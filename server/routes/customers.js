@@ -11,6 +11,7 @@ import FlaggedAlert from '../models/FlaggedAlert.js';
 import SlackLog from '../models/SlackLog.js';
 import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import { resolveCustomerMatch, resolveCustomerMatchBulk } from '../services/customerMatchService.js';
+import { classifyUploadRow } from '../services/customerUploadIdentity.js';
 
 const router = express.Router();
 
@@ -54,6 +55,7 @@ router.post('/upload-emails', async (req, res) => {
       // Legacy format - emails only
       customersToProcess = emails.map((email, index) => ({
         customerId: email.toLowerCase().replace(/[^a-z0-9]/g, '_'),
+        idGenerated: true, // no real ID was supplied — match by email only
         name: email.split('@')[0],
         email: email
       }));
@@ -75,6 +77,7 @@ router.post('/upload-emails', async (req, res) => {
     let updated = 0;
     let skipped = 0;
     const errors = [];
+    const conflicts = [];
 
     // Process each customer
     for (const customerData of customersToProcess) {
@@ -94,17 +97,26 @@ router.post('/upload-emails', async (req, res) => {
           continue;
         }
 
-        // Check if customer already exists by email or customerId
-        let existingCustomer = await Customer.findOne({ 
-          $or: [
-            { email: buildEmailRegex(email) },
-            { customerId: customerId.trim() }
-          ]
-        });
-        
+        // An upload never changes an existing customer's customerId (issue #4:
+        // that orphaned their deliveries and every other record keyed on it).
+        // Mismatches are reported for review; renames go through rename-id.
+        const [byEmail, byId] = await Promise.all([
+          Customer.findOne({ email: buildEmailRegex(email) }),
+          Customer.findOne({ customerId: customerId.trim() })
+        ]);
+        const decision = classifyUploadRow(
+          { customerId: customerId.trim(), idGenerated: customerData.idGenerated === true },
+          { byEmail, byId }
+        );
+
+        if (decision.action === 'conflict') {
+          conflicts.push({ customerId: customerId.trim(), email, name, reason: decision.reason, existingCustomerId: decision.existingCustomerId, otherCustomerId: decision.otherCustomerId });
+          continue;
+        }
+
+        const existingCustomer = decision.action === 'update' ? decision.customer : null;
         if (existingCustomer) {
-          // Update existing customer with new data
-          existingCustomer.customerId = customerId.trim();
+          // Update existing customer with new data (customerId is left as-is)
           existingCustomer.email = email;
           existingCustomer.firstName = name.trim().split(' ')[0] || 'Unknown';
           existingCustomer.lastName = name.trim().split(' ').slice(1).join(' ') || '';
@@ -143,6 +155,7 @@ router.post('/upload-emails', async (req, res) => {
       imported,
       updated,
       skipped,
+      conflicts: conflicts.length > 0 ? conflicts : undefined,
       errors: errors.length > 0 ? errors : undefined,
       totalProcessed: imported + updated
     });
@@ -179,7 +192,7 @@ router.post('/upload-bulk', async (req, res) => {
     }
 
     const errors = [];
-    const ops = [];
+    const parsed = []; // validated rows, matched against existing customers below
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
     for (const customerData of customers) {
@@ -230,13 +243,65 @@ router.post('/upload-bulk', async (req, res) => {
         updatedAt: new Date()
       };
 
-      ops.push({
-        updateOne: {
-          filter: { $or: [{ customerId: doc.customerId }, { email: doc.email }] },
-          update: { $set: doc, $setOnInsert: { createdAt: new Date() } },
-          upsert: true
-        }
-      });
+      parsed.push(doc);
+    }
+
+    // Match every row to an existing customer BEFORE writing anything (issue
+    // #4). The old single upsert filtered on "customerId OR email" and then
+    // $set the file's customerId, silently renaming the matched customer and
+    // orphaning its deliveries. An upload never changes an existing
+    // customer's customerId: a row whose ID disagrees with the one on file is
+    // reported in `conflicts` and skipped; intended renames use rename-id.
+    const byIdMap = new Map();
+    const byEmailMap = new Map();
+    if (parsed.length > 0) {
+      const [idMatches, emailMatches] = await Promise.all([
+        Customer.find({ customerId: { $in: [...new Set(parsed.map((d) => d.customerId))] } }).select('_id customerId email').lean(),
+        Customer.find({ email: { $in: [...new Set(parsed.map((d) => d.email))] } })
+          .collation({ locale: 'en', strength: 2 }) // emails match case-insensitively
+          .select('_id customerId email').lean()
+      ]);
+      idMatches.forEach((c) => byIdMap.set(c.customerId, c));
+      emailMatches.forEach((c) => byEmailMap.set(String(c.email).toLowerCase(), c));
+    }
+
+    const ops = [];
+    const conflicts = [];
+    for (const doc of parsed) {
+      const decision = classifyUploadRow(
+        { customerId: doc.customerId },
+        { byEmail: byEmailMap.get(doc.email) || null, byId: byIdMap.get(doc.customerId) || null }
+      );
+
+      if (decision.action === 'conflict') {
+        conflicts.push({
+          customerId: doc.customerId,
+          email: doc.email,
+          name: `${doc.firstName} ${doc.lastName}`.trim(),
+          reason: decision.reason,
+          existingCustomerId: decision.existingCustomerId,
+          otherCustomerId: decision.otherCustomerId
+        });
+        continue;
+      }
+
+      if (decision.action === 'update') {
+        // Matched by the customer's own (unchanged) customerId; the file's ID is not written.
+        const { customerId: _keepExistingId, ...fields } = doc;
+        ops.push({ updateOne: { filter: { customerId: decision.customer.customerId }, update: { $set: fields } } });
+      } else {
+        ops.push({
+          updateOne: {
+            filter: { customerId: doc.customerId },
+            update: { $set: doc, $setOnInsert: { createdAt: new Date() } },
+            upsert: true
+          }
+        });
+        // Later duplicate rows in the same file now resolve to this new customer.
+        const placeholder = { _id: `new:${doc.customerId}`, customerId: doc.customerId, email: doc.email };
+        byIdMap.set(doc.customerId, placeholder);
+        byEmailMap.set(doc.email, placeholder);
+      }
     }
 
     let created = 0;
@@ -253,6 +318,8 @@ router.post('/upload-bulk', async (req, res) => {
       message: `Successfully processed ${ops.length} customers`,
       created,
       updated,
+      skipped: conflicts.length,
+      conflicts: conflicts.length > 0 ? conflicts : undefined,
       errors: errors.length > 0 ? errors : undefined,
       totalProcessed: created + updated
     });
@@ -700,6 +767,16 @@ router.patch('/:oldCustomerId/rename-id', async (req, res) => {
         cascaded[label] = `failed: ${cascadeError.message}`;
       }
     }
+
+    // Audit trail for the one sanctioned way to change a customerId (#4): who,
+    // before/after, and what was updated where.
+    console.info('[customer-id-rename]', JSON.stringify({
+      from: oldCustomerId,
+      to: newCustomerId,
+      by: req.user?._id ? String(req.user._id) : null,
+      cascaded,
+      partialFailure: failures.length > 0 ? failures : null
+    }));
 
     res.json({
       success: true,

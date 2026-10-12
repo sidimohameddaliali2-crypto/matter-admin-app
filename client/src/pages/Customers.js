@@ -1099,6 +1099,12 @@ const Customers = () => {
         const resultMsg = `✅ Successfully processed ${customers.length} customers\n\n` +
           `Created: ${response.data.created || 0}\n` +
           `Updated: ${response.data.updated || 0}` +
+          (response.data.conflicts?.length > 0
+            ? `\n\n⚠️ Needs review — ${response.data.conflicts.length} row(s) NOT applied because their customer ID doesn't match the one on file (nothing was renamed):\n` +
+              response.data.conflicts.slice(0, 3).map((c) => `• ${c.customerId} (${c.email}): ${c.reason}`).join('\n') +
+              (response.data.conflicts.length > 3 ? `\n...and ${response.data.conflicts.length - 3} more` : '') +
+              `\nTo change a customer's ID on purpose, use Rename ID on the customer.`
+            : '') +
           (response.data.errors?.length > 0 ? `\n\nPartial errors (${response.data.errors.length}): ${response.data.errors.slice(0, 2).join(', ')}` : '') +
           (errors.length > 0 ? `\n\n⚠️ Skipped ${errors.length} invalid rows` : '');
         
