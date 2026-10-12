@@ -3491,6 +3491,12 @@ router.post('/:id/manual-coords', protect, authorize(['driver', 'dispatcher', 'm
       return res.status(404).json({ success: false, message: 'Delivery not found' });
     }
 
+    const before = {
+      lat: delivery.gpsLocation?.lat ?? null,
+      lng: delivery.gpsLocation?.lng ?? null,
+      address: delivery.address || null
+    };
+
     // Optionally update address/link if provided
     if (address) {
       delivery.address = address;
@@ -3499,25 +3505,22 @@ router.post('/:id/manual-coords', protect, authorize(['driver', 'dispatcher', 'm
 
     await saveCustomerCoords(delivery, parsedLat, parsedLng, linkToSave);
 
-    // Best-effort: update other deliveries for same customer missing coords so future requests skip geocoding
-    await Delivery.updateMany(
-      {
-        customerId: delivery.customerId,
-        $or: [
-          { 'gpsLocation.lat': { $exists: false } },
-          { 'gpsLocation.lat': null }
-        ]
-      },
-      {
-        $set: {
-          'gpsLocation.lat': parsedLat,
-          'gpsLocation.lng': parsedLng,
-          'gpsLocation.link': linkToSave,
-          lat: parsedLat,
-          lng: parsedLng
-        }
-      }
-    );
+    // A pin correction applies to THIS delivery only (issue #6). This used to
+    // also write the pin onto every other delivery for the same customer that
+    // had no GPS — including completed ones at a different address, which
+    // rewrote delivery history. Customers can have several addresses and
+    // deliveries carry no location id, so customerId alone can't say which
+    // other deliveries share this spot. It isn't needed for reuse either:
+    // saveCustomerCoords caches the pin on the Customer keyed by address, and
+    // resolveDeliveryCoordinatesCached hands it to any later delivery at that
+    // same address.
+    console.info('[manual-coords]', JSON.stringify({
+      deliveryId: String(delivery._id),
+      customerId: delivery.customerId || null,
+      by: req.user?._id ? String(req.user._id) : null,
+      before,
+      after: { lat: parsedLat, lng: parsedLng, address: delivery.address || null }
+    }));
 
     res.json({ success: true, message: 'Coordinates saved', data: { delivery } });
   } catch (error) {
