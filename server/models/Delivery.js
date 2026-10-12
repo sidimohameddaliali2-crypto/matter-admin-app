@@ -21,6 +21,18 @@ const deliverySchema = new mongoose.Schema({
     default: null,
     index: true
   },
+  // Matter's own id for the saved address this delivery goes to
+  // (customer_addresses[].id, as a string) — a stable identity for "this
+  // place", unlike customerId (a customer can have several addresses) or the
+  // free-text `address`. Pin corrections only propagate between deliveries
+  // that share it (see POST /:id/manual-coords). Null for manual/CSV
+  // deliveries and for rows created before this field existed — those never
+  // match anything. Cleared automatically if the address text is edited (see
+  // the hooks below), since the id no longer describes the new text.
+  addressId: {
+    type: String,
+    default: null
+  },
   // Change scheduledTime to be within the delivery window
   scheduledTime: {
     type: Date,
@@ -225,6 +237,27 @@ deliverySchema.index({ driver: 1, scheduledTime: 1 }); // For getDriverTodaysDel
 deliverySchema.index({ company: 1, zone: 1 }); // For bulk filtering by company/zone
 deliverySchema.index({ status: 1, scheduledTime: 1 }); // For status queries with time range
 deliverySchema.index({ driver: 1, type: 1 }); // For per-driver all-time stats (GET /api/users/drivers)
+deliverySchema.index({ customerId: 1, addressId: 1, scheduledTime: 1 }); // Pin-correction propagation (same customer + address id, future jobs)
+
+// Editing a delivery's address text makes its addressId stale — it would still
+// point at the old saved address. Drop the id unless the same write sets one.
+deliverySchema.pre('save', function clearStaleAddressIdOnSave(next) {
+  if (!this.isNew && this.isModified('address') && !this.isModified('addressId')) {
+    this.addressId = null;
+  }
+  next();
+});
+
+deliverySchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], function clearStaleAddressIdOnUpdate(next) {
+  // Only the `{ $set: {...} }` form — every address write in this codebase
+  // (applyChangesToDelivery etc.) uses it.
+  const update = this.getUpdate();
+  const set = update && update.$set;
+  if (set && Object.prototype.hasOwnProperty.call(set, 'address') && !Object.prototype.hasOwnProperty.call(set, 'addressId')) {
+    set.addressId = null;
+  }
+  next();
+});
 
 deliverySchema.methods.updateStatus = async function (status, notes, location) {
   this.status = status;

@@ -104,6 +104,7 @@ One delivery by its Mongo id.
     "address": "Villa 12, Street 4, Al Barsha",
     "locationType": "Villa",
     "zone": "Al Barsha",
+    "addressId": "1042",
     "scheduledTime": "2026-09-11T04:00:00.000Z",
     "status": "delivered",
     "deliveredTime": "2026-09-11T03:42:00.000Z",
@@ -123,6 +124,10 @@ One delivery by its Mongo id.
   }
 }
 ```
+
+`addressId` is Matter's id for the saved address the delivery goes to (a string),
+or `null` for manual/CSV deliveries and older rows. It identifies the *place*, so a
+customer with several addresses can be told apart.
 
 `customer.mealPerDay` is always present (pulled live from `Customer.mealPerDay`
 by matching `customerId`) — this is "the number of meals this customer is

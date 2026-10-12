@@ -176,7 +176,10 @@ export async function importMatterDeliveriesForDate(dateKey) {
         gpsLocation: (useAddr.coordinates && Number.isFinite(useAddr.coordinates.lat) && Number.isFinite(useAddr.coordinates.lng))
           ? { lat: useAddr.coordinates.lat, lng: useAddr.coordinates.lng }
           : undefined,
-        matterSubscriptionId: subscriptionId
+        matterSubscriptionId: subscriptionId,
+        // Matter's id for this saved address — the stable identity pin
+        // corrections key on (see Delivery.addressId).
+        addressId: useAddr.id != null ? String(useAddr.id) : null
       });
       summary.created += 1;
     } catch (err) {

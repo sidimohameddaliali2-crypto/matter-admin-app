@@ -11,9 +11,8 @@ import api from '../utils/api';
 //
 // Uses Google Maps JS (owner request, 2026-09-30) rather than the 2GIS
 // MapGL display everywhere else in the app (dispatcher route maps) — that's
-// a deliberate one-page exception, not a project-wide switch; see
-// DriverDeliveryMap.js for the same @react-google-maps/api pattern this
-// reuses (useLoadScript + REACT_APP_GOOGLE_MAPS_API_KEY).
+// a deliberate one-page exception, not a project-wide switch. Loads through
+// @react-google-maps/api (useLoadScript + REACT_APP_GOOGLE_MAPS_API_KEY).
 
 const GOOGLE_MAPS_API_KEY = process.env.REACT_APP_GOOGLE_MAPS_API_KEY || '';
 const DUBAI_CENTER = { lat: 25.2048, lng: 55.2708 };

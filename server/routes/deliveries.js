@@ -16,7 +16,7 @@ import { sendDeliveryPushToDriver } from '../services/pushNotificationService.js
 import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 import { recalculateDriverKPI } from '../services/driverKpiService.js';
 import { businessRangeBounds, getTimingOverview, getTimingRecords } from '../services/deliveryTimingHistory.js';
-import { businessOffsetMs, getBusinessDayBounds } from '../utils/businessDate.js';
+import { businessOffsetMs, getBusinessDayBounds, setBusinessTimeOfDay } from '../utils/businessDate.js';
 import {
   optimizeRoutes,
   applyRoutePlan,
@@ -202,7 +202,7 @@ async function sendDeliveryRemovalToSlack(deliveries, meta = {}) {
 }
 
 // Helper function to apply changes to delivery
-async function applyChangesToDelivery(delivery, changes) {
+export async function applyChangesToDelivery(delivery, changes) {
   const updateFields = {};
   
   // Convert Mongoose Map to plain object if needed
@@ -212,17 +212,10 @@ async function applyChangesToDelivery(delivery, changes) {
   
   Object.keys(changesObj).forEach(field => {
     if (field === 'scheduledTime') {
-      // Handle time changes - combine with existing date in business timezone
-      const existingDate = new Date(delivery.scheduledTime);
-      const [hStr, mStr] = String(changesObj[field]).split(':');
-      const hours = Number.parseInt(hStr || '0', 10) || 0;
-      const minutes = Number.parseInt(mStr || '0', 10) || 0;
-
-      const y = existingDate.getUTCFullYear();
-      const mo = existingDate.getUTCMonth();
-      const d = existingDate.getUTCDate();
-      const utcMillis = Date.UTC(y, mo, d, hours, minutes, 0, 0) - LOCAL_TZ_OFFSET_MS;
-      updateFields[field] = new Date(utcMillis);
+      // "HH:mm" Dubai time on the delivery's existing BUSINESS day (issue #5:
+      // taking the UTC date first moved a 00:00-03:59 Dubai delivery to the
+      // previous day). Throws on an invalid time before anything is written.
+      updateFields[field] = setBusinessTimeOfDay(delivery.scheduledTime, changesObj[field]);
     } else if (field === 'customerName') {
       updateFields[field] = changesObj[field];
     } else if (field === 'customerPhone') {
@@ -374,12 +367,11 @@ router.get('/depot', authorize(['admin', 'super_admin', 'dispatcher', 'manager']
 });
 
 // @desc    Resolve coordinates for deliveries that have none stored (map views).
-//          Same customer-cached resolver Optimize Routes uses: a customer's
-//          address is geocoded at most once, ever — see
-//          resolveDeliveryCoordinatesCached / Customer.gpsLocation. Read-only
-//          from this endpoint's point of view — it never writes to the
-//          delivery itself, only (via the shared resolver) to the customer's
-//          cache.
+//          Same customer-cached resolver Optimize Routes uses: it only returns a
+//          pin that already exists (a Maps-link pin, or the customer's saved pin
+//          for this exact address) — it never guesses from the address text.
+//          Fully read-only. Deliveries it can't resolve come back in
+//          `unresolved` for a dispatcher to place.
 // @route   POST /api/deliveries/resolve-coords   { deliveryIds: [] }
 const RESOLVE_COORDS_MAX_IDS = 500;
 const RESOLVE_COORDS_CONCURRENCY = 5;
@@ -1635,7 +1627,10 @@ router.post('/', [
       }
     }
 
-    // Try to extract/geocode coordinates from Google Maps URL or address
+    // Pin from what the delivery already carries: its own coordinates, a
+    // Google Maps link, or the customer's saved pin for this exact address.
+    // No address guessing — unpinned deliveries wait for a dispatcher (see
+    // resolveDeliveryCoordinates in services/geocoding.js).
     if (!deliveryData.lat || !deliveryData.lng) {
       if (!deliveryData.gpsLocation || !deliveryData.gpsLocation.lat || !deliveryData.gpsLocation.lng) {
         try {
@@ -1652,7 +1647,7 @@ router.post('/', [
             console.log(`📍 Coordinates resolved for delivery:`, coords);
           }
         } catch (err) {
-          console.warn('Geocoding failed (non-blocking):', err.message);
+          console.warn('Coordinate lookup failed (non-blocking):', err.message);
         }
       }
     }
@@ -1739,7 +1734,7 @@ router.post('/bulk', [
     const startTime = Date.now();
     console.log(`📦 Starting bulk delivery creation for ${deliveryList.length} deliveries...`);
 
-    // Process deliveries to auto-detect areas and geocode coordinates
+    // Process deliveries to auto-detect areas and attach any known coordinates
     const processedDeliveries = await Promise.all(deliveryList.map(async (delivery) => {
       const deliveryData = { ...delivery };
 
@@ -1771,14 +1766,10 @@ router.post('/bulk', [
         }
       }
 
-      // Try to extract/geocode coordinates from Google Maps URL or address —
-      // resolveDeliveryCoordinatesCached checks the customer's cached location
-      // first (Customer.gpsLocation), so a repeat customer's address is never
-      // re-sent to Google here. (This replaces an older ad-hoc "most recent
-      // delivery for this customer" lookup that didn't validate the result was
-      // even plausible before reusing it — a bad geocode could self-propagate
-      // to every later delivery for that customer. The cached resolver's
-      // depot-proximity check closes that gap.)
+      // Pin from what the delivery already carries: its own coordinates, a
+      // Google Maps link, or the customer's saved pin for this exact address
+      // (resolveDeliveryCoordinatesCached — read-only, never calls Google).
+      // An unpinned delivery stays unpinned for a dispatcher to place.
       if (!deliveryData.lat || !deliveryData.lng) {
         if (!deliveryData.gpsLocation || !deliveryData.gpsLocation.lat || !deliveryData.gpsLocation.lng) {
           try {
@@ -1794,7 +1785,7 @@ router.post('/bulk', [
               deliveryData.lng = coords.lng;
             }
           } catch (err) {
-            console.warn('Geocoding failed for bulk delivery (non-blocking):', err.message);
+            console.warn('Coordinate lookup failed for bulk delivery (non-blocking):', err.message);
           }
         }
       }
@@ -1841,6 +1832,11 @@ router.post('/bulk', [
       data: {
         deliveries: createdDeliveries,
         totalCreated: createdDeliveries.length,
+        // How many have no map pin (no coordinates, Maps link, or saved pin for
+        // the address) — they wait for a dispatcher to place one.
+        withoutPin: createdDeliveries.filter(
+          (d) => !isPlausibleCoordinate(d.gpsLocation?.lat, d.gpsLocation?.lng)
+        ).length,
         changesApplied: totalChangesApplied,
         processingTimeMs: elapsedMs
       }
@@ -3505,21 +3501,50 @@ router.post('/:id/manual-coords', protect, authorize(['driver', 'dispatcher', 'm
 
     await saveCustomerCoords(delivery, parsedLat, parsedLng, linkToSave);
 
-    // A pin correction applies to THIS delivery only (issue #6). This used to
-    // also write the pin onto every other delivery for the same customer that
-    // had no GPS — including completed ones at a different address, which
-    // rewrote delivery history. Customers can have several addresses and
-    // deliveries carry no location id, so customerId alone can't say which
-    // other deliveries share this spot. It isn't needed for reuse either:
-    // saveCustomerCoords caches the pin on the Customer keyed by address, and
-    // resolveDeliveryCoordinatesCached hands it to any later delivery at that
-    // same address.
+    // A pin correction applies to THIS delivery, plus other deliveries ONLY if
+    // they are provably the same place: same customer AND same Matter
+    // addressId, still editable (pending/assigned — never delivered history,
+    // never a stop a driver is already working), and scheduled today or later.
+    // (Issue #6: this used to write the pin onto every delivery for the
+    // customer with no GPS, including completed ones at other addresses.)
+    // A delivery with no addressId (manual/CSV, or an address edited since)
+    // propagates nowhere; later deliveries at the same address text still
+    // reuse the pin via the Customer.gpsLocation cache saveCustomerCoords sets.
+    let propagatedIds = [];
+    if (delivery.addressId) {
+      const { startOfDay: startOfToday } = getBusinessDayBounds(new Date());
+      const targets = await Delivery.find({
+        _id: { $ne: delivery._id },
+        customerId: delivery.customerId,
+        addressId: delivery.addressId,
+        type: 'Delivery',
+        status: { $in: ['pending', 'assigned'] },
+        scheduledTime: { $gte: startOfToday }
+      }).select('_id').lean();
+      propagatedIds = targets.map((t) => String(t._id));
+      if (propagatedIds.length > 0) {
+        await Delivery.updateMany(
+          { _id: { $in: targets.map((t) => t._id) } },
+          {
+            $set: {
+              'gpsLocation.lat': parsedLat,
+              'gpsLocation.lng': parsedLng,
+              'gpsLocation.link': linkToSave,
+              lat: parsedLat,
+              lng: parsedLng
+            }
+          }
+        );
+      }
+    }
     console.info('[manual-coords]', JSON.stringify({
       deliveryId: String(delivery._id),
       customerId: delivery.customerId || null,
+      addressId: delivery.addressId || null,
       by: req.user?._id ? String(req.user._id) : null,
       before,
-      after: { lat: parsedLat, lng: parsedLng, address: delivery.address || null }
+      after: { lat: parsedLat, lng: parsedLng, address: delivery.address || null },
+      propagatedTo: propagatedIds
     }));
 
     res.json({ success: true, message: 'Coordinates saved', data: { delivery } });

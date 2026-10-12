@@ -134,8 +134,15 @@ export function isPlausibleCoordinate(lat, lng) {
 }
 
 /**
- * Try to extract or geocode coordinates from various sources
- * Priority: Google Maps URL > existing coords > geocode address
+ * Coordinates a delivery already carries — NEVER a guess from its address.
+ * Priority: existing coords > a pin extracted from a Google Maps link.
+ *
+ * Owner (2026-10-12): automatic Google geocoding is off. An address-text guess
+ * could land on the wrong street/community inside the service area (the 300 km
+ * plausibility check only catches wildly wrong ones) and then get reused
+ * silently, so a delivery with no pin stays unpinned until a dispatcher places
+ * one (or deliberately runs the Google/2GIS geocode buttons on Driver Routes,
+ * which go through POST /deliveries/geocode-google and geocodeAddress above).
  */
 export async function resolveDeliveryCoordinates(delivery) {
   // If already has coordinates in gpsLocation, return them
@@ -172,42 +179,16 @@ export async function resolveDeliveryCoordinates(delivery) {
     }
   }
 
-  // Fallback: geocode the address
-  if (delivery.address) {
-    console.log(`🌍 Geocoding address for ${delivery.customerName}:`, delivery.address);
-    const geocoded = await geocodeAddress(delivery.address);
-    if (geocoded && isPlausibleCoordinate(geocoded.lat, geocoded.lng)) {
-      console.log(`✅ Geocoded address:`, geocoded);
-      return {
-        lat: geocoded.lat,
-        lng: geocoded.lng
-      };
-    } else if (geocoded) {
-      console.warn(`⚠️ Geocoded address for ${delivery.customerName} landed implausibly far from the depot — rejecting:`, geocoded, delivery.address);
-    } else {
-      console.warn(`⚠️ Could not geocode address: ${delivery.address}`);
-    }
-  }
-
   return null;
 }
 
 /**
- * Same as resolveDeliveryCoordinates, but backed by a permanent per-customer
- * cache (Customer.gpsLocation) instead of re-geocoding on every call.
- *
- * Why: resolveDeliveryCoordinates only ever looks at the fields on the one
- * delivery it's given — it has no memory between calls. That meant every
- * Optimize Routes run, every delivery created for a repeat customer, and
- * every Driver Routes map load that hit a delivery with no gpsLocation saved
- * would call Google Geocoding again for the exact same address, sometimes
- * dozens of times over for one customer's history. This wrapper checks (and
- * updates) the customer's own record instead, so a given address is sent to
- * Google at most once — including a *negative* cache (source: 'unresolved')
- * for addresses that don't geocode plausibly, so a garbage address like
- * "PICKUP" doesn't get retried against Google on every single lookup either.
- * The cache is address-keyed: editing a customer's address naturally
- * invalidates it and the next lookup re-resolves.
+ * Same as resolveDeliveryCoordinates, plus the customer's saved pin
+ * (Customer.gpsLocation) when it was saved for this exact address text —
+ * so a pin a dispatcher placed once is reused for every later delivery to that
+ * address. Read-only: it never calls Google and never writes a guess onto the
+ * customer (see the note on resolveDeliveryCoordinates). Returns null when
+ * there's no real pin to give.
  */
 export async function resolveDeliveryCoordinatesCached(delivery) {
   if (isPlausibleCoordinate(delivery.gpsLocation?.lat, delivery.gpsLocation?.lng)) {
@@ -220,27 +201,10 @@ export async function resolveDeliveryCoordinatesCached(delivery) {
   if (customerId) {
     const customer = await Customer.findOne({ customerId }).select('gpsLocation').lean();
     const cached = customer?.gpsLocation;
-    if (cached && cached.address === normalizedAddress) {
-      if (isPlausibleCoordinate(cached.lat, cached.lng)) {
-        return { lat: cached.lat, lng: cached.lng };
-      }
-      if (cached.source === 'unresolved') {
-        return null;
-      }
+    if (cached && cached.address === normalizedAddress && isPlausibleCoordinate(cached.lat, cached.lng)) {
+      return { lat: cached.lat, lng: cached.lng };
     }
   }
 
-  const resolved = await resolveDeliveryCoordinates(delivery);
-
-  if (customerId) {
-    const toSave = resolved
-      ? { lat: resolved.lat, lng: resolved.lng, source: 'geocoded' }
-      : { lat: null, lng: null, source: 'unresolved' };
-    await Customer.updateOne(
-      { customerId },
-      { $set: { gpsLocation: { ...toSave, address: normalizedAddress, geocodedAt: new Date() } } }
-    ).catch((err) => console.warn('Failed to cache customer coordinates:', err.message));
-  }
-
-  return resolved;
+  return resolveDeliveryCoordinates(delivery);
 }

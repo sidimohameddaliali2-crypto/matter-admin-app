@@ -75,3 +75,32 @@ export function resolveBusinessDateRange(startValue, endValue) {
   if (endExclusive <= start) return null;
   return { start, endExclusive };
 }
+
+// Strict "H:mm" / "HH:mm" (24h) parse. Returns { hours, minutes } or null.
+// Deliberately NOT lenient about junk: "", "9", "25:00", "09:75" and "6:00 AM"
+// all return null so callers can reject them instead of silently storing 00:00.
+export function parseTimeOfDay(value) {
+  const match = /^(\d{1,2}):(\d{2})$/.exec(String(value ?? '').trim());
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return null;
+  return { hours, minutes };
+}
+
+// The instant that is `timeValue` ("HH:mm", Dubai wall-clock time) on the SAME
+// business day as `existingInstant` — "change this delivery's time", keeping
+// its date. The date is worked out in business time FIRST and only then
+// converted to UTC, so a 03:00 Tuesday (Monday 23:00Z) edited to 05:00 stays
+// Tuesday (01:00Z) instead of landing on Monday. Throws on an invalid time.
+export function setBusinessTimeOfDay(existingInstant, timeValue) {
+  const time = parseTimeOfDay(timeValue);
+  if (!time) {
+    const err = new Error(`Invalid time "${timeValue}" — expected HH:mm (00:00-23:59)`);
+    err.code = 'INVALID_TIME_OF_DAY';
+    throw err;
+  }
+  const key = toBusinessDateKey(existingInstant);
+  if (!key) throw new Error('Invalid date for business time edit');
+  return new Date(businessDayStart(key).getTime() + (time.hours * 60 + time.minutes) * 60 * 1000);
+}

@@ -9,13 +9,9 @@ import User from '../models/User.js';
 import { detectAreaFromAddress } from '../config/areas.js';
 import { protect, admin } from '../middleware/auth.js';
 import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
+import { getBusinessDayBounds, setBusinessTimeOfDay, parseTimeOfDay } from '../utils/businessDate.js';
 
 const router = express.Router();
-const BUSINESS_TZ_OFFSET_MINUTES = Number.parseInt(
-  process.env.LOCAL_TIMEZONE_OFFSET_MINUTES || process.env.BUSINESS_TZ_OFFSET_MINUTES || '240',
-  10
-);
-const BUSINESS_TZ_OFFSET_MS = BUSINESS_TZ_OFFSET_MINUTES * 60 * 1000;
 
 // Slack notifier for delivery changes
 async function sendDeliveryChangeToSlack(changesPayload, meta = {}) {
@@ -187,7 +183,7 @@ const upload = multer({
 });
 
 // Helper function to apply changes to delivery
-async function applyChangesToDelivery(delivery, changes) {
+export async function applyChangesToDelivery(delivery, changes) {
   const updateFields = {};
   
   // Convert Mongoose Map to plain object if needed
@@ -195,23 +191,11 @@ async function applyChangesToDelivery(delivery, changes) {
   
   console.log('Changes to apply (converted):', changesObj);
   
-  // Helper: interpret HH:mm as local business time (default UTC+4)
-  const BUSINESS_TZ_OFFSET_MIN = Number.parseInt(process.env.BUSINESS_TZ_OFFSET_MINUTES || '240', 10);
-
   Object.keys(changesObj).forEach(field => {
     if (field === 'scheduledTime') {
-      // Handle time changes - combine with existing date, respecting business timezone
-      const existingDate = new Date(delivery.scheduledTime);
-      const [hStr, mStr] = String(changesObj[field]).split(':');
-      const hours = Number.parseInt(hStr || '0', 10) || 0;
-      const minutes = Number.parseInt(mStr || '0', 10) || 0;
-
-      // Build a UTC instant that represents (Y-M-D at HH:mm) in the business timezone
-      const y = existingDate.getUTCFullYear();
-      const mo = existingDate.getUTCMonth(); // 0-based
-      const d = existingDate.getUTCDate();
-      const utcMillis = Date.UTC(y, mo, d, hours, minutes, 0, 0) - BUSINESS_TZ_OFFSET_MIN * 60 * 1000;
-      updateFields[field] = new Date(utcMillis);
+      // Same shared conversion as routes/deliveries.js: "HH:mm" Dubai time on
+      // the delivery's existing business day (issue #5). Throws on invalid.
+      updateFields[field] = setBusinessTimeOfDay(delivery.scheduledTime, changesObj[field]);
     } else if (field === 'customerName') {
       updateFields[field] = changesObj[field];
     } else if (field === 'customerPhone') {
@@ -282,26 +266,6 @@ async function applyChangesToDelivery(delivery, changes) {
       date.getUTCDate(),
       23, 59, 59, 999
     ));
-  }
-
-  function getBusinessDayBounds(dateValue) {
-    const reference = new Date(dateValue);
-    if (Number.isNaN(reference.getTime())) {
-      throw new Error('Invalid date provided');
-    }
-
-    const local = new Date(reference.getTime() + BUSINESS_TZ_OFFSET_MS);
-    const startOfDayMs = Date.UTC(
-      local.getUTCFullYear(),
-      local.getUTCMonth(),
-      local.getUTCDate(),
-      0, 0, 0, 0
-    ) - BUSINESS_TZ_OFFSET_MS;
-
-    return {
-      startOfDay: new Date(startOfDayMs),
-      endOfDayExclusive: new Date(startOfDayMs + MS_PER_DAY)
-    };
   }
 
   async function calculateMatchMeta({ customerId, customerPhone, customerName }) {
@@ -473,6 +437,12 @@ router.post('/manual', async (req, res) => {
     if (!changes || Object.keys(changes).length === 0) {
       return res.status(400).json({ 
         message: 'At least one change must be specified' 
+      });
+    }
+
+    if (changes.scheduledTime !== undefined && !parseTimeOfDay(changes.scheduledTime)) {
+      return res.status(400).json({
+        message: 'Invalid time. Use HH:mm, 24-hour (00:00-23:59).'
       });
     }
 
@@ -964,6 +934,15 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
               errors.push({
                 row: results.length + 1,
                 error: 'No valid changes provided',
+                data
+              });
+              return;
+            }
+
+            if (changes.scheduledTime !== undefined && !parseTimeOfDay(changes.scheduledTime)) {
+              errors.push({
+                row: results.length + 1,
+                error: `Invalid scheduledTime "${changes.scheduledTime}" — use HH:mm, 24-hour (00:00-23:59)`,
                 data
               });
               return;

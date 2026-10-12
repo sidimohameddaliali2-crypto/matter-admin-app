@@ -102,6 +102,7 @@ function serializeDelivery(delivery, customersById) {
     address: d.address || null,
     locationType: d.addressDetails?.locationType || null,
     zone: d.zone || null,
+    addressId: d.addressId || null,
     scheduledTime: d.scheduledTime || null,
     status: d.status || null,
     deliveredTime: d.deliveredTime || d.completedAt || null,

@@ -914,6 +914,7 @@ const AddDelivery = () => {
       if (response.data?.success) {
         const createdCount = response.data?.data?.totalCreated || importData.length;
         const changesApplied = response.data?.data?.changesApplied || 0;
+        const withoutPin = response.data?.data?.withoutPin || 0;
 
         console.log(`✅ Bulk import completed in ${elapsedSec}s`);
         console.log(`   - Created: ${createdCount} deliveries`);
@@ -931,6 +932,9 @@ const AddDelivery = () => {
         let successMessage = `✅ Successfully imported ${createdCount} deliveries in ${elapsedSec}s`;
         if (changesApplied > 0) {
           successMessage += ` with ${changesApplied} pending changes applied`;
+        }
+        if (withoutPin > 0) {
+          successMessage += `\n\n${withoutPin} of them have no map pin yet — place them on Driver Routes before optimizing.`;
         }
         alert(successMessage);
 
