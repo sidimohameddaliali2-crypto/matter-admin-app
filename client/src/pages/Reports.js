@@ -236,17 +236,14 @@ const Reports = () => {
     setMonthlyLoading(true);
     setMonthlyGenerated(false);
     try {
-      const start = new Date(monthlyRange.startDate);
-      start.setHours(0, 0, 0, 0);
-      const end = new Date(monthlyRange.endDate);
-      end.setHours(23, 59, 59, 999);
-
+      // monthlyRange holds "YYYY-MM-DD" keys — the report API reads them as
+      // Dubai business dates (whole end day included).
       const [custRes, reportRes] = await Promise.all([
         api.get('/customers', { params: { limit: 2000 } }),
         api.get('/reports', {
           params: {
-            startDate: start.toISOString(),
-            endDate: end.toISOString(),
+            startDate: monthlyRange.startDate,
+            endDate: monthlyRange.endDate,
           }
         }),
       ]);
@@ -631,7 +628,7 @@ const generatePDF = (data) => {
       }
 
       const response = await api.get('/reports', {
-        params: { startDate: start.toISOString(), endDate: end.toISOString() }
+        params: { startDate: multiExportRange.startDate, endDate: multiExportRange.endDate }
       });
       const deliveries = response.data?.data?.allDeliveries || [];
 
@@ -640,17 +637,19 @@ const generatePDF = (data) => {
         return;
       }
 
-      const offsetMinutes = Number(process.env.REACT_APP_LOCAL_TIMEZONE_OFFSET_MINUTES || 0);
+      const offsetMinutes = Number(process.env.REACT_APP_LOCAL_TIMEZONE_OFFSET_MINUTES || 240);
       const formatTime = (d) => {
         const local = new Date(new Date(d).getTime() + offsetMinutes * 60 * 1000);
         return `${String(local.getUTCHours()).padStart(2, '0')}:${String(local.getUTCMinutes()).padStart(2, '0')}`;
       };
 
-      // Group deliveries by calendar day (scheduled date), one worksheet per day
+      // One worksheet per Dubai business day — keyed with the same offset as
+      // formatTime (not the browser's own timezone), so a 03:00 delivery lands
+      // on its real day and matches the server's report grouping.
       const byDay = new Map();
       deliveries.forEach((delivery) => {
         if (!delivery.scheduledTime) return;
-        const dayKey = formatDateKeyLocal(new Date(delivery.scheduledTime));
+        const dayKey = new Date(new Date(delivery.scheduledTime).getTime() + offsetMinutes * 60 * 1000).toISOString().slice(0, 10);
         if (!byDay.has(dayKey)) byDay.set(dayKey, []);
         byDay.get(dayKey).push(delivery);
       });

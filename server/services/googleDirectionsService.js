@@ -10,6 +10,29 @@ import axios from 'axios';
 const GOOGLE_DIRECTIONS_API_KEY = process.env.GOOGLE_DIRECTIONS_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
 const DIRECTIONS_URL = 'https://maps.googleapis.com/maps/api/directions/json';
 
+// Short-lived in-memory cache, keyed by the rounded point sequence. Not
+// meant to serve stale routes for long (traffic-aware duration goes stale
+// fast) — just absorbs near-duplicate requests that land within a few
+// seconds of each other (a driver double-tapping retry, the mobile app's
+// own dedupe guard having a gap, etc.) without re-billing Google for an
+// identical route. One process's memory only — fine at this fleet's scale,
+// not meant to survive a restart or be shared across server instances.
+const DIRECTIONS_CACHE_TTL_MS = 20000;
+const directionsCache = new Map();
+
+// Rounded to 4 decimal places (~11m) — a driver's GPS jitters within that
+// easily, and two requests "at the same spot" a few seconds apart should
+// hit the same cache entry rather than missing over noise.
+function cacheKey(points) {
+  return points.map((p) => `${p.lat.toFixed(4)},${p.lng.toFixed(4)}`).join('|');
+}
+
+function pruneExpiredCacheEntries(now) {
+  for (const [key, entry] of directionsCache) {
+    if (now - entry.timestamp > DIRECTIONS_CACHE_TTL_MS) directionsCache.delete(key);
+  }
+}
+
 // Strips Google's `html_instructions` (e.g. "Turn <b>left</b> onto <b>Palm
 // Grove St</b>") down to plain text for display in the app's instruction
 // banner. Google sometimes appends a secondary note directly after the
@@ -82,6 +105,14 @@ export async function getDirections(points) {
     return { polyline: [], legs: [] };
   }
 
+  const now = Date.now();
+  const key = cacheKey(points);
+  const cached = directionsCache.get(key);
+  if (cached && now - cached.timestamp <= DIRECTIONS_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  pruneExpiredCacheEntries(now);
+
   const [origin, ...rest] = points;
   const destination = rest[rest.length - 1];
   const waypoints = rest.slice(0, -1);
@@ -96,6 +127,10 @@ export async function getDirections(points) {
     // 'now' is the literal value its docs specify for "right now".
     departure_time: 'now',
     traffic_model: 'best_guess',
+    // Biases Google's interpretation of ambiguous street/area names toward
+    // the UAE — this fleet never routes outside it, so there's no case
+    // where this bias would point Google at the wrong country.
+    region: 'ae',
     key: GOOGLE_DIRECTIONS_API_KEY
   };
   if (waypoints.length > 0) {
@@ -136,5 +171,7 @@ export async function getDirections(points) {
     }))
   }));
 
-  return { polyline, legs };
+  const result = { polyline, legs };
+  directionsCache.set(key, { timestamp: now, data: result });
+  return result;
 }

@@ -1,16 +1,26 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import api from '../../utils/api';
 
+// The report API treats "YYYY-MM-DD" as a Dubai business date and owns the
+// timezone math (server/utils/businessDate.js). Sending the picked calendar
+// date — not browser-local midnight as an ISO instant — keeps reports correct
+// even when the browser isn't on Dubai time.
+const toDateKey = (value) => {
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const d = value instanceof Date ? value : new Date(value);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 export const fetchReportData = createAsyncThunk(
   'reports/fetchReportData',
   async (dateRange, { rejectWithValue }) => {
     try {
       const { startDate, endDate } = dateRange;
-      
+
       const response = await api.get('/reports', {
         params: {
-          startDate: startDate.toISOString(),
-          endDate: endDate.toISOString()
+          startDate: toDateKey(startDate),
+          endDate: toDateKey(endDate)
         }
       });
       

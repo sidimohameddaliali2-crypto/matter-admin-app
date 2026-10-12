@@ -2,6 +2,7 @@ import Delivery from '../models/Delivery.js';
 import matterApiService from './matterApiService.js';
 import { resolveCustomerMatch, createCustomerFromMatterSubscription } from './customerMatchService.js';
 import { detectAreaFromAddress } from '../config/areas.js';
+import { getBusinessDayBounds } from '../utils/businessDate.js';
 
 // Owner (2026-09-22): "read all the delivery schedule for the day from the
 // matter api and put them in the delivery page, use sub id for each
@@ -42,10 +43,6 @@ export function scheduledTimeFor(dateKey, hour) {
   return new Date(Date.UTC(y, m - 1, d, hour, 0, 0, 0) - LOCAL_TZ_OFFSET_MS);
 }
 
-function businessDayBounds(dateKey) {
-  const startOfDay = scheduledTimeFor(dateKey, 0);
-  return { startOfDay, endOfDayExclusive: new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000) };
-}
 
 // Owner (2026-09-22): "the delivery address ... need to be not one line as
 // before but changed to field: label, emirate, area, building, unit, floor,
@@ -60,6 +57,17 @@ export function buildAddressLine(addr) {
   return [addr.building, addr.unit ? `Unit ${addr.unit}` : null, addr.floor, addr.area, addr.emirate]
     .filter(Boolean)
     .join(', ');
+}
+
+// The safe fallback when nothing is flagged current_delivery_address: if the
+// customer has exactly one `status: 'active'` saved address, there's nothing
+// to guess between — using it is as safe as the current flag would've been.
+// Returns null (caller should skip) when there are zero or multiple active
+// addresses and none is marked current, since picking among several really
+// would be a guess.
+function unambiguousActiveAddress(addresses) {
+  const active = (Array.isArray(addresses) ? addresses : []).filter((a) => a.status === 'active');
+  return active.length === 1 ? active[0] : null;
 }
 
 /**
@@ -80,12 +88,12 @@ export function buildAddressLine(addr) {
  */
 export async function importMatterDeliveriesForDate(dateKey) {
   const matches = await matterApiService.findSubscriptionsWithDeliveryOnDate(dateKey);
-  const summary = { date: dateKey, total: matches.length, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, failed: 0, errors: [] };
+  const summary = { date: dateKey, total: matches.length, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, failed: 0, errors: [] };
 
   for (const sub of matches) {
     try {
       const subscriptionId = String(sub.subscription_id);
-      const { startOfDay, endOfDayExclusive } = businessDayBounds(sub.delivery_date || dateKey);
+      const { startOfDay, endOfDayExclusive } = getBusinessDayBounds(sub.delivery_date || dateKey);
 
       const existingFromThisImport = await Delivery.findOne({
         matterSubscriptionId: subscriptionId,
@@ -93,6 +101,29 @@ export async function importMatterDeliveriesForDate(dateKey) {
       }).select('_id');
       if (existingFromThisImport) {
         summary.alreadyExisted += 1;
+        continue;
+      }
+
+      // Owner (2026-10-11): "use only the location that have current from
+      // matter api." selectBestAddress (matterApiService.js) falls back to
+      // a "most complete"/primary address when no saved address is flagged
+      // current_delivery_address — fine for contact-list exports, not for
+      // where a driver actually goes, so address_detail alone isn't
+      // trusted here. BUT (owner, 2026-10-11, after Adoré Rossouw/Chris
+      // Shrubsole/Emily de Rooy's real Monday deliveries got silently
+      // skipped): requiring the flag outright turned out too strict —
+      // current_delivery_address just isn't reliably set in Matter even for
+      // ordinary active customers. The actual goal is "never guess between
+      // multiple candidates," not "require the flag" — so a subscription
+      // with exactly ONE active address is unambiguous and safe to use even
+      // unflagged; only skip when there's genuine ambiguity (0 or 2+ active
+      // addresses with none marked current). Checked before customer
+      // resolution so a skipped subscription doesn't still leave behind a
+      // newly-created Customer record.
+      const addr = sub.address_detail || {};
+      const useAddr = addr.current_delivery_address === true ? addr : unambiguousActiveAddress(sub.customer_addresses);
+      if (!useAddr) {
+        summary.noCurrentAddress += 1;
         continue;
       }
 
@@ -122,8 +153,7 @@ export async function importMatterDeliveriesForDate(dateKey) {
 
       const hour = parseWindowHour(sub.delivery_window) ?? DEFAULT_WINDOW_HOUR;
       const scheduledTime = scheduledTimeFor(sub.delivery_date || dateKey, hour);
-      const addr = sub.address_detail || {};
-      const addressLine = buildAddressLine(addr) || sub.address || '';
+      const addressLine = buildAddressLine(useAddr) || sub.address || '';
       const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || sub.name || 'Matter Customer';
 
       await Delivery.create({
@@ -134,17 +164,17 @@ export async function importMatterDeliveriesForDate(dateKey) {
         type: 'Delivery',
         address: addressLine,
         addressDetails: {
-          label: addr.label || '',
-          city: addr.emirate || '',
-          area: addr.area || '',
-          building: addr.building || '',
-          floor: addr.floor || '',
-          apartment: addr.unit || '',
-          addressStatus: addr.status || ''
+          label: useAddr.label || '',
+          city: useAddr.emirate || '',
+          area: useAddr.area || '',
+          building: useAddr.building || '',
+          floor: useAddr.floor || '',
+          apartment: useAddr.unit || '',
+          addressStatus: useAddr.status || ''
         },
-        zone: addr.area || detectAreaFromAddress(addressLine) || '',
-        gpsLocation: (addr.coordinates && Number.isFinite(addr.coordinates.lat) && Number.isFinite(addr.coordinates.lng))
-          ? { lat: addr.coordinates.lat, lng: addr.coordinates.lng }
+        zone: useAddr.area || detectAreaFromAddress(addressLine) || '',
+        gpsLocation: (useAddr.coordinates && Number.isFinite(useAddr.coordinates.lat) && Number.isFinite(useAddr.coordinates.lng))
+          ? { lat: useAddr.coordinates.lat, lng: useAddr.coordinates.lng }
           : undefined,
         matterSubscriptionId: subscriptionId
       });

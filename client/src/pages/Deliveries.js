@@ -117,6 +117,7 @@ const Deliveries = () => {
   const [selectedDeliveries, setSelectedDeliveries] = useState(() => new Set());
   const [allDrivers, setAllDrivers] = useState([]);
   const [isPrintConfigOpen, setIsPrintConfigOpen] = useState(false);
+  const [isImportingFromMatter, setIsImportingFromMatter] = useState(false);
   const [isDeletingSelected, setIsDeletingSelected] = useState(false);
   // Owner (2026-10-10): clicking a delivery opens its details in a modal,
   // in place, instead of navigating to a separate page — closing it must
@@ -337,6 +338,35 @@ const Deliveries = () => {
     setTimingFilter('all');
   };
 
+  // Pulls deliveries for the currently-selected date straight from Matter
+  // (owner, 2026-10-11) — the on-demand counterpart to the nightly import
+  // job, which stays off unless MATTER_IMPORT_ENABLED=1. Safe to click more
+  // than once: already-imported/already-scheduled customers are skipped
+  // server-side, and a customer with no address flagged "current" in Matter
+  // is skipped too rather than guessed at.
+  const handleImportFromMatter = async () => {
+    if (!selectedDate) return;
+    const confirmed = window.confirm(`Fetch deliveries scheduled for ${formattedSelectedDate} from the Matter API?`);
+    if (!confirmed) return;
+    try {
+      setIsImportingFromMatter(true);
+      const response = await api.post('/matter/import-deliveries', { date: selectedDate });
+      if (!response.data?.success) throw new Error(response.data?.message || 'Failed to import deliveries from Matter');
+      const s = response.data.data || {};
+      alert(
+        `Matter import for ${selectedDate}: ${s.created || 0} created, ${s.alreadyExisted || 0} already imported, ` +
+        `${s.alreadyHadOtherDelivery || 0} already had a delivery, ${s.noCurrentAddress || 0} skipped (no current address), ` +
+        `${s.failed || 0} failed.`
+      );
+      await fetchDeliveries();
+    } catch (err) {
+      console.error('Import from Matter error:', err);
+      alert(err.response?.data?.message || err.message || 'Failed to import deliveries from Matter');
+    } finally {
+      setIsImportingFromMatter(false);
+    }
+  };
+
   const handleDeleteSelectedDeliveries = async () => {
     if (!hasSelections) return;
     const deliveryIds = Array.from(selectedDeliveries);
@@ -406,6 +436,17 @@ const Deliveries = () => {
         <div className="flex flex-wrap items-center gap-2">
           <button onClick={fetchDeliveries} className="p-2 text-gray-500 hover:text-blue-600 hover:bg-gray-100 rounded-lg transition-colors" title="Refresh">
             <span className={`material-symbols-outlined ${isLoading ? 'animate-spin' : ''}`}>refresh</span>
+          </button>
+          <button
+            onClick={handleImportFromMatter}
+            disabled={isImportingFromMatter || !selectedDate}
+            title="Fetch deliveries for the selected date from the Matter API"
+            className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <span className={`material-symbols-outlined text-[18px] ${isImportingFromMatter ? 'animate-spin' : ''}`}>
+              {isImportingFromMatter ? 'progress_activity' : 'cloud_download'}
+            </span>
+            {isImportingFromMatter ? 'Importing…' : 'Import from Matter'}
           </button>
           <button
             onClick={() => setIsPrintConfigOpen(true)}

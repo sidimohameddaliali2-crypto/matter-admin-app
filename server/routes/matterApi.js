@@ -1,8 +1,9 @@
 import express from 'express';
-import { protect } from '../middleware/auth.js';
+import { protect, authorize } from '../middleware/auth.js';
 import matterApiService, { describeMatterApiError } from '../services/matterApiService.js';
 import { detectAreaFromAddress } from '../config/areas.js';
 import { getNutritionForCustomerLink } from '../services/matterNutritionLookup.js';
+import { importMatterDeliveriesForDate } from '../services/matterDeliveryImportService.js';
 
 const router = express.Router();
 
@@ -85,6 +86,30 @@ router.get('/subscriptions/delivery-on-date', protect, async (req, res) => {
     const status = error?.response?.status || 500;
     console.error('Matter API delivery-on-date error:', error.response?.data || error.message);
     res.status(status).json({ success: false, message: describeMatterApiError(error) || 'Failed to check deliveries for date', error: error.response?.data || error.message });
+  }
+});
+
+// Manually trigger the Matter delivery import for a specific date — the
+// on-demand counterpart to jobs/importMatterDeliveries.js (which only runs
+// automatically when MATTER_IMPORT_ENABLED=1, off by default; see that
+// file's comment). Owner (2026-10-11): "I want the delivery for Monday to
+// be fetch[ed] from the matter api." Idempotent/safe to re-run — see
+// importMatterDeliveriesForDate's own comment (skips subscriptions already
+// imported or already delivered another way, and now also skips any
+// subscription with no address flagged current_delivery_address rather than
+// guessing one).
+// @route   POST /api/matter/import-deliveries   body: { date: "YYYY-MM-DD" }
+router.post('/import-deliveries', protect, authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
+  try {
+    const { date } = req.body || {};
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ success: false, message: 'date is required, as YYYY-MM-DD' });
+    }
+    const summary = await importMatterDeliveriesForDate(date);
+    res.json({ success: true, data: summary });
+  } catch (error) {
+    console.error('Matter API import-deliveries error:', error.response?.data || error.message);
+    res.status(500).json({ success: false, message: describeMatterApiError(error) || 'Failed to import deliveries from Matter', error: error.response?.data || error.message });
   }
 });
 

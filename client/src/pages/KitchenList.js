@@ -1956,7 +1956,11 @@ const KitchenList = () => {
     const partnerEntries = entriesWithMeals.filter((row) => !!row.entry.partner);
     const regularEntries = entriesWithMeals.filter((row) => !row.entry.partner);
 
+    // Running customer number, 1..N down the whole paper in print order (the
+    // sections are built one after another in that order).
+    let serialNo = 0;
     const customerBlock = ({ entry, dayMeals }, subLine) => {
+      serialNo += 1;
       const windowHour = parseDeliveryHour(entry.deliveryWindow?.label);
       const hasWindow = windowHour !== 999;
       const windowHourLabel = formatDeliveryHourLabel(windowHour);
@@ -1970,7 +1974,11 @@ const KitchenList = () => {
       const rows = dayMeals.map((meal) => {
         const label = getMealLabel(meal);
         const remark = mealRemarkText(meal);
-        return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}</td>`
+        const isLarge = String(meal?.mealType || '').toLowerCase() === 'breakfast' && !!meal?.flags?.isLargeBreakfast;
+        const largeTag = isLarge
+          ? ' <span style="background:#6d28d9;color:#ffffff;font-size:8pt;font-weight:bold">&nbsp;LARGE&nbsp;</span>'
+          : '';
+        return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}${largeTag}</td>`
           + `<td style="color:#c2410c;font-weight:bold">${esc(remark)}</td>`
           + `<td>${esc(meal.proteinWeight || 0)}g</td><td>${esc(meal.carbWeight || 0)}g</td><td>${esc(meal.vegWeight || 0)}g</td></tr>`;
       }).join('');
@@ -1981,7 +1989,7 @@ const KitchenList = () => {
       // and its meals and totals on the same page.
       return `
         <table width="100%" border="0" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin-top:6pt"><tr style="page-break-inside:avoid"><td style="padding-top:8pt">
-          <p style="margin:0;font-size:12pt;page-break-after:avoid"><b>${esc(nameOf({ entry }) || 'Unknown customer')}</b>
+          <p style="margin:0;font-size:12pt;page-break-after:avoid"><b>${serialNo}. ${esc(nameOf({ entry }) || 'Unknown customer')}</b>
             &nbsp;&nbsp;<span style="background:${hasWindow ? '#1e293b' : '#94a3b8'};color:#ffffff;font-size:9pt;font-weight:bold">&nbsp;${esc(tagText)}&nbsp;</span></p>
           <p style="margin:0;font-size:9pt;page-break-after:avoid">${esc(subLine)}</p>
           ${entry.noDeliveryDate === dateKey ? '<p style="margin:0;font-size:9pt;color:#be123c;page-break-after:avoid"><b>NO MATTER DELIVERY ON THIS DATE - confirm before cooking</b></p>' : ''}
@@ -2047,11 +2055,20 @@ const KitchenList = () => {
     const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:w="urn:schemas-microsoft-com:office:word" xmlns="http://www.w3.org/TR/REC-html40">
 <head><meta charset="utf-8"><title>Kitchen Prep Sheet</title>
 <!--[if gte mso 9]><xml><w:WordDocument><w:View>Print</w:View></w:WordDocument></xml><![endif]-->
-<style>body{font-family:Arial,sans-serif} th,td{text-align:left;page-break-after:avoid} tr{page-break-inside:avoid}</style></head>
+<style>
+body{font-family:Arial,sans-serif} th,td{text-align:left;page-break-after:avoid} tr{page-break-inside:avoid}
+@page WordSection1 { size:595.3pt 841.9pt; margin:54pt 54pt 60pt 54pt; mso-footer:f1; }
+div.WordSection1 { page:WordSection1; }
+p.MsoFooter { margin:0; font-size:8pt; color:#787878; text-align:right; }
+</style></head>
 <body>
+<div class="WordSection1">
 <h1 style="font-size:16pt;margin:0">Kitchen Prep Sheet — ${esc(dayLabel)}</h1>
 <p style="font-size:9pt;color:#787878;margin:0">Generated: ${esc(new Date().toLocaleString())}</p>
 ${body}
+</div>
+<!-- Word reads this div as the page footer: "Page N of M" are live Word fields. -->
+<div style="mso-element:footer" id="f1"><p class="MsoFooter" style="text-align:right">Kitchen Prep Sheet — ${esc(dayLabel)} &nbsp;|&nbsp; Page <span style="mso-field-code:' PAGE '"></span> of <span style="mso-field-code:' NUMPAGES '"></span></p></div>
 </body></html>`;
 
     const blob = new Blob(['﻿', html], { type: 'application/msword' });
@@ -2091,6 +2108,8 @@ ${body}
       doc.setTextColor(0);
 
       let cursorY = 32;
+      // Running customer number, 1..N down the whole paper in print order.
+      let serialNo = 0;
 
       // Group by delivery emirate first, then by delivery window within each
       // emirate — every (emirate, window) combination is its own physical
@@ -2131,8 +2150,9 @@ ${body}
 
         doc.setFontSize(12);
         // Keep a long name from running underneath the tag.
+        serialNo += 1;
         const nameLine = doc.splitTextToSize(
-          entry.customerName || entry.email || 'Unknown customer',
+          `${serialNo}. ${entry.customerName || entry.email || 'Unknown customer'}`,
           tagX - 14 - 3
         )[0];
         doc.text(nameLine, 14, y);
@@ -2197,11 +2217,13 @@ ${body}
           y += 5;
         }
 
-        const tableRows = dayMeals.map((meal) => {
+        // A breakfast served at the Large portion gets a LARGE tag on its row.
+        const isLargeRow = dayMeals.map((meal) => String(meal?.mealType || '').toLowerCase() === 'breakfast' && !!meal?.flags?.isLargeBreakfast);
+        const tableRows = dayMeals.map((meal, mealIndex) => {
           const label = getMealLabel(meal);
           return [
             label.mealType,
-            label.mealName,
+            isLargeRow[mealIndex] ? `${label.mealName}   [LARGE]` : label.mealName,
             mealRemarkText(meal),
             `${meal.proteinWeight || 0}g`,
             `${meal.carbWeight || 0}g`,
@@ -2222,6 +2244,11 @@ ${body}
           didParseCell: (data) => {
             if (data.section === 'body' && data.column.index === 2 && data.cell.raw) {
               data.cell.styles.textColor = [194, 65, 12];
+              data.cell.styles.fontStyle = 'bold';
+            }
+            // Large breakfast: whole row in purple bold so it stands out.
+            if (data.section === 'body' && isLargeRow[data.row.index] && data.column.index <= 1) {
+              data.cell.styles.textColor = [109, 40, 217];
               data.cell.styles.fontStyle = 'bold';
             }
           },
@@ -2370,6 +2397,19 @@ ${body}
       if (entriesWithMeals.length === 0) {
         doc.setFontSize(11);
         doc.text('No customers have meals selected for this date.', 14, cursorY);
+      }
+
+      // Page numbers ("Page 3 of 76") on every page, added last so the total
+      // is known — autoTable adds pages of its own while it lays tables out.
+      const totalPages = doc.getNumberOfPages();
+      for (let pageNo = 1; pageNo <= totalPages; pageNo += 1) {
+        doc.setPage(pageNo);
+        doc.setFontSize(8);
+        doc.setFont(undefined, 'normal');
+        doc.setTextColor(110);
+        doc.text(`Kitchen Prep Sheet — ${dayLabel}`, 14, pageHeight - 7);
+        doc.text(`Page ${pageNo} of ${totalPages}`, pageWidth - 14, pageHeight - 7, { align: 'right' });
+        doc.setTextColor(0);
       }
 
       doc.save(`kitchen-paper-${dateKey}${planFileSuffix}.pdf`);

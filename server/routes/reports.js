@@ -3,6 +3,7 @@ import Delivery from '../models/Delivery.js';
 import Bag from '../models/Bag.js';
 import User from '../models/User.js';
 import { protect, authorize } from '../middleware/auth.js'; //
+import { resolveBusinessDateRange, toBusinessDateKey } from '../utils/businessDate.js';
 
 const router = express.Router();
 
@@ -290,15 +291,23 @@ router.get('/', protect, async (req, res) => {
       });
     }
 
-    const start = new Date(startDate);
-    const end = new Date(endDate);
-    end.setHours(23, 59, 59, 999); // End of day
+    // startDate/endDate as "YYYY-MM-DD" are Dubai business dates (whole end
+    // day included); full ISO timestamps are exact instants. Never uses the
+    // server's OS timezone — see utils/businessDate.js.
+    const range = resolveBusinessDateRange(startDate, endDate);
+    if (!range) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid date range. Use YYYY-MM-DD (business dates) or ISO timestamps, with endDate on/after startDate.'
+      });
+    }
+    const { start, endExclusive } = range;
 
     // Get deliveries in date range
     const deliveries = await Delivery.find({
       scheduledTime: {
         $gte: start,
-        $lte: end
+        $lt: endExclusive
       }
     }).populate('driver', 'profile');
 
@@ -340,7 +349,7 @@ router.get('/', protect, async (req, res) => {
 
     const deliveriesPerDay = {};
     deliveries.forEach(delivery => {
-      const date = delivery.scheduledTime.toISOString().split('T')[0];
+      const date = toBusinessDateKey(delivery.scheduledTime);
       deliveriesPerDay[date] = (deliveriesPerDay[date] || 0) + 1;
 
       if (delivery.status === 'delivered') {
@@ -419,14 +428,16 @@ router.get('/', protect, async (req, res) => {
           lateRate: totalDeliveries > 0 ? Math.round((lateDeliveries / totalDeliveries) * 100) : 0,
           earlyRate: totalDeliveries > 0 ? Math.round((earlyDeliveries / totalDeliveries) * 100) : 0
         },
-        deliveriesPerDay: Object.entries(deliveriesPerDay).map(([date, count]) => ({ date, count })),
+        deliveriesPerDay: Object.entries(deliveriesPerDay)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([date, count]) => ({ date, count })),
         deliveriesByDriver: Object.entries(deliveriesByDriver).map(([driver, count]) => ({ driver, count })),
         deliveriesByCompany: Object.entries(deliveriesByCompany).map(([company, count]) => ({ company, count })),
         lateDeliveryDetails: lateDeliveryDetails.sort((a, b) => b.lateMinutes - a.lateMinutes),
         earlyDeliveryDetails: earlyDeliveryDetails.sort((a, b) => b.earlyMinutes - a.earlyMinutes),
         dateRange: {
           startDate: start,
-          endDate: end
+          endDateExclusive: endExclusive
         },
         // Add all deliveries for detailed view
         allDeliveries: deliveries.map(delivery => ({

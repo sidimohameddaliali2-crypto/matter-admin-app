@@ -328,6 +328,11 @@ class MatterApiService {
             // which needs real coordinates/address parts and a wall-clock
             // time, not just the flattened display string.
             address_detail: selectBestAddress(detail.data.customer_addresses),
+            // Raw list too (not just the already-picked best one) — lets a
+            // caller tell "exactly one plausible address, picked with zero
+            // ambiguity" apart from "guessed among several candidates" (see
+            // matterDeliveryImportService.js's unambiguousActiveAddress).
+            customer_addresses: detail.data.customer_addresses || [],
             delivery_window: detail.data.delivery_window || null,
             meal_frequency: detail.data.plan?.meal_frequency ?? 1,
             breakfast_included: !!detail.data.breakfast_included,

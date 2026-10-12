@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import { useSelector } from 'react-redux';
 import io from 'socket.io-client';
 
 const SocketContext = createContext();
@@ -11,16 +12,27 @@ export const useSocket = () => {
   return context;
 };
 
+// Only opens a connection for a logged-in staff user (SocketProvider wraps
+// the whole app, including public pages like /menu-select/:token and
+// /join/:token, which have no reason to hold a live socket open). Reacts to
+// state.auth.token rather than reading localStorage once on mount, so a
+// socket opens right after login (no page refresh needed) and closes right
+// on logout — previously the one-time read meant a user who logged in
+// without reloading kept an unauthenticated socket open for the rest of
+// their session.
 export const SocketProvider = ({ children }) => {
+  const token = useSelector((state) => state.auth.token);
   const [socket, setSocket] = useState(null);
   const [onlineDrivers, setOnlineDrivers] = useState([]);
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
+    if (!token) {
+      setSocket(null);
+      return undefined;
+    }
+
     const newSocket = io(process.env.REACT_APP_SOCKET_URL || 'http://localhost:5000', {
-      auth: {
-        token: token
-      }
+      auth: { token }
     });
 
     setSocket(newSocket);
@@ -35,7 +47,7 @@ export const SocketProvider = ({ children }) => {
     });
 
     return () => newSocket.close();
-  }, []);
+  }, [token]);
 
   const value = {
     socket,

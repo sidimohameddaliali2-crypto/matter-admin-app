@@ -17,6 +17,7 @@ import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 import { syncDeliveryToSheet, syncDeliveriesToSheet } from '../services/googleSheetSync.js';
 import { recalculateDriverKPI } from '../services/driverKpiService.js';
 import { businessRangeBounds, getTimingOverview, getTimingRecords } from '../services/deliveryTimingHistory.js';
+import { businessOffsetMs, getBusinessDayBounds } from '../utils/businessDate.js';
 import {
   optimizeRoutes,
   applyRoutePlan,
@@ -55,11 +56,7 @@ async function saveCustomerCoords(delivery, lat, lng, link) {
 }
 
 // Timezone handling: treat client-supplied local times as LOCAL_TZ when they lack an explicit offset
-const LOCAL_TZ_OFFSET_MINUTES = Number.parseInt(
-  process.env.LOCAL_TIMEZONE_OFFSET_MINUTES || process.env.BUSINESS_TZ_OFFSET_MINUTES || '0',
-  10
-);
-const LOCAL_TZ_OFFSET_MS = LOCAL_TZ_OFFSET_MINUTES * 60 * 1000;
+const LOCAL_TZ_OFFSET_MS = businessOffsetMs();
 
 function hasExplicitOffset(value) {
   return typeof value === 'string' && /([zZ]|[+-]\d{2}:?\d{2})$/.test(value.trim());
@@ -117,27 +114,6 @@ function formatLocalDateTime(date) {
   const local = new Date(dt.getTime() + LOCAL_TZ_OFFSET_MS);
   const pad = (n) => String(n).padStart(2, '0');
   return `${local.getUTCFullYear()}-${pad(local.getUTCMonth() + 1)}-${pad(local.getUTCDate())} ${pad(local.getUTCHours())}:${pad(local.getUTCMinutes())}`;
-}
-
-function getBusinessDayBounds(dateInput) {
-  const reference = dateInput instanceof Date ? dateInput : new Date(dateInput);
-  if (Number.isNaN(reference.getTime())) {
-    throw new Error('Invalid date for business day bounds');
-  }
-
-  // Convert UTC instant to local business date, then back to UTC bounds for that local day.
-  const local = new Date(reference.getTime() + LOCAL_TZ_OFFSET_MS);
-  const startOfDayMs = Date.UTC(
-    local.getUTCFullYear(),
-    local.getUTCMonth(),
-    local.getUTCDate(),
-    0, 0, 0, 0
-  ) - LOCAL_TZ_OFFSET_MS;
-
-  return {
-    startOfDay: new Date(startOfDayMs),
-    endOfDayExclusive: new Date(startOfDayMs + 24 * 60 * 60 * 1000)
-  };
 }
 
 async function notifyManualDeliverySlack(delivery, actorLabel) {

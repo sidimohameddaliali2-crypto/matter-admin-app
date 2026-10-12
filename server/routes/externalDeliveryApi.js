@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import Delivery from '../models/Delivery.js';
 import Customer from '../models/Customer.js';
 import { apiKeyAuth } from '../middleware/apiKeyAuth.js';
+import { isDateKey, businessDayStart } from '../utils/businessDate.js';
 
 // Read-only delivery API for external/third-party consumers (logistics
 // partners, kitchen systems, etc.) — authenticated with a static API key
@@ -18,15 +19,10 @@ router.use(apiKeyAuth);
 
 const MAX_LIMIT = 200;
 
-// Same local-timezone convention the rest of the app uses (e.g.
-// getBusinessDayBounds in routes/deliveries.js) so "give me the 11th"
-// matches the business day drivers actually see, not a UTC slice of it.
-const LOCAL_TZ_OFFSET_MINUTES = Number.parseInt(
-  process.env.LOCAL_TIMEZONE_OFFSET_MINUTES || process.env.BUSINESS_TZ_OFFSET_MINUTES || '0',
-  10
-);
-const LOCAL_TZ_OFFSET_MS = LOCAL_TZ_OFFSET_MINUTES * 60 * 1000;
-const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+// Same business-day convention as the rest of the app (utils/businessDate.js)
+// so "give me the 11th" matches the business day drivers actually see, not a
+// UTC slice of it.
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 // Turns a `date`/`dateFrom`/`dateTo` query value into a real Date.
 // - A bare "YYYY-MM-DD" is treated as a LOCAL calendar day: `endOfDay`
@@ -40,12 +36,9 @@ const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 // Returns null for an unparseable value.
 function parseDateBoundary(value, endOfDay) {
   if (!value) return null;
-  if (DATE_ONLY_RE.test(value)) {
-    const [y, m, d] = value.split('-').map(Number);
-    const utcMillis = endOfDay
-      ? Date.UTC(y, m - 1, d, 23, 59, 59, 999)
-      : Date.UTC(y, m - 1, d, 0, 0, 0, 0);
-    return new Date(utcMillis - LOCAL_TZ_OFFSET_MS);
+  if (isDateKey(value)) {
+    const start = businessDayStart(value);
+    return endOfDay ? new Date(start.getTime() + DAY_MS - 1) : start;
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
