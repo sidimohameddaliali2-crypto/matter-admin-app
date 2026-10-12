@@ -7,7 +7,7 @@ Guidance for working in this repo. MATTER is a meal-subscription business in Dub
 ```
 server/   Express + Mongoose API (ES modules, "type": "module"), Socket.IO, background jobs
 client/   React 19 SPA (Create React App / react-scripts), Redux Toolkit, Tailwind + MUI
-docs/     Current integration docs (external delivery API, Google Sheet sync + Apps Script)
+docs/     Current integration docs (external delivery API, Matter API, Postgres migration plan)
 .github/workflows/deploy-digitalocean.yml   Deploys on every push to main
 ```
 
@@ -33,7 +33,7 @@ The route optimizer needs Python with `ortools` (`server/optimizer/requirements.
 
 - `server/loadEnv.js` must remain the first import in `server.js`. ESM evaluates every import before the importing file's own code, so any module that reads `process.env` at the top level would otherwise capture `undefined`. It loads `server/.env` first and then `server/.env.local` as an override.
 - `.env*` files and `server/ecosystem.config.cjs` are git-ignored because they contain secrets. There is no `.env.example` yet. `ecosystem.config.example.cjs` is the only template.
-- Required: `MONGODB_URI` and `JWT_SECRET`. Most integrations are optional and turn off when their env vars are missing, including Redis (`REDIS_URL`), DigitalOcean Spaces (`SPACES_*`), Slack (`SLACK_*`, `ENABLE_SLACK_NOTIFICATIONS`), Google Sheet sync, and the Matter import.
+- Required: `MONGODB_URI` and `JWT_SECRET`. Most integrations are optional and turn off when their env vars are missing, including Redis (`REDIS_URL`), DigitalOcean Spaces (`SPACES_*`), Slack (`SLACK_*`, `ENABLE_SLACK_NOTIFICATIONS`), and the Matter import.
 - Business time is Dubai (UTC+4). Use `LOCAL_TIMEZONE_OFFSET_MINUTES` (default 240) and `BUSINESS_TZ_OFFSET_MINUTES` for day boundaries. Don't rely on the server's TZ.
 
 ## Server architecture
@@ -57,7 +57,7 @@ The route optimizer needs Python with `ortools` (`server/optimizer/requirements.
 - Athleat / FileMaker (`athleatService.js`): the legacy FileMaker Data API for customers and orders, which the app is migrating away from. The many `server/test*.js`, `get*.js`, and `search*.js` files at the server root are ad-hoc FileMaker/Matter debugging scripts, not part of the app.
 - Maps and geo: Google is used only for geocoding (`geocoding.js`). Always call `resolveDeliveryCoordinatesCached`, which caches results on `Customer.gpsLocation`. OSRM supplies distance matrices (`distanceMatrixService.js`). The dispatcher route maps use 2GIS MapGL (`@2gis/mapgl`, which takes coordinates as `[lng, lat]`). Don't add Google Maps JS to new views.
 - Route optimization: `routeOptimizationService.js` spawns `optimizer/solve_routes.py` (OR-Tools). `handoffPlanner.js` plans van ↔ bike handoffs.
-- Other integrations: Supy recipes (`supyService.js`, with a cache warmed at startup), Xero invoicing, Truckoom fleet, Slack (`slackNotifier.js`, `slackEventService.js`), Brevo email (`emailService.js`), Expo push, Gallabox WhatsApp, Shopify, and the Google Sheet mirror (`googleSheetSync.js`, which is fire-and-forget and must never throw).
+- Other integrations: Supy recipes (`supyService.js`, with a cache warmed at startup), Xero invoicing, Truckoom fleet, Slack (`slackNotifier.js`, `slackEventService.js`), Brevo email (`emailService.js`), Expo push, Gallabox WhatsApp, and Shopify.
 
 ## Client architecture
 

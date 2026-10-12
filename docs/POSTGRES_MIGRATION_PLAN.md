@@ -234,6 +234,6 @@ invoked (log this explicitly, don't just assume).
   regardless of whether this migration proceeds.
 - Which ORM alternative to Drizzle you could use instead (Prisma, Knex, raw
   `pg`) — covered in the earlier query-layer discussion, not repeated here.
-- Rewriting the event/integration layer (Slack, Google Sheet sync) — that's
+- Rewriting the event/integration layer (Slack and other integrations) — that's
   an orthogonal architecture change (see the "connecting more tools"
   discussion) and isn't blocked by or blocking this migration.

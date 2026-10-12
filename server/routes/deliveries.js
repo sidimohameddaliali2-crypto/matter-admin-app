@@ -14,7 +14,6 @@ import { detectAreaFromAddress } from '../config/areas.js';
 import { resolveDeliveryCoordinatesCached, isPlausibleCoordinate, geocodeAddress } from '../services/geocoding.js';
 import { sendDeliveryPushToDriver } from '../services/pushNotificationService.js';
 import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
-import { syncDeliveryToSheet, syncDeliveriesToSheet } from '../services/googleSheetSync.js';
 import { recalculateDriverKPI } from '../services/driverKpiService.js';
 import { businessRangeBounds, getTimingOverview, getTimingRecords } from '../services/deliveryTimingHistory.js';
 import { businessOffsetMs, getBusinessDayBounds } from '../utils/businessDate.js';
@@ -1695,9 +1694,6 @@ router.post('/', [
       });
     }
 
-    // Mirror the new delivery into the Google Sheet (no-op unless configured)
-    syncDeliveryToSheet(delivery, { event: 'created' });
-
     res.status(201).json({
       success: true,
       message: appliedChangesCount > 0 
@@ -1835,9 +1831,6 @@ router.post('/bulk', [
       createdDeliveries.forEach(delivery => io.emit('delivery:created', delivery));
       console.log(`📡 Emitted delivery:created events for ${createdDeliveries.length} deliveries`);
     }
-
-    // Mirror every uploaded delivery into the Google Sheet (no-op unless configured)
-    syncDeliveriesToSheet(createdDeliveries, { event: 'created' });
 
     const elapsedMs = Date.now() - startTime;
     console.log(`⏱️ Bulk delivery creation completed in ${elapsedMs}ms (${(elapsedMs / createdDeliveries.length).toFixed(2)}ms per delivery)`);
@@ -2027,9 +2020,6 @@ router.patch('/assign-driver', [
     } else {
       console.warn('Socket.io not initialized - cannot emit delivery updates (assign-driver)');
     }
-
-    // Reflect the new driver on each delivery's Google Sheet row
-    syncDeliveriesToSheet(updatedDeliveries, { event: 'assigned' });
 
     const pushes = reassignments.flatMap(({ delivery, oldDriverId }) => {
       const jobs = [sendDeliveryPushToDriver({ driverId, type: 'delivery_reassigned', delivery })];
@@ -2257,9 +2247,6 @@ router.put('/:id', authorize(['admin', 'super_admin', 'dispatcher', 'manager']),
       });
     }
 
-    // Push the edited fields onto the delivery's Google Sheet row
-    syncDeliveryToSheet(delivery, { event: 'updated' });
-
     res.json({
       success: true,
       message: 'Delivery updated successfully',
@@ -2433,8 +2420,6 @@ router.post('/:id/collect', upload.single('proofImage'), handleUploadError, auth
     const io = req.app.get('io');
     if (io) io.emit('delivery:updated', delivery);
 
-    syncDeliveryToSheet(delivery, { event: 'collected' });
-
     return res.json({ success: true, message: 'Collection marked as collected', data: { delivery } });
   } catch (error) {
     console.error('Collect endpoint error:', error);
@@ -2573,10 +2558,6 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
     } else {
       console.warn('Socket.io not initialized - cannot emit status updates (complete)');
     }
-
-    // Push delivered time, proof and the early/on-time/late verdict onto the
-    // delivery's Google Sheet row
-    syncDeliveryToSheet(delivery, { event: 'delivered' });
 
     res.json({
       success: true,
@@ -2972,10 +2953,6 @@ router.patch('/:id/status', async (req, res) => {
         console.warn('KPI recalculate failed (caught):', err?.message || err);
       });
     }
-
-    // Push the status change (and, when delivered, timing + proof) onto the
-    // delivery's Google Sheet row
-    syncDeliveryToSheet(delivery, { event: status === 'delivered' ? 'delivered' : 'status' });
 
     res.json({
       success: true,
