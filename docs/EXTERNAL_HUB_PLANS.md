@@ -1,6 +1,6 @@
 # External fixed-hub driver plans — protocol 1
 
-Source implementation; **tests/builds/phone checks have not been run**. Do not treat this branch as deployment or dispatch approval. The external planner retains routing ownership: neither import nor driver events invoke the optimizer or send notifications.
+Validated with local synthetic data and an Android emulator on 13 October 2026; physical-phone and production checks remain outstanding. Do not treat this branch as deployment or dispatch approval. The external planner retains routing ownership: neither import nor driver events invoke the optimizer or send notifications.
 
 ## Versions and storage
 
@@ -54,12 +54,14 @@ Hub operations intentionally do not create reusable `Bag` inventory rows or mark
 
 Admin route preview reads imported timing directly and labels it as planned, not live ETA. The legacy ETA path now returns every pickup in `detours[]`; the legacy singular `detour` field remains only for compatibility.
 
-## Verification still required
+## Validation and remaining rollout checks
 
-Jacob chose “Implement and push; leave checks explicitly unrun” on 13 October 2026. No safe pre-existing remote check workflow exists; no new workflow was added and no local tests, installs, builds, servers or database commands were run.
+Local validation on 13 October 2026 passed 128 backend tests with a disposable MongoDB replica set, including transaction rollback, source-address/assignment changes, revisions, cancellation and duplicate receipts. The admin client passed 19 tests and its production build. Native Jest tests and a bounded arm64 Android APK build also passed.
 
-Prepared fixtures: pure validation/event tests, MongoDB transaction integration with isolated synthetic IDs, and native parser/stop-selection/outbox tests. Integration tests require a localhost disposable replica-set URI in `MONGO_TEST_URI`; without it the integration test is skipped. They must not use a shared database.
+The emulator journey used actual application routers and MongoDB persistence with synthetic accounts. It completed four photo-and-bag-code deliveries, three two-sided handoffs (two vans, including a return to the first hub), and a final return to base. It exercised future-day review, initial loads, missing counterpart, wrong-batch prevention, offline photo/transfer persistence across restart, and a dropped response followed by an idempotent retry. Camera input, time, GPS, directions and HTTPS object storage were controlled fixtures, not production-provider evidence.
 
-Before rollout: run backend `npm test` on a safe runner with the isolated Mongo fixture enabled; native `npm test -- --runInBand` and Android bundling/build; admin client build. Then verify actual devices against an isolated identified backend: initial loads, two different hub pickups, both drivers' cargo, wrong batch, missing counterpart, duplicate submission, changed/cancelled plans, offline photos/reconnect/restart, midnight/date selection, GPS/proximity, and existing non-plan photo/QR/bag return flows. No screenshots or phone proof are supplied by this source-only branch.
+The fixes preserve empty Mongo state, detect same-pin source-address edits, restore the wrapped authentication response, retain validated offline sessions, bound photo upload attempts, and keep bag counts aligned with the imported manifest. Native forms remain visible above the keyboard.
 
-Deployment compatibility, actual phone rendering, GPS accuracy, photo upload retry semantics after an ambiguous upload response, physical cargo capacity, and hub access remain unverified. The server event and stock mutation is idempotent; the existing photo-upload endpoint has no idempotency contract, so an uncertain upload could leave an orphan uploaded image even though customer completion cannot duplicate.
+Integration tests require a localhost disposable replica-set URI in `MONGO_TEST_URI`; without it the integration test is skipped. They must not use a shared database.
+
+Physical-phone testing, real GPS/road and hub access, real provider behavior, production deployment and the existing non-plan bag-return journey remain rollout checks. An uncertain photo-upload response can still leave an orphan image because the upload API is not idempotent; accepted route events and stock mutation remain idempotent. No deployment, production import or real-driver notification is established by this validation.

@@ -6,6 +6,7 @@ import { validatePlan, replaceState, applyEvent, projectPlan, fingerprint, fail,
 
 const customers = plan => plan.routes.flatMap(r => r.stops.filter(s => s.type === 'customer').map(s => ({ ...s, driverId: r.driverId })));
 const planId = value => String(value?._id || value);
+const addressFingerprint = delivery => fingerprint({ address: delivery.address || '', addressDetails: delivery.addressDetails || {} });
 
 // Used at import and before each action, including reconnect retries. A
 // dispatcher edit/deletion outside this protocol cannot silently change cargo.
@@ -19,6 +20,7 @@ export async function validateDeliveries(plan, session, importing = false) {
     if (d.gpsLocation?.lat !== stop.point.lat || d.gpsLocation?.lng !== stop.point.lng) fail('Delivery pin changed or is unconfirmed; replace the plan');
     if (d.externalRoutePlan && planId(d.externalRoutePlan) !== planId(plan)) fail('Delivery belongs to another external plan');
     if (!importing && (!d.externalRoutePlan || String(d.driver) !== stop.driverId || d.externalRouteRevision !== plan.revision)) fail('Assignment changed; replace the plan');
+    if (!importing && stop.sourceAddressFingerprint !== addressFingerprint(d)) fail('Delivery address changed; replace the plan');
     const done = Boolean(plan.state.completedStops[stop.id]);
     if (['delivered', 'completed', 'collected'].includes(d.status) !== done) fail('Delivery progress changed outside this plan; dispatcher review required');
   }
@@ -37,7 +39,8 @@ export async function importExternalPlan(raw, actorId) {
       result = current; return;
     }
     if ((current?.revision || 0) !== draft.expectedRevision) fail('Plan revision changed; reload before importing');
-    if (current) replaceState(draft, current.toObject());
+    const previous = current?.toObject();
+    if (previous) draft.state = structuredClone(previous.state);
     else current = new ExternalRoutePlan({ serviceDate: draft.serviceDate, createdBy: actorId });
     draft._id = current._id;
     const users = await User.find({ _id: { $in: draft.routes.map(r => r.driverId) }, role: 'driver', isActive: true }).session(session).lean();
@@ -47,7 +50,11 @@ export async function importExternalPlan(raw, actorId) {
       if (u.profile?.vehicleType !== r.vehicleType) fail('Driver vehicle profile does not match the manifest', 400);
       r.driverName = [u.profile?.firstName, u.profile?.lastName].filter(Boolean).join(' ') || r.vehicleLabel;
     }
-    await validateDeliveries(draft, session, true);
+    const sourceDeliveries = await validateDeliveries(draft, session, true);
+    for (const route of draft.routes) for (const stop of route.stops) {
+      if (stop.type === 'customer') stop.sourceAddressFingerprint = addressFingerprint(sourceDeliveries.find(d => String(d._id) === stop.deliveryId));
+    }
+    if (previous) replaceState(draft, previous);
     const dayStart = new Date(`${draft.serviceDate}T00:00:00+04:00`);
     const ids = customers(draft).map(s => s.deliveryId);
     const otherAssigned = await Delivery.exists({
@@ -87,6 +94,8 @@ export async function recordPlanEvent(id, actorId, event) {
       const rows = await Delivery.find({ _id: { $in: own } }).session(session).lean();
       result = { duplicate: true, plan: projectForDriver(plan, actorId, rows) }; return;
     }
+    if (plan.cancelled) fail('Plan cancelled; refresh your assignment');
+    if (event.revision !== plan.revision) fail('Plan revision changed; refresh and acknowledge');
     const deliveries = await validateDeliveries(plan, session);
     // Writing the inspected rows makes concurrent edits/reassignment conflict
     // with this transaction, including transfer events that otherwise only

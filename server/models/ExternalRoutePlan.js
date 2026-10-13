@@ -17,6 +17,6 @@ const schema = new mongoose.Schema({
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   cancellation: mongoose.Schema.Types.Mixed
-}, { timestamps: true, optimisticConcurrency: true });
+}, { timestamps: true, optimisticConcurrency: true, minimize: false });
 
 export default mongoose.model('ExternalRoutePlan', schema);

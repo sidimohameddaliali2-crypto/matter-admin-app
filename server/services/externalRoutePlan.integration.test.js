@@ -20,15 +20,19 @@ test('persisted external import -> two native pickups -> proofs, retries, replac
   t.after(() => t.mock.timers.reset());
   const raw = fixture();
   // Direct fixture inserts avoid account creation hooks and use no live identities.
-  await User.collection.insertMany(raw.routes.map(r => ({ _id: new mongoose.Types.ObjectId(r.driverId), role: 'driver', isActive: true, profile: { firstName: 'Fixture', lastName: r.vehicleLabel, vehicleType: r.vehicleType } })));
+  await User.collection.insertMany(raw.routes.map(r => ({ _id: new mongoose.Types.ObjectId(r.driverId), email: `${r.driverId}@fixture.invalid`, role: 'driver', isActive: true, profile: { firstName: 'Fixture', lastName: r.vehicleLabel, vehicleType: r.vehicleType } })));
   await Delivery.collection.insertMany(raw.routes[0].stops.filter(s => s.type === 'customer').map(s => ({ _id: new mongoose.Types.ObjectId(s.deliveryId), customerId: s.id, customerName: `Fixture ${s.id}`, type: 'Delivery', status: 'pending', scheduledTime: new Date(s.deadlineAt), gpsLocation: s.point })));
   const actor = new mongoose.Types.ObjectId();
   let p = await importExternalPlan(raw, actor);
   assert.equal((await importExternalPlan(raw, actor)).id, p.id, 'duplicate import uses same plan');
   assert.equal(await ExternalRoutePlan.countDocuments(), 1);
+  assert.deepEqual((await ExternalRoutePlan.findById(p.id).lean()).state.completedStops, {}, 'empty progress must survive Mongo persistence');
   const planKey = p.id;
   let serial = 0;
   const send = (driverId, type, extra = {}, revision = 1, eventId = `fixture-event-${serial++}`) => recordPlanEvent(planKey, driverId, { driverId, eventId, type, revision, ...extra });
+  await Delivery.updateOne({ _id: ids.d1 }, { $set: { address: 'Changed fixture apartment, same map pin' } });
+  await assert.rejects(send(ids.bike, 'acknowledge'), /address/i, 'same-pin address changes must invalidate the old plan');
+  await Delivery.updateOne({ _id: ids.d1 }, { $unset: { address: '' } });
   await Delivery.updateOne({ _id: ids.d2 }, { $set: { driver: ids.van2 } });
   await assert.rejects(send(ids.bike, 'acknowledge'), /Assignment changed/);
   assert.equal((await ExternalRoutePlan.findById(planKey).lean()).receipts.length, 0);
