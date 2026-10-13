@@ -17,6 +17,7 @@ import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 import { recalculateDriverKPI } from '../services/driverKpiService.js';
 import { businessRangeBounds, getTimingOverview, getTimingRecords } from '../services/deliveryTimingHistory.js';
 import { businessOffsetMs, getBusinessDayBounds, setBusinessTimeOfDay } from '../utils/businessDate.js';
+import { fillProofAddressInBackground, resolveProofAddressWithin } from '../services/proofLocationAddress.js';
 import {
   optimizeRoutes,
   applyRoutePlan,
@@ -1526,6 +1527,13 @@ router.get('/:id', async (req, res) => {
     const timedDelivery = enrichDeliveryTiming(deliveryObject);
     const enrichedDelivery = await annotateWeekendCombo(timedDelivery);
 
+    // Street address of where the driver's phone reported the drop-off (the
+    // app only sends coordinates). Looked up once, saved, and cached.
+    if (enrichedDelivery.proof?.location && !enrichedDelivery.proof.location.address) {
+      const dropOffAddress = await resolveProofAddressWithin(enrichedDelivery);
+      if (dropOffAddress) enrichedDelivery.proof.location.address = dropOffAddress;
+    }
+
     // Fetch bags that are either assigned to this delivery or to this customer
     const bags = await Bag.find({
       $or: [
@@ -2555,6 +2563,8 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
       console.warn('Socket.io not initialized - cannot emit status updates (complete)');
     }
 
+    fillProofAddressInBackground(delivery); // label the drop-off spot; never blocks the driver
+
     res.json({
       success: true,
       message: 'Delivery completed successfully',
@@ -2949,6 +2959,8 @@ router.patch('/:id/status', async (req, res) => {
         console.warn('KPI recalculate failed (caught):', err?.message || err);
       });
     }
+
+    fillProofAddressInBackground(delivery); // label the drop-off spot; never blocks the driver
 
     res.json({
       success: true,

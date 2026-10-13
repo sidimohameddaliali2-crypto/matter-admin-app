@@ -647,6 +647,20 @@ const DeliveryDetail = () => {
               <span className="text-xs bg-gray-50 px-2 py-1 rounded-md text-gray-500">{currentDelivery.proof.images.length} Files</span>
             )}
           </div>
+          {currentDelivery?.proof?.location?.lat != null && (
+            <div className="mb-3 text-sm text-gray-700" data-testid="proof-dropoff-location">
+              <span className="text-xs text-gray-400 block">Dropped off at (driver's phone)</span>
+              {currentDelivery.proof.location.address || 'Address not available'}
+              <a
+                href={`https://www.google.com/maps?q=${currentDelivery.proof.location.lat},${currentDelivery.proof.location.lng}`}
+                target="_blank"
+                rel="noreferrer"
+                className="ml-2 text-blue-600 hover:underline"
+              >
+                Map
+              </a>
+            </div>
+          )}
           {currentDelivery?.proof?.images?.length > 0 || currentDelivery?.proof?.photoUrl ? (
             <div className="grid grid-cols-2 gap-3">
               {(currentDelivery?.proof?.images || (currentDelivery?.proof?.photoUrl ? [currentDelivery.proof.photoUrl] : [])).map((imageEntry, index) => {
@@ -988,6 +1002,21 @@ const DeliveryDetail = () => {
             className="bg-white border border-gray-200 rounded-lg p-5"
           >
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Proof of Delivery</h3>
+
+            {currentDelivery?.proof?.location?.lat != null && (
+              <div className="mb-3 text-sm text-gray-700" data-testid="proof-dropoff-location">
+                <span className="text-xs text-gray-400 block">Dropped off at (driver's phone)</span>
+                {currentDelivery.proof.location.address || 'Address not available'}
+                <a
+                  href={`https://www.google.com/maps?q=${currentDelivery.proof.location.lat},${currentDelivery.proof.location.lng}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ml-2 text-blue-600 hover:underline"
+                >
+                  Map
+                </a>
+              </div>
+            )}
 
             {currentDelivery?.proof?.images?.length > 0 || currentDelivery?.proof?.photoUrl ? (
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

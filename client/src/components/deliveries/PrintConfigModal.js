@@ -3,6 +3,7 @@ import StickerDesignerModal from '../stickers/StickerDesignerModal';
 import BagTagPrintModal from '../BagTagPrintModal';
 
 const CONTENT_FIELDS = [
+  { key: 'showDeliveryId', label: 'Delivery ID' },
   { key: 'showCustomerId', label: 'Customer ID' },
   { key: 'showAddress', label: 'Address' },
   { key: 'showZone', label: 'Zone' },
@@ -13,6 +14,7 @@ const CONTENT_FIELDS = [
 ];
 
 const DEFAULT_CONTENT_FLAGS = {
+  showDeliveryId: true,
   showCustomerId: true,
   showAddress: false,
   showZone: true,

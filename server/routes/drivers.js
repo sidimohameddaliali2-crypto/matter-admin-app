@@ -3,6 +3,8 @@ import User from '../models/User.js';
 import Delivery from '../models/Delivery.js';
 import { protect, admin } from '../middleware/auth.js';
 import { getDirections } from '../services/googleDirectionsService.js';
+import { addressForDriver } from '../services/reverseGeocode.js';
+import { mapWithLimit } from '../utils/concurrency.js';
 
 const router = express.Router();
 
@@ -98,12 +100,18 @@ router.get('/locations', protect, async (req, res) => {
       .select('email profile location isActive kpi lastLogin updatedAt createdAt')
       .lean();
 
-    const driverLocations = drivers.map((driver) => {
+    const driverLocations = await mapWithLimit(drivers, 5, async (driver) => {
       const rawLat = driver.location?.latitude;
       const rawLng = driver.location?.longitude;
       const latitude = rawLat !== undefined && rawLat !== null ? Number(rawLat) : null;
       const longitude = rawLng !== undefined && rawLng !== null ? Number(rawLng) : null;
       const hasCoordinates = Number.isFinite(latitude) && Number.isFinite(longitude);
+
+      // The app sends coordinates only; look the street address up (cached and
+      // throttled per driver — see services/reverseGeocode.js).
+      const address = hasCoordinates
+        ? driver.location?.address || (await addressForDriver(driver._id, latitude, longitude)) || null
+        : null;
 
       return {
         _id: driver._id,
@@ -117,7 +125,7 @@ router.get('/locations', protect, async (req, res) => {
               latitude,
               longitude,
               lastUpdated: driver.location?.lastUpdated || driver.updatedAt || driver.createdAt,
-              address: driver.location?.address || 'Location updated'
+              address
             }
           : null
       };
@@ -127,6 +135,41 @@ router.get('/locations', protect, async (req, res) => {
   } catch (error) {
     console.error('Error fetching driver locations:', error);
     res.status(500).json({ message: 'Failed to fetch driver locations', error: error.message });
+  }
+});
+
+// One driver's last reported position and its street address (the app sends
+// coordinates only; the address is looked up server-side).
+router.get('/:id/location', protect, async (req, res) => {
+  try {
+    const isOwnLocation = String(req.user.id || req.user._id) === String(req.params.id);
+    if (req.user.role === 'driver' && !isOwnLocation) {
+      return res.status(403).json({ success: false, message: 'Access denied' });
+    }
+    const driver = await User.findOne({ _id: req.params.id, role: 'driver' })
+      .select('email profile.firstName profile.lastName location')
+      .lean();
+    if (!driver) {
+      return res.status(404).json({ success: false, message: 'Driver not found' });
+    }
+    const latitude = Number(driver.location?.latitude);
+    const longitude = Number(driver.location?.longitude);
+    const hasCoordinates = Number.isFinite(latitude) && Number.isFinite(longitude);
+    const address = hasCoordinates
+      ? driver.location?.address || (await addressForDriver(driver._id, latitude, longitude)) || null
+      : null;
+    res.json({
+      success: true,
+      data: {
+        driverId: String(driver._id),
+        location: hasCoordinates
+          ? { latitude, longitude, lastUpdated: driver.location?.lastUpdated || null, address }
+          : null
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching driver location:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch driver location' });
   }
 });
 

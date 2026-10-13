@@ -10,6 +10,7 @@ const DEFAULT_CONFIG = {
   stickerHeight: 80,  // Height in mm
   stickerMargin: 0,   // Margin between stickers in mm
   paperSize: 'A4',    // Paper size: A4, Letter, A5, Legal
+  showDeliveryId: true,
   showCustomerId: true,
   showAddress: true,
   showZone: true,
@@ -172,6 +173,9 @@ const buildStickerData = (delivery) => {
 
   return {
     id: getDeliveryId(delivery) || Math.random().toString(36).slice(2),
+    // The delivery record's own id (not the customer's). A Sunday copy printed
+    // for a Saturday+Sunday customer carries the real Sunday delivery's id.
+    deliveryId: String(delivery?.deliveryRecordId || delivery?._id || delivery?.id || ''),
     customerName: delivery?.customerName || 'Unnamed Customer',
     customerId: delivery?.customerId || 'N/A',
     address: delivery?.address || 'No address',
@@ -235,6 +239,7 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
             _id: `${baseId}-sunday`,
             id: `${baseId}-sunday`,
             scheduledTime: delivery.combinedSunday.scheduledTime,
+            deliveryRecordId: delivery.combinedSunday.deliveryId,
             combinedSunday: null,
           });
         }
@@ -529,6 +534,11 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
               </div>
               <div class="sticker-customer">
                 <div class="customer-name">${escapeHtml(data.customerName)}</div>  
+                ${
+                  config.showDeliveryId && data.deliveryId
+                    ? `<div class="delivery-id">ID: ${escapeHtml(data.deliveryId)}</div>`
+                    : ''
+                }
               </div>
               ${
             config.showAddress
@@ -681,6 +691,13 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
       .customer-id {
         font-size: 0.75rem;
         color: #6B7280;
+      }
+      .delivery-id {
+        font-family: 'Courier New', monospace;
+        font-size: 0.68rem;
+        color: #374151;
+        margin-top: 2px;
+        word-break: break-all;
       }
       .sticker-field {
         font-size: 0.78rem;
@@ -1127,6 +1144,7 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
                 </h4>
                 <div className="grid grid-cols-2 gap-2">
                   {[
+                    { key: 'showDeliveryId', label: 'Delivery ID' },
                     { key: 'showCustomerId', label: 'Customer ID' },
                     { key: 'showAddress', label: 'Address' },
                     { key: 'showZone', label: 'Area / Zone' },
@@ -1273,6 +1291,9 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
                     </div>
                     <div>
                       <p className="text-base font-semibold">{delivery.customerName}</p>
+                      {config.showDeliveryId && delivery.deliveryId && (
+                        <p className="text-[11px] font-mono text-gray-600 break-all">ID: {delivery.deliveryId}</p>
+                      )}
                       {config.showCustomerId && (
                         <p className="text-xs text-gray-500">ID: {delivery.customerId}</p>
                       )}

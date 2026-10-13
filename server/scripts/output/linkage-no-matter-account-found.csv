@@ -915,6 +915,5 @@ customerId,email,name,phone,dataSource,isActive
 "CUST-000124113","mira.toleu@gmail.com","Mira T","","ManualEntry","true"
 "CUST-000124154","roheetahmed@gmail.com","Roheet Ahmed","","ManualEntry","true"
 "sidi.dali","sidi.dali@gmail.com","","","WebData","true"
-"charliet78","charliet78@hotmail.com","Charles Thompson","971564188602","MatterApi","true"
 "tatumgreig","tatumgreig@googlemail.com","Tatum Greig","9710554690664","MatterApi","true"
 "adnan.r.dandan","adnan.r.dandan@gmail.com","Ryan Dandan","971525752840","MatterApi","true"

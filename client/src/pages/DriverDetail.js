@@ -112,6 +112,7 @@ const DriverDetail = () => {
   const [chartLoading, setChartLoading] = useState(false);
 
   const [weeklyStats, setWeeklyStats] = useState(null);
+  const [liveLocation, setLiveLocation] = useState(null);
 
   const [calendarMonth, setCalendarMonth] = useState(() => {
     const d = new Date();
@@ -121,6 +122,19 @@ const DriverDetail = () => {
   useEffect(() => {
     if (id) dispatch(fetchDriverById(id));
   }, [dispatch, id]);
+
+  // Where the driver's phone last reported being, with its street address
+  // (the app sends coordinates only; the server looks the address up).
+  useEffect(() => {
+    if (!id) return undefined;
+    let cancelled = false;
+    const load = () => api.get(`/users/drivers/${id}/location`)
+      .then((res) => { if (!cancelled) setLiveLocation(res.data?.data?.location || null); })
+      .catch(() => { if (!cancelled) setLiveLocation(null); });
+    load();
+    const timer = setInterval(load, 60 * 1000);
+    return () => { cancelled = true; clearInterval(timer); };
+  }, [id]);
 
   useEffect(() => {
     if (!id) return;
@@ -305,6 +319,29 @@ const DriverDetail = () => {
                 <span className="material-symbols-outlined text-gray-400 text-[18px]">mail</span>
                 <span className="text-sm text-gray-900">{currentDriver.email}</span>
               </div>
+            </div>
+            <div className="flex items-start gap-2 mt-2" data-testid="driver-current-location">
+              <span className="material-symbols-outlined text-gray-400 text-[18px]">location_on</span>
+              {liveLocation ? (
+                <span className="text-sm text-gray-900">
+                  {liveLocation.address || 'Address not available'}
+                  <a
+                    href={`https://www.google.com/maps?q=${liveLocation.latitude},${liveLocation.longitude}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="ml-2 text-blue-600 hover:underline"
+                  >
+                    Map
+                  </a>
+                  {liveLocation.lastUpdated && (
+                    <span className="ml-2 text-xs text-gray-400">
+                      updated {new Date(liveLocation.lastUpdated).toLocaleString()}
+                    </span>
+                  )}
+                </span>
+              ) : (
+                <span className="text-sm text-gray-400">No location reported yet</span>
+              )}
             </div>
           </div>
         </div>
