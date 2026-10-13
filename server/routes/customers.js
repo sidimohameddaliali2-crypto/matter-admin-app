@@ -12,6 +12,7 @@ import SlackLog from '../models/SlackLog.js';
 import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import { resolveCustomerMatch, resolveCustomerMatchBulk } from '../services/customerMatchService.js';
 import { classifyUploadRow } from '../services/customerUploadIdentity.js';
+import { relinkSubscription, LinkTargetNotFoundError } from '../services/subscriptionLink.js';
 
 const router = express.Router();
 
@@ -840,23 +841,18 @@ router.post('/match/link', async (req, res) => {
 
     const subId = String(subscriptionId).trim();
 
-    await Customer.updateMany(
-      { matterSubscriptionId: subId, customerId: { $ne: customerId } },
-      { $set: { matterSubscriptionId: null } }
-    );
-
-    const customer = await Customer.findOneAndUpdate(
-      { customerId },
-      { $set: { matterSubscriptionId: subId } },
-      { new: true }
-    ).select(MATCH_PROJECTION);
-
-    if (!customer) {
-      return res.status(404).json({ success: false, message: 'Customer not found' });
-    }
+    // Verifies the target exists first, then clears the old owner and sets the
+    // new one in a single transaction (issue #3) — see services/subscriptionLink.js.
+    const customer = await relinkSubscription({ subId, customerId });
 
     res.json({ success: true, data: { customer, matchedBy: 'manual' } });
   } catch (error) {
+    if (error instanceof LinkTargetNotFoundError) {
+      return res.status(404).json({ success: false, message: 'Customer not found' });
+    }
+    if (error?.code === 11000) {
+      return res.status(409).json({ success: false, message: 'That subscription is already linked to another customer' });
+    }
     console.error('Error linking customer to subscription:', error);
     res.status(500).json({ success: false, message: 'Error linking customer', error: error.message });
   }

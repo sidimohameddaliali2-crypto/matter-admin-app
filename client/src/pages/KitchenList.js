@@ -3,6 +3,7 @@ import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, 
 import api from '../utils/api';
 import { calculateKitchenListEntry, breakfastNameHasMacros, snackNameHasMacros } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
+import { downloadCustomerPaperPdf, downloadCustomerPaperWord } from '../utils/kitchenPaperCustomer';
 import {
   emptyBreakfast,
   normalizeBreakfastKey,
@@ -312,6 +313,13 @@ const KitchenList = () => {
   const [savingDayNoteKey, setSavingDayNoteKey] = useState('');
   const [snackOptionsByDate, setSnackOptionsByDate] = useState({});
   const [pdfDate, setPdfDate] = useState('');
+  // Per-customer kitchen paper over a custom date range (PDF / Word).
+  const [customerPaperSearch, setCustomerPaperSearch] = useState('');
+  const [customerPaperEmail, setCustomerPaperEmail] = useState('');
+  const [customerPaperFrom, setCustomerPaperFrom] = useState('');
+  const [customerPaperTo, setCustomerPaperTo] = useState('');
+  const [customerPaperBusy, setCustomerPaperBusy] = useState(false);
+  const [customerPaperMsg, setCustomerPaperMsg] = useState(null);
   const [paperPlan, setPaperPlan] = useState('');
   const [generatingPdf, setGeneratingPdf] = useState(false);
   const [missingSelectionEntries, setMissingSelectionEntries] = useState([]);
@@ -1924,6 +1932,43 @@ const KitchenList = () => {
     XLSX.writeFile(workbook, `kitchen-paper-${dateKey}${planFileSuffix}.xlsx`);
   };
 
+  // Owner (2026-10-12): kitchen paper for ONE customer over a custom date range
+  // (dates are the loaded menu's days). One page per delivery date; dates the
+  // customer has no active Matter delivery for are left out and listed instead.
+  const customerPaperOptions = useMemo(() => {
+    const needle = customerPaperSearch.trim().toLowerCase();
+    return allComputedRows
+      .filter((entry) => (entry.selectedMeals || []).length > 0)
+      .filter((entry) => !needle || `${entry.customerName || ''} ${entry.email || ''}`.toLowerCase().includes(needle))
+      .sort((a, b) => (a.customerName || a.email || '').localeCompare(b.customerName || b.email || ''))
+      .slice(0, 300);
+  }, [allComputedRows, customerPaperSearch]);
+
+  const runCustomerPaper = async (format) => {
+    const entry = allComputedRows.find((row) => String(row.email || '').toLowerCase() === customerPaperEmail.toLowerCase());
+    if (!entry) { setCustomerPaperMsg({ type: 'error', text: 'Pick a customer first.' }); return; }
+    let fromKey = customerPaperFrom || menuDateKeys[0];
+    let toKey = customerPaperTo || menuDateKeys[menuDateKeys.length - 1];
+    if (fromKey > toKey) [fromKey, toKey] = [toKey, fromKey];
+    setCustomerPaperBusy(true);
+    setCustomerPaperMsg(null);
+    try {
+      const helpers = { getDateKey, formatDateLabel, getMealLabel, mealRemarkText, exclusionsText, formatAddress, parseDeliveryHour, formatDeliveryHourLabel, loadJsPDF, loadAutoTable };
+      const result = format === 'word'
+        ? downloadCustomerPaperWord({ entry, fromKey, toKey, helpers })
+        : await downloadCustomerPaperPdf({ entry, fromKey, toKey, helpers });
+      if (!result.ok) {
+        setCustomerPaperMsg({ type: 'error', text: `Nothing to print: no meals${result.skipped.length ? ' with an active Matter delivery' : ''} for ${entry.customerName || entry.email} between ${formatDateLabel(fromKey)} and ${formatDateLabel(toKey)}.${result.skipped.length ? ` (No Matter delivery on: ${result.skipped.map((k) => formatDateLabel(k)).join(', ')}.)` : ''}` });
+      } else {
+        setCustomerPaperMsg({ type: 'ok', text: `Downloaded ${result.days.length} day(s) for ${entry.customerName || entry.email}.${result.skipped.length ? ` Left out (no active Matter delivery): ${result.skipped.map((k) => formatDateLabel(k)).join(', ')}.` : ''}` });
+      }
+    } catch (err) {
+      setCustomerPaperMsg({ type: 'error', text: err?.message || 'Failed to create the customer paper.' });
+    } finally {
+      setCustomerPaperBusy(false);
+    }
+  };
+
   // Builds one jsPDF table per customer synchronously — for a date with
   // hundreds of deliveries, that used to run as one unbroken block with zero
   // feedback (no loading state at all) and no chance for the browser to
@@ -1976,7 +2021,7 @@ const KitchenList = () => {
         const remark = mealRemarkText(meal);
         const isLarge = String(meal?.mealType || '').toLowerCase() === 'breakfast' && !!meal?.flags?.isLargeBreakfast;
         const largeTag = isLarge
-          ? ' <span style="background:#6d28d9;color:#ffffff;font-size:8pt;font-weight:bold">&nbsp;LARGE&nbsp;</span>'
+          ? ' <span style="background:#6d28d9;color:#ffffff;font-size:10.5pt;font-weight:bold">&nbsp;LARGE&nbsp;</span>'
           : '';
         return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}${largeTag}</td>`
           + `<td style="color:#c2410c;font-weight:bold">${esc(remark)}</td>`
@@ -1989,18 +2034,18 @@ const KitchenList = () => {
       // and its meals and totals on the same page.
       return `
         <table width="100%" border="0" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin-top:6pt"><tr style="page-break-inside:avoid"><td style="padding-top:8pt">
-          <p style="margin:0;font-size:12pt;page-break-after:avoid"><b>${serialNo}. ${esc(nameOf({ entry }) || 'Unknown customer')}</b>
-            &nbsp;&nbsp;<span style="background:${hasWindow ? '#1e293b' : '#94a3b8'};color:#ffffff;font-size:9pt;font-weight:bold">&nbsp;${esc(tagText)}&nbsp;</span></p>
-          <p style="margin:0;font-size:9pt;page-break-after:avoid">${esc(subLine)}</p>
-          ${entry.noDeliveryDate === dateKey ? '<p style="margin:0;font-size:9pt;color:#be123c;page-break-after:avoid"><b>NO MATTER DELIVERY ON THIS DATE - confirm before cooking</b></p>' : ''}
-          <p style="margin:0;font-size:9pt;page-break-after:avoid"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
-          <p style="margin:0;font-size:9pt;color:#be123c;page-break-after:avoid"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
-          ${dayNote ? `<p style="margin:0;font-size:9pt;color:#b45309;page-break-after:avoid"><b>Note: ${esc(dayNote)}</b></p>` : ''}
-          <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;width:100%;font-size:9pt;margin-top:4pt">
+          <p style="margin:0;font-size:14pt;page-break-after:avoid"><b>${serialNo}. ${esc(nameOf({ entry }) || 'Unknown customer')}</b>
+            &nbsp;&nbsp;<span style="background:${hasWindow ? '#1e293b' : '#94a3b8'};color:#ffffff;font-size:10pt;font-weight:bold">&nbsp;${esc(tagText)}&nbsp;</span></p>
+          <p style="margin:0;font-size:10.5pt;page-break-after:avoid">${esc(subLine)}</p>
+          ${entry.noDeliveryDate === dateKey ? '<p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>NO MATTER DELIVERY ON THIS DATE - confirm before cooking</b></p>' : ''}
+          <p style="margin:0;font-size:10.5pt;page-break-after:avoid"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
+          <p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
+          ${dayNote ? `<p style="margin:0;font-size:10.5pt;color:#b45309;page-break-after:avoid"><b>Note: ${esc(dayNote)}</b></p>` : ''}
+          <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;width:100%;font-size:10.5pt;margin-top:4pt">
             <tr style="background:#1e293b;color:#ffffff"><th>Type</th><th>Meal</th><th>Remark</th><th>P</th><th>C</th><th>V</th></tr>
             ${rows}
           </table>
-          <p style="margin:4pt 0 0 0;font-size:10pt"><b>Total Macros: C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}</b></p>
+          <p style="margin:4pt 0 0 0;font-size:12pt"><b>Total Macros: C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}</b></p>
         </td></tr></table>`;
     };
 
@@ -2011,8 +2056,8 @@ const KitchenList = () => {
       // inside — each customer line landed on its own page (1,300+ pages).
       sections.push(`
         <div>
-          <p style="margin:0;font-size:10pt;color:#787878;${sections.length > 0 ? 'page-break-before:always' : ''}">${esc(kicker)}</p>
-          <h2 style="margin:4pt 0 0 0;font-size:13pt;background:#f1f5f9;padding:3pt">${esc(heading)}</h2>
+          <p style="margin:0;font-size:11pt;color:#787878;${sections.length > 0 ? 'page-break-before:always' : ''}">${esc(kicker)}</p>
+          <h2 style="margin:4pt 0 0 0;font-size:15pt;background:#f1f5f9;padding:3pt">${esc(heading)}</h2>
           ${rows.map((row) => customerBlock(row, subLineFor(row))).join('')}
         </div>`);
     };
@@ -2063,15 +2108,15 @@ p.MsoFooter { margin:0; font-size:8pt; color:#787878; text-align:right; }
 </style></head>
 <body>
 <div class="WordSection1">
-<h1 style="font-size:16pt;margin:0">Kitchen Prep Sheet — ${esc(dayLabel)}</h1>
-<p style="font-size:9pt;color:#787878;margin:0">Generated: ${esc(new Date().toLocaleString())}</p>
+<h1 style="font-size:18pt;margin:0">Kitchen Prep Sheet — ${esc(dayLabel)}</h1>
+<p style="font-size:10pt;color:#787878;margin:0">Generated: ${esc(new Date().toLocaleString())}</p>
 ${body}
 </div>
 <!-- Word reads this div as the page footer: "Page N of M" are live Word fields. -->
 <div style="mso-element:footer" id="f1"><p class="MsoFooter" style="text-align:right">Kitchen Prep Sheet — ${esc(dayLabel)} &nbsp;|&nbsp; Page <span style="mso-field-code:' PAGE '"></span> of <span style="mso-field-code:' NUMPAGES '"></span></p></div>
 </body></html>`;
 
-    const blob = new Blob(['﻿', html], { type: 'application/msword' });
+    const blob = new Blob(['\uFEFF', html], { type: 'application/msword' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -2100,9 +2145,9 @@ ${body}
       const pageHeight = doc.internal.pageSize.getHeight();
       const pageWidth = doc.internal.pageSize.getWidth();
 
-      doc.setFontSize(16);
+      doc.setFontSize(17.5);
       doc.text(`Kitchen Prep Sheet — ${dayLabel}`, 14, 18);
-      doc.setFontSize(9);
+      doc.setFontSize(10);
       doc.setTextColor(120);
       doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 24);
       doc.setTextColor(0);
@@ -2127,7 +2172,7 @@ ${body}
       // in lockstep with any future formatting change.
       const renderCustomerBlock = (entry, dayMeals, startY, subLine) => {
         let y = startY;
-        if (y > pageHeight - 50) {
+        if (y > pageHeight - 62) {
           doc.addPage();
           y = 20;
         }
@@ -2143,12 +2188,12 @@ ${body}
         const tagText = !hasWindow
           ? 'No delivery window'
           : (/^\s*by\b/i.test(String(entry.deliveryWindow?.label || '')) ? `By ${windowHourLabel}` : windowHourLabel);
-        doc.setFontSize(9);
+        doc.setFontSize(10);
         doc.setFont(undefined, 'bold');
         const tagWidth = doc.getTextWidth(tagText) + 6;
         const tagX = pageWidth - 14 - tagWidth;
 
-        doc.setFontSize(12);
+        doc.setFontSize(14);
         // Keep a long name from running underneath the tag.
         serialNo += 1;
         const nameLine = doc.splitTextToSize(
@@ -2157,19 +2202,19 @@ ${body}
         )[0];
         doc.text(nameLine, 14, y);
 
-        doc.setFontSize(9);
+        doc.setFontSize(10);
         if (hasWindow) doc.setFillColor(30, 41, 59);
         else doc.setFillColor(148, 163, 184);
-        doc.roundedRect(tagX, y - 5, tagWidth, 7, 1.5, 1.5, 'F');
+        doc.roundedRect(tagX, y - 5.5, tagWidth, 8, 1.5, 1.5, 'F');
         doc.setTextColor(255);
-        doc.text(tagText, tagX + 3, y - 0.3);
+        doc.text(tagText, tagX + 3, y - 0.2);
         doc.setTextColor(0);
         doc.setFont(undefined, 'normal');
-        y += 6;
+        y += 7;
 
-        doc.setFontSize(9);
+        doc.setFontSize(10.5);
         doc.text(subLine, 14, y, { maxWidth: pageWidth - 28 });
-        y += 5;
+        y += 5.6;
 
         if (entry.noDeliveryDate === dateKey) {
           doc.setFont(undefined, 'bold');
@@ -2177,7 +2222,7 @@ ${body}
           doc.text('NO MATTER DELIVERY ON THIS DATE - confirm before cooking', 14, y, { maxWidth: pageWidth - 28 });
           doc.setTextColor(0);
           doc.setFont(undefined, 'normal');
-          y += 5;
+          y += 5.6;
         }
 
         // The customer's plan entitlement per day (not what they picked).
@@ -2193,7 +2238,7 @@ ${body}
           { maxWidth: pageWidth - 28 }
         );
         doc.setFont(undefined, 'normal');
-        y += 5;
+        y += 5.6;
 
         // Food exclusions, in red so the kitchen can't miss them.
         const exclusionLines = doc.splitTextToSize(`Exclusions: ${exclusionsText(entry)}`, pageWidth - 28);
@@ -2202,7 +2247,7 @@ ${body}
         doc.text(exclusionLines, 14, y);
         doc.setTextColor(0);
         doc.setFont(undefined, 'normal');
-        y += exclusionLines.length * 4.4 + 0.6;
+        y += exclusionLines.length * 5.2 + 0.6;
 
         // Kitchen-only note for this specific delivery day, if one was
         // added on Kitchen List — printed right under the address so it's
@@ -2214,7 +2259,7 @@ ${body}
           doc.text(`Note: ${dayNote}`, 14, y, { maxWidth: pageWidth - 28 });
           doc.setTextColor(0);
           doc.setFont(undefined, 'normal');
-          y += 5;
+          y += 5.6;
         }
 
         // A breakfast served at the Large portion gets a LARGE tag on its row.
@@ -2236,7 +2281,7 @@ ${body}
           head: [['Type', 'Meal', 'Remark', 'P', 'C', 'V']],
           body: tableRows,
           theme: 'grid',
-          styles: { fontSize: 9 },
+          styles: { fontSize: 10.5, cellPadding: 2.2 },
           headStyles: { fillColor: [30, 41, 59] },
           // The Remark column only has content some of the time — call it
           // out in orange (matching the Kitchen List badge) so a flagged
@@ -2255,13 +2300,13 @@ ${body}
           margin: { left: 14, right: 14 }
         });
 
-        y = doc.lastAutoTable.finalY + 6;
+        y = doc.lastAutoTable.finalY + 7;
         if (y > pageHeight - 20) {
           doc.addPage();
           y = 20;
         }
 
-        doc.setFontSize(10);
+        doc.setFontSize(12);
         doc.setFont(undefined, 'bold');
         doc.text(
           `Total Macros: C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}`,
@@ -2325,13 +2370,13 @@ ${body}
           }
           isFirstSection = false;
 
-          doc.setFontSize(10);
+          doc.setFontSize(11);
           doc.setTextColor(120);
           doc.text(`${dayLabel} — ${emirate}`, 14, cursorY);
           doc.setTextColor(0);
           cursorY += 8;
 
-          doc.setFontSize(13);
+          doc.setFontSize(14.5);
           doc.setFont(undefined, 'bold');
           doc.setFillColor(241, 245, 249);
           doc.rect(14, cursorY - 5, pageWidth - 28, 8, 'F');
@@ -2372,13 +2417,13 @@ ${body}
           }
           isFirstSection = false;
 
-          doc.setFontSize(10);
+          doc.setFontSize(11);
           doc.setTextColor(120);
           doc.text(`${dayLabel} — Partners`, 14, cursorY);
           doc.setTextColor(0);
           cursorY += 8;
 
-          doc.setFontSize(13);
+          doc.setFontSize(14.5);
           doc.setFont(undefined, 'bold');
           doc.setFillColor(241, 245, 249);
           doc.rect(14, cursorY - 5, pageWidth - 28, 8, 'F');
@@ -2395,7 +2440,7 @@ ${body}
       }
 
       if (entriesWithMeals.length === 0) {
-        doc.setFontSize(11);
+        doc.setFontSize(12);
         doc.text('No customers have meals selected for this date.', 14, cursorY);
       }
 
@@ -2508,6 +2553,76 @@ ${body}
                     : `Left out ${paperExcluded.names.length} customer(s) with meals saved but no active Matter delivery on this date: ${paperExcluded.names.slice(0, 8).join(', ')}${paperExcluded.names.length > 8 ? ', ...' : ''}`}
                 </p>
               )}
+              <div className="mt-1 flex w-full flex-wrap items-end gap-3 border-t border-white/10 pt-3">
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-300">Customer kitchen paper</label>
+                  <input
+                    type="text"
+                    value={customerPaperSearch}
+                    onChange={(e) => setCustomerPaperSearch(e.target.value)}
+                    placeholder="Search a customer..."
+                    className="w-44 rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white placeholder:text-slate-400"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-300">Customer</label>
+                  <select
+                    value={customerPaperEmail}
+                    onChange={(e) => { setCustomerPaperEmail(e.target.value); setCustomerPaperMsg(null); }}
+                    className="w-64 rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white [&>option]:text-slate-900"
+                  >
+                    <option value="">Select a customer...</option>
+                    {customerPaperOptions.map((entry) => (
+                      <option key={entry.email || entry.customerId} value={entry.email}>{entry.customerName || entry.email}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-300">From</label>
+                  <select
+                    value={customerPaperFrom || menuDateKeys[0] || ''}
+                    onChange={(e) => setCustomerPaperFrom(e.target.value)}
+                    className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white [&>option]:text-slate-900"
+                  >
+                    {menuDateKeys.map((key) => (
+                      <option key={key} value={key}>{formatDateLabel(key)}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-300">To</label>
+                  <select
+                    value={customerPaperTo || menuDateKeys[menuDateKeys.length - 1] || ''}
+                    onChange={(e) => setCustomerPaperTo(e.target.value)}
+                    className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white [&>option]:text-slate-900"
+                  >
+                    {menuDateKeys.map((key) => (
+                      <option key={key} value={key}>{formatDateLabel(key)}</option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => runCustomerPaper('pdf')}
+                  disabled={!customerPaperEmail || customerPaperBusy}
+                  title="One page per delivery date for this customer, between the From and To dates"
+                  className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
+                >
+                  <FileText size={16} className={customerPaperBusy ? 'animate-pulse' : ''} /> {customerPaperBusy ? 'Generating...' : 'Customer PDF'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => runCustomerPaper('word')}
+                  disabled={!customerPaperEmail || customerPaperBusy}
+                  title="Word version of the customer's paper for the same dates"
+                  className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
+                >
+                  <FileText size={16} /> Customer Word
+                </button>
+                {customerPaperMsg && (
+                  <p className={`w-full text-xs ${customerPaperMsg.type === 'error' ? 'text-rose-300' : 'text-emerald-300'}`}>{customerPaperMsg.text}</p>
+                )}
+              </div>
               <button
                 type="button"
                 onClick={downloadMealRemarksTemplate}

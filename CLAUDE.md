@@ -49,7 +49,7 @@ The route optimizer needs Python with `ortools` (`server/optimizer/requirements.
 - Caching goes through `config/cache.js` (`cacheGet`/`cacheSet`/`cacheDelete`). Everything must keep working when Redis is down, because the helpers no-op.
 - File uploads use multer and `middleware/compressImage.js` (sharp). Files go to DigitalOcean Spaces (`config/spaces.js`) when that's configured, and to `server/uploads/` otherwise.
 - Background jobs (`jobs/`) start from `server.js` as setTimeout-then-daily-setInterval: flagged-customer notifier, move uncollected collections, recalculate driver KPIs (see `services/driverKpiService.js`), and import Matter deliveries.
-- Areas: `config/areas.js` (`detectAreaFromAddress`) maps addresses to delivery areas. The other `areas-*.js` files are backups and experiments.
+- Areas: `config/areas.js` (`detectAreaFromAddress`) maps addresses to delivery areas. `config/zoneRules.js` then overrides the zone automatically (emirate Abu Dhabi, or zone "Dubai South", becomes zone "Abu Dhabi"); it is enforced by the `Delivery` model's validate/update hooks, so add new zone rules there, not at call sites. The other `areas-*.js` files are backups and experiments.
 
 ## External integrations (`server/services/`)
 

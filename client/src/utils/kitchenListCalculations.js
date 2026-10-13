@@ -981,6 +981,8 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     // Carried through so callers can match this customer to Matter's delivery
     // list (kitchen paper / counting leave out customers with no delivery).
     matterSubscriptionId: customer?.matterSubscriptionId ?? null,
+    // The customer's own Matter delivery dates (for a per-customer paper over a date range).
+    deliveryDates: Array.isArray(customer?.deliveryDates) ? customer.deliveryDates : null,
     matterCustomerId: customer?.matterCustomerId ?? null,
     cpf: customer?.cpf ?? null,
     macros: normalizedMacros,

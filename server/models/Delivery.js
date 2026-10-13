@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { applyZoneRules, isAbuDhabiEmirate, ABU_DHABI_ZONE } from '../config/zoneRules.js';
 
 const deliverySchema = new mongoose.Schema({
   
@@ -257,6 +258,39 @@ deliverySchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], function cle
     set.addressId = null;
   }
   next();
+});
+
+// Automatic zone rules (config/zoneRules.js): emirate Abu Dhabi, or zone
+// "Dubai South", -> zone "Abu Dhabi". Enforced here so it holds on every path:
+// create / bulk insert / save all run 'validate'; the update hook covers
+// findByIdAndUpdate-style edits (applyChangesToDelivery, dispatcher edits).
+deliverySchema.pre('validate', function applyZoneRulesOnValidate(next) {
+  const zone = applyZoneRules({ zone: this.zone, city: this.addressDetails?.city });
+  if (zone !== this.zone) this.zone = zone;
+  next();
+});
+
+deliverySchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], async function applyZoneRulesOnUpdate() {
+  const update = this.getUpdate();
+  const set = update && update.$set;
+  if (!set) return;
+
+  const cityInUpdate = set['addressDetails.city'] ?? set.addressDetails?.city;
+  const touchesZone = Object.prototype.hasOwnProperty.call(set, 'zone');
+  if (!touchesZone && cityInUpdate === undefined) return;
+
+  // The emirate being set now, else (single-document edits only) the one on file.
+  let city = cityInUpdate;
+  if (city === undefined && this.op !== 'updateMany') {
+    const existing = await this.model.findOne(this.getQuery()).select('addressDetails.city').lean();
+    city = existing?.addressDetails?.city;
+  }
+
+  if (touchesZone) {
+    set.zone = applyZoneRules({ zone: set.zone, city });
+  } else if (isAbuDhabiEmirate(city)) {
+    set.zone = ABU_DHABI_ZONE; // emirate changed to Abu Dhabi without a zone in the same edit
+  }
 });
 
 deliverySchema.methods.updateStatus = async function (status, notes, location) {
