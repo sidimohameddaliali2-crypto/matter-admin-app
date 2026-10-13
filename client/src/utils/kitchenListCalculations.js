@@ -581,7 +581,15 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
   // Trial-runs a day's non-breakfast/non-snack meals against a given
   // breakfast macro deduction and reports whether any meal's raw (pre-cap)
   // protein or carbs would exceed the per-meal cap.
-  const dayWouldExceedCap = (dayKey, dayMeta, breakfastMacros) => {
+  // Owner (2026-10-13): a main meal should never be squeezed below 10 g carbs or
+  // 15 g protein by the Large-breakfast upgrade (its macros x1.5 take that much
+  // more off the day's budget). When they would be, the breakfast stays Large —
+  // weight (150 g protein / 200 g carb) and LARGE tag — but its macros are NOT
+  // scaled x1.5, neither on the card nor in the day's deduction.
+  const MEAL_MIN_CARB = 10;
+  const MEAL_MIN_PROTEIN = 15;
+  // The day's main meals (pre-cap, unrounded) for a given breakfast deduction.
+  const computeDayMainMeals = (dayKey, dayMeta, breakfastMacros) => {
     const dayMeals = mealsByDay[dayKey] || [];
     const dayMealCount = Math.max(1, dayMeta.nonBreakfastCount || Number(customer?.mealPerDay) || 1);
     const deliveryNumber = deliveryNumberByDay.get(dayKey) || 1;
@@ -616,12 +624,15 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
         const t = normalizeText(m?.mealType);
         return t !== 'breakfast' && t !== 'snack';
       })
-      .some((meal) => {
+      .map((meal) => {
         const type = resolveProteinType(meal);
-        const computed = calculateByProteinRule({ type, carbsBase, proteinBase, fatsBase, meta: dayMeta, meal });
-        return Math.round(computed.P) > MEAL_PROTEIN_CAP || Math.round(computed.C) > MEAL_CARB_CAP;
+        return calculateByProteinRule({ type, carbsBase, proteinBase, fatsBase, meta: dayMeta, meal });
       });
   };
+  const dayWouldExceedCap = (dayKey, dayMeta, breakfastMacros) => computeDayMainMeals(dayKey, dayMeta, breakfastMacros)
+    .some((computed) => Math.round(computed.P) > MEAL_PROTEIN_CAP || Math.round(computed.C) > MEAL_CARB_CAP);
+  const dayFallsBelowMinimum = (dayKey, dayMeta, breakfastMacros) => computeDayMainMeals(dayKey, dayMeta, breakfastMacros)
+    .some((computed) => Math.round(computed.C) < MEAL_MIN_CARB || Math.round(computed.P) < MEAL_MIN_PROTEIN);
 
   // dateKey -> true once escalated to the fixed large-breakfast profile;
   // dateKey -> true if a meal would still exceed the cap even after that
@@ -642,6 +653,8 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     }, { C: 0, P: 0, F: 0 });
 
   const dayUsesLargeBreakfast = new Set();
+  // Days that are Large (weight + tag) but whose macros are left unscaled — see MEAL_MIN_CARB.
+  const dayLargeUnscaled = new Set();
   const dayHasMacroShortfall = new Set();
 
   sortedDayKeys.forEach((dayKey) => {
@@ -667,7 +680,10 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     if (dayWouldExceedCap(dayKey, dayMeta, defaultBreakfastMacros)) {
       if (escalationWouldFitBudget) {
         dayUsesLargeBreakfast.add(dayKey);
-        if (dayWouldExceedCap(dayKey, dayMeta, largeBreakfastMacros)) {
+        if (dayFallsBelowMinimum(dayKey, dayMeta, largeBreakfastMacros)) {
+          dayLargeUnscaled.add(dayKey);
+        }
+        if (dayWouldExceedCap(dayKey, dayMeta, dayLargeUnscaled.has(dayKey) ? defaultBreakfastMacros : largeBreakfastMacros)) {
           dayHasMacroShortfall.add(dayKey);
         }
       } else {
@@ -710,7 +726,8 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
       // to what's deducted from the day's budget (sumDayBreakfastMacros), not
       // to what the card/paper show. Auto-large days keep the floored value
       // since that's what the scaled deduction is built from.
-      const breakfastMacros = autoLarge
+      const largeUnscaled = autoLarge && dayLargeUnscaled.has(dayKey);
+      const breakfastMacros = autoLarge && !largeUnscaled
         ? scaleToLargeBreakfast(baseBreakfastMacros)
         : { ...baseBreakfastMacros, P: Number(mealBreakfastPreset.P) || 0 };
       return {
@@ -730,6 +747,8 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
           // Large for ANY reason (auto-upgraded, or the breakfast's own preset
           // is a large one) — Kitchen Counting lists large breakfasts apart.
           isLargeBreakfast: isLarge,
+          // Large (weight + tag) but macros left unscaled so the meals keep >=10 g carb / >=15 g protein.
+          largeMacrosNotScaled: largeUnscaled,
           macroShortfall: dayHasMacroShortfall.has(dayKey)
         }
       };
@@ -864,7 +883,7 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     // Every breakfast that day comes off the budget (a customer can pick two),
     // not just the first. A day auto-escalated to large scales them all by 1.5x.
     const dayBreakfastTotals = sumDayBreakfastMacros(dayMeals);
-    const dayBreakfastDeduction = dayAutoLargeBreakfast
+    const dayBreakfastDeduction = dayAutoLargeBreakfast && !dayLargeUnscaled.has(dayKey)
       ? scaleToLargeBreakfast(dayBreakfastTotals)
       : dayBreakfastTotals;
 
