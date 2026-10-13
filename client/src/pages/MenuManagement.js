@@ -426,10 +426,14 @@ const MenuManagement = () => {
   };
 
   // Column layout shared by the blank template and the "Download Excel" of an
-  // existing menu. SLOT and PROTEIN TYPE sit at the end so files made before
-  // they existed still parse by position (see the fallback order in upload).
+  // existing menu. SLOT / PROTEIN TYPE / SAUCE / GARNISH sit at the end so
+  // files made before they existed still parse by position (see the fallback
+  // order in upload). SAUCE and GARNISH are never shown to the customer — the
+  // selection screen only uses them to flag a swap to the kitchen (see
+  // needsSauceChange/needsGarnishChange, surfaced on Kitchen List as "Change
+  // sauce"/"Change garnish") when they hit a customer's exclusion.
   const MENU_EXCEL_HEADERS = [
-    'MEAL TYPE', 'INTOLERANCES', 'DAY', 'MEAL NAME', 'CARB', 'VEG', 'SLOT', 'PROTEIN TYPE'
+    'MEAL TYPE', 'INTOLERANCES', 'DAY', 'MEAL NAME', 'CARB', 'VEG', 'SLOT', 'PROTEIN TYPE', 'SAUCE', 'GARNISH'
   ];
   const SLOT_VALUES = ['main', 'sub'];
   const PROTEIN_TYPE_VALUES = ['chicken', 'beef', 'fish'];
@@ -452,9 +456,9 @@ const MenuManagement = () => {
   const handleDownloadMenuTemplate = () => {
     writeMenuExcel(
       [
-        ['main', 'nuts, dairy', 1, 'Chicken Bowl', 'rice', 'broccoli', 'main', 'chicken'],
-        ['main', 'gluten', 2, 'Beef Stew', 'quinoa', 'spinach', 'sub', 'beef'],
-        ['snack', '', 1, 'Mixed Nuts Pack', '', '', '', '']
+        ['main', 'nuts, dairy', 1, 'Chicken Bowl', 'rice', 'broccoli', 'main', 'chicken', 'teriyaki sauce', 'sesame seeds'],
+        ['main', 'gluten', 2, 'Beef Stew', 'quinoa', 'spinach', 'sub', 'beef', 'tomato sauce', 'parsley'],
+        ['snack', '', 1, 'Mixed Nuts Pack', '', '', '', '', '', '']
       ],
       'menu_upload_template.xlsx'
     );
@@ -489,7 +493,9 @@ const MenuManagement = () => {
             item.carbs,
             item.veg,
             normalizeSlot(item.rotationCategory),
-            normalizeProteinType(item.portionType)
+            normalizeProteinType(item.portionType),
+            item.sauce,
+            item.garnish
           ]);
         });
       });
@@ -540,7 +546,9 @@ const MenuManagement = () => {
         carb: getHeaderIndex(headerRow, ['CARB', 'CARBS']),
         veg: getHeaderIndex(headerRow, ['VEG', 'VEGETABLE', 'VEGGIE']),
         slot: getHeaderIndex(headerRow, ['SLOT']),
-        proteinType: getHeaderIndex(headerRow, ['PROTEIN TYPE', 'PROTEIN', 'PORTION TYPE'])
+        proteinType: getHeaderIndex(headerRow, ['PROTEIN TYPE', 'PROTEIN', 'PORTION TYPE']),
+        sauce: getHeaderIndex(headerRow, ['SAUCE']),
+        garnish: getHeaderIndex(headerRow, ['GARNISH'])
       };
 
       const useFallbackOrder =
@@ -569,6 +577,10 @@ const MenuManagement = () => {
         // doesn't name them.
         const slot = headerIndexes.slot !== -1 ? values[headerIndexes.slot] : values[6];
         const proteinType = headerIndexes.proteinType !== -1 ? values[headerIndexes.proteinType] : values[7];
+        // Never shown to the customer (see MENU_EXCEL_HEADERS comment above) —
+        // only used to flag a kitchen swap when they hit an exclusion.
+        const sauce = headerIndexes.sauce !== -1 ? values[headerIndexes.sauce] : values[8];
+        const garnish = headerIndexes.garnish !== -1 ? values[headerIndexes.garnish] : values[9];
 
         const dayNumber = Number.parseInt(String(dayValue || '').trim(), 10);
         if (!mealName || Number.isNaN(dayNumber) || dayNumber <= 0) {
@@ -599,7 +611,9 @@ const MenuManagement = () => {
           carbs: String(carb || '').trim(),
           veg: String(veg || '').trim(),
           rotationCategory: isSnack ? '' : normalizeSlot(slot),
-          portionType: isSnack ? '' : normalizeProteinType(proteinType)
+          portionType: isSnack ? '' : normalizeProteinType(proteinType),
+          sauce: String(sauce || '').trim(),
+          garnish: String(garnish || '').trim()
         });
       });
 

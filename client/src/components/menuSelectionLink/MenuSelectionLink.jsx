@@ -793,7 +793,11 @@ const MenuSelectionLink = ({ token }) => {
             proteinText: m.proteinText,
             carbText: m.carbText,
             vegText: m.vegText,
-            sauceText: m.sauceText,
+            // sauceText / garnish are intentionally never shown to the
+            // customer — see needsSauceChange/needsGarnishChange, which flag
+            // a swap to the kitchen instead (Kitchen List: "Change sauce" /
+            // "Change garnish"). Keep sauceNames/garnishNames (used by
+            // computeSauceGarnishFlags above) out of what reaches the card.
             typeLabel: c.label,
             bagBg: blocked ? '#FEE2E2' : bag.bg,
             bagFg: blocked ? '#991B1B' : bag.fg,
@@ -1204,7 +1208,7 @@ const MenuSelectionLink = ({ token }) => {
                               ))}
                             </div>
                           ) : null}
-                          {(mc.proteinText || mc.carbText || mc.vegText || mc.sauceText) ? (
+                          {(mc.proteinText || mc.carbText || mc.vegText) ? (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginBottom: 14 }}>
                               {mc.proteinText ? (
                                 <div style={{ fontSize: 12, lineHeight: 1.45 }}>
@@ -1222,12 +1226,6 @@ const MenuSelectionLink = ({ token }) => {
                                 <div style={{ fontSize: 12, lineHeight: 1.45 }}>
                                   <span style={{ color: 'var(--color-neutral-600)', fontWeight: 600 }}>Veg: </span>
                                   <span className="text-muted">{mc.vegText}</span>
-                                </div>
-                              ) : null}
-                              {mc.sauceText ? (
-                                <div style={{ fontSize: 12, lineHeight: 1.45 }}>
-                                  <span style={{ color: 'var(--color-neutral-600)', fontWeight: 600 }}>Sauce: </span>
-                                  <span className="text-muted">{mc.sauceText}</span>
                                 </div>
                               ) : null}
                             </div>

@@ -257,11 +257,28 @@ export const EXCLUSION_GROUPS = {
   'all fish': ['cream dory', 'nile perch', 'shrimp', 'salmon', 'squid', 'tuna', 'scallop'],
 };
 
+const escapeRegexChars = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Whole-word/whole-phrase substring check — `\b` either side, so "Potato"
+// matches inside "Sweet Potato Mash" but "Egg" does NOT match inside
+// "Eggplant" (no word boundary right after "Egg" there) and "Pea" does not
+// match inside "Peanut" for the same reason.
+const containsWholePhrase = (haystack, needle) => {
+  if (!haystack || !needle) return false;
+  return new RegExp(`\\b${escapeRegexChars(needle)}\\b`, 'i').test(haystack);
+};
+
 /**
  * True if `term` (a meal ingredient name) should be treated as excluded by
- * `exclusionPhrase` (one of the customer's canonical exclusion phrases) —
- * either an exact match, or `term` is a member of the umbrella group
- * `exclusionPhrase` names (see EXCLUSION_GROUPS above).
+ * `exclusionPhrase` (one of the customer's canonical exclusion phrases).
+ * Owner (2026-10-13): a real conflict was sometimes missed when the
+ * ingredient name was more specific than the customer's plain exclusion
+ * phrase — e.g. exclusion "Potato" against a carb named "Sweet Potato Mash"
+ * used to require an exact string match and silently passed. Matches now on:
+ * an exact match, `term` belonging to an umbrella group (EXCLUSION_GROUPS,
+ * e.g. "All Nuts"), or either string containing the other as a whole
+ * word/phrase (so "Potato" <-> "Sweet Potato Mash" matches both ways, while
+ * "Egg" / "Eggplant" and "Pea" / "Peanut" correctly do not).
  */
 export const exclusionMatchesTerm = (exclusionPhrase, term) => {
   const ex = String(exclusionPhrase || '').trim().toLowerCase();
@@ -269,7 +286,8 @@ export const exclusionMatchesTerm = (exclusionPhrase, term) => {
   if (!ex || !t) return false;
   if (ex === t) return true;
   const group = EXCLUSION_GROUPS[ex];
-  return group ? group.includes(t) : false;
+  if (group && group.includes(t)) return true;
+  return containsWholePhrase(t, ex) || containsWholePhrase(ex, t);
 };
 
 /** True if `exclusionPhrase` matches any term in `terms` — see exclusionMatchesTerm. */

@@ -241,7 +241,16 @@ customerSchema.index({ email: 1 }, { unique: true, sparse: true }); // Sparse al
 customerSchema.index({ athleatId: 1 }, { sparse: true });
 // One Matter subscription can only ever belong to one internal customer.
 // Enforced here at the DB level in addition to the clear-then-set app logic
-// in POST /api/customers/match/link.
-customerSchema.index({ matterSubscriptionId: 1 }, { unique: true, sparse: true });
+// in POST /api/customers/match/link. A plain `sparse` index doesn't work
+// here: the field's own `default: null` means "unset" is stored as a
+// literal null, not an absent field, and sparse only excludes absent fields
+// — so a sparse+unique index still collides on every null (confirmed live,
+// 2026-10-13, after the index had silently drifted to non-unique for this
+// exact reason and let a real duplicate customer through). A partial index
+// with an explicit $type filter correctly excludes both null and missing.
+customerSchema.index(
+  { matterSubscriptionId: 1 },
+  { unique: true, partialFilterExpression: { matterSubscriptionId: { $type: 'string' } } }
+);
 
 export default mongoose.model('Customer', customerSchema);
