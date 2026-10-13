@@ -28,6 +28,9 @@ import {
 } from '../services/routeOptimizationService.js';
 import { buildOrderedRouteLegs } from '../services/distanceMatrixService.js';
 import Handoff from '../models/Handoff.js';
+import { driverPlans, validateDeliveries } from '../services/externalRoutePlanService.js';
+import ExternalRoutePlan from '../models/ExternalRoutePlan.js';
+import { externalRouteEta } from '../services/externalRoutePlan.js';
 import { HANDOFF_DWELL_SECONDS, KITCHEN_RELOAD_DWELL_SECONDS } from '../services/handoffPlanner.js';
 
 // Helper to persist coordinates onto a customer's record via their deliveries
@@ -351,6 +354,28 @@ async function checkAndApplyPendingChanges(delivery) {
 // All routes are protected
 router.use(protect);
 
+// Revisioned stock belongs to the external-plan transaction boundary. Older
+// clients must not complete/reassign it via unrevisioned delivery endpoints.
+router.use(async (req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  const changesExecution = /^\/[a-f\d]{24}\/(complete|status|bag-assignment)$/i.test(req.path)
+    || ['/assign-driver', '/unassign-driver', '/optimize-routes/apply'].includes(req.path);
+  // Dispatcher source corrections remain possible. Validation then blocks the
+  // old plan until it is replaced; those edits contend with event transactions.
+  if (!changesExecution) return next();
+  const pathId = req.path.split('/')[1];
+  const ids = [pathId, ...(Array.isArray(req.body?.deliveryIds) ? req.body.deliveryIds : []),
+    ...(Array.isArray(req.body?.routes) ? req.body.routes.flatMap(r => (r.stops || []).map(s => s.deliveryId)) : [])]
+    .filter(id => mongoose.isValidObjectId(id));
+  if (!ids.length) return next();
+  try {
+    if (await Delivery.exists({ _id: { $in: ids }, externalRoutePlan: { $ne: null } })) {
+      return res.status(409).json({ success: false, message: 'This delivery is in a revisioned external plan. Use the plan workflow or replace/cancel its assignment.' });
+    }
+    next();
+  } catch (error) { next(error); }
+});
+
 // @desc    Depot (kitchen) location used by map views — same env the route optimizer uses.
 //          Registered before '/:id' so "depot" is never parsed as a delivery id.
 // @route   GET /api/deliveries/depot
@@ -480,6 +505,15 @@ router.post('/geocode-google', authorize(['admin', 'super_admin', 'dispatcher', 
 const ROUTE_ETA_MAX_STOPS = 150;
 router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
   const { deliveryIds, vehicleType, driverId, date, fixedDepartureSeconds } = req.body || {};
+  try {
+    const external = typeof driverId === 'string' && typeof date === 'string'
+      ? await ExternalRoutePlan.findOne({ serviceDate: date, 'routes.driverId': driverId }).lean() : null;
+    if (external) {
+      if (external.cancelled) return res.status(409).json({ success: false, message: 'External plan was cancelled' });
+      await validateDeliveries(external, null);
+      return res.json({ success: true, data: externalRouteEta(external, driverId) });
+    }
+  } catch (error) { return res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
   // Simulation-only: a dispatcher-set departure that deliberately overrides
   // the normal 1:00 AM earliest-departure rule for a what-if preview. Any
   // other caller leaves this out and the usual rule applies.
@@ -531,19 +565,19 @@ router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'mana
     const points = [depot, ...withCoords.map((w) => w.coords), depot];
     const { legDurations, legDistances } = await buildOrderedRouteLegs(points);
 
-    // The driver's planned second-trip pickup for this day, if any. A bike has
-    // at most one (a van handoff OR a kitchen return); a van can be the
+    // The driver's planned pickups for this day. A bike may have several;
+    // a van can be the
     // counterpart for several bikes.
     const validDate = typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date);
     const validDriverId = typeof driverId === 'string' && /^[a-f\d]{24}$/i.test(driverId);
-    let pickup = null;         // this driver's OWN detour (bike side)
+    let pickups = [];         // every pickup in this driver's route
     let meetingBikes = [];     // bikes meeting this driver (van side)
     if (validDate && validDriverId) {
       const records = await Handoff.find({ date, status: { $ne: 'cancelled' }, $or: [{ bike: driverId }, { van: driverId }] })
         .populate('bike', 'profile.firstName profile.lastName')
         .populate('van', 'profile.firstName profile.lastName')
         .lean();
-      pickup = records.find((r) => String(r.bike?._id ?? r.bike) === String(driverId)) || null;
+      pickups = records.filter((r) => String(r.bike?._id ?? r.bike) === String(driverId));
       meetingBikes = records.filter((r) => r.van && String(r.van?._id ?? r.van) === String(driverId));
     }
 
@@ -551,8 +585,8 @@ router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'mana
     // Matched by delivery id rather than the stored routeOrder, so a stop
     // dropped above for having no location can't shift it onto the wrong leg.
     const nameOf = (u) => [u?.profile?.firstName, u?.profile?.lastName].filter(Boolean).join(' ') || 'Driver';
-    let detour = null;
-    if (pickup) {
+    const detours = [];
+    for (const pickup of pickups) {
       const secondTripIds = new Set((pickup.deliveryIds || []).map((id) => String(id?._id ?? id)));
       const insertAt = withCoords.findIndex((w) => secondTripIds.has(String(w.delivery._id)));
       // Needs a stop before it to leave from; index 0 would mean the whole
@@ -578,7 +612,7 @@ router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'mana
             ? KITCHEN_RELOAD_DWELL_SECONDS
             : HANDOFF_DWELL_SECONDS + Math.round(pickup.expectedWaitSeconds || 0);
           const direct = Math.round(legDurations[insertAt] ?? 0);
-          detour = {
+          detours.push({
             type: pickup.type,
             beforeIndex: insertAt,
             beforeDeliveryId: String(withCoords[insertAt].delivery._id),
@@ -591,7 +625,7 @@ router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'mana
             vanReason: pickup.vanReason || null,
             bagCount: (pickup.deliveryIds || []).length,
             status: pickup.status
-          };
+          });
         }
       }
     }
@@ -612,7 +646,7 @@ router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'mana
     {
       let elapsed = 0;
       for (let i = 0; i < withCoords.length; i += 1) {
-        if (detour && i === detour.beforeIndex) elapsed += detour.extraSeconds;
+        for (const detour of detours.filter(d => d.beforeIndex === i)) elapsed += detour.extraSeconds;
         elapsed += legDurations[i] ?? 0;
         if (scheduledSeconds[i] !== null) {
           const latest = scheduledSeconds[i] - elapsed;
@@ -653,7 +687,7 @@ router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'mana
       // The second-trip pickup happens on the way to this stop: note the
       // clock time the driver reaches the kitchen / meeting point, then charge
       // the whole side trip before the (direct) leg below.
-      if (detour && i === detour.beforeIndex) {
+      for (const detour of detours.filter(d => d.beforeIndex === i)) {
         detour.arrivalSeconds = clock + detour.toPickupSeconds;
         detour.departureSeconds = detour.arrivalSeconds + detour.dwellSeconds;
         clock += detour.extraSeconds;
@@ -725,7 +759,7 @@ router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'mana
           serviceSeconds: serviceSeconds.reduce((a, b) => a + b, 0),
           // Extra time for the second-trip side trip, already folded into the
           // ETAs and backAtKitchenSeconds above (0 when there isn't one).
-          pickupDetourSeconds: detour?.extraSeconds || 0,
+          pickupDetourSeconds: detours.reduce((sum, d) => sum + d.extraSeconds, 0),
           backAtKitchenSeconds,
           late: counts.late,
           early: counts.early,
@@ -733,7 +767,8 @@ router.post('/route-eta', authorize(['admin', 'super_admin', 'dispatcher', 'mana
         },
         // This driver's own second-trip pickup (bike side), with the clock
         // time it happens — null when the day needs no second trip.
-        detour,
+        detour: detours[0] || null, // compatibility for older clients
+        detours,
         // Bikes meeting THIS driver (van side) — informational; the van's own
         // stop ETAs above don't include its small detour to each meeting.
         meetingBikes: meetingBikes.map((r) => ({
@@ -2723,7 +2758,7 @@ router.get('/driver/today', protect, async (req, res) => {
 
     res.json({
       success: true,
-      data: { deliveries, handoffs }
+      data: { deliveries, handoffs, routePlans: await driverPlans(String(req.user._id)), externalPlanProtocol: 1 }
     });
   } catch (error) {
     console.error('❌ Get driver deliveries error:', error);

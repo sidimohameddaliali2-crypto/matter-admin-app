@@ -58,6 +58,15 @@ const deliverySchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  externalRoutePlan: { type: mongoose.Schema.Types.ObjectId, ref: 'ExternalRoutePlan', default: null },
+  externalRouteRevision: Number,
+  externalRouteStateVersion: { type: Number, default: 0 },
+  externalRouteTiming: {
+    earliestAt: Date,
+    planByAt: Date,
+    plannedArrivalAt: Date,
+    plannedCompletionAt: Date
+  },
   // Set on a bike's second-trip deliveries: the van↔bike meeting where the
   // bike collects them. Null for everything else.
   handoff: {
@@ -191,6 +200,7 @@ deliveryType: {
    proof: {
     images: [String], // This should store URLs, not base64
     photoUrl: String, // Primary photo URL (kept in sync with images[0])
+    captureId: String, // Durable native evidence identity for external plans
     signature: String,
     bagId: String,
     timestamp: Date,

@@ -1049,15 +1049,16 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
 
     // Where this bike picks up trip 2. A kitchen return already has the depot
     // marker, so only a van meeting needs its own pin.
-    const meet = eta.status === 'ok' && eta.detour?.type === 'van_handoff' ? eta.detour.meetingPoint : null;
-    if (meet && Number.isFinite(meet.lat) && Number.isFinite(meet.lng)) {
-      markersRef.current.push(new mapgl.HtmlMarker(map, {
-        coordinates: [meet.lng, meet.lat],
-        html: meetingHtml(meet.name || 'Van meeting point'),
-        anchor: [16, 16],
-        zIndex: 6
-      }));
-    }
+    const meetings = eta.status === 'ok' ? (eta.detours || []).filter(d => d.type === 'van_handoff') : [];
+    meetings.forEach(({ meetingPoint: meet }) => {
+      if (meet && Number.isFinite(meet.lat) && Number.isFinite(meet.lng)) {
+        markersRef.current.push(new mapgl.HtmlMarker(map, {
+          coordinates: [meet.lng, meet.lat],
+          html: meetingHtml(meet.name || 'Van meeting point'),
+          anchor: [16, 16], zIndex: 6
+        }));
+      }
+    });
     // Where this van hands bags to bikes.
     if (eta.status === 'ok') {
       (eta.meetingBikes || []).forEach((b) => {
@@ -1258,6 +1259,9 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
           totals: data.totals || null,
           windowSeconds: data.windowSeconds || null,
           detour: data.detour || null,
+          detours: data.detours || (data.detour ? [data.detour] : []),
+          source: data.source,
+          revision: data.revision,
           meetingBikes: data.meetingBikes || [],
           byId
         };
@@ -2166,6 +2170,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                   {eta.status === 'ok' && eta.departure ? (
                     <div className="space-y-1">
                       <p>
+                        {eta.source === 'external_plan' ? <span>Imported plan revision {eta.revision} · planned times, not live travel estimates. Depart 01:00.</span> : null}
                         {eta.departure.reason === 'usual' ? (
                           <>Leave the kitchen at the usual <span className="font-semibold">{clock(eta.departure.seconds)}</span>.</>
                         ) : null}
@@ -2204,37 +2209,38 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                           <span className="text-gray-500"> (incl. {(eta.totals.returnDistanceMeters / 1000).toFixed(1)} km return)</span>
                         </p>
                       ) : null}
-                      {eta.detour ? (
-                        <p className={eta.detour.type === 'kitchen_return' ? 'text-amber-800' : 'text-violet-800'}>
-                          {eta.detour.type === 'kitchen_return' ? (
+                      {(eta.detours || []).map((detour, pickupIndex) => (
+                        <p key={pickupIndex} className={detour.type === 'kitchen_return' ? 'text-amber-800' : 'text-violet-800'}>
+                          {detour.type === 'kitchen_return' ? (
                             <>
-                              🏠 Back at the kitchen <span className="font-semibold">{clock(eta.detour.arrivalSeconds)}</span> to reload
-                              {' '}({eta.detour.bagCount} {eta.detour.bagCount === 1 ? 'bag' : 'bags'} for trip 2), out again{' '}
-                              <span className="font-semibold">{clock(eta.detour.departureSeconds)}</span>
+                              🏠 Back at the kitchen <span className="font-semibold">{clock(detour.arrivalSeconds)}</span> to reload
+                              {' '}({detour.bagCount} {detour.bagCount === 1 ? 'bag' : 'bags'} in this pickup), out again{' '}
+                              <span className="font-semibold">{clock(detour.departureSeconds)}</span>
                             </>
                           ) : (
                             <>
-                              🚐 Meets <span className="font-semibold">{eta.detour.counterpartName}</span> at{' '}
-                              <span className="font-semibold">{clock(eta.detour.arrivalSeconds)}</span>
-                              {eta.detour.meetingPoint?.name ? <> — {eta.detour.meetingPoint.name}</> : null}
-                              {' '}({eta.detour.bagCount} {eta.detour.bagCount === 1 ? 'bag' : 'bags'} for trip 2)
+                              🚐 Meets <span className="font-semibold">{detour.counterpartName}</span> at{' '}
+                              <span className="font-semibold">{clock(detour.arrivalSeconds)}</span>
+                              {detour.meetingPoint?.name ? <> — {detour.meetingPoint.name}</> : null}
+                              {' '}({detour.bagCount} {detour.bagCount === 1 ? 'bag' : 'bags'} in this pickup)
                             </>
                           )}
-                          <span className="text-gray-500"> · adds {fmtDuration(eta.detour.extraSeconds)}</span>
-                          {eta.detour.vanReason ? (
+                          {detour.batchId ? <span> · Batch {detour.batchId}</span> : null}
+                          {Number.isFinite(detour.extraSeconds) ? <span className="text-gray-500"> · adds {fmtDuration(detour.extraSeconds)}</span> : null}
+                          {detour.vanReason ? (
                             <span className="block text-[11px] text-gray-500">
-                              No van could take it: {eta.detour.vanReason}
+                              No van could take it: {detour.vanReason}
                             </span>
                           ) : null}
                         </p>
-                      ) : null}
+                      ))}
                       {eta.meetingBikes?.length > 0 ? (
                         <p className="text-violet-800">
                           🚲 Hands trip-2 bags to{' '}
                           {eta.meetingBikes.map((b, i) => (
                             <span key={b.handoffId}>
                               {i > 0 ? ', ' : ''}
-                              <span className="font-semibold">{b.bikeName}</span> after stop {(b.afterRouteOrder ?? 0) + 1}
+                              <span className="font-semibold">{b.bikeName}</span> {b.afterRouteOrder == null ? `at ${clock(b.plannedVanArrivalSeconds)}` : `after stop ${b.afterRouteOrder + 1}`} {b.batchId ? `· Batch ${b.batchId}` : ''}
                               {b.meetingPoint?.name ? ` (${b.meetingPoint.name})` : ''}
                             </span>
                           ))}
@@ -2433,11 +2439,11 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                       const isActive = activeId === stop._id;
                       const stopEta = eta.status === 'ok' ? eta.byId[stop._id] : null;
                       const earlyLate = stopStatusLabel(stopEta);
-                      const pickupHere = eta.status === 'ok' && eta.detour?.beforeDeliveryId === stop._id ? eta.detour : null;
+                      const pickupsHere = eta.status === 'ok' ? (eta.detours || []).filter(d => d.beforeDeliveryId === stop._id) : [];
                       return (
                         <React.Fragment key={stop._id}>
-                        {pickupHere ? (
-                          <li className={`px-3 py-2.5 flex items-start gap-3 text-sm border-y ${
+                        {pickupsHere.map((pickupHere, pickupIndex) => (
+                          <li key={pickupIndex} className={`px-3 py-2.5 flex items-start gap-3 text-sm border-y ${
                             pickupHere.type === 'kitchen_return'
                               ? 'bg-amber-50 border-amber-100'
                               : 'bg-violet-50 border-violet-100'
@@ -2456,12 +2462,14 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                               <span className={`block text-[11px] ${pickupHere.type === 'kitchen_return' ? 'text-amber-700' : 'text-violet-700'}`}>
                                 {pickupHere.meetingPoint?.name && pickupHere.type !== 'kitchen_return'
                                   ? `${pickupHere.meetingPoint.name} · ` : ''}
-                                arrive {clock(pickupHere.arrivalSeconds)} · leave {clock(pickupHere.departureSeconds)}
-                                {' · '}adds {fmtDuration(pickupHere.extraSeconds)}
+                                arrive {clock(pickupHere.arrivalSeconds)}
+                                {pickupHere.batchId ? ` · Batch ${pickupHere.batchId}` : ''}
+                                {Number.isFinite(pickupHere.departureSeconds) ? ` · leave ${clock(pickupHere.departureSeconds)}` : ''}
+                                {Number.isFinite(pickupHere.extraSeconds) ? ` · adds ${fmtDuration(pickupHere.extraSeconds)}` : ''}
                               </span>
                             </span>
                           </li>
-                        ) : null}
+                        ))}
                         <li
                           ref={isActive ? activeRowRef : null}
                           onClick={() => setActiveId(stop._id)}
