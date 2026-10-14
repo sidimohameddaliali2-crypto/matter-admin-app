@@ -17,7 +17,11 @@ jest.mock('@react-google-maps/api', () => {
       React.useEffect(() => { onLoad(mockMap); }, [onLoad]);
       return <div>{children}</div>;
     },
-    OverlayView, InfoWindow: OverlayView, Polyline: () => null,
+    OverlayView,
+    InfoWindow: ({ children, onCloseClick }) => <div data-testid="driver-popup">
+      <button onClick={onCloseClick}>Close popup</button>{children}
+    </div>,
+    Polyline: () => <div data-testid="route-line" />,
   };
 });
 
@@ -86,6 +90,24 @@ test('frames the driver and distant stops after the route arrives, and does not 
   await click('Refresh');
   await resolveRoute(requests[1], [stop('S1', 24.5)]);
   expect(mockMap.fitBounds).toHaveBeenCalledTimes(1);
+});
+
+test('closing the location popup preserves the selected driver and route through refresh', async () => {
+  await mount();
+  await click('Driver D1');
+  await resolveRoute(requests[0], [stop('S1', 24.5), stop('S2', 24.6)]);
+  expect(container.querySelector('[data-testid="driver-popup"]')).not.toBeNull();
+  await click('Close popup');
+  expect(container.querySelector('[data-testid="driver-popup"]')).toBeNull();
+  expect(container.querySelector('[data-testid="driver-route-panel"]')).not.toBeNull();
+  expect(container.querySelector('[data-testid="route-line"]')).not.toBeNull();
+  expect(container.textContent).toContain('Customer S1');
+  await click('Refresh');
+  await resolveRoute(requests[1], [stop('S1', 24.5), stop('S2', 24.6)]);
+  expect(container.querySelector('[data-testid="driver-popup"]')).toBeNull();
+  expect(container.querySelector('[data-testid="route-line"]')).not.toBeNull();
+  await click('Driver D1');
+  expect(container.querySelector('[data-testid="driver-popup"]')).not.toBeNull();
 });
 
 test('switching drivers hides the old route and waits for the new route before framing', async () => {

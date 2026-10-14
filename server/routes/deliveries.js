@@ -1,3 +1,4 @@
+import deliveryOrderRouter from './deliveryOrder.js';
 import express from 'express';
 import mongoose from 'mongoose';
 import axios from 'axios';
@@ -351,6 +352,7 @@ async function checkAndApplyPendingChanges(delivery) {
 
 // All routes are protected
 router.use(protect);
+router.use('/delivery-order', deliveryOrderRouter);
 
 // @desc    Depot (kitchen) location used by map views — same env the route optimizer uses.
 //          Registered before '/:id' so "depot" is never parsed as a delivery id.

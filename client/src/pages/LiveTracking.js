@@ -272,6 +272,7 @@ const LiveTracking = () => {
   const [error, setError] = useState('');
   const [trackerWarning, setTrackerWarning] = useState('');
   const [activeKey, setActiveKey] = useState(null); // `veh:<vehicleNo>` or `drv:<driverId>`
+  const [infoOpen, setInfoOpen] = useState(false);
   // Route of the selected driver: every delivery assigned to them for the
   // chosen day, in visit order (owner, 2026-10-13).
   const [routeDate, setRouteDate] = useState(() => formatBusinessDateInput(new Date()));
@@ -402,8 +403,13 @@ const LiveTracking = () => {
     setMapReady(true);
   }, []);
 
-  const panTo = (position, key) => {
+  const selectDriver = (key) => {
     setActiveKey(key);
+    setInfoOpen(true);
+  };
+
+  const panTo = (position, key) => {
+    selectDriver(key);
     if (mapInstanceRef.current && position) {
       mapInstanceRef.current.panTo(position);
       mapInstanceRef.current.setZoom(14);
@@ -566,7 +572,7 @@ const LiveTracking = () => {
     fittedKeyRef.current = key;
   }, [route, routeLoading, routeLoadedKey, mapReady, selectedDriverId, routeDate, vehicles, appOnlyDrivers]);
 
-  const clearSelection = () => { setActiveKey(null); setActiveStopId(null); fittedKeyRef.current = ''; };
+  const clearSelection = () => { setActiveKey(null); setInfoOpen(false); setActiveStopId(null); fittedKeyRef.current = ''; };
 
   const focusStop = (stop) => {
     setActiveStopId(stop._id);
@@ -747,7 +753,7 @@ const LiveTracking = () => {
                   key={v.vehicleNo}
                   vehicle={v}
                   isActive={activeKey === `veh:${v.vehicleNo}`}
-                  onClick={() => setActiveKey(`veh:${v.vehicleNo}`)}
+                  onClick={() => selectDriver(`veh:${v.vehicleNo}`)}
                 />
               ))}
               {phonePins.map((p) => (
@@ -757,7 +763,7 @@ const LiveTracking = () => {
                   colorCode={p.colorCode}
                   location={p.location}
                   isActive={activeKey === p.activeKey}
-                  onClick={() => setActiveKey(p.activeKey)}
+                  onClick={() => selectDriver(p.activeKey)}
                 />
               ))}
               {selectedDriver && route.pinned.length > 1 && (
@@ -788,8 +794,8 @@ const LiveTracking = () => {
                   subtitle={selectedDriverSpot.subtitle}
                 />
               )}
-              {activeInfo && (
-                <InfoWindow position={activeInfo.position} onCloseClick={() => setActiveKey(null)}>
+              {activeInfo && infoOpen && (
+                <InfoWindow position={activeInfo.position} onCloseClick={() => setInfoOpen(false)}>
                   <div style={{ maxWidth: 260 }}>
                     <p style={{ fontWeight: 600, fontSize: 13 }}>{activeInfo.title}</p>
                     <p style={{ fontSize: 11, color: '#6B7280' }}>{activeInfo.subtitle}</p>

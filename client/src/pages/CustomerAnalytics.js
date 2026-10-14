@@ -112,7 +112,7 @@ function ReportModal({ subscriptions, onClose }) {
           [`Deliveries for ${dateKey}`],
           [`Total: ${dayCustomers.length}`],
           [],
-          ['Customer Name', 'Email', 'Phone', 'Address', 'Zone', 'Delivery Window', 'Plan', 'Meals/Day', 'Exclusions'],
+          ['Customer Name', 'Email', 'Phone', 'Address', 'Zone', 'Delivery Window', 'Plan', 'Meals/Day', 'Snacks/Day', 'Exclusions'],
         ];
 
         dayCustomers.forEach((s) => {
@@ -125,12 +125,13 @@ function ReportModal({ subscriptions, onClose }) {
             s.delivery_window?.label || '',
             s.plan_name || '',
             s.meal_frequency ?? '',
+            s.snacks_per_day ?? '',
             (s.exclusions || []).join('; '),
           ]);
         });
 
         const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
-        worksheet['!cols'] = [24, 26, 16, 32, 18, 18, 18, 12, 24].map((w) => ({ wch: w }));
+        worksheet['!cols'] = [24, 26, 16, 32, 18, 18, 18, 12, 12, 24].map((w) => ({ wch: w }));
         // Sheet names can't exceed 31 chars or contain : \ / ? * [ ] — "YYYY-MM-DD" is safe
         XLSX.utils.book_append_sheet(workbook, worksheet, dateKey);
       });

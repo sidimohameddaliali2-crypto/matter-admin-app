@@ -485,13 +485,30 @@ const generatePDF = (data) => {
       return;
     }
 
+    // Meals/day and snacks/day live on the Customer record, not on Delivery
+    // (the /reports endpoint this page's data comes from never populates
+    // customer) — fetched once here, same endpoint/pattern already used by
+    // generateMonthlySalesReport above, and looked up per row by customerId.
+    let mealsByCustomerId = {};
+    try {
+      const { data } = await api.get('/customers', { params: { limit: 2000 } });
+      const customers = Array.isArray(data?.data) ? data.data : [];
+      mealsByCustomerId = customers.reduce((acc, c) => {
+        if (c.customerId) acc[c.customerId] = { mealPerDay: c.mealPerDay, snackCount: c.snackCount };
+        return acc;
+      }, {});
+    } catch (err) {
+      console.warn('Failed to load customer meal/snack data for export', err);
+    }
+    const mealsFor = (delivery) => mealsByCustomerId[delivery.customerId || delivery.customerID] || {};
+
     if (format === 'excel') {
       const sheetData = [];
       sheetData.push(['Matter Delivery Tracker']);
       sheetData.push([`Daily deliveries for ${selectedDate}`]);
       sheetData.push([`Total deliveries: ${filteredDeliveries.length}`]);
       sheetData.push([]);
-      sheetData.push(['Customer ID', 'Customer', 'Address', 'Driver', 'Area', 'Scheduled Time', 'Status', 'Timing']);
+      sheetData.push(['Customer ID', 'Customer', 'Address', 'Driver', 'Area', 'Scheduled Time', 'Status', 'Timing', 'Meals/Day', 'Snacks/Day']);
 
       filteredDeliveries.forEach((delivery) => {
         const status = normalizeStatus(delivery);
@@ -506,6 +523,7 @@ const generatePDF = (data) => {
           : delivery.earlyMinutes > 0
             ? `${delivery.earlyMinutes} min early`
             : 'On time';
+        const meals = mealsFor(delivery);
 
         sheetData.push([
           delivery.customerId || delivery.customerID || '-',
@@ -516,6 +534,8 @@ const generatePDF = (data) => {
           scheduledTime,
           status,
           timing,
+          meals.mealPerDay ?? '-',
+          meals.snackCount ?? '-',
         ]);
       });
 
@@ -544,6 +564,7 @@ const generatePDF = (data) => {
           : delivery.earlyMinutes > 0
             ? `${delivery.earlyMinutes} min early`
             : 'On time';
+        const meals = mealsFor(delivery);
 
         return `
           <tr>
@@ -554,6 +575,8 @@ const generatePDF = (data) => {
             <td>${scheduledTime}</td>
             <td>${status}</td>
             <td>${timing}</td>
+            <td>${meals.mealPerDay ?? '-'}</td>
+            <td>${meals.snackCount ?? '-'}</td>
           </tr>
         `;
       }).join('');
@@ -592,6 +615,8 @@ const generatePDF = (data) => {
                   <th>Scheduled Time</th>
                   <th>Status</th>
                   <th>Timing</th>
+                  <th>Meals/Day</th>
+                  <th>Snacks/Day</th>
                 </tr>
               </thead>
               <tbody>

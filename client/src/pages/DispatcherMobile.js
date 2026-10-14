@@ -1,3 +1,4 @@
+import DeliveryOrderModal from '../components/DeliveryOrderModal';
 ﻿import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
@@ -53,6 +54,7 @@ const statusPills = {
 };
 
 const DispatcherMobile = () => {
+  const [orderOpen, setOrderOpen] = useState(false);
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const { deliveries = [], isLoading: deliveriesLoading, error: deliveriesError } = useSelector(
@@ -1133,6 +1135,8 @@ const DispatcherMobile = () => {
           <div className="mt-2 sm:mt-4 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-2 sm:gap-4">
             <div className="text-xs uppercase tracking-wide text-gray-500 truncate">
               {`${filteredDeliveries.length} deliveries`}
+              <button type="button" onClick={() => setOrderOpen(true)} className="ml-3 p-2 rounded-lg bg-blue-600 text-white normal-case">Delivery order</button>
+              {orderOpen && <DeliveryOrderModal date={selectedDate} drivers={drivers} onClose={() => setOrderOpen(false)} />}
             </div>
             <div className="flex flex-wrap items-center gap-1 sm:gap-2">
               <button

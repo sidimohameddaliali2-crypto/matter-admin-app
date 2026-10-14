@@ -335,6 +335,7 @@ class MatterApiService {
             customer_addresses: detail.data.customer_addresses || [],
             delivery_window: detail.data.delivery_window || null,
             meal_frequency: detail.data.plan?.meal_frequency ?? 1,
+            snacks_per_day: detail.data.snacks_per_day ?? null,
             breakfast_included: !!detail.data.breakfast_included,
             exclusions: (detail.data.exclusions || []).map((ex) => ex.title).filter(Boolean),
             subscription_status: sub.subscription_status,
