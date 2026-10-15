@@ -1,6 +1,20 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 
+// Shared by HTTP and Socket.IO. Never accept a built-in fallback signing key.
+export const authenticateStaffToken = async (token) => {
+  if (typeof token !== 'string' || !token || !process.env.JWT_SECRET) {
+    throw new Error('Not authorized');
+  }
+  const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+  if (!decoded || typeof decoded.id !== 'string' || decoded.partnerId || decoded.memberId) {
+    throw new Error('Invalid token type');
+  }
+  const user = await User.findById(decoded.id).select('-password');
+  if (!user || !user.isActive) throw new Error('Not authorized');
+  return user;
+};
+
 export const protect = async (req, res, next) => {
   try {
     let token;
@@ -14,8 +28,7 @@ export const protect = async (req, res, next) => {
     }
 
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-      req.user = await User.findById(decoded.id).select('-password');
+      req.user = await authenticateStaffToken(token);
       
       if (!req.user) {
         return res.status(401).json({ message: 'User not found' });

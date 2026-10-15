@@ -13,8 +13,42 @@ import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import { resolveCustomerMatch, resolveCustomerMatchBulk } from '../services/customerMatchService.js';
 import { classifyUploadRow } from '../services/customerUploadIdentity.js';
 import { relinkSubscription, LinkTargetNotFoundError } from '../services/subscriptionLink.js';
+import { protect } from '../middleware/auth.js';
+import { effectivePermissions } from '../models/User.js';
 
 const router = express.Router();
+
+// Owner (2026-10-15): customer data and writes must never be public.
+router.use(protect);
+router.use(async (req, res, next) => {
+  const permissions = effectivePermissions(req.user);
+  const hasAny = (keys) => keys.some((key) => permissions[key]);
+  const readKeys = ['customers', 'website_subscriptions', 'subscription', 'renewal', 'reports', 'delivery_changes', 'complaints'];
+  let allowed;
+  if (req.method === 'GET' || req.method === 'HEAD') {
+    allowed = hasAny(readKeys) || (req.user.role !== 'driver' && permissions.deliveries);
+    // Drivers can retrieve a saved pin only for customers on their own deliveries.
+    if (!allowed && req.user.role === 'driver' && /^\/[^/]+\/location\/?$/.test(req.path)) {
+      try {
+        allowed = !!await Delivery.exists({
+          customerId: decodeURIComponent(req.path.split('/')[1]),
+          driver: req.user._id,
+        });
+      } catch (error) {
+        return res.status(403).json({ success: false, message: 'Customer access denied' });
+      }
+    }
+  } else if (['/match/link', '/match/unlink', '/match/bulk'].includes(req.path.replace(/\/$/, ''))) {
+    allowed = hasAny(['customers', 'website_subscriptions']);
+  } else if (req.path.replace(/\/$/, '') === '/send-whatsapp-reminder') {
+    allowed = hasAny(['customers', 'renewal']);
+  } else {
+    allowed = permissions.customers;
+  }
+  if (!allowed) return res.status(403).json({ success: false, message: 'Customer access denied' });
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
 
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const buildEmailRegex = (email) => {
@@ -955,8 +989,10 @@ router.get('/email/:email', async (req, res) => {
  */
 router.get('/:customerId/location', async (req, res) => {
   try {
+    const query = { customerId: req.params.customerId, address: { $exists: true, $ne: '' } };
+    if (req.user.role === 'driver') query.driver = req.user._id;
     const delivery = await Delivery.findOne(
-      { customerId: req.params.customerId, address: { $exists: true, $ne: '' } },
+      query,
       { address: 1, zone: 1, gpsLocation: 1 }
     ).sort({ scheduledTime: -1 }).lean();
 

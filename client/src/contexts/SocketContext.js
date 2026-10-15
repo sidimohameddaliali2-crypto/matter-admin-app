@@ -31,7 +31,10 @@ export const SocketProvider = ({ children }) => {
       return undefined;
     }
 
-    const newSocket = io(process.env.REACT_APP_SOCKET_URL || 'http://localhost:5000', {
+    const defaultSocketUrl = ['localhost', '127.0.0.1'].includes(window.location.hostname)
+      ? 'http://localhost:5000'
+      : window.location.origin;
+    const newSocket = io(process.env.REACT_APP_SOCKET_URL || defaultSocketUrl, {
       auth: { token }
     });
 

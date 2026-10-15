@@ -44,6 +44,23 @@ export function scheduledTimeFor(dateKey, hour) {
 }
 
 
+// Matter's `area` field is usually English, but has been observed live
+// (2026-10-15, James Connolly sub 498/1239 and Zara Cooper sub 542) to come
+// back in Arabic script for some addresses — the same street/building
+// record, same coordinates, just localized differently on Matter's side.
+// Taking it as-is leaked Arabic text into both the driver-facing address
+// line and the dispatcher's zone filter. `street`/`additional_details`
+// usually still carry an English place name alongside the Arabic (e.g.
+// "... - Jumeirah Village Triangle - دبي - ..."), so keyword-detecting
+// against those is the fallback instead of ever displaying the raw Arabic.
+const ARABIC_SCRIPT = /[؀-ۿ]/;
+function resolveEnglishArea(addr) {
+  const rawArea = addr.area || '';
+  if (rawArea && !ARABIC_SCRIPT.test(rawArea)) return rawArea;
+  const fallbackText = [addr.street, addr.additional_details, addr.building].filter(Boolean).join(' ');
+  return detectAreaFromAddress(fallbackText) || '';
+}
+
 // Owner (2026-09-22): "the delivery address ... need to be not one line as
 // before but changed to field: label, emirate, area, building, unit, floor,
 // status" — addressDetails now carries every one of those as its own field
@@ -54,7 +71,7 @@ export function scheduledTimeFor(dateKey, hour) {
 // its own, so dropping it would leave those views blank for every
 // Matter-imported delivery.
 export function buildAddressLine(addr) {
-  return [addr.building, addr.unit ? `Unit ${addr.unit}` : null, addr.floor, addr.area, addr.emirate]
+  return [addr.building, addr.unit ? `Unit ${addr.unit}` : null, addr.floor, resolveEnglishArea(addr), addr.emirate]
     .filter(Boolean)
     .join(', ');
 }
@@ -172,7 +189,7 @@ export async function importMatterDeliveriesForDate(dateKey) {
           apartment: useAddr.unit || '',
           addressStatus: useAddr.status || ''
         },
-        zone: useAddr.area || detectAreaFromAddress(addressLine) || '',
+        zone: resolveEnglishArea(useAddr) || detectAreaFromAddress(addressLine) || '',
         gpsLocation: (useAddr.coordinates && Number.isFinite(useAddr.coordinates.lat) && Number.isFinite(useAddr.coordinates.lng))
           ? { lat: useAddr.coordinates.lat, lng: useAddr.coordinates.lng }
           : undefined,

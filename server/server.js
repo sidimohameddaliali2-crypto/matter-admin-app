@@ -33,6 +33,7 @@ import { startMoveUncollectedCollectionsJob } from './jobs/moveUncollectedCollec
 import { startRecalculateDriverKpisJob } from './jobs/recalculateDriverKpis.js';
 import { startImportMatterDeliveriesJob } from './jobs/importMatterDeliveries.js';
 import { startRecordVehicleLocationsJob } from './jobs/recordVehicleLocations.js';
+import { authenticateSocket, registerStaffSocket } from './middleware/socketAuth.js';
 
 // Initialize Spaces after dotenv loads
 initializeSpaces();
@@ -79,6 +80,7 @@ const io = new Server(server, {
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
   }
 });
+io.use(authenticateSocket);
 
 // Make io accessible via Express app (so routes can use req.app.get('io'))
 app.set('io', io);
@@ -266,23 +268,7 @@ app.get('/api/users/drivers/test', (req, res) => {
 io.on('connection', (socket) => {
   console.log('🔌 User connected:', socket.id);
 
-  // Join driver room
-  socket.on('driver:join', (driverId) => {
-    socket.join(`driver:${driverId}`);
-    console.log(`Driver ${driverId} joined room`);
-  });
-
-  // Handle delivery status updates
-  socket.on('delivery:statusUpdate', (data) => {
-    io.emit('delivery:updated', data);
-    console.log('Delivery status updated:', data);
-  });
-
-  // Handle driver status updates
-  socket.on('driver:statusUpdate', (data) => {
-    io.emit('driver:statusChanged', data);
-    console.log('Driver status updated:', data);
-  });
+  registerStaffSocket(socket);
 
   socket.on('disconnect', () => {
     console.log('🔌 User disconnected:', socket.id);

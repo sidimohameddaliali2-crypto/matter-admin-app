@@ -2,7 +2,7 @@ import express from 'express';
 import jwt from 'jsonwebtoken';
 import { body, validationResult } from 'express-validator';
 import User, { effectivePermissions } from '../models/User.js';
-import { authenticate } from '../middleware/auth.js';
+import { authenticate, admin } from '../middleware/auth.js';
 
 const router = express.Router();
 
@@ -17,8 +17,9 @@ const generateToken = (id) => {
 
 // @desc    Register user
 // @route   POST /api/auth/register
-// @access  Public
-router.post('/register', [
+// Staff accounts are provisioned by admins; public registration allowed role escalation.
+// @access  Admin
+router.post('/register', authenticate, admin, [
   body('email').isEmail().normalizeEmail(),
   body('password').isLength({ min: 6 }),
   body('firstName').notEmpty().trim(),
@@ -35,6 +36,10 @@ router.post('/register', [
     }
 
     const { email, password, firstName, lastName, phone, role } = req.body;
+
+    if (role === 'super_admin' && req.user.role !== 'super_admin') {
+      return res.status(403).json({ success: false, message: 'Only super admin can create super admin users' });
+    }
 
     // Check if user exists
     const existingUser = await User.findOne({ email });
