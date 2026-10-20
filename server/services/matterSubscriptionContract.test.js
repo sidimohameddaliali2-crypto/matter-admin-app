@@ -169,3 +169,28 @@ test('bounded comparison route includes multiple linked orders and Dubai-day bou
 test('missing delivery windows stay unknown rather than inventing a 6 AM target', () => {
   assert.equal(buildMatterDeliverySnapshot({ ...sub, delivery_window: null }, '2026-10-20').scheduledTime, null);
 });
+
+
+test('kitchen email lookup takes priority over stale saved links and rejects uncertain matches', async () => {
+  const original = { get: matter.getSubscription, list: matter.listSubscriptions };
+  const current = { ...sub, subscription_id: 'renewed', customer_id: 'same-customer', email: 'fixture@example.invalid' };
+  matter.listSubscriptions = async (params) => {
+    assert.equal(params.email, 'fixture@example.invalid');
+    assert.equal(params.customerId, undefined);
+    return { data: [current] };
+  };
+  matter.getSubscription = async (id) => { assert.equal(id, 'renewed'); return { data: current }; };
+  try {
+    const input = { email: ' Fixture@Example.Invalid ', subscriptionId: 'stale', customerId: 'same-customer' };
+    assert.equal((await matter.getKitchenNutrition(input)).subscription_id, 'renewed');
+    await assert.rejects(matter.getKitchenNutrition({ ...input, customerId: 'different-person' }), /conflict/);
+    for (const rows of [[], [current, current]]) {
+      matter.listSubscriptions = async () => ({ data: rows });
+      await assert.rejects(matter.getKitchenNutrition(input), /missing or ambiguous/);
+    }
+    matter.listSubscriptions = async () => ({ data: [{ ...current, email: 'other@example.invalid' }] });
+    await assert.rejects(matter.getKitchenNutrition(input), /email does not match/);
+    matter.listSubscriptions = async () => { throw new Error('upstream unavailable'); };
+    await assert.rejects(matter.getKitchenNutrition(input), /unavailable/);
+  } finally { matter.getSubscription = original.get; matter.listSubscriptions = original.list; }
+});

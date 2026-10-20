@@ -2,6 +2,20 @@ import { matchesMatterSubscription, enrichSelectionsWithNutrition, fetchBreakfas
 import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
 import { assertKitchenExportReady, prepareKitchenSelections } from '../utils/kitchenIntegrity';
 
+export const verifiedKitchenRoster = (response) => {
+  if (response?.success !== true || response.complete === false || !Array.isArray(response.data)) {
+    throw new Error('Delivery roster is incomplete. Retry before exporting or counting.');
+  }
+  return response.data;
+};
+
+export const hasKitchenDeliveryOnDate = (entry, roster, date) => {
+  if ((entry.skippedDays || []).some((day) => getDateKey(day.date || day) === date)) return false;
+  // Partner members use their assigned meal dates, not Matter subscriptions.
+  if (entry.partner) return true;
+  return roster.some((sub) => matchesMatterSubscription(entry, sub));
+};
+
 export const assertKitchenRosterCovered = (selections, roster, date) => {
   for (const sub of roster) {
     const entry = selections.find((candidate) => matchesMatterSubscription(candidate, sub));
@@ -30,13 +44,12 @@ export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => 
   const rosters = new Map();
   for (const date of dayKeys) {
     const result = await api.get('/matter/subscriptions/delivery-on-date', { params: { date }, timeout: 180000 });
-    if (!result.data?.success || result.data.complete === false) throw new Error('Delivery roster is incomplete.');
-    assertKitchenRosterCovered(selections, result.data.data || [], date);
-    rosters.set(date, result.data.data || []);
+    const roster = verifiedKitchenRoster(result.data);
+    assertKitchenRosterCovered(selections, roster, date);
+    rosters.set(date, roster);
   }
   const entries = selections.map(transformSelection).map((entry) => {
-    const deliveryDates = dayKeys.filter((date) => !(entry.skippedDays || []).some((day) => getDateKey(day.date || day) === date)
-      && (entry.partner || rosters.get(date).some((sub) => matchesMatterSubscription(entry, sub))));
+    const deliveryDates = dayKeys.filter((date) => hasKitchenDeliveryOnDate(entry, rosters.get(date), date));
     // Calculate the entire selection first: the approved fallback delivery-number
     // adjustment depends on its full date order, not the range being printed.
     const calculated = calculateKitchenListEntry({ customer: { ...entry, customerName: getCustomerName(entry) }, selectedMeals: entry.selectedMeals || [], breakfastPreset, snackPreset });

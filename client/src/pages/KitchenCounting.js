@@ -1,5 +1,5 @@
 import { kitchenSourceLabel, prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
-import { assertKitchenRosterCovered } from '../lib/kitchenSnapshot';
+import { assertKitchenRosterCovered, verifiedKitchenRoster, hasKitchenDeliveryOnDate } from '../lib/kitchenSnapshot';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { ChefHat, Download, Loader, RefreshCw } from 'lucide-react';
 // xlsx is only needed once a staff member clicks an export button — loaded
@@ -14,7 +14,6 @@ import api from '../utils/api';
 import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
 import {
-  matchesMatterSubscription,
   getDateKey,
   formatDateLabel,
   fetchBreakfastPresets,
@@ -148,12 +147,7 @@ const KitchenCounting = () => {
       const breakfastState = await fetchBreakfastPresets(api, selectedMenuId);
       const snackState = await fetchSnackPresets(api);
 
-      // Same nutrition resolution as Kitchen List: matterSubscriptionId first
-      // (an internally-matched customer whose Matter email differs from
-      // theirs), email as fallback — so the weights/macros computed here are
-      // guaranteed to match what Kitchen List itself would show, since it's
-      // the exact same calculateKitchenListEntry function fed the same inputs.
-      //
+      // Use the same fresh, email-first nutrition resolution as Kitchen List.
       // A menu with hundreds of customers means hundreds of individual Matter
       // API calls (8 at a time) — that can legitimately take a while on a
       // first (uncached) load, with nothing on screen to show it's actually
@@ -187,13 +181,9 @@ const KitchenCounting = () => {
         params: { date: selectedDate },
         timeout: 180000
       });
-      const deliverySubs = deliveryRes.data?.data || [];
-      assertKitchenRosterCovered(rawSelections, deliverySubs, selectedDate);
-      const hasDelivery = (entry) => {
-        if ((entry.skippedDays || []).some((day) => getDateKey(day.date || day) === selectedDate)) return false;
-        if (entry.partner) return true;
-        return deliverySubs.some((sub) => matchesMatterSubscription(entry, sub));
-      };
+      const deliverySubs = verifiedKitchenRoster(deliveryRes.data);
+      assertKitchenRosterCovered(enrichedSelections, deliverySubs, selectedDate);
+      const hasDelivery = (entry) => hasKitchenDeliveryOnDate(entry, deliverySubs, selectedDate);
 
       if (!current()) return;
       const deliverable = computed.filter(hasDelivery);

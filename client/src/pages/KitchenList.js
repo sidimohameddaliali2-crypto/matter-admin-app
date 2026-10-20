@@ -444,18 +444,9 @@ const KitchenList = () => {
         if (response.data?.success) {
           const rawSelections = response.data.data || [];
 
-          // Macros, snacks/day, and plan name always come from the customer's website
-          // subscription (Matter API), never from the internal Customer page — even
-          // when the Customer page already has values. Cached per email (see
-          // nutritionCacheRef) and fetched at most 8 at a time — firing all of
-          // these at once for hundreds of customers is what was freezing the page.
-          //
-          // Some internal customers were set up with a different email than
-          // their Matter website subscription — for those, email lookup would
-          // silently match nothing (or the wrong person). Customer
-          // Management's "Internal Customer Match" panel links such a
-          // customer to their real subscription via matterSubscriptionId;
-          // when that's set, look up by that id directly instead of email.
+          // Read fresh website nutrition by email first. Saved Matter IDs are
+          // used only when no email is available; customer identity conflicts
+          // and ambiguous matches remain unresolved rather than guessed.
           const enrichedSelections = await enrichSelectionsWithNutrition(api, rawSelections, nutritionCacheRef, { extended: true });
 
           const keyedSelections = enrichedSelections.map((entry) => attachStableMealKeys(entry));

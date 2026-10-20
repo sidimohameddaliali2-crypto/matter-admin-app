@@ -231,15 +231,21 @@ class MatterApiService {
   }
 
   // Production kitchen reads deliberately bypass the 15-minute nutrition
-  // cache and never relink Customer records. A known subscription is exact:
-  // renewal/customer/email fallback could select a different paid entitlement.
+  // cache and never relink Customer records. Email is the primary lookup
+  // (owner request); saved IDs are used only when email is unavailable.
   async getKitchenNutrition({ subscriptionId, customerId, email } = {}) {
+    const normalizedEmail = String(email || '').trim().toLowerCase();
     let id = subscriptionId;
-    if (!id) {
-      const list = await this.listSubscriptions({ customerId: customerId || undefined, email: customerId ? undefined : email, pageSize: 100 });
+    if (normalizedEmail || !id) {
+      const list = await this.listSubscriptions({ customerId: normalizedEmail ? undefined : customerId || undefined, email: normalizedEmail || undefined, pageSize: 100 });
       const rows = list?.data || [];
       if (rows.length !== 1 || Number(list?.meta?.total_pages || 1) > 1) {
-        const error = new Error('Kitchen subscription is ambiguous; link the exact Matter subscription before production.');
+        const error = new Error('Kitchen subscription lookup is missing or ambiguous; verify the customer email and Matter subscription.');
+        error.statusCode = 409;
+        throw error;
+      }
+      if (normalizedEmail && String(rows[0].email || '').trim().toLowerCase() !== normalizedEmail) {
+        const error = new Error('Matter subscription email does not match the requested customer.');
         error.statusCode = 409;
         throw error;
       }

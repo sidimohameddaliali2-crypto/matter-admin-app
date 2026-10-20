@@ -288,7 +288,7 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
     });
     if (nutritionResponse.data?.success === false) throw new Error('Matter inputs could not be verified.');
     const nutrition = nutritionResponse.data?.data;
-    if (subscriptionId && String(nutrition?.subscription_id || '') !== subscriptionId) throw new Error('Matter subscription link does not match.');
+    if (!email && subscriptionId && String(nutrition?.subscription_id || '') !== subscriptionId) throw new Error('Matter subscription link does not match.');
     const websiteMacros = nutrition?.macros
       ? { C: nutrition.macros.carbohydrates, P: nutrition.macros.protein, F: nutrition.macros.fat }
       : null;

@@ -1,7 +1,7 @@
 import { calculateKitchenListEntry } from './kitchenListCalculations';
 import { assertKitchenExportReady, createKitchenRequestGuard, kitchenMealWarnings, prepareKitchenSelections } from './kitchenIntegrity';
 import { enrichSelectionsWithNutrition } from '../lib/kitchenData';
-import { loadKitchenSnapshot, assertKitchenRosterCovered } from '../lib/kitchenSnapshot';
+import { loadKitchenSnapshot, assertKitchenRosterCovered, verifiedKitchenRoster, hasKitchenDeliveryOnDate } from '../lib/kitchenSnapshot';
 import { downloadCustomerPaperPdf, downloadCustomerPaperWord } from './kitchenPaperCustomer';
 
 const date = '2026-10-20';
@@ -141,4 +141,52 @@ test('PDF and Word retain calculated portion quantities, warnings, date and form
     global.Blob = originalBlob; URL.createObjectURL = originalCreate; URL.revokeObjectURL = originalRevoke;
     click.mockRestore(); jest.useRealTimers();
   }
+});
+
+
+test('kitchen accepts the email-resolved renewal instead of requiring a stale saved ID', async () => {
+  const api = { get: jest.fn().mockResolvedValue({ data: { success: true, data: {
+    subscription_id: 'renewed', plan_name: 'Custom', macros: { carbohydrates: 100, protein: 120, fat: 40 }
+  } } }) };
+  const [result] = await enrichSelectionsWithNutrition(api, [{ ...customer, matterSubscriptionId: 'stale' }], { current: new Map() });
+  expect(result.nutritionStatus).toBe('resolved');
+  expect(result.matterSourceSubscriptionId).toBe('renewed');
+  expect(result.targetMacros).toEqual({ C: 100, P: 120, F: 40 });
+  const [withoutEmail] = await enrichSelectionsWithNutrition(api, [{ matterSubscriptionId: 'stale' }], { current: new Map() });
+  expect(withoutEmail.nutritionStatus).toBe('failed');
+});
+
+
+test('paper and counting exclude customers absent from the active date roster and locally skipped days', () => {
+  const entry = { email: customer.email, matterSubscriptionId: 'old', matterSourceSubscriptionId: 'renewed' };
+  const roster = [{ subscription_id: 'renewed', email: customer.email }];
+  expect(hasKitchenDeliveryOnDate(entry, [], '2026-10-22')).toBe(false);
+  expect(hasKitchenDeliveryOnDate(entry, roster, '2026-10-23')).toBe(true);
+  expect(hasKitchenDeliveryOnDate({ ...entry, skippedDays: [{ date: '2026-10-23' }] }, roster, '2026-10-23')).toBe(false);
+  expect(hasKitchenDeliveryOnDate(entry, [{ subscription_id: 'old', email: customer.email }], date)).toBe(false);
+});
+
+test('missing or partial active delivery rosters cannot produce kitchen quantities', () => {
+  for (const response of [null, { success: false, data: [] }, { success: true, complete: false, data: [] }, { success: true }]) {
+    expect(() => verifiedKitchenRoster(response)).toThrow('incomplete');
+  }
+  expect(verifiedKitchenRoster({ success: true, data: [] })).toEqual([]);
+});
+
+test('paper snapshot retains meals only on dates with an active Matter delivery', async () => {
+  const day1 = '2026-10-22', day2 = '2026-10-23';
+  const api = {
+    post: async () => ({ data: { success: true, preparation: 'completed' } }),
+    get: async (path, options) => {
+      if (path.endsWith('/selections')) return { data: { success: true, data: [{ ...customer, selectedMeals: [{ ...meal, date: day1 }, { ...meal, date: day2 }] }] } };
+      if (path.includes('kitchen-inputs')) return { data: { success: true, data: { plan_name: 'Custom', macros: { carbohydrates: 38, protein: 32, fat: 10 }, active_delivery_dates: [day2] } } };
+      if (path.includes('delivery-on-date')) return { data: { success: true, data: options.params.date === day2 ? [{ email: customer.email, meal_frequency: 1 }] : [] } };
+      return { data: { success: true, data: {} } };
+    }
+  };
+  expect((await loadKitchenSnapshot(api, 'menu', [day1])).entries).toEqual([]);
+  const snapshot = await loadKitchenSnapshot(api, 'menu', [day1, day2]);
+  expect(snapshot.entries).toHaveLength(1);
+  expect(snapshot.entries[0].selectedMeals.map(m => m.date)).toEqual([day2]);
+  expect(snapshot.entries[0].deliveryDates).toEqual([day2]);
 });
