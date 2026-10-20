@@ -24,7 +24,7 @@ const monthLabel = (date) => date.toLocaleDateString('en-US', { month: 'long', y
  * right now (e.g. a resume date that's in a different month than the skip
  * date sitting right next to it in the list).
  */
-const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, onSelectDate, minSelectableDate = null, jumpToMonth = null, blockedDates = [], weekendEnabled = true }) => {
+const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, selectedDates = [], onSelectDate, minSelectableDate = null, jumpToMonth = null, blockedDates = [], weekendEnabled = true }) => {
   const [viewMonth, setViewMonth] = useState(() => {
     const anchor = initialMonth ? fromKey(initialMonth) : new Date();
     return new Date(anchor.getFullYear(), anchor.getMonth(), 1);
@@ -101,8 +101,7 @@ const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, on
           const isSkip = kinds.includes('skip');
           const isResume = kinds.includes('resume');
           const isActive = kinds.includes('active');
-          const isSuggested = kinds.includes('suggested');
-          const isSelected = key === selectedDate;
+          const isSelected = key === selectedDate || selectedDates.includes(key);
           const isPast = key < todayKey;
           const isBelowMin = minSelectableDate ? key < minSelectableDate : false;
           const weekday = fromKey(key).getDay();
@@ -111,7 +110,7 @@ const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, on
           // A marked date (skip or resume) is a full filled circle behind
           // the number, not a small dot — resume wins if a date is somehow
           // both (rare: a resume date landing on another row's skip date).
-          const markerColor = isSkip ? '#DC2626' : isActive ? '#64748B' : isResume ? '#16A34A' : isSuggested ? '#2563EB' : null;
+          const markerColor = isSkip ? '#DC2626' : isActive ? '#2F80FF' : isResume ? '#16A34A' : null;
           return (
             <button
               key={i}
@@ -132,7 +131,7 @@ const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, on
                 fontSize: 12.5,
                 fontFamily: 'inherit',
               }}
-              aria-label={`${key}${isSkip ? ', paused (fixed)' : isActive ? ', active delivery (unavailable)' : isResume ? ', resume delivery' : isSuggested ? ', suggested resume (not selected)' : ''}`}
+              aria-label={`${key}${isSkip ? ', paused (fixed)' : isActive ? ', active delivery (unavailable)' : isResume ? ', resume delivery' : ''}`}
               aria-pressed={isSelected}
               title={isSkip ? 'Paused day (fixed)' : isActive ? 'Active delivery (unavailable)' : isResume ? 'Resumes here' : undefined}
             >
@@ -144,8 +143,7 @@ const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, on
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10, fontSize: 11.5, color: 'var(--color-neutral-600)' }}>
         <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#DC2626', display: 'inline-block', marginRight: 4 }} />Paused</span>
         <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#16A34A', display: 'inline-block', marginRight: 4 }} />Resumes</span>
-        <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#64748B', display: 'inline-block', marginRight: 4 }} />Active delivery</span>
-        <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#2563EB', display: 'inline-block', marginRight: 4 }} />Suggested</span>
+        <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#2F80FF', display: 'inline-block', marginRight: 4 }} />Active delivery</span>
       </div>
     </div>
   );

@@ -137,7 +137,7 @@ const menuSelectionRecordSchema = new mongoose.Schema({
 
   // Days the customer chose to skip in the menu-selection link. Each entry
   // tracks the outcome of the automatic Matter subscription pause created for
-  // that day (paused day + resume day placed after the cycle end). Surfaced
+  // that day (paused day + the customer's chosen resume day). Surfaced
   // in the admin selections view only — never sent to the customer.
   skippedDays: [{
     date: { type: String },              // "YYYY-MM-DD"
@@ -149,7 +149,7 @@ const menuSelectionRecordSchema = new mongoose.Schema({
       enum: ['pending', 'success', 'already_paused', 'failed', 'declined'],
       default: 'pending'
     },
-    resumeDate: { type: String },        // "YYYY-MM-DD" assigned after cycle end (on success)
+    resumeDate: { type: String },        // "YYYY-MM-DD" explicitly chosen by the customer
     subscriptionId: { type: String },
     error: { type: String },             // failure detail shown next to the date in admin
     processedAt: { type: Date }

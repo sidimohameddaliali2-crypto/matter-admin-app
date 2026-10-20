@@ -166,6 +166,19 @@ function buildDemoModel() {
   return { menuName: DEMO_MENU_NAME, menuRange: DEMO_MENU_RANGE, dayKeys, meals };
 }
 
+function expandSaturdaySkips(dates, deliveryDates) {
+  const result = new Set(dates);
+  const eligible = new Set(deliveryDates || []);
+  dates.forEach((key) => {
+    const date = dateFromKey(key);
+    if (date.getDay() !== 6) return;
+    date.setDate(date.getDate() + 1);
+    const sunday = toDateKey(date);
+    if (eligible.has(sunday)) result.add(sunday);
+  });
+  return [...result].sort();
+}
+
 function buildRealModel(weeklyMenu, profile) {
   const weekendOk = !!profile?.weekend;
   const rows = Array.isArray(weeklyMenu?.meals) ? weeklyMenu.meals : [];
@@ -301,7 +314,12 @@ const MenuSelectionLink = ({ token }) => {
   const [account, setAccount] = useState(null); // normalized customer
   const [day, setDay] = useState(0);
   const [qty, setQty] = useState({});
-  const [skipped, setSkipped] = useState({});
+  const [manualSkipped, setSkipped] = useState({});
+  const skipped = useMemo(() => {
+    const keys = model?.dayKeys || [];
+    const dates = new Set(expandSaturdaySkips(keys.filter((_, i) => manualSkipped[i]), keys));
+    return Object.fromEntries(keys.map((key, i) => [i, dates.has(key)]));
+  }, [manualSkipped, model]);
   // Snapshot of `skipped` taken at the moment of a successful submit. Once a
   // day has been submitted as skipped, "Change my selections" can no longer
   // un-skip (or re-skip) it — a skip actually pauses that delivery on the
@@ -316,9 +334,9 @@ const MenuSelectionLink = ({ token }) => {
   const [modal, setModal] = useState(null);
   // Pause-confirmation calendar: open only when the customer hits final
   // submit with >=1 day skipped (see onSubmitButton). `skipPauseReview` holds
-  // what skip-pause-preview suggested; nothing is sent to select-meals until
+  // the availability from skip-pause-preview; nothing is sent to select-meals until
   // the customer confirms it (SkipPauseCalendarModal's onConfirm -> doSubmit).
-  const [skipPauseReview, setSkipPauseReview] = useState(null); // { pauses: [{date, alreadyPaused, suggestedResumeDate}] } | null
+  const [skipPauseReview, setSkipPauseReview] = useState(null); // Availability and pause dates, without generated resume dates.
   const [pausePreviewLoading, setPausePreviewLoading] = useState(false);
   // Frozen at the moment of a successful submit (same convention as
   // lockedSkipDays) so the done screen's Renew button can't drift if the
@@ -436,6 +454,7 @@ const MenuSelectionLink = ({ token }) => {
         plan: profile.mealPlan || 'Meal plan',
         perDay: Number(profile.mealPerDay) || 1,
         weekend: !!profile.weekend,
+        deliveryDates: profile.deliveryDates || built.dayKeys,
         // Menu-selection Partner members (Customer.unlimitedMeals) have no daily cap.
         unlimitedMeals: !!profile.unlimitedMeals,
         allergensDisplay,
@@ -745,7 +764,10 @@ const MenuSelectionLink = ({ token }) => {
           ...(mealFlags[m.key] || {}),
         });
       });
-      const skippedDates = dayKeys.filter((_, i) => skipped[i]);
+      const skippedDates = [...new Set([
+        ...expandSaturdaySkips(dayKeys.filter((_, i) => skipped[i]), account.deliveryDates || dayKeys),
+        ...(pauseDecisions || []).map((d) => d.date),
+      ])];
       const res = await api.post(`/menus/customers/${encodeURIComponent(account.email)}/select-meals`, {
         weeklyMenuId: rawMenu._id,
         selections,
@@ -762,7 +784,7 @@ const MenuSelectionLink = ({ token }) => {
             pauses: review.pauses.map((p) => {
               const result = res.data.pauseResults.find((r) => r.date === p.date);
               const confirmed = pauseDecisions?.find((d) => d.date === p.date);
-              return { ...p, alreadyPaused: p.alreadyPaused || ['success', 'already_paused'].includes(result?.pauseStatus), suggestedResumeDate: result?.resumeDate || confirmed?.resumeDate || p.suggestedResumeDate };
+              return { ...p, alreadyPaused: p.alreadyPaused || ['success', 'already_paused'].includes(result?.pauseStatus), resumeDate: result?.resumeDate || confirmed?.resumeDate || p.resumeDate };
             }),
           } : review);
           return;
@@ -781,19 +803,19 @@ const MenuSelectionLink = ({ token }) => {
     }
   }, [account, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped]);
 
-  // Fetches suggested resume dates for the currently-skipped days and opens
+  // Fetches available dates for the currently-skipped days and opens
   // the pause-confirmation calendar. Never calls select-meals itself — the
   // whole submission (meals + pauses) waits for the modal's confirm action
   // (handleConfirmPauseReview below).
   const openSkipPauseReview = useCallback(async (skippedDateKeys) => {
     setPausePreviewLoading(true);
-    setSkipPauseReview({ pauses: skippedDateKeys.map((date) => ({ date, alreadyPaused: false, suggestedResumeDate: null })) });
+    setSkipPauseReview({ pauses: skippedDateKeys.map((date) => ({ date, alreadyPaused: false, resumeDate: null })) });
     try {
       const res = await api.post(`/menus/customers/${encodeURIComponent(account.email)}/skip-pause-preview`, {
         dates: skippedDateKeys,
       });
       const pauses = res.data?.data?.pauses;
-      setSkipPauseReview({ ...res.data?.data, pauses: Array.isArray(pauses) && pauses.length ? pauses : skippedDateKeys.map((date) => ({ date, alreadyPaused: false, suggestedResumeDate: null })) });
+      setSkipPauseReview({ ...res.data?.data, pauses: Array.isArray(pauses) && pauses.length ? pauses : skippedDateKeys.map((date) => ({ date, alreadyPaused: false, resumeDate: null })) });
     } catch (err) {
       // Never block the customer from reviewing/confirming their skips just
       // because the suggestion lookup failed — they can still pick resume
@@ -833,7 +855,7 @@ const MenuSelectionLink = ({ token }) => {
       setDay((d) => d + 1);
       return;
     }
-    const skippedDateKeys = dayKeys.filter((_, i) => skipped[i]);
+    const skippedDateKeys = expandSaturdaySkips(dayKeys.filter((_, i) => skipped[i]), account?.deliveryDates || dayKeys);
     if (preview || skippedDateKeys.length === 0) {
       doSubmit();
       return;
@@ -864,6 +886,10 @@ const MenuSelectionLink = ({ token }) => {
   // Locked once this day was submitted as skipped (see doSubmit) — "Change
   // my selections" can revisit it, but the skip itself can't be undone.
   const skipLockedToday = !!lockedSkipDays[day];
+  const currentDate = dayKeys[day] ? dateFromKey(dayKeys[day]) : null;
+  const previousDate = currentDate ? new Date(currentDate) : null;
+  previousDate?.setDate(previousDate.getDate() - 1);
+  const sundayIncluded = currentDate?.getDay() === 0 && !!skipped[dayKeys.indexOf(toDateKey(previousDate))];
   const dayHeading = dayKeys[day] ? fmtDayLong(dayKeys[day]) : `Day ${day + 1}`;
   const selectedToday = dayCount(day);
   const dayFull = !skippedToday && selectedToday >= target;
@@ -1240,19 +1266,21 @@ const MenuSelectionLink = ({ token }) => {
                 {skippedToday ? 'You skipped this day' : 'Not eating on this day?'}
               </div>
               <div className="text-muted" style={{ fontSize: 12.5, marginTop: 2 }}>
-                {skipLockedToday
+                {sundayIncluded && !skipLockedToday
+                  ? 'Included because Saturday is skipped.'
+                  : skipLockedToday
                   ? 'Already submitted — contact customer service to change this.'
                   : deadlineLockedToday
                     ? 'The deadline for this day has passed — contact customer service to change this.'
                     : skippedToday
                       ? 'No delivery scheduled.'
-                      : 'Skip before browsing the menu.'}
+                      : currentDate?.getDay() === 6 ? 'Skipping Saturday also skips Sunday.' : 'Skip before browsing the menu.'}
               </div>
             </div>
             <button
               className="btn btn-secondary"
               onClick={() => setSkipped((s) => ({ ...s, [day]: !s[day] }))}
-              disabled={skipLockedToday || deadlineLockedToday}
+              disabled={skipLockedToday || deadlineLockedToday || sundayIncluded}
               title={
                 skipLockedToday
                   ? 'This skip was already submitted and can no longer be changed here.'
@@ -1558,4 +1586,4 @@ const MenuSelectionLink = ({ token }) => {
 };
 
 export default MenuSelectionLink;
-export { buildRealModel };
+export { buildRealModel, expandSaturdaySkips };

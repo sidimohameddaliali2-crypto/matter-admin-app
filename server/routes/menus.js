@@ -17,7 +17,7 @@ import supyService from '../services/supyService.js';
 import { withKitchenPreparation, preparationHasFailures } from '../services/kitchenPreparation.js';
 import { getNutritionForCustomerLink } from '../services/matterNutritionLookup.js';
 import { syncMenuSelectionMainMealsToPartnerMenu } from '../services/menuSelectionPartnerSync.js';
-import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, reconcilePendingPausesForRecord, validateRequiredResumeDates } from '../services/matterPauseResumeService.js';
+import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, validateRequiredResumeDates, expandSaturdaySkips } from '../services/matterPauseResumeService.js';
 import {
   resolveCustomerMatch,
   resolveCustomerMatchBulk,
@@ -46,12 +46,6 @@ const isWeekendKey = (dateKey) => {
   const day = new Date(y, m - 1, d).getDay();
   return day === 0 || day === 6;
 };
-// Thin wrapper kept for the fallback call site below — the real logic now
-// lives in matterPauseResumeService.js (reconcilePendingPausesForRecord),
-// shared with the pre-submit preview and the synchronous apply-on-confirm
-// path in POST /select-meals, so none of the three can disagree.
-const processSkippedDayPauses = reconcilePendingPausesForRecord;
-
 const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const buildEmailRegex = (email) => {
   const cleaned = String(email || '').trim();
@@ -3916,7 +3910,7 @@ router.post('/items', protect, async (req, res) => {
 /**
  * POST /api/customers/:email/skip-pause-preview
  * Read-only: for each date the customer has currently marked as skipped in
- * the selection screen, suggest the Matter resume date — WITHOUT calling
+ * the selection screen, return Matter's date availability — WITHOUT calling
  * Matter's pause endpoint. Powers the pause-confirmation calendar shown
  * before the customer confirms their submission (see select-meals below,
  * which applies whatever the customer actually confirms, not a recompute of
@@ -3957,12 +3951,11 @@ router.post('/customers/:email/skip-pause-preview', async (req, res) => {
     res.json({ success: true, data: preview });
   } catch (error) {
     console.error('Error previewing skip pauses:', error);
-    // Never block the calendar from opening — degrade to "no suggestion" per
-    // date so the customer can still pick a resume date by hand.
+    // Show the lookup error in the calendar and require a retry before confirming.
     const dates = Array.isArray(req.body?.dates) ? req.body.dates.map(toDayKey).filter(Boolean) : [];
     res.json({
       success: true,
-      data: { subscriptionId: null, availabilityError: 'Could not verify active deliveries with Matter. Please retry.', pauses: dates.map((date) => ({ date, alreadyPaused: false, suggestedResumeDate: null, error: error.message })) }
+      data: { subscriptionId: null, availabilityError: 'Could not verify active deliveries with Matter. Please retry.', pauses: dates.map((date) => ({ date, alreadyPaused: false, resumeDate: null, error: error.message })) }
     });
   }
 });
@@ -4057,9 +4050,11 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     skippedDateKeys = [...new Set([...priorByDate.keys(), ...skippedDateKeys])].sort();
     const alreadyPaused = new Set([...priorByDate].filter(([, p]) => ['success', 'already_paused'].includes(p.pauseStatus)).map(([date]) => date));
     const claimedExisting = [...pauseDecisionByDate.values()].filter((d) => d.alreadyPaused && !alreadyPaused.has(toDayKey(d.date)));
-    if (claimedExisting.length) {
+    const includesSaturday = skippedDateKeys.some((date) => new Date(`${date}T00:00:00Z`).getUTCDay() === 6);
+    if (claimedExisting.length || includesSaturday) {
       const ctx = await resolveSubscriptionContext({ email: cleanEmail, matterSubscriptionId: matterSub?.subscription_id || resolveMatterSubscriptionId(customer), matterCustomerId: matterSub?.customer_id || null });
       if (ctx.error) return res.status(502).json({ success: false, message: ctx.error });
+      skippedDateKeys = expandSaturdaySkips(skippedDateKeys, new Set([...ctx.activeDeliveryDates, ...ctx.existingPaused]));
       claimedExisting.forEach((d) => {
         d.alreadyPaused = ctx.existingPaused.has(toDayKey(d.date));
         if (d.alreadyPaused) alreadyPaused.add(toDayKey(d.date));
@@ -4097,7 +4092,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     }));
 
     // Explicitly map selections to ensure quantity is preserved
-    const mappedSelections = (selections || []).map(sel => ({
+    const mappedSelections = (selections || []).filter((sel) => !skippedDateKeys.includes(toDayKey(sel.date))).map(sel => ({
       date: sel.date,
       mealType: sel.mealType,
       menuItemId: toMenuItemId(sel.menuItemId),
@@ -4264,7 +4259,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     // confirmation calendar, skip-pause-preview -> SkipPauseCalendarModal)
     // synchronously, before responding — the customer only sees "done" once
     // this has actually been attempted, never a server recompute of what
-    // skip-pause-preview suggested. Matter failures are caught inside
+    // the customer explicitly selected. Matter failures are caught inside
     // applyConfirmedPauses, recorded on skippedDays, and returned for the
     // customer to review/retry. Skips any date a prior submit already resolved to
     // success/already_paused, same dedupe as the skippedDays build above, so
@@ -4329,21 +4324,6 @@ router.post('/customers/:email/select-meals', async (req, res) => {
       data: customer
     });
 
-    // Fire-and-forget: pause each skipped day on the customer's Matter
-    // subscription and place the resume day after the cycle end. The customer
-    // has already been responded to and sees nothing about this — outcomes are
-    // recorded on MenuSelectionRecord.skippedDays for the admin view.
-    if (weeklyMenuId && skippedDateKeys.length > 0 && pauseDecisionByDate.size === 0) {
-      processSkippedDayPauses({
-        weeklyMenuId,
-        email: customer.email,
-        weekendEnabled: !!customer.weekend,
-        matterSubscriptionId: resolveMatterSubscriptionId(customer),
-        matterCustomerId: customer.matterCustomerId || null
-      }).catch((err) => {
-        console.error('processSkippedDayPauses failed for', customer.email, 'menu', weeklyMenuId, '-', err.message);
-      });
-    }
   } catch (error) {
     console.error('Error selecting meals:', error);
     res.status(500).json({
