@@ -66,6 +66,27 @@ export function extractCoordsFromGoogleMapsUrl(url) {
 }
 
 /**
+ * A pin typed or pasted by a person: either "25.1234, 55.5678" or a full
+ * Google Maps link containing the coordinates (@lat,lng, loc:lat,lng, q=lat,lng
+ * or the !3d..!4d.. form). Returns { lat, lng } or null. Short share links
+ * (maps.app.goo.gl) carry no coordinates and can't be resolved offline, so they
+ * return null.
+ */
+export function parsePinInput(input) {
+  if (!input || typeof input !== 'string') return null;
+  const text = input.trim();
+  const plain = text.match(/^(-?\d+(?:\.\d+)?)\s*[,;\s]\s*(-?\d+(?:\.\d+)?)$/);
+  if (plain) return { lat: parseFloat(plain[1]), lng: parseFloat(plain[2]) };
+  const fromUrl = extractCoordsFromGoogleMapsUrl(text);
+  if (fromUrl) return fromUrl;
+  const q = text.match(/[?&](?:q|query|ll)=(-?\d+\.\d+),(-?\d+\.\d+)/);
+  if (q) return { lat: parseFloat(q[1]), lng: parseFloat(q[2]) };
+  const d = text.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+  if (d) return { lat: parseFloat(d[1]), lng: parseFloat(d[2]) };
+  return null;
+}
+
+/**
  * Geocode an address to get lat/lng.
  *
  * Google only — deliberately, since 2026-09-05. This used to fall back to

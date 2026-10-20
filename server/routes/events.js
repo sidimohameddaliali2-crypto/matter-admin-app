@@ -291,7 +291,7 @@ router.get('/:id', auth, async (req, res) => {
  */
 router.post('/', auth, async (req, res) => {
   try {
-    const { eventName, companyId, companyName, companyLogo, eventDate, emirate, venue, arrivalTime, pointOfContact, flowerCollection, logistics, disassembly, isPaid, notes } = req.body;
+    const { eventName, companyId, companyName, companyLogo, eventDate, emirate, venue, arrivalTime, pointOfContact, flowerCollection, logistics, disassembly, isPaid, notes, driverProvider } = req.body;
 
     // predefined logos for known companies
     const logoMap = {
@@ -391,7 +391,8 @@ router.post('/', auth, async (req, res) => {
         notes: ''
       },
       notes,
-      isPaid: !!isPaid
+      isPaid: !!isPaid,
+      driverProvider: finalCompanyName === 'Yellow Block' && driverProvider === 'matter' ? 'matter' : 'yellow_block'
     };
 
     const event = new Event(eventData);
@@ -444,11 +445,15 @@ router.post('/', auth, async (req, res) => {
  */
 router.patch('/:id', auth, async (req, res) => {
   try {
-    const { eventName, eventDate, emirate, venue, arrivalTime, pointOfContact, flowerCollection, logistics, disassembly, status, notes, assignedDriver } = req.body;
+    const { eventName, eventDate, emirate, venue, arrivalTime, pointOfContact, flowerCollection, logistics, disassembly, status, notes, assignedDriver, driverProvider } = req.body;
 
     const event = await Event.findById(req.params.id);
     if (!event) {
       return res.status(404).json({ error: 'Event not found' });
+    }
+
+    if (event.companyName === 'Yellow Block' && (driverProvider === 'matter' || driverProvider === 'yellow_block')) {
+      event.driverProvider = driverProvider;
     }
 
     // Track old status before any changes (for WhatsApp notification)

@@ -98,6 +98,7 @@ const CreateEventModal = ({ isOpen, onClose }) => {
     companyId: user?.profile?._id || '',
     // logo preset from mapping
     companyLogo: companyOptions[0].logo,
+    driverProvider: 'yellow_block',
     eventDate: '',
     emirate: 'Dubai',
     venue: {
@@ -575,6 +576,7 @@ const CreateEventModal = ({ isOpen, onClose }) => {
         companyName: defaultCompanyName,
         companyId: user?.profile?._id || '',
         companyLogo: companyOptions[0].logo,
+        driverProvider: 'yellow_block',
         eventDate: '',
         emirate: 'Dubai',
         venue: {
@@ -700,6 +702,38 @@ const CreateEventModal = ({ isOpen, onClose }) => {
                   </div>
                 </div>
               </div>
+
+              {/* Assign driver: first field of a Yellow Block event */}
+              {formData.companyName === 'Yellow Block' && (
+                <div className="space-y-3 bg-pink-50 p-4 rounded-lg border border-pink-200">
+                  <h3 className="font-semibold text-gray-900">Assign Driver *</h3>
+                  <div className="grid grid-cols-2 gap-3">
+                    {[
+                      { value: 'yellow_block', label: 'Yellow Block driver' },
+                      { value: 'matter', label: 'Matter driver' }
+                    ].map((opt) => (
+                      <label
+                        key={opt.value}
+                        className={`flex items-center gap-3 cursor-pointer rounded-lg px-3 py-2 border-2 bg-white ${
+                          formData.driverProvider === opt.value ? 'border-blue-600' : 'border-gray-300'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="driverProvider"
+                          checked={formData.driverProvider === opt.value}
+                          onChange={() => handleInputChange('driverProvider', opt.value)}
+                          className="w-4 h-4"
+                        />
+                        <span className="text-gray-700 font-medium">{opt.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                  {formData.driverProvider === 'matter' && (
+                    <p className="text-xs text-blue-700">This event will be delivered by a Matter driver and shown pink and blue on the calendar.</p>
+                  )}
+                </div>
+              )}
 
               {/* Basic Info */}
               <div className="space-y-4">

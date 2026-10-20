@@ -41,7 +41,7 @@ export async function runImportMatterDeliveriesOnce(dateKey = tomorrowDateKey())
     console.log(
       `[MatterImport] ${dateKey}: ${summary.created} created, ${summary.alreadyExisted} already imported, ` +
       `${summary.alreadyHadOtherDelivery} already had a delivery from elsewhere, ` +
-      `${summary.customersCreated} new customer(s), ${summary.failed} failed (of ${summary.total} subscriptions).`
+      `${summary.customersCreated} new customer(s), ${summary.discoveryFailed || 0} discovery failure(s), ${summary.writeFailed || 0} write failure(s) (of ${summary.total} subscriptions); complete=${summary.complete !== false}.`
     );
     if (summary.failed > 0) {
       console.error('[MatterImport] Failures:', JSON.stringify(summary.errors.slice(0, 10)));

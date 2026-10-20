@@ -314,7 +314,9 @@ const EventDetailModal = ({ isOpen, onClose }) => {
           >
             {/* Header */}
             <div style={{
-              background: `linear-gradient(to right, ${getCompanyColor(selectedEvent.companyName).bgFrom} 0%, ${getCompanyColor(selectedEvent.companyName).bgTo} 100%)`
+              background: (selectedEvent.companyName === 'Yellow Block' && selectedEvent.driverProvider === 'matter')
+                ? 'linear-gradient(to right, #f0a3ed 0%, #f0a3ed 50%, #2563eb 50%, #2563eb 100%)'
+                : `linear-gradient(to right, ${getCompanyColor(selectedEvent.companyName).bgFrom} 0%, ${getCompanyColor(selectedEvent.companyName).bgTo} 100%)`
             }} className="p-6 flex items-center justify-between">
               <div className="flex items-center gap-4">
                 {selectedEvent.companyLogo ? (
@@ -347,6 +349,11 @@ const EventDetailModal = ({ isOpen, onClose }) => {
                 <div className={`px-4 py-2 rounded-lg border font-semibold text-sm ${statusColors[selectedEvent.status]}`}>
                   {selectedEvent.status.replace('_', ' ').toUpperCase()}
                 </div>
+                {selectedEvent.companyName === 'Yellow Block' && selectedEvent.driverProvider === 'matter' && (
+                  <div className="px-4 py-2 rounded-lg border border-blue-300 bg-blue-50 text-blue-800 font-semibold text-sm">
+                    🚚 Delivered by Matter driver
+                  </div>
+                )}
                 {!isEditing && (
                   <div className="flex gap-2 ml-auto flex-wrap">
                     <button

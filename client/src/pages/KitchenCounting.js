@@ -1,3 +1,5 @@
+import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
+import { assertKitchenRosterCovered } from '../lib/kitchenSnapshot';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { ChefHat, Download, Loader, RefreshCw } from 'lucide-react';
 // xlsx is only needed once a staff member clicks an export button — loaded
@@ -42,6 +44,10 @@ const KitchenCounting = () => {
   const [error, setError] = useState('');
   const [customerEntries, setCustomerEntries] = useState([]);
   const nutritionCacheRef = useRef(new Map());
+  const requestGuard = useRef(createKitchenRequestGuard());
+  const activeScope = useRef('');
+  activeScope.current = `${selectedMenuId}:${selectedDate}`;
+  const [loadedScope, setLoadedScope] = useState('');
 
   useEffect(() => {
     const loadMenus = async () => {
@@ -122,20 +128,24 @@ const KitchenCounting = () => {
   );
 
   const loadCounts = useCallback(async () => {
-    if (!selectedMenuId || !selectedDate) return;
+    const request = requestGuard.current.begin();
+    const scope = `${selectedMenuId}:${selectedDate}`;
+    const current = () => requestGuard.current.isCurrent(request) && activeScope.current === scope;
+    setCustomerEntries([]);
+    setLoadedScope('');
+    if (!selectedMenuId || !selectedDate) { setLoading(false); return; }
+    nutritionCacheRef.current.clear();
     setLoading(true);
     setError('');
     try {
-      // autoPopulateDate (Stage 3): silently fills in placeholder selections
-      // for any Matter subscriber with a delivery this date who never
-      // submitted one themselves, before the server returns this list.
-      const response = await api.get(`/menus/${selectedMenuId}/selections`, {
-        params: { autoPopulateDate: selectedDate }
-      });
+      // Explicit preparation must finish before the selections snapshot is read.
+      await prepareKitchenSelections(api, selectedMenuId, selectedDate, current);
+      if (!current()) return;
+      const response = await api.get(`/menus/${selectedMenuId}/selections`);
       const rawSelections = response.data?.success ? (response.data.data || []) : [];
 
       const breakfastState = await fetchBreakfastPresets(api, selectedMenuId);
-      const snackState = await fetchSnackPresets(api).catch(() => ({ presetsByName: {} }));
+      const snackState = await fetchSnackPresets(api);
 
       // Same nutrition resolution as Kitchen List: matterSubscriptionId first
       // (an internally-matched customer whose Matter email differs from
@@ -148,9 +158,10 @@ const KitchenCounting = () => {
       // first (uncached) load, with nothing on screen to show it's actually
       // progressing rather than stuck. loadProgress renders as "N / total"
       // under the spinner so a slow load reads as slow, not frozen.
+      if (!current()) return;
       setLoadProgress({ done: 0, total: rawSelections.length });
       const enrichedSelections = await enrichSelectionsWithNutrition(api, rawSelections, nutritionCacheRef, {
-        onEach: () => setLoadProgress((prev) => ({ ...prev, done: prev.done + 1 }))
+        onEach: () => { if (current()) setLoadProgress((prev) => ({ ...prev, done: prev.done + 1 })); }
       });
 
       const computed = enrichedSelections.map((entry) => {
@@ -176,10 +187,12 @@ const KitchenCounting = () => {
         timeout: 180000
       });
       const deliverySubs = deliveryRes.data?.data || [];
+      assertKitchenRosterCovered(rawSelections, deliverySubs, selectedDate);
       const deliveryEmails = new Set(deliverySubs.map((s) => String(s.email || '').trim().toLowerCase()).filter(Boolean));
       const deliverySubIds = new Set(deliverySubs.map((s) => String(s.subscription_id || '').trim()).filter(Boolean));
       const deliveryCustIds = new Set(deliverySubs.map((s) => String(s.customer_id ?? '').trim()).filter(Boolean));
       const hasDelivery = (entry) => {
+        if ((entry.skippedDays || []).some((day) => getDateKey(day.date || day) === selectedDate)) return false;
         if (entry.partner) return true;
         const subId = String(entry.matterSubscriptionId || '').trim();
         const custId = String(entry.matterCustomerId || '').trim();
@@ -187,15 +200,19 @@ const KitchenCounting = () => {
         return (subId && deliverySubIds.has(subId)) || (custId && deliveryCustIds.has(custId)) || (!!email && deliveryEmails.has(email));
       };
 
-      setCustomerEntries(computed.filter(hasDelivery));
+      if (!current()) return;
+      const deliverable = computed.filter(hasDelivery);
+      assertKitchenExportReady(deliverable);
+      setCustomerEntries(deliverable);
+      setLoadedScope(scope);
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to load kitchen counting data');
+      if (current()) { setCustomerEntries([]); setError(err.response?.data?.message || err.message || 'Failed to load kitchen counting data'); }
     } finally {
-      setLoading(false);
+      if (current()) setLoading(false);
     }
   }, [selectedMenuId, selectedDate]);
 
-  useEffect(() => { loadCounts(); }, [loadCounts]);
+  useEffect(() => { loadCounts(); return () => requestGuard.current.cancel(); }, [loadCounts]);
 
   // The whole point of this page: cook-counts must exactly match what
   // Kitchen List shows for the same menu+date — guaranteed here because both
@@ -205,7 +222,7 @@ const KitchenCounting = () => {
   const countRows = useMemo(() => {
     const grouped = new Map();
 
-    customerEntries.forEach((entry) => {
+    (loadedScope === `${selectedMenuId}:${selectedDate}` ? customerEntries : []).forEach((entry) => {
       (entry.selectedMeals || [])
         .filter((meal) => getDateKey(meal?.date) === selectedDate)
         .forEach((meal) => {
@@ -252,7 +269,7 @@ const KitchenCounting = () => {
       if (a.mealName !== b.mealName) return a.mealName.localeCompare(b.mealName);
       return b.count - a.count;
     });
-  }, [customerEntries, selectedDate]);
+  }, [customerEntries, selectedDate, selectedMenuId, loadedScope]);
 
   const totalMealCount = countRows
     .filter((r) => r.category === 'meal')
@@ -264,8 +281,10 @@ const KitchenCounting = () => {
   // here, one per portion, not one row with a quantity column, so the
   // kitchen can tick off physical portions one by one.
   const downloadMealCustomerList = async (category, mealName) => {
+    if (loading || error || loadedScope !== `${selectedMenuId}:${selectedDate}`) return;
+    assertKitchenExportReady(customerEntries);
     const rows = [];
-    customerEntries.forEach((entry) => {
+    (loadedScope === `${selectedMenuId}:${selectedDate}` ? customerEntries : []).forEach((entry) => {
       (entry.selectedMeals || [])
         .filter((meal) => getDateKey(meal?.date) === selectedDate)
         .filter((meal) => (meal.category || 'meal') === category && countingMealName(meal) === mealName)
@@ -293,12 +312,17 @@ const KitchenCounting = () => {
     const XLSX = await loadXLSX();
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(customerEntries.map((entry) => ({ Customer: entry.customerName || entry.email, Date: selectedDate, Formula: entry.formulaVersion, 'Nutrition checked': entry.nutritionResolvedAt || 'Partner preset', Plan: entry.planName || 'Partner' }))), 'Inputs');
+    const warnings = customerEntries.flatMap((entry) => (entry.selectedMeals || []).filter((meal) => getDateKey(meal.date) === selectedDate).flatMap((meal) => kitchenMealWarnings(meal).map((warning) => ({ Customer: entry.customerName || entry.email, Meal: meal.mealName, Warning: warning, Date: selectedDate, Formula: entry.formulaVersion }))));
+    if (warnings.length) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(warnings), 'Attention');
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Customers');
     const safeName = mealName.replace(/[^a-z0-9]+/gi, '-').toLowerCase().replace(/^-+|-+$/g, '');
     XLSX.writeFile(workbook, `kitchen-counting-${safeName}-${selectedDate}.xlsx`);
   };
 
   const exportToExcel = async () => {
+    if (loading || error || loadedScope !== `${selectedMenuId}:${selectedDate}`) return;
+    assertKitchenExportReady(customerEntries);
     if (countRows.length === 0) return;
     const rows = countRows.map((r) => ({
       Category: CATEGORY_LABEL[r.category] || r.category,
@@ -311,6 +335,9 @@ const KitchenCounting = () => {
     const XLSX = await loadXLSX();
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(customerEntries.map((entry) => ({ Customer: entry.customerName || entry.email, Date: selectedDate, Formula: entry.formulaVersion, 'Nutrition checked': entry.nutritionResolvedAt || 'Partner preset', Plan: entry.planName || 'Partner' }))), 'Inputs');
+    const warnings = customerEntries.flatMap((entry) => (entry.selectedMeals || []).filter((meal) => getDateKey(meal.date) === selectedDate).flatMap((meal) => kitchenMealWarnings(meal).map((warning) => ({ Customer: entry.customerName || entry.email, Meal: meal.mealName, Warning: warning, Date: selectedDate, Formula: entry.formulaVersion }))));
+    if (warnings.length) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(warnings), 'Attention');
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Counting');
     XLSX.writeFile(workbook, `kitchen-counting-${selectedDate || 'export'}.xlsx`);
   };
@@ -336,7 +363,7 @@ const KitchenCounting = () => {
             <label className="mb-2 block text-sm font-semibold text-slate-700">Menu</label>
             <select
               value={selectedMenuId}
-              onChange={(e) => setSelectedMenuId(e.target.value)}
+              onChange={(e) => { requestGuard.current.cancel(); setLoadedScope(''); setSelectedDate(''); setSelectedMenuId(e.target.value); }}
               disabled={loadingMenus}
               className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm focus:border-slate-900 focus:outline-none"
             >
@@ -352,7 +379,7 @@ const KitchenCounting = () => {
             <div className="flex gap-3">
               <select
                 value={selectedDate}
-                onChange={(e) => setSelectedDate(e.target.value)}
+                onChange={(e) => { requestGuard.current.cancel(); setLoadedScope(''); setSelectedDate(e.target.value); }}
                 disabled={!selectedMenuId || menuDateKeys.length === 0}
                 className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm focus:border-slate-900 focus:outline-none disabled:opacity-50"
               >
@@ -398,7 +425,7 @@ const KitchenCounting = () => {
               <button
                 type="button"
                 onClick={exportToExcel}
-                disabled={countRows.length === 0}
+                disabled={loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}` || countRows.length === 0}
                 className="inline-flex items-center gap-2 rounded-2xl bg-amber-400 px-4 py-2.5 text-sm font-semibold text-slate-900 hover:bg-amber-300 disabled:opacity-50"
               >
                 <Download size={16} /> Export Excel

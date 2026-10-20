@@ -290,13 +290,15 @@ class MatterApiService {
 
     const CONCURRENCY = 20;
     const matches = [];
+    const failures = [];
 
     for (let i = 0; i < candidates.length; i += CONCURRENCY) {
       const batch = candidates.slice(i, i + CONCURRENCY);
       const results = await Promise.all(batch.map(async (sub) => {
         try {
           const detail = await this.getSubscription(sub.subscription_id);
-          const schedule = detail?.data?.delivery_schedule || [];
+          const schedule = detail?.data?.delivery_schedule;
+          if (!Array.isArray(schedule)) throw new Error('Delivery schedule is missing');
           const deliveryDates = schedule
             .filter((entry) => {
               const d = String(entry.date).slice(0, 10);
@@ -347,12 +349,20 @@ class MatterApiService {
           }));
         } catch (error) {
           console.error(`delivery-in-range check failed for subscription ${sub.subscription_id}:`, error.message);
+          failures.push({ subscriptionId: String(sub.subscription_id), message: 'Unable to verify delivery schedule' });
           return [];
         }
       }));
       matches.push(...results.flat());
     }
 
+    if (failures.length) {
+      const error = new Error(`Delivery roster is incomplete: ${failures.length} subscription lookup(s) failed. Retry before preparing kitchen quantities or importing deliveries.`);
+      error.code = 'INCOMPLETE_DELIVERY_ROSTER';
+      error.statusCode = 503;
+      error.discovery = { complete: false, candidates: candidates.length, verified: candidates.length - failures.length, failed: failures.length, errors: failures };
+      throw error;
+    }
     return matches;
   }
 

@@ -146,6 +146,14 @@ const eventSchema = new mongoose.Schema(
       disassemblyTime: String,
       notes: String
     },
+    // Whose driver handles a Yellow Block event: their own ('yellow_block', the
+    // default and the only behaviour before this field existed) or a Matter
+    // driver ('matter'). Only meaningful when companyName is 'Yellow Block'.
+    driverProvider: {
+      type: String,
+      enum: ['yellow_block', 'matter'],
+      default: 'yellow_block'
+    },
     assignedDriver: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

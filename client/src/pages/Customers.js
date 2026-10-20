@@ -236,6 +236,9 @@ const AddCustomerModal = ({ onClose, onSubmit, isSubmitting, submitError }) => {
   );
 };
 
+const hasSavedPin = (g) => Number.isFinite(g?.lat) && Number.isFinite(g?.lng);
+const mapsUrlFor = (g) => `https://www.google.com/maps?q=${g.lat},${g.lng}`;
+
 const EditCustomerModal = ({ customer, onClose, onSubmit, isSubmitting, submitError }) => {
   const [form, setForm] = useState({
     customerId: customer.customerId || '',
@@ -244,6 +247,7 @@ const EditCustomerModal = ({ customer, onClose, onSubmit, isSubmitting, submitEr
     phone: customer.phone && customer.phone !== 'N/A' ? customer.phone : '',
     company: customer.company && customer.company !== 'N/A' ? customer.company : '',
     address: customer.address && customer.address !== 'N/A' ? customer.address : '',
+    mapsLink: hasSavedPin(customer.gpsLocation) ? `${customer.gpsLocation.lat}, ${customer.gpsLocation.lng}` : '',
   });
   const set = (field) => (e) => setForm(p => ({ ...p, [field]: e.target.value }));
   const customerIdChanged = form.customerId.trim() !== customer.customerId;
@@ -284,6 +288,11 @@ const EditCustomerModal = ({ customer, onClose, onSubmit, isSubmitting, submitEr
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Address</label>
             <textarea rows={2} value={form.address} onChange={set('address')} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Map location</label>
+            <input type="text" value={form.mapsLink} onChange={set('mapsLink')} placeholder="Google Maps link or coordinates, e.g. 25.2048, 55.2708" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <p className="text-xs text-gray-500 mt-1">Saved on this customer and used for every delivery to this exact address. Leave empty to remove the pin.</p>
           </div>
           {submitError && <p className="text-sm text-red-600 whitespace-pre-line">{submitError}</p>}
           <div className="flex gap-3 pt-2">
@@ -425,6 +434,7 @@ const Customers = () => {
         phone: formData.phone.trim(),
         company: formData.company.trim(),
         address: formData.address.trim(),
+        mapsLink: (formData.mapsLink || '').trim(),
       };
 
       const { data } = await api.patch(`/customers/${activeCustomerId}`, payload);
@@ -438,6 +448,7 @@ const Customers = () => {
         phone: saved.phone || payload.phone || 'N/A',
         company: saved.company || payload.company || 'N/A',
         address: saved.address || payload.address || 'N/A',
+        gpsLocation: saved.gpsLocation || null,
       };
 
       setSelectedCustomer(merged);
@@ -486,6 +497,7 @@ const Customers = () => {
           customerName: `${dbCustomer.firstName || ''} ${dbCustomer.lastName || ''}`.trim() || dbCustomer.firstName || 'Unknown',
           company: dbCustomer.company || 'N/A',
           address: dbCustomer.address || 'N/A',
+          gpsLocation: dbCustomer.gpsLocation || null,
           phone: dbCustomer.phone || 'N/A',
           email: dbCustomer.email || 'N/A',
           cpf: dbCustomer.cpf || null,
@@ -1488,6 +1500,14 @@ const Customers = () => {
                 <MapPin className="w-4 h-4 mr-2 mt-0.5 flex-shrink-0" />
                 {selectedCustomer.address}
               </p>
+              {hasSavedPin(selectedCustomer.gpsLocation) ? (
+                <p className="text-sm mt-1 ml-6">
+                  <span className="text-gray-500">Map pin: {Number(selectedCustomer.gpsLocation.lat).toFixed(5)}, {Number(selectedCustomer.gpsLocation.lng).toFixed(5)}</span>{' '}
+                  <a href={mapsUrlFor(selectedCustomer.gpsLocation)} target="_blank" rel="noopener noreferrer" className="text-blue-600 font-semibold hover:underline">Open map</a>
+                </p>
+              ) : (
+                <p className="text-xs text-gray-400 mt-1 ml-6">No map pin saved. Use Edit to add one.</p>
+              )}
             </div>
             {customerProfile?.athleatId && (
               <div className="md:col-span-2 pt-2 border-t">

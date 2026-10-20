@@ -101,6 +101,7 @@ export const normalizeSnackPresetMap = (rawMap) => {
 
 export const fetchSnackPresets = async (api) => {
   const response = await api.get('/menus/kitchen-snack-presets');
+  if (!response.data?.success) throw new Error('Snack presets could not be verified.');
   return { presetsByName: normalizeSnackPresetMap(response.data?.data?.presetsByName) };
 };
 
@@ -123,6 +124,7 @@ export const fetchBreakfastPresets = async (api, menuId) => {
 
   try {
     const response = await api.get('/menus/kitchen-breakfast-presets');
+    if (!response.data?.success) throw new Error('Breakfast presets could not be verified.');
     if (response.data?.success) {
       breakfastState = toBreakfastPresetState(response.data?.data || {});
     }
@@ -144,23 +146,18 @@ export const fetchBreakfastPresets = async (api, menuId) => {
     }
   }
 
-  // Prefer whatever came back from the server, but fall back to a previous
-  // session's cached presets if the server returned nothing usable.
-  const storedBreakfastState = loadBreakfastPresetFromStorage();
-  if (Object.keys(breakfastState.presetsByName || {}).length === 0 && Object.keys(storedBreakfastState.presetsByName || {}).length > 0) {
-    return storedBreakfastState;
-  }
+  // Production presets must come from this server load, never a previous browser session.
   return breakfastState;
 };
 
 export const getCustomerName = (entry) => {
-  const rawMatterName = String(entry?.matterName || '').trim();
+  const rawMatterName = String(entry?.matterName || '').replace(/\s+/g, ' ').trim();
   if (rawMatterName) {
     // Matter's names are sometimes typed all-lowercase or ALL CAPS — tidy only
     // those to Title Case; a name with mixed case is left exactly as Matter has it.
     const allOneCase = rawMatterName === rawMatterName.toLowerCase() || rawMatterName === rawMatterName.toUpperCase();
     return allOneCase
-      ? rawMatterName.toLowerCase().replace(/(^|[\s'-])([a-z])/g, (m, sep, ch) => sep + ch.toUpperCase())
+      ? rawMatterName.replace(/\s+/g, ' ').toLowerCase().replace(/(^|[\s'-])(\p{L})/gu, (m, sep, ch) => sep + ch.toUpperCase())
       : rawMatterName;
   }
   const first = String(entry?.firstName || '').trim();
@@ -275,14 +272,18 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
   const subscriptionId = String(entry?.matterSubscriptionId || '').trim();
   // Matter's permanent customer id — survives renewals, unlike subscriptionId.
   const matterCustomerId = String(entry?.matterCustomerId || '').trim();
+  if (entry?.partner) {
+    onEach?.();
+    return { ...entry, nutritionStatus: 'resolved', nutritionSource: 'partner-preset', nutritionResolvedAt: new Date().toISOString() };
+  }
   if (!email && !subscriptionId && !matterCustomerId) {
     onEach?.();
-    return entry;
+    return { ...entry, nutritionStatus: 'missing' };
   }
 
   const cacheKey = matterCustomerId ? `cust:${matterCustomerId}` : (subscriptionId ? `sub:${subscriptionId}` : email.toLowerCase());
   const cached = nutritionCacheRef.current.get(cacheKey);
-  if (cached) {
+  if (cached && Date.now() - Date.parse(cached.nutritionResolvedAt) < 60000) {
     onEach?.();
     return { ...entry, ...cached };
   }
@@ -297,12 +298,17 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
       : await api.get('/matter/subscriptions/nutrition-by-email', { params: { email }, timeout: 20000 });
     const nutrition = nutritionResponse.data?.data;
     const websiteMacros = nutrition?.macros
-      ? { C: nutrition.macros.carbohydrates || 0, P: nutrition.macros.protein || 0, F: nutrition.macros.fat || 0 }
+      ? { C: nutrition.macros.carbohydrates, P: nutrition.macros.protein, F: nutrition.macros.fat }
       : null;
 
     const enrichedFields = {
-      targetMacros: hasNonZeroMacros(websiteMacros) ? websiteMacros : entry?.targetMacros,
-      customerMacros: hasNonZeroMacros(websiteMacros) ? websiteMacros : entry?.customerMacros,
+      targetMacros: websiteMacros || {},
+      customerMacros: websiteMacros || {},
+      nutritionStatus: nutrition ? 'resolved' : 'missing',
+      nutritionSource: 'matter',
+      nutritionPlanKind: String(nutrition?.plan_name || '').trim().toLowerCase() === 'matter core' ? 'core' : 'ordinary',
+      nutritionUnits: String(nutrition?.plan_name || '').trim().toLowerCase() === 'matter core' ? 'food-weight-grams' : 'nutrient-grams',
+      nutritionResolvedAt: new Date().toISOString(),
       snacksPerDay: nutrition?.snacks_per_day ?? null,
       planName: nutrition?.plan_name ?? null,
       // Owner (2026-10-07): show the Matter name, not the internal record's
@@ -322,7 +328,7 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
     return { ...entry, ...enrichedFields };
   } catch {
     onEach?.();
-    return entry;
+    return { ...entry, nutritionStatus: 'failed', nutritionSource: 'matter' };
   }
 });
 

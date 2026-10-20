@@ -17,7 +17,11 @@ const partnerMenuItemSchema = new mongoose.Schema({
   availableTo: { type: Date, default: null },
   category: { type: String, default: '' },
   ingredients: { type: [String], default: [] },
-  sortOrder: { type: Number, default: 0 }
+  sortOrder: { type: Number, default: 0 },
+  // 'menu-selection' = auto-synced from a published WeeklyMenu's chicken/beef/fish
+  // rotation (see services/menuSelectionPartnerSync.js) — its availability window
+  // is managed by that sync, not an admin. 'manual' = entered directly in this menu.
+  source: { type: String, enum: ['manual', 'menu-selection'], default: 'manual' }
 }, { timestamps: true });
 
 partnerMenuItemSchema.index({ mealType: 1, sortOrder: 1 });

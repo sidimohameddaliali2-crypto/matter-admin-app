@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import * as XLSX from 'xlsx';
 import api from '../utils/api';
 import PrintConfigModal from '../components/deliveries/PrintConfigModal';
 import DeliveryDetailModal from '../components/deliveries/DeliveryDetailModal';
@@ -390,6 +391,37 @@ const Deliveries = () => {
     ? filteredDeliveries.filter((d) => selectedDeliveries.has(d._id))
     : filteredDeliveries);
 
+  // Excel delivery sheet: the selected rows, or everything currently shown.
+  // Times are rendered in Dubai time (same helper as the table), not the device's.
+  const handleDownloadExcel = () => {
+    const rows = getPrintTargets().map((d) => {
+      const scheduled = d.scheduledTime ? formatDate(d.scheduledTime) : null;
+      const actualAt = getActualDeliveryTime(d);
+      const actual = actualAt ? formatDate(actualAt) : null;
+      const lat = d.gpsLocation?.lat;
+      const lng = d.gpsLocation?.lng;
+      const hasPin = Number.isFinite(lat) && Number.isFinite(lng);
+      return {
+        'Customer ID': d.customerId || '',
+        'Customer Name': d.customerName || '',
+        Address: d.address || '',
+        Zone: d.zone || '',
+        'Scheduled Date': scheduled?.date || '',
+        'Scheduled Time': scheduled?.time || '',
+        'Delivered Time': actual ? `${actual.date} ${actual.time}` : '',
+        Latitude: hasPin ? lat : '',
+        Longitude: hasPin ? lng : '',
+        'GPS Location': hasPin ? `${lat}, ${lng}` : '',
+        'Map Link': d.gpsLocation?.link || (hasPin ? `https://www.google.com/maps?q=${lat},${lng}` : ''),
+      };
+    });
+    const ws = XLSX.utils.json_to_sheet(rows);
+    ws['!cols'] = [14, 26, 50, 16, 14, 14, 22, 11, 11, 22, 40].map((wch) => ({ wch }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Deliveries');
+    XLSX.writeFile(wb, `Delivery_Sheet_${selectedDate || 'all'}.xlsx`);
+  };
+
   const formattedSelectedDate = selectedDate ? new Date(`${selectedDate}T00:00:00`).toLocaleDateString() : 'All Dates';
 
   if (isLoading) {
@@ -455,6 +487,15 @@ const Deliveries = () => {
           >
             <span className="material-symbols-outlined text-[18px]">print</span>
             {hasSelections ? `Print (${selectedCount})` : `Print (${filteredDeliveries.length})`}
+          </button>
+          <button
+            onClick={handleDownloadExcel}
+            disabled={filteredDeliveries.length === 0}
+            title="Download the delivery sheet as Excel"
+            className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <span className="material-symbols-outlined text-[18px]">download</span>
+            {hasSelections ? `Excel (${selectedCount})` : `Excel (${filteredDeliveries.length})`}
           </button>
           <button
             onClick={handleDeleteSelectedDeliveries}

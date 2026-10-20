@@ -40,7 +40,8 @@ const FIXED_SELECTION_DEADLINES = [
   { deliveryDay: 'Sunday', daysBefore: 4, deadlineTime: '00:00' },
 ];
 import api from '../utils/api';
-import { lookupProteinWeight, lookupCarbWeight } from '../utils/nutrition';
+import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
+import { assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
 import SupyRecipeSearch from '../components/SupyRecipeSearch';
 import IngredientTagEditor from '../components/IngredientTagEditor';
 import { toSentenceCase } from '../utils/textFormat';
@@ -1201,65 +1202,20 @@ const MenuManagement = () => {
   const handleDownloadKitchenPaperPdf = async () => {
     if (!selectedCustomerDetail) return;
 
-    const normalizeMacros = (rawMacros) => {
-      if (!rawMacros) return null;
-      if (rawMacros.total) {
-        return {
-          C: Number(rawMacros.total.C) || 0,
-          P: Number(rawMacros.total.P) || 0,
-          F: Number(rawMacros.total.F) || 0,
-          calories: Number(rawMacros.total.calories) || 0
-        };
-      }
-      return {
-        C: Number(rawMacros.C) || 0,
-        P: Number(rawMacros.P) || 0,
-        F: Number(rawMacros.F) || 0,
-        calories: Number(rawMacros.calories) || 0
-      };
-    };
-
     try {
       setIsDownloadingKitchenPaper(true);
-
-      let macros = normalizeMacros(selectedCustomerDetail.macros);
-      let mealPerDay = Number(selectedCustomerDetail.mealPerDay) || 0;
-
-      if (selectionMenuId && selectedCustomerDetail.email) {
-        try {
-          const customerKey = encodeURIComponent(selectedCustomerDetail.customerId || selectedCustomerDetail.email);
-          const profileResponse = await api.get(
-            `/menus/customers/${customerKey}/meal-profile?email=${encodeURIComponent(selectedCustomerDetail.email)}&menuId=${encodeURIComponent(selectionMenuId)}`
-          );
-          if (profileResponse.data?.success) {
-            const profileData = profileResponse.data.data;
-            if (!macros || (macros.C === 0 && macros.P === 0 && macros.F === 0)) {
-              macros = normalizeMacros(profileData?.macros);
-            }
-            if (profileData?.mealPerDay) {
-              mealPerDay = Number(profileData.mealPerDay);
-            }
-          }
-        } catch (profileFetchError) {
-          console.warn('Unable to fetch meal profile for kitchen paper:', profileFetchError);
-        }
-      }
-
-      const selectedMeals = Array.isArray(selectedCustomerDetail.selectedMeals)
-        ? selectedCustomerDetail.selectedMeals
-        : [];
-
-      const totalSelectedMeals = selectedMeals.reduce((sum, meal) => sum + (Number(meal.quantity) || 1), 0) || 1;
-      const profileMeals = mealPerDay || totalSelectedMeals;
-      const totalC = Number(macros?.C) || 0;
-      const totalP = Number(macros?.P) || 0;
-      const totalF = Number(macros?.F) || 0;
-      const totalCalories = Math.round(totalC * 4 + totalP * 4 + totalF * 9);
-      const perMealC = Math.round(totalC / profileMeals);
-      const perMealP = Math.round(totalP / profileMeals);
-      const mealCarbWeight = lookupCarbWeight(perMealC);
-      const mealProteinWeight = lookupProteinWeight(perMealP);
-      const mealVegWeight = 80;
+      const selectedDates = [...new Set((selectedCustomerDetail.selectedMeals || []).map((meal) => getDateKey(meal.date || meal.menuItemId?.itemDate)).filter(Boolean))];
+      const snapshot = await loadKitchenSnapshot(api, selectionMenuId, selectedDates);
+      const entry = snapshot.entries.find((row) => String(row.email || '').toLowerCase() === String(selectedCustomerDetail.email || '').toLowerCase());
+      if (!entry) throw new Error('No confirmed delivery meals are available for this customer.');
+      assertKitchenExportReady([entry]);
+      const selectedMeals = entry.selectedMeals;
+      const totalSelectedMeals = selectedMeals.length;
+      const profileMeals = entry.mealsPerDay || totalSelectedMeals;
+      const totalC = selectedMeals.reduce((sum, meal) => sum + Number(meal.macros?.C || 0), 0);
+      const totalP = selectedMeals.reduce((sum, meal) => sum + Number(meal.macros?.P || 0), 0);
+      const totalF = selectedMeals.reduce((sum, meal) => sum + Number(meal.macros?.F || 0), 0);
+      const totalCalories = entry.totalCalories;
       const exclusion = selectedCustomerDetail.mealExclusion || selectedCustomerDetail.exclusions || 'None';
       const submittedAt = selectedCustomerDetail.lastMenuSelectionDate
         ? new Date(selectedCustomerDetail.lastMenuSelectionDate).toLocaleString('en-US', {
@@ -1310,6 +1266,7 @@ const MenuManagement = () => {
       currentY += addTextLines(`Submitted: ${submittedAt}`, margin, currentY);
       currentY += addTextLines(`Meal exclusion: ${exclusion}`, margin, currentY);
       currentY += addTextLines(`Total meals selected: ${totalSelectedMeals}`, margin, currentY);
+      currentY += addTextLines(`Formula: ${entry.formulaVersion} | Nutrition checked: ${entry.nutritionResolvedAt || "Partner preset"}`, margin, currentY);
       currentY += addTextLines(`Meals in profile: ${profileMeals}`, margin, currentY);
 
       currentY += 4;
@@ -1321,7 +1278,6 @@ const MenuManagement = () => {
       pdf.setFont('helvetica', 'normal');
       currentY += addTextLines(`Total Macros: C ${totalC}g, P ${totalP}g, F ${totalF}g`, margin, currentY);
       currentY += addTextLines(`Total Calories: ${totalCalories} kcal`, margin, currentY);
-      currentY += addTextLines(`Per meal (÷${profileMeals}): C ${perMealC}g → ${mealCarbWeight}g | P ${perMealP}g → ${mealProteinWeight}g | V ${mealVegWeight}g`, margin, currentY);
       currentY += 4;
 
       pdf.setFontSize(14);
@@ -1353,7 +1309,9 @@ const MenuManagement = () => {
             const mealLine = `• ${name} (${type})${quantity > 1 ? ` x${quantity}` : ''}`;
             const height = addTextLines(mealLine, margin + 2, currentY);
             currentY += height;
-            currentY += addTextLines(`  P: ${mealProteinWeight}g | C: ${mealCarbWeight}g | V: ${mealVegWeight}g`, margin + 4, currentY);
+            currentY += addTextLines(`  P: ${meal.proteinWeight}g | C: ${meal.carbWeight}g | V: ${meal.vegWeight}g`, margin + 4, currentY);
+            const warnings = kitchenMealWarnings(meal);
+            if (warnings.length) currentY += addTextLines(`  Review: ${warnings.join(' | ')}`, margin + 4, currentY);
             if (meal.carbVegAction) {
               currentY += addTextLines(`  - Carb/Veg action: ${meal.carbVegAction}`, margin + 4, currentY);
             }
@@ -1385,7 +1343,7 @@ const MenuManagement = () => {
       pdf.save(fileName);
     } catch (error) {
       console.error('Error generating kitchen paper PDF:', error);
-      alert('Failed to generate kitchen paper PDF. Please try again.');
+      alert(error.response?.data?.message || error.message || 'Failed to generate kitchen paper PDF. Please try again.');
     } finally {
       setIsDownloadingKitchenPaper(false);
     }

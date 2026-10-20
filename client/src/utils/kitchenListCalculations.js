@@ -1,3 +1,5 @@
+import { kitchenInputErrors, KITCHEN_FORMULA_VERSION } from './kitchenIntegrity';
+
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
 
 const calculateCalories = ({ C = 0, P = 0, F = 0 }) => {
@@ -478,6 +480,15 @@ const expandMealQuantities = (meals) => meals.flatMap((meal) => {
 
 export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelectedMeals = [], breakfastPreset = {}, snackPreset = {} }) => {
   const selectedMeals = expandMealQuantities(rawSelectedMeals);
+  const inputErrors = kitchenInputErrors(customer);
+  if (inputErrors.length) {
+    return {
+      ...customer, calculationStatus: 'incomplete', inputErrors, formulaVersion: KITCHEN_FORMULA_VERSION,
+      customerName: customer?.customerName || [customer?.firstName, customer?.lastName].filter(Boolean).join(' ') || customer?.email,
+      selectedMeals: selectedMeals.map((meal) => ({ ...meal, category: meal.mealType === 'breakfast' ? 'breakfast' : meal.mealType === 'snack' ? 'snack' : 'meal', weight: null, proteinWeight: null, carbWeight: null, vegWeight: null, macros: {}, inputErrors, flags: { invalidInput: true } })),
+      macros: {}, totalWeight: null, totalCalories: null, mealCount: selectedMeals.length,
+    };
+  }
   const snackPresetsByName = snackPreset?.presetsByName || {};
   const customerMacros = customer?.targetMacros
     || customer?.customerMacros
@@ -990,6 +1001,9 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
 
   return {
     customerId: customer?.customerId,
+    calculationStatus: 'complete', inputErrors: [], formulaVersion: KITCHEN_FORMULA_VERSION,
+    nutritionResolvedAt: customer?.nutritionResolvedAt || null,
+    skippedDays: customer?.skippedDays || [],
     // The caller's resolved display name wins (Kitchen List passes the Matter
     // name first, then the saved first/last name) — this used to be rebuilt
     // here from first/last only, so a customer saved with no name (or a

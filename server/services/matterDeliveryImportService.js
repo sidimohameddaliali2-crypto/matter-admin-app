@@ -3,6 +3,10 @@ import matterApiService from './matterApiService.js';
 import { resolveCustomerMatch, createCustomerFromMatterSubscription } from './customerMatchService.js';
 import { detectAreaFromAddress } from '../config/areas.js';
 import { getBusinessDayBounds } from '../utils/businessDate.js';
+import { displayMatterName } from '../utils/matterName.js';
+
+// Statuses after which a delivery's record is left exactly as it was.
+const FINISHED_STATUSES = new Set(['delivered', 'completed', 'collected', 'failed']);
 
 // Owner (2026-09-22): "read all the delivery schedule for the day from the
 // matter api and put them in the delivery page, use sub id for each
@@ -104,8 +108,14 @@ function unambiguousActiveAddress(addresses) {
  * a real duplicate driver stop, not just a harmless double DB row.
  */
 export async function importMatterDeliveriesForDate(dateKey) {
-  const matches = await matterApiService.findSubscriptionsWithDeliveryOnDate(dateKey);
-  const summary = { date: dateKey, total: matches.length, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, failed: 0, errors: [] };
+  let matches;
+  try {
+    matches = await matterApiService.findSubscriptionsWithDeliveryOnDate(dateKey);
+  } catch (error) {
+    if (error.code !== 'INCOMPLETE_DELIVERY_ROSTER') throw error;
+    return { date: dateKey, complete: false, total: error.discovery.candidates, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, failed: error.discovery.failed, discoveryFailed: error.discovery.failed, writeFailed: 0, errors: error.discovery.errors };
+  }
+  const summary = { date: dateKey, complete: true, discoveryFailed: 0, writeFailed: 0, total: matches.length, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, failed: 0, errors: [] };
 
   for (const sub of matches) {
     try {
@@ -115,9 +125,16 @@ export async function importMatterDeliveriesForDate(dateKey) {
       const existingFromThisImport = await Delivery.findOne({
         matterSubscriptionId: subscriptionId,
         scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive }
-      }).select('_id');
+      }).select('_id customerName status');
       if (existingFromThisImport) {
         summary.alreadyExisted += 1;
+        // A name changed (or was fixed) in Matter after the delivery was
+        // imported — keep the sheet in step, unless the delivery is finished.
+        const matterName = displayMatterName(sub.name);
+        if (matterName && existingFromThisImport.customerName !== matterName && !FINISHED_STATUSES.has(existingFromThisImport.status)) {
+          await Delivery.updateOne({ _id: existingFromThisImport._id }, { $set: { customerName: matterName } });
+          summary.namesRefreshed = (summary.namesRefreshed || 0) + 1;
+        }
         continue;
       }
 
@@ -171,7 +188,11 @@ export async function importMatterDeliveriesForDate(dateKey) {
       const hour = parseWindowHour(sub.delivery_window) ?? DEFAULT_WINDOW_HOUR;
       const scheduledTime = scheduledTimeFor(sub.delivery_date || dateKey, hour);
       const addressLine = buildAddressLine(useAddr) || sub.address || '';
-      const customerName = [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || sub.name || 'Matter Customer';
+      // Owner (2026-10-16): the Matter API's name first, so the delivery sheet
+      // matches the kitchen sheet; the internal record's name is only the fallback.
+      const customerName = displayMatterName(sub.name)
+        || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim()
+        || 'Matter Customer';
 
       await Delivery.create({
         customerId: customer.customerId,
@@ -201,6 +222,8 @@ export async function importMatterDeliveriesForDate(dateKey) {
       summary.created += 1;
     } catch (err) {
       summary.failed += 1;
+      summary.writeFailed += 1;
+      summary.complete = false;
       summary.errors.push({ subscription_id: sub.subscription_id, message: err.message });
     }
   }

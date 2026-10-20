@@ -1,3 +1,4 @@
+import { assertKitchenExportReady } from './kitchenIntegrity';
 // Kitchen paper for ONE customer over a custom date range (PDF and Word).
 //
 // One page per delivery date, each laid out like the customer's block on the
@@ -42,6 +43,7 @@ const breakfastLabelFor = (entry) => (entry.breakfastIncluded === null || entry.
 const isLargeBreakfast = (meal) => String(meal?.mealType || '').toLowerCase() === 'breakfast' && !!meal?.flags?.isLargeBreakfast;
 
 export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers }) => {
+  assertKitchenExportReady([entry]);
   const { getDateKey, formatDateLabel, getMealLabel, mealRemarkText, exclusionsText, formatAddress, loadJsPDF, loadAutoTable } = helpers;
   const { days, skipped, deliveryKnown } = getCustomerPaperDays({ entry, fromKey, toKey, getDateKey });
   if (days.length === 0) return { ok: false, days, skipped };
@@ -92,7 +94,7 @@ export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers 
 
     doc.setFont(undefined, 'bold');
     const planLines = doc.splitTextToSize(
-      `Plan: ${entry.planName || 'N/A'}  |  Meals/day: ${orNA(entry.mealsPerDay)}  |  Snacks/day: ${orNA(entry.snacksPerDay)}  |  Breakfast included: ${breakfastLabelFor(entry)}`,
+      `Formula: ${entry.formulaVersion} | Nutrition checked: ${entry.nutritionResolvedAt || 'Partner preset'}\nPlan: ${entry.planName || 'N/A'}  |  Meals/day: ${orNA(entry.mealsPerDay)}  |  Snacks/day: ${orNA(entry.snacksPerDay)}  |  Breakfast included: ${breakfastLabelFor(entry)}`,
       pageWidth - 28
     );
     doc.text(planLines, 14, y);
@@ -174,6 +176,7 @@ export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers 
 };
 
 export const downloadCustomerPaperWord = ({ entry, fromKey, toKey, helpers }) => {
+  assertKitchenExportReady([entry]);
   const { getDateKey, formatDateLabel, getMealLabel, mealRemarkText, exclusionsText, formatAddress } = helpers;
   const { days, skipped, deliveryKnown } = getCustomerPaperDays({ entry, fromKey, toKey, getDateKey });
   if (days.length === 0) return { ok: false, days, skipped };
@@ -205,7 +208,7 @@ export const downloadCustomerPaperWord = ({ entry, fromKey, toKey, helpers }) =>
       <h1 style="font-size:18pt;margin:0;${dayIndex > 0 ? 'page-break-before:always' : ''}">Kitchen Prep Sheet — ${esc(formatDateLabel(day.dateKey))}</h1>
       <p style="margin:8pt 0 0 0;font-size:15pt"><b>${esc(name)}</b>${tag ? ` &nbsp;&nbsp;<span style="background:${tag.has ? '#1e293b' : '#94a3b8'};color:#ffffff;font-size:10pt;font-weight:bold">&nbsp;${esc(tag.text)}&nbsp;</span>` : ''}</p>
       <p style="margin:0;font-size:11pt">${esc(entry.partner ? `Partner: ${entry.partner?.businessName || 'Partner'}` : `Address: ${formatAddress(entry.deliveryAddress)}`)}</p>
-      <p style="margin:0;font-size:11pt"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orNA(entry.mealsPerDay))} | Snacks/day: ${esc(orNA(entry.snacksPerDay))} | Breakfast included: ${breakfastLabelFor(entry)}</b></p>
+      <p style="margin:0;font-size:11pt"><b>Plan: ${esc(entry.planName || 'N/A')} | ${esc(entry.formulaVersion || '')} | ${esc(entry.nutritionResolvedAt || 'Partner preset')} | Meals/day: ${esc(orNA(entry.mealsPerDay))} | Snacks/day: ${esc(orNA(entry.snacksPerDay))} | Breakfast included: ${breakfastLabelFor(entry)}</b></p>
       <p style="margin:0;font-size:11pt;color:#be123c"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
       ${dayNote ? `<p style="margin:0;font-size:11pt;color:#b45309"><b>Note: ${esc(dayNote)}</b></p>` : ''}
       ${summary.length ? `<p style="margin:4pt 0 0 0;font-size:9.5pt;color:#787878">${esc(summary.join('   |   '))}</p>` : ''}

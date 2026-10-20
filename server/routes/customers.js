@@ -13,6 +13,7 @@ import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import { resolveCustomerMatch, resolveCustomerMatchBulk } from '../services/customerMatchService.js';
 import { classifyUploadRow } from '../services/customerUploadIdentity.js';
 import { relinkSubscription, LinkTargetNotFoundError } from '../services/subscriptionLink.js';
+import { parsePinInput, isPlausibleCoordinate } from '../services/geocoding.js';
 import { protect } from '../middleware/auth.js';
 import { effectivePermissions } from '../models/User.js';
 
@@ -566,7 +567,7 @@ router.get('/', async (req, res) => {
     const maxLimit = Math.min(parseInt(limit, 10) || 10000, 10000);
 
     const customers = await Customer.find(query)
-      .select('customerId email cpf macros firstName lastName phone company planStartDate cycleDuration amountPaid discount')
+      .select('customerId email cpf macros firstName lastName phone company address gpsLocation planStartDate cycleDuration amountPaid discount')
       .sort({ createdAt: -1 })
       .limit(maxLimit);
 
@@ -702,6 +703,31 @@ router.patch('/:customerId', async (req, res) => {
       if (linkedPartner.menuSelectionEnabled) {
         if (req.body.unlimitedMeals === undefined) updates.unlimitedMeals = true;
         if (req.body.macros === undefined) updates.macros = linkedPartner.presetMacros;
+      }
+    }
+
+    // The customer's saved map pin (internal record). Entered as a Google Maps
+    // link or "lat, lng"; an empty value clears it. It is tied to the address
+    // text it was saved with, because deliveries only reuse a customer pin when
+    // their address matches exactly (see resolveDeliveryCoordinatesCached).
+    if (req.body.mapsLink !== undefined) {
+      const raw = String(req.body.mapsLink ?? '').trim();
+      if (!raw) {
+        updates.gpsLocation = { lat: null, lng: null, source: null, address: null, geocodedAt: null };
+      } else {
+        const pin = parsePinInput(raw);
+        if (!pin || !isPlausibleCoordinate(pin.lat, pin.lng)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Could not read a location from that. Paste a full Google Maps link that contains the coordinates (open the short link first) or type "lat, lng", e.g. 25.2048, 55.2708.'
+          });
+        }
+        let pinAddress = typeof updates.address === 'string' ? updates.address.trim() : null;
+        if (pinAddress === null) {
+          const existing = await Customer.findOne({ customerId: req.params.customerId }).select('address').lean();
+          pinAddress = String(existing?.address || '').trim();
+        }
+        updates.gpsLocation = { lat: pin.lat, lng: pin.lng, source: 'manual', address: pinAddress, geocodedAt: new Date() };
       }
     }
 

@@ -258,6 +258,11 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
     <Modal title={isEdit ? 'Edit item' : 'Add menu item'} onClose={onClose}>
       <form onSubmit={submit} className="space-y-4" style={SANS}>
         {error && <div className="bg-[#fff2eb] border border-[#ffd9c2] text-[#ff3b00] rounded-2xl px-4 py-2 text-sm">{error}</div>}
+        {initial?.source === 'menu-selection' && (
+          <div className="bg-[#eafbd0] border border-[#cdeb9e] text-[#2a3f13] rounded-2xl px-4 py-2.5 text-[12.5px] leading-snug">
+            Auto-synced from the Menu Selection weekly menu. Its price and availability window are kept in sync automatically each time next week's menu is published — edits here will be overwritten the next time that dish appears.
+          </div>
+        )}
         <div><label className="block text-sm font-medium text-[#0b1a3f] mb-1">Item Name *</label>
           <input name="name" required value={form.name} onChange={set} className={inputCls} placeholder="Grilled Chicken Bowl" /></div>
         <div className="grid grid-cols-2 gap-3">
@@ -891,7 +896,15 @@ const AdminPartners = () => {
                           <div className="flex items-center gap-2.5 min-w-0">
                             <div className="w-[34px] h-[34px] rounded-[11px] bg-[#f1ebe2] text-[#6b7894] flex items-center justify-center flex-none text-xs" style={AB}>{it.name.slice(0, 2).toUpperCase()}</div>
                             <div className="min-w-0">
-                              <div className="font-bold truncate">{it.name}</div>
+                              <div className="flex items-center gap-1.5">
+                                <div className="font-bold truncate">{it.name}</div>
+                                {it.source === 'menu-selection' && (
+                                  <span title={`Auto-synced from Menu Selection — available ${it.availableFrom ? fmtDate(it.availableFrom) : '?'}${it.availableTo && it.availableTo !== it.availableFrom ? ` to ${fmtDate(it.availableTo)}` : ''}`}
+                                    className="flex-none bg-[#eafbd0] text-[#2a3f13] rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wide whitespace-nowrap">
+                                    Menu Selection
+                                  </span>
+                                )}
+                              </div>
                               {it.category && <div className="text-[11px] text-[#6b7894] truncate">{it.category}</div>}
                             </div>
                           </div>

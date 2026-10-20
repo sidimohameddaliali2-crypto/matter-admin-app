@@ -83,9 +83,9 @@ router.get('/subscriptions/delivery-on-date', protect, async (req, res) => {
     }));
     res.json({ success: true, data });
   } catch (error) {
-    const status = error?.response?.status || 500;
+    const status = error.statusCode || error?.response?.status || 500;
     console.error('Matter API delivery-on-date error:', error.response?.data || error.message);
-    res.status(status).json({ success: false, message: describeMatterApiError(error) || 'Failed to check deliveries for date', error: error.response?.data || error.message });
+    res.status(status).json({ success: false, complete: false, code: error.code, discovery: error.discovery, message: describeMatterApiError(error) || 'Failed to check deliveries for date', error: error.response?.data || error.message });
   }
 });
 
@@ -106,7 +106,7 @@ router.post('/import-deliveries', protect, authorize(['admin', 'super_admin', 'd
       return res.status(400).json({ success: false, message: 'date is required, as YYYY-MM-DD' });
     }
     const summary = await importMatterDeliveriesForDate(date);
-    res.json({ success: true, data: summary });
+    res.status(summary.complete === false ? 503 : 200).json({ success: summary.complete !== false, message: summary.complete === false ? 'Delivery import is incomplete; no complete result is available.' : undefined, data: summary });
   } catch (error) {
     console.error('Matter API import-deliveries error:', error.response?.data || error.message);
     res.status(500).json({ success: false, message: describeMatterApiError(error) || 'Failed to import deliveries from Matter', error: error.response?.data || error.message });

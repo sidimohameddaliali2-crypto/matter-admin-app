@@ -33,6 +33,11 @@ const EventCalendarView = ({ events, onEventClick, onDayClick, hideDetailPanel =
     };
   };
 
+  // Yellow Block event delivered by a Matter driver: half Yellow Block pink,
+  // half Matter blue, and labelled as such.
+  const isMatterDriven = (event) => event.companyName === 'Yellow Block' && event.driverProvider === 'matter';
+  const SPLIT_BACKGROUND = 'linear-gradient(to right, #f0a3ed 0%, #f0a3ed 50%, #2563eb 50%, #2563eb 100%)';
+
   // Get calendar days for current month
   const getDaysInMonth = (date) => {
     return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
@@ -185,17 +190,20 @@ const EventCalendarView = ({ events, onEventClick, onDayClick, hideDetailPanel =
                               onEventClick?.(event);
                             }}
                             style={isCancelled ? {} : {
-                              background: (event.companyName?.toLowerCase().includes('matter') && event.isPaid)
-                                ? 'linear-gradient(to right, #16a34a 0%, #15803d 100%)'
-                                : `linear-gradient(to right, ${companyColor.bgFrom} 0%, ${companyColor.bgTo} 100%)`,
-                              color: 'white'
+                              background: isMatterDriven(event)
+                                ? SPLIT_BACKGROUND
+                                : (event.companyName?.toLowerCase().includes('matter') && event.isPaid)
+                                  ? 'linear-gradient(to right, #16a34a 0%, #15803d 100%)'
+                                  : `linear-gradient(to right, ${companyColor.bgFrom} 0%, ${companyColor.bgTo} 100%)`,
+                              color: 'white',
+                              ...(isMatterDriven(event) ? { textShadow: '0 1px 2px rgba(0,0,0,0.6)' } : {})
                             }}
                             className={`text-xs p-1 rounded cursor-pointer hover:shadow-md transition truncate font-semibold ${
                               isCancelled
                                 ? 'bg-gray-200 text-gray-500 line-through'
                                 : ''
                             }`}
-                            title={`${event.eventName}${isCancelled ? ' (Cancelled)' : ''}`}
+                            title={`${event.eventName}${isMatterDriven(event) ? ' (delivered by Matter driver)' : ''}${isCancelled ? ' (Cancelled)' : ''}`}
                           >
                             {event.eventName}
                           </motion.div>
@@ -277,7 +285,9 @@ const EventCalendarView = ({ events, onEventClick, onDayClick, hideDetailPanel =
                 onClick={() => onEventClick?.(event)}
               >
                 <div style={event.status === 'cancelled' ? {} : {
-                  background: `linear-gradient(to right, ${getCompanyColor(event.companyName).bgFrom} 0%, ${getCompanyColor(event.companyName).bgTo} 100%)`
+                  background: isMatterDriven(event)
+                    ? SPLIT_BACKGROUND
+                    : `linear-gradient(to right, ${getCompanyColor(event.companyName).bgFrom} 0%, ${getCompanyColor(event.companyName).bgTo} 100%)`
                 }} className={`p-4 flex items-center justify-between ${
                   event.status === 'cancelled' ? 'bg-gray-200' : ''
                 }`}>
@@ -301,6 +311,9 @@ const EventCalendarView = ({ events, onEventClick, onDayClick, hideDetailPanel =
                       <p className={`text-sm ${event.status === 'cancelled' ? 'text-gray-400' : 'opacity-90 text-white'}`}>{event.eventName}</p>
                       {event.status === 'cancelled' && (
                         <span className="text-xs font-semibold text-red-500 bg-red-100 px-2 py-0.5 rounded">Cancelled</span>
+                      )}
+                      {isMatterDriven(event) && (
+                        <span className="text-xs font-bold text-blue-800 bg-white px-2 py-0.5 rounded inline-block mt-1">🚚 Delivered by Matter driver</span>
                       )}
                     </div>
                   </div>

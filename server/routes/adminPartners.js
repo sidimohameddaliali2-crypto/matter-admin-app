@@ -18,6 +18,7 @@ import WasteLog, { WASTE_REASONS } from '../models/WasteLog.js';
 import Member from '../models/Member.js';
 import MemberOrder from '../models/MemberOrder.js';
 import { protect, admin, authorize } from '../middleware/auth.js';
+import { assignMenuSelectionItemsToPartner } from '../services/menuSelectionPartnerSync.js';
 
 const adminOrKitchen = authorize(['admin', 'super_admin', 'kitchen']);
 
@@ -594,6 +595,10 @@ router.post('/', admin, async (req, res) => {
       profilePicture: profilePicture || ''
     });
     partner.password = undefined;
+    // New partner should already have every Menu Selection chicken/beef/fish
+    // item, not just whatever's been manually assigned since.
+    assignMenuSelectionItemsToPartner(partner._id)
+      .catch((err) => console.error('[menu-selection->partner-menu sync] new-partner assign failed:', err.message));
     res.status(201).json({ success: true, data: partner });
   } catch (err) {
     console.error(err);
