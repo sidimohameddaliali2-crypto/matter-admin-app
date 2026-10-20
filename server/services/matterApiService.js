@@ -90,6 +90,10 @@ const buildNutritionResult = (subscription) => ({
   active_delivery_dates: Array.isArray(subscription.delivery_schedule)
     ? activeDeliveryDates(subscription)
     : null,
+  // The subscription's billing-cycle boundary — used by the menu-selection
+  // screen's "last day of your cycle" banner/Renew prompt, and by
+  // matterPauseResumeService to place a skipped day's resume day right after it.
+  cycle_end_date: subscription.cycle_end_date ? String(subscription.cycle_end_date).slice(0, 10) : null,
   customer_addresses: subscription.customer_addresses || [],
   delivery_window: subscription.delivery_window || null,
   // Dietary restrictions — surfaced so the Kitchen List customer card can

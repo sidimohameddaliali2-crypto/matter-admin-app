@@ -143,7 +143,10 @@ const menuSelectionRecordSchema = new mongoose.Schema({
     date: { type: String },              // "YYYY-MM-DD"
     pauseStatus: {
       type: String,
-      enum: ['pending', 'success', 'already_paused', 'failed'],
+      // 'declined' (2026-10-20): the customer reviewed this skip in the
+      // pause-confirmation calendar and chose not to pause Matter deliveries
+      // for it — the menu day still shows skipped, but no Matter call is made.
+      enum: ['pending', 'success', 'already_paused', 'failed', 'declined'],
       default: 'pending'
     },
     resumeDate: { type: String },        // "YYYY-MM-DD" assigned after cycle end (on success)

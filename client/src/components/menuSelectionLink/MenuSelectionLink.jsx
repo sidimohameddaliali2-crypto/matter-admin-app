@@ -3,6 +3,7 @@ import api from '../../utils/api';
 import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm } from '../../constants/exclusionList';
 import { toSentenceCase } from '../../utils/textFormat';
 import MatterLogo from './MatterLogo';
+import SkipPauseCalendarModal from './SkipPauseCalendarModal';
 import {
   DEMO_ACCOUNTS,
   DEMO_DAYS,
@@ -311,6 +312,16 @@ const MenuSelectionLink = ({ token }) => {
   // swap flags Kitchen List reads — see computeSauceGarnishFlags/addWithCap.
   const [mealFlags, setMealFlags] = useState({});
   const [modal, setModal] = useState(null);
+  // Pause-confirmation calendar: open only when the customer hits final
+  // submit with >=1 day skipped (see onSubmitButton). `skipPauseReview` holds
+  // what skip-pause-preview suggested; nothing is sent to select-meals until
+  // the customer confirms it (SkipPauseCalendarModal's onConfirm -> doSubmit).
+  const [skipPauseReview, setSkipPauseReview] = useState(null); // { pauses: [{date, alreadyPaused, suggestedResumeDate}] } | null
+  const [pausePreviewLoading, setPausePreviewLoading] = useState(false);
+  // Frozen at the moment of a successful submit (same convention as
+  // lockedSkipDays) so the done screen's Renew button can't drift if the
+  // customer later reopens "Change my selections".
+  const [renewalEligible, setRenewalEligible] = useState(false);
   const [toast, setToast] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const toastTimer = useRef(null);
@@ -431,6 +442,10 @@ const MenuSelectionLink = ({ token }) => {
         // The exact Matter subscription this profile was resolved from —
         // sent back with the submission so it's logged on the selection record.
         subscriptionId: profile.subscriptionId || null,
+        // Billing-cycle boundary — see lastCycleDayKey below for how "last
+        // day of your cycle" is derived from this against the real delivery
+        // calendar, rather than treating this raw date as a delivery day.
+        cycleEndDate: profile.cycleEndDate || null,
       });
       setModel(built);
 
@@ -473,6 +488,17 @@ const MenuSelectionLink = ({ token }) => {
   // Menu-selection Partner members (account.unlimitedMeals) have no daily cap —
   // Infinity means addWithCap below never blocks another meal being added.
   const target = account?.unlimitedMeals ? Infinity : (account?.perDay || 3);
+
+  // "Last day of your cycle" is the last REAL delivery day (dayKeys is
+  // already filtered to the customer's own Matter calendar + the published
+  // menu) on or before the subscription's cycle_end_date — not that raw
+  // boundary itself, since it isn't necessarily a delivery day. null when
+  // cycleEndDate is unknown, so neither the banner nor the Renew button show.
+  const lastCycleDayKey = useMemo(() => {
+    if (!account?.cycleEndDate) return null;
+    const eligible = dayKeys.filter((k) => k <= account.cycleEndDate);
+    return eligible.length ? eligible[eligible.length - 1] : null;
+  }, [dayKeys, account]);
 
   const dayCount = useCallback(
     (i) =>
@@ -665,7 +691,13 @@ const MenuSelectionLink = ({ token }) => {
   );
 
   /* -- submit -- */
-  const doSubmit = useCallback(async () => {
+  // `pauseDecisions` is only non-null when the pause-confirmation calendar
+  // was shown and confirmed (see openSkipPauseReview/handleConfirmPauseReview
+  // below) — one {date, action:'pause'|'decline', resumeDate, alreadyPaused}
+  // per skipped day, exactly what the customer saw and approved. Nothing
+  // about pausing is ever recomputed server-side from this; the server
+  // applies these decisions verbatim (routes/menus.js select-meals).
+  const doSubmit = useCallback(async (pauseDecisions) => {
     if (preview) {
       setLockedSkipDays(skipped);
       setStep('done');
@@ -694,9 +726,11 @@ const MenuSelectionLink = ({ token }) => {
         selections,
         skippedDates,
         subscriptionId: account.subscriptionId || undefined,
+        ...(pauseDecisions ? { pauseDecisions } : {}),
       });
       if (res.data?.success) {
         setLockedSkipDays(skipped);
+        setRenewalEligible(!!lastCycleDayKey);
         setStep('done');
       } else {
         flash(res.data?.message || 'Could not save your selections.');
@@ -706,7 +740,39 @@ const MenuSelectionLink = ({ token }) => {
     } finally {
       setSubmitting(false);
     }
-  }, [account, dayKeys, flash, mealFlags, model, preview, qty, rawMenu, skipped]);
+  }, [account, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped]);
+
+  // Fetches suggested resume dates for the currently-skipped days and opens
+  // the pause-confirmation calendar. Never calls select-meals itself — the
+  // whole submission (meals + pauses) waits for the modal's confirm action
+  // (handleConfirmPauseReview below).
+  const openSkipPauseReview = useCallback(async (skippedDateKeys) => {
+    setPausePreviewLoading(true);
+    setSkipPauseReview({ pauses: skippedDateKeys.map((date) => ({ date, alreadyPaused: false, suggestedResumeDate: null })) });
+    try {
+      const res = await api.post(`/menus/customers/${encodeURIComponent(account.email)}/skip-pause-preview`, {
+        dates: skippedDateKeys,
+      });
+      const pauses = res.data?.data?.pauses;
+      setSkipPauseReview({ pauses: Array.isArray(pauses) && pauses.length ? pauses : skippedDateKeys.map((date) => ({ date, alreadyPaused: false, suggestedResumeDate: null })) });
+    } catch (err) {
+      // Never block the customer from reviewing/confirming their skips just
+      // because the suggestion lookup failed — they can still pick resume
+      // dates by hand in the calendar.
+      flash('Could not look up suggested resume dates — pick them manually below.');
+    } finally {
+      setPausePreviewLoading(false);
+    }
+  }, [account, flash]);
+
+  const handleConfirmPauseReview = useCallback((decisions) => {
+    setSkipPauseReview(null);
+    doSubmit(decisions);
+  }, [doSubmit]);
+
+  const handleCancelPauseReview = useCallback(() => {
+    setSkipPauseReview(null);
+  }, []);
 
   const onSubmitButton = useCallback(() => {
     // A day is either skipped entirely, or filled to exactly the customer's
@@ -729,8 +795,13 @@ const MenuSelectionLink = ({ token }) => {
       setDay((d) => d + 1);
       return;
     }
-    doSubmit();
-  }, [account, day, dayCount, deadlineLockedToday, doSubmit, flash, lastDay, skipped, target]);
+    const skippedDateKeys = dayKeys.filter((_, i) => skipped[i]);
+    if (preview || skippedDateKeys.length === 0) {
+      doSubmit();
+      return;
+    }
+    openSkipPauseReview(skippedDateKeys);
+  }, [account, day, dayCount, dayKeys, deadlineLockedToday, doSubmit, flash, lastDay, openSkipPauseReview, preview, skipped, target]);
 
   const resetAll = useCallback(() => {
     setStep('signin');
@@ -743,6 +814,9 @@ const MenuSelectionLink = ({ token }) => {
     setAcknowledged({});
     setMealFlags({});
     setModal(null);
+    setSkipPauseReview(null);
+    setPausePreviewLoading(false);
+    setRenewalEligible(false);
     setDay(0);
   }, []);
 
@@ -1170,6 +1244,20 @@ const MenuSelectionLink = ({ token }) => {
         </div>
       )}
 
+      {!skippedToday && dayKeys[day] === lastCycleDayKey && (
+        <div style={{ padding: '18px 22px 0' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 'var(--radius-lg)', padding: '12px 14px' }}>
+            <span style={{ fontSize: 18, lineHeight: 1 }}>📅</span>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: '#92400E' }}>Last day of your current cycle</div>
+              <p style={{ margin: '2px 0 0', fontSize: 12.5, color: '#92400E', lineHeight: 1.5 }}>
+                Your subscription cycle ends after {dayHeading}. Renew to keep your deliveries going without a gap.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       {skippedToday ? (
         <div style={{ padding: '26px 22px' }}>
           <div style={{ border: '1px dashed var(--color-neutral-400)', borderRadius: 'var(--radius-lg)', padding: '40px 24px', textAlign: 'center' }}>
@@ -1293,7 +1381,18 @@ const MenuSelectionLink = ({ token }) => {
           </div>
         ))}
       </div>
-      <button className="btn btn-secondary btn-block" onClick={() => setStep('menu')} style={{ marginTop: 20 }}>
+      {renewalEligible && (
+        <a
+          href="https://www.matternutrition.xyz/"
+          target="_blank"
+          rel="noreferrer"
+          className="btn btn-primary btn-block"
+          style={{ marginTop: 20, textAlign: 'center' }}
+        >
+          Renew my subscription
+        </a>
+      )}
+      <button className="btn btn-secondary btn-block" onClick={() => setStep('menu')} style={{ marginTop: 10 }}>
         Change my selections
       </button>
     </div>
@@ -1391,6 +1490,15 @@ const MenuSelectionLink = ({ token }) => {
             {renderBody()}
           </div>
           {renderModal()}
+          <SkipPauseCalendarModal
+            open={!!skipPauseReview}
+            loading={pausePreviewLoading}
+            pauses={skipPauseReview?.pauses || []}
+            submitting={submitting}
+            preview={preview}
+            onCancel={handleCancelPauseReview}
+            onConfirm={handleConfirmPauseReview}
+          />
           {renderToast()}
         </div>
       </div>
