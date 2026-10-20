@@ -3942,8 +3942,10 @@ router.post('/customers/:email/skip-pause-preview', async (req, res) => {
 
     const preview = await previewSkipPauses({
       email: cleanEmail,
-      matterSubscriptionId: customer ? resolveMatterSubscriptionId(customer) : undefined,
-      matterCustomerId: customer?.matterCustomerId || null,
+      // Match the exact Matter email used at sign-in. An internal match may
+      // still point at the subscription from before the customer's renewal.
+      matterSubscriptionId: matterSub?.subscription_id || (customer ? resolveMatterSubscriptionId(customer) : null),
+      matterCustomerId: matterSub?.customer_id || null,
       skippedDateKeys: dates,
       weekendEnabled: !!customer?.weekend
     });
@@ -3956,7 +3958,7 @@ router.post('/customers/:email/skip-pause-preview', async (req, res) => {
     const dates = Array.isArray(req.body?.dates) ? req.body.dates.map(toDayKey).filter(Boolean) : [];
     res.json({
       success: true,
-      data: { subscriptionId: null, pauses: dates.map((date) => ({ date, alreadyPaused: false, suggestedResumeDate: null, error: error.message })) }
+      data: { subscriptionId: null, availabilityError: 'Could not verify active deliveries with Matter. Please retry.', pauses: dates.map((date) => ({ date, alreadyPaused: false, suggestedResumeDate: null, error: error.message })) }
     });
   }
 });
@@ -4272,9 +4274,9 @@ router.post('/customers/:email/select-meals', async (req, res) => {
           applied = decisions.map((d) => ({ date: d.date, pauseStatus: 'declined' }));
         } else {
           const ctx = await resolveSubscriptionContext({
-            email: customer.email,
-            matterSubscriptionId: resolveMatterSubscriptionId(customer),
-            matterCustomerId: customer.matterCustomerId || null
+            email: cleanEmail,
+            matterSubscriptionId: matterSub?.subscription_id || resolveMatterSubscriptionId(customer),
+            matterCustomerId: matterSub?.customer_id || null
           });
           applied = ctx.error
             ? decisions.map((d) => (d.action === 'decline'

@@ -432,6 +432,7 @@ const MenuSelectionLink = ({ token }) => {
         email: profile.email || v,
         plan: profile.mealPlan || 'Meal plan',
         perDay: Number(profile.mealPerDay) || 1,
+        weekend: !!profile.weekend,
         // Menu-selection Partner members (Customer.unlimitedMeals) have no daily cap.
         unlimitedMeals: !!profile.unlimitedMeals,
         allergensDisplay,
@@ -495,7 +496,14 @@ const MenuSelectionLink = ({ token }) => {
   // boundary itself, since it isn't necessarily a delivery day. null when
   // cycleEndDate is unknown, so neither the banner nor the Renew button show.
   const lastCycleDayKey = useMemo(() => {
-    if (!account?.cycleEndDate) return null;
+    if (!account?.cycleEndDate || dayKeys.length === 0) return null;
+    // Owner (2026-10-21): the cycle must actually END somewhere within this
+    // menu's days for the banner to be relevant. Without this check, a cycle
+    // ending weeks from now (well past the whole menu) made every day in
+    // dayKeys "eligible" (all <= a far-future cycleEndDate), so `.pop()`
+    // silently picked the LAST day of the menu instead — the banner showed
+    // every week regardless of whether the cycle was actually ending.
+    if (account.cycleEndDate > dayKeys[dayKeys.length - 1]) return null;
     const eligible = dayKeys.filter((k) => k <= account.cycleEndDate);
     return eligible.length ? eligible[eligible.length - 1] : null;
   }, [dayKeys, account]);
@@ -754,12 +762,12 @@ const MenuSelectionLink = ({ token }) => {
         dates: skippedDateKeys,
       });
       const pauses = res.data?.data?.pauses;
-      setSkipPauseReview({ pauses: Array.isArray(pauses) && pauses.length ? pauses : skippedDateKeys.map((date) => ({ date, alreadyPaused: false, suggestedResumeDate: null })) });
+      setSkipPauseReview({ ...res.data?.data, pauses: Array.isArray(pauses) && pauses.length ? pauses : skippedDateKeys.map((date) => ({ date, alreadyPaused: false, suggestedResumeDate: null })) });
     } catch (err) {
       // Never block the customer from reviewing/confirming their skips just
       // because the suggestion lookup failed — they can still pick resume
       // dates by hand in the calendar.
-      flash('Could not look up suggested resume dates — pick them manually below.');
+      setSkipPauseReview({ pauses: [], availabilityError: 'Could not verify your active deliveries. Go back and submit again to retry.' });
     } finally {
       setPausePreviewLoading(false);
     }
@@ -1496,6 +1504,10 @@ const MenuSelectionLink = ({ token }) => {
             pauses={skipPauseReview?.pauses || []}
             submitting={submitting}
             preview={preview}
+            weekendEnabled={!!account?.weekend}
+            activeDeliveryDates={skipPauseReview?.activeDeliveryDates || []}
+            unavailableDates={skipPauseReview?.unavailableDates || []}
+            availabilityError={skipPauseReview?.availabilityError}
             onCancel={handleCancelPauseReview}
             onConfirm={handleConfirmPauseReview}
           />
