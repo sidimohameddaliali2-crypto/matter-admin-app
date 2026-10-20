@@ -1,5 +1,6 @@
 import matterApiService, { describeMatterApiError } from './matterApiService.js';
 import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
+import { matterWeekendEnabled } from './matterSubscriptionContract.js';
 
 /**
  * Everything to do with pausing a customer's Matter deliveries for a day they
@@ -106,7 +107,7 @@ export async function resolveSubscriptionContext({ email, matterSubscriptionId, 
       console.error('resolveSubscriptionContext: failed to read existing pauses:', err.message);
     }
 
-    return { subscription, subscriptionId: subscription.subscription_id, cycleEndKey, existingPaused, usedReturn, activeDeliveryDates };
+    return { subscription, subscriptionId: subscription.subscription_id, cycleEndKey, existingPaused, usedReturn, activeDeliveryDates, weekendEnabled: matterWeekendEnabled(detailData) };
   } catch (err) {
     return { error: describeMatterApiError(err) || err.message || 'Failed to reach the Matter API' };
   }
@@ -133,7 +134,23 @@ export function suggestResumeDates({ skippedDateKeys, cycleEndKey, existingPause
     return out;
   }
 
+  // Owner (2026-10-21): a resume date must be after BOTH the cycle end AND
+  // every date in this batch that's being paused — not just the cycle end.
+  // When the cycle ends before some of the skip dates (a menu that spans
+  // into the next cycle, or a customer selecting weeks ahead), starting the
+  // cursor at cycle_end+1 alone could suggest a resume date that falls
+  // before — or ON — a day that's simultaneously being paused. Matter (and
+  // applyConfirmedPauses' own revalidation) correctly rejects that as
+  // invalid, but silently, so the customer would see a normal-looking
+  // suggestion that then failed with no visible error.
+  const latestSkipDate = (skippedDateKeys || [])
+    .map(toDayKey)
+    .filter(Boolean)
+    .reduce((max, d) => (!max || d > max ? d : max), null);
   let cursor = addDaysToDateKey(cycleEndKey, 1);
+  if (latestSkipDate && cursor <= latestSkipDate) {
+    cursor = addDaysToDateKey(latestSkipDate, 1);
+  }
   const nextResumeDate = () => {
     while (used.has(cursor) || paused.has(cursor) || active.has(cursor) || (skippedDateKeys || []).includes(cursor) || (!weekendEnabled && isWeekendKey(cursor))) {
       cursor = addDaysToDateKey(cursor, 1);
@@ -156,6 +173,27 @@ export function suggestResumeDates({ skippedDateKeys, cycleEndKey, existingPause
   return out;
 }
 
+// Validate before saving meals or calling Matter. An unconfirmed skip must
+// never fall through to automatic resume-date selection.
+export function validateRequiredResumeDates({ skippedDateKeys, decisions, alreadyPaused = new Set() }) {
+  const byDate = new Map((decisions || []).map((d) => [toDayKey(d.date), d]));
+  const used = new Set();
+  const skipped = new Set(skippedDateKeys || []);
+  for (const date of skipped) {
+    if (alreadyPaused.has(date)) continue;
+    const decision = byDate.get(date);
+    const resume = decision?.resumeDate;
+    const valid = typeof resume === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(resume)
+      && !Number.isNaN(Date.parse(`${resume}T00:00:00Z`))
+      && new Date(`${resume}T00:00:00Z`).toISOString().slice(0, 10) === resume;
+    if (decision?.action !== 'pause' || !valid) return `Choose an exact resume date for the paused day ${date}.`;
+    if (resume <= date || skipped.has(resume)) return `The resume date for ${date} must follow the paused day and cannot be another paused day.`;
+    if (used.has(resume)) return 'Choose a different resume date for each paused day.';
+    used.add(resume);
+  }
+  return null;
+}
+
 /**
  * Read-only orchestration for the pre-submit preview the customer sees in the
  * pause-confirmation calendar. Never calls createSubscriptionPause.
@@ -175,10 +213,11 @@ export async function previewSkipPauses({ email, matterSubscriptionId, matterCus
     existingPaused: ctx.existingPaused,
     usedReturn: ctx.usedReturn,
     activeDeliveryDates: ctx.activeDeliveryDates,
-    weekendEnabled
+    weekendEnabled: ctx.weekendEnabled
   });
   return {
     subscriptionId: ctx.subscriptionId,
+    weekendEnabled: ctx.weekendEnabled,
     activeDeliveryDates: [...ctx.activeDeliveryDates],
     unavailableDates: [...new Set([...ctx.existingPaused, ...ctx.usedReturn])],
     pauses: (skippedDateKeys || []).map((date) => {
@@ -278,7 +317,7 @@ export async function reconcilePendingPausesForRecord({ weeklyMenuId, email, wee
       existingPaused: ctx.existingPaused,
       usedReturn: ctx.usedReturn,
       activeDeliveryDates: ctx.activeDeliveryDates,
-      weekendEnabled
+      weekendEnabled: ctx.weekendEnabled
     });
     const decisions = pending.map((s) => {
       const key = toDayKey(s.date);

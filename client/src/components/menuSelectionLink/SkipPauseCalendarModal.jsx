@@ -21,18 +21,21 @@ const fmtShort = (key) => {
  * confirm for it). The calendar only changes resume dates; pauses cannot
  * be removed here.
  */
-const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, weekendEnabled = false, activeDeliveryDates = [], unavailableDates = [], availabilityError, onCancel, onConfirm }) => {
+const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, weekendEnabled = false, activeDeliveryDates = [], unavailableDates = [], availabilityError, submissionError, onCancel, onConfirm }) => {
   const [drafts, setDrafts] = useState([]);
   const [editingDate, setEditingDate] = useState(null);
   const [bulkEditing, setBulkEditing] = useState(false);
+  const [calendarFocus, setCalendarFocus] = useState(null);
 
   useEffect(() => {
     if (!open) return;
     setBulkEditing(false);
+    setCalendarFocus(null);
     setDrafts((pauses || []).map((p) => ({
       date: p.date,
       alreadyPaused: !!p.alreadyPaused,
-      resumeDate: p.suggestedResumeDate || null,
+      resumeDate: p.alreadyPaused ? (p.suggestedResumeDate || null) : null,
+      suggestedResumeDate: p.suggestedResumeDate || null,
       action: 'pause',
     })));
     setEditingDate((pauses || []).find((p) => !p.alreadyPaused)?.date || null);
@@ -43,6 +46,7 @@ const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, we
     drafts.forEach((d) => {
       out.push({ date: d.date, kind: 'skip' });
       if (d.action === 'pause' && d.resumeDate) out.push({ date: d.resumeDate, kind: 'resume' });
+      if (!d.alreadyPaused && !d.resumeDate && d.suggestedResumeDate) out.push({ date: d.suggestedResumeDate, kind: 'suggested' });
     });
     activeDeliveryDates.forEach((date) => out.push({ date, kind: 'active' }));
     return out;
@@ -76,6 +80,7 @@ const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, we
   const blockedDates = [...activeDeliveryDates, ...unavailableDates, ...drafts.flatMap((d) => [d.date, ...((!bulkEditing && d.date !== editingDate || d.alreadyPaused) && d.resumeDate ? [d.resumeDate] : [])])];
   const allResolved = !availabilityError && drafts.length > 0 && drafts.every((d) => d.alreadyPaused || (!!d.resumeDate && !activeDeliveryDates.includes(d.resumeDate) && !unavailableDates.includes(d.resumeDate)));
   const selectDate = (dateKey) => {
+    setCalendarFocus(dateKey);
     if (!bulkEditing) {
       setDrafts((list) => list.map((d) => d.date === editingDate ? { ...d, resumeDate: dateKey } : d));
       return;
@@ -105,7 +110,8 @@ const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, we
         <div className="dialog-body" style={{ opacity: 1 }}>
           <p style={{ margin: '0 0 14px', fontSize: 13.5, lineHeight: 1.6 }}>
             No meals will be delivered on the paused days below. We suggest resume dates after your cycle ends;
-            you can choose other available dates. Days with an active delivery cannot be selected.
+            you must choose one exact resume date for each paused day. Suggested dates are not selected automatically.
+            Days with an active delivery cannot be selected.
             Your paused days are fixed and cannot be removed here.
           </p>
 
@@ -114,9 +120,18 @@ const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, we
           ) : (
             <>
               {availabilityError && <p role="alert">{availabilityError}</p>}
+              {submissionError && <p role="alert">{submissionError}</p>}
+              <p style={{ fontSize: 12.5 }}>
+                {drafts.length} paused day{drafts.length === 1 ? '' : 's'} listed below. Your subscription changes only after you confirm.
+              </p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                <button type="button" className="btn btn-secondary" disabled={submitting} onClick={() => setCalendarFocus(earliestSkipDate)}>Show paused days</button>
+                <button type="button" className="btn btn-secondary" disabled={submitting} onClick={() => setCalendarFocus(drafts.map((d) => d.resumeDate).filter(Boolean).sort()[0] || earliestDate)}>Show resume dates</button>
+              </div>
               {editableDrafts.length > 1 && (
                 <button type="button" className="btn btn-secondary" disabled={submitting || !!availabilityError} onClick={() => {
                   setBulkEditing(true);
+                  setCalendarFocus(earliestDate);
                   setDrafts((list) => list.map((d) => d.alreadyPaused ? d : { ...d, resumeDate: null }));
                 }}>Choose multiple resume dates</button>
               )}
@@ -130,20 +145,20 @@ const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, we
                 // Jump the view to wherever this row's current resume date
                 // is the moment editing starts — it's often a different
                 // month than the skip date itself (see PauseCalendarGrid).
-                jumpToMonth={bulkEditing ? earliestDate : editingDate ? (drafts.find((d) => d.date === editingDate)?.resumeDate || editingDate) : null}
+                jumpToMonth={calendarFocus || (bulkEditing ? earliestDate : editingDate ? (activeDraft?.resumeDate || activeDraft?.suggestedResumeDate || editingDate) : null)}
                 onSelectDate={(bulkEditing || editingDate) && !submitting && !availabilityError ? selectDate : undefined}
               />
               {bulkEditing && <p role="status" style={{ fontSize: 12.5 }}>
-                Choose {editableDrafts.length} resume dates. {editableDrafts.filter((d) => d.resumeDate).length} of {editableDrafts.length} selected. Tap a green date to deselect it. Active deliveries are unavailable.
+                Choose {editableDrafts.length} resume dates. {editableDrafts.filter((d) => d.resumeDate).length} of {editableDrafts.length} selected. Dates are matched to paused days in chronological order, as shown below. Tap a green date to deselect it.
               </p>}
               {activeDraft && !bulkEditing && (
                 <p role="status" style={{ fontSize: 12.5, margin: '12px 0 0' }}>
-                  Tap a calendar day to change the resume date for the pause on {fmtShort(activeDraft.date)}.
+                  Choose the resume date for the pause on {fmtShort(activeDraft.date)}.
                 </p>
               )}
               {!bulkEditing && !availabilityError && drafts.some((d) => !d.alreadyPaused && !d.resumeDate) && (
                 <p role="alert" style={{ fontSize: 12.5 }}>
-                  We couldn't load a suggested resume date. Please choose one on the calendar.
+                  Choose a resume date for every paused day to enable Confirm. {editableDrafts.filter((d) => d.resumeDate).length} of {editableDrafts.length} chosen.
                 </p>
               )}
 
@@ -166,6 +181,7 @@ const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, we
                           : d.resumeDate
                               ? `Resumes ${fmtShort(d.resumeDate)}`
                               : 'Pick a resume date'}
+                        {!d.alreadyPaused && !d.resumeDate && d.suggestedResumeDate && <div>Suggested: {fmtShort(d.suggestedResumeDate)} (choose to accept)</div>}
                       </div>
                     </div>
                     {d.alreadyPaused ? null : (
@@ -176,7 +192,7 @@ const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, we
                           style={{ fontSize: 11.5, padding: '4px 10px' }}
                           disabled={submitting}
                           aria-pressed={editingDate === d.date}
-                          onClick={() => { setBulkEditing(false); setEditingDate(d.date); }}
+                          onClick={() => { setBulkEditing(false); setEditingDate(d.date); setCalendarFocus(d.resumeDate || d.suggestedResumeDate || d.date); }}
                         >
                           {!bulkEditing && editingDate === d.date ? 'Editing resume' : 'Change resume'}
                         </button>

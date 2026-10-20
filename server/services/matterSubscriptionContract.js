@@ -24,3 +24,14 @@ export function matterMealContract(subscription) {
     effectiveState: 'current-snapshot-only',
   };
 }
+
+// Matter's dated schedule wins over the legacy internal weekend flag.
+// Include paused days: pausing a weekend must not remove weekend eligibility.
+export function matterWeekendEnabled(subscription, fallback = false) {
+  if (!Array.isArray(subscription?.delivery_schedule)) return !!fallback;
+  return subscription.delivery_schedule.some((entry) => {
+    if (!['active', 'paused'].includes(entry.status)) return false;
+    const weekday = new Date(`${String(entry.date).slice(0, 10)}T00:00:00Z`).getUTCDay();
+    return weekday === 0 || weekday === 6;
+  });
+}

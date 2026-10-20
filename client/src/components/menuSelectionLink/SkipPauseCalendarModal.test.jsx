@@ -29,7 +29,8 @@ test('loads the suggested resume month after an asynchronous preview and submits
   render(true, [{ date: '2099-10-21' }]);
   render(false, pauses);
   expect(container.textContent).toContain('November 2099');
-  expect(day('2099-11-02').getAttribute('aria-pressed')).toBe('true');
+  expect(day('2099-11-02').getAttribute('aria-pressed')).toBe('false');
+  expect(button('Confirm').disabled).toBe(true);
   expect(button('Unpause')).toBeUndefined();
   click(day('2099-11-05'));
   // Moving a date later must still allow returning to the original suggestion.
@@ -47,11 +48,16 @@ test('prevents two skips from using the same resume date and switches the calend
   act(() => root.render(<SkipPauseCalendarModal open weekendEnabled pauses={[
     ...pauses, { date: '2099-10-22', suggestedResumeDate: '2099-12-01' },
   ]} />));
-  click(container.querySelector('[aria-label="Next month"]'));
-  expect(day('2099-12-01').disabled).toBe(true);
+  click(day('2099-11-02'));
+  expect(button('Confirm').disabled).toBe(true);
   click(button('Change resume'));
   expect(day('2099-12-01').disabled).toBe(false);
+  expect(day('2099-12-01').getAttribute('aria-pressed')).toBe('false');
+  click(day('2099-12-01'));
   expect(day('2099-12-01').getAttribute('aria-pressed')).toBe('true');
+  expect(button('Confirm').disabled).toBe(false);
+  click(container.querySelector('[aria-label="Previous month"]'));
+  expect(day('2099-11-02').disabled).toBe(true);
 });
 
 test('requires a resume date when the preview cannot suggest one', () => {
@@ -92,4 +98,33 @@ test('cannot confirm or edit when Matter availability could not be verified', ()
   expect(button('Confirm').disabled).toBe(true);
   expect(day('2099-11-05').disabled).toBe(true);
   expect(container.querySelector('[role="alert"]').textContent).toBe('Please retry');
+});
+
+test('Matter weekend eligibility allows free weekend resume dates and shows partial pause failures', () => {
+  act(() => root.render(<SkipPauseCalendarModal open weekendEnabled pauses={pauses} submissionError="One pause failed. Please retry." />));
+  const weekend = [...container.querySelectorAll('button[aria-label^="2099-11-"]')].find((b) => {
+    const weekday = new Date(`${b.getAttribute('aria-label').slice(0, 10)}T00:00:00`).getDay();
+    return weekday === 0 || weekday === 6;
+  });
+  expect(weekend.disabled).toBe(false);
+  expect(container.querySelector('[role="alert"]').textContent).toBe('One pause failed. Please retry.');
+});
+
+test('all three unconfirmed skips stay visible when the suggested resumes are in another month', () => {
+  const onConfirm = jest.fn();
+  act(() => root.render(<SkipPauseCalendarModal open weekendEnabled onConfirm={onConfirm}
+    pauses={[
+      { date: '2026-10-28', suggestedResumeDate: '2026-11-12' },
+      { date: '2026-10-30', suggestedResumeDate: '2026-11-13' },
+      { date: '2026-10-31', suggestedResumeDate: '2026-11-14' },
+    ]} activeDeliveryDates={['2026-10-28', '2026-10-30', '2026-10-31']} />));
+  expect(container.textContent).toContain('3 paused days listed below');
+  click(button('Show paused days'));
+  for (const date of ['2026-10-28', '2026-10-30', '2026-10-31']) {
+    expect(day(date).style.background).toBe('rgb(220, 38, 38)');
+    expect(day(date).disabled).toBe(true);
+  }
+  click(button('Show resume dates'));
+  expect(container.textContent).toContain('November 2026');
+  expect(onConfirm).not.toHaveBeenCalled();
 });

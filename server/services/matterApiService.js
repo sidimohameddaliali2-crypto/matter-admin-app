@@ -2,7 +2,7 @@ import axios from 'axios';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { cacheGet, cacheSet } from '../config/cache.js';
-import { resolveMatterDeliveryAddress, matterMealContract } from './matterSubscriptionContract.js';
+import { resolveMatterDeliveryAddress, matterMealContract, matterWeekendEnabled } from './matterSubscriptionContract.js';
 
 // A customer's macro/plan config on Matter changes on the order of days or
 // weeks (subscription edits, pause/resume), not mid-shift — caching these
@@ -95,6 +95,7 @@ export const buildNutritionResult = (subscription) => ({
   active_delivery_dates: Array.isArray(subscription.delivery_schedule)
     ? activeDeliveryDates(subscription)
     : null,
+  weekend_enabled: Array.isArray(subscription.delivery_schedule) ? matterWeekendEnabled(subscription) : null,
   // The subscription's billing-cycle boundary — used by the menu-selection
   // screen's "last day of your cycle" banner/Renew prompt, and by
   // matterPauseResumeService to place a skipped day's resume day right after it.

@@ -17,7 +17,7 @@ import supyService from '../services/supyService.js';
 import { withKitchenPreparation, preparationHasFailures } from '../services/kitchenPreparation.js';
 import { getNutritionForCustomerLink } from '../services/matterNutritionLookup.js';
 import { syncMenuSelectionMainMealsToPartnerMenu } from '../services/menuSelectionPartnerSync.js';
-import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, reconcilePendingPausesForRecord } from '../services/matterPauseResumeService.js';
+import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, reconcilePendingPausesForRecord, validateRequiredResumeDates } from '../services/matterPauseResumeService.js';
 import {
   resolveCustomerMatch,
   resolveCustomerMatchBulk,
@@ -444,13 +444,16 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
     let consolidatedMeals = [];
     let foundMenuSelectionRecord = false;
 
+    let savedSkippedDays = [];
+
     if (menuId) {
       const record = await MenuSelectionRecord.findOne({
         weeklyMenuId: menuId,
-        email: buildEmailRegex(resolvedEmail)
+        $or: [{ email: buildEmailRegex(resolvedEmail) }, ...(customer ? [{ customer: customer._id }, { email: buildEmailRegex(customer.email) }] : [])]
       });
       const manuallySelectedMeals = (record?.selectedMeals || []).filter((m) => !m.isAutoAssigned);
-      if (record && manuallySelectedMeals.length > 0) {
+      savedSkippedDays = record?.skippedDays || [];
+      if (record && (manuallySelectedMeals.length > 0 || savedSkippedDays.length > 0)) {
         foundMenuSelectionRecord = true;
         consolidatedMeals = manuallySelectedMeals.map(m => ({
           date: m.date,
@@ -540,11 +543,12 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
         mealExclusion: (nutrition.exclusions || []).join(', '),
         allergies: customer?.allergies || [],
         selectedMeals: consolidatedMeals,
+        skippedDays: savedSkippedDays,
         macros: matterMacros,
         currentWeekMenu: customer?.currentWeekMenu || null,
         hasSubmittedForRequestedMenu: foundMenuSelectionRecord,
         lastMenuSelectionDate: customer?.lastMenuSelectionDate || null,
-        weekend: customer?.weekend || false,
+        weekend: nutrition.weekend_enabled ?? customer?.weekend ?? false,
         note: null
       }
     });
@@ -3979,7 +3983,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     const cleanSubscriptionId = subscriptionId ? String(subscriptionId).trim() : undefined;
 
     // Days the customer explicitly skipped in the selection flow (deduped, normalized)
-    const skippedDateKeys = Array.from(new Set(
+    let skippedDateKeys = Array.from(new Set(
       (Array.isArray(skippedDates) ? skippedDates : [])
         .map(toDayKey)
         .filter(Boolean)
@@ -3988,10 +3992,9 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     // What the customer actually confirmed in the pause-confirmation calendar
     // (skip-pause-preview -> SkipPauseCalendarModal), keyed by date: whether
     // to pause Matter deliveries for that day and on which resume date, or to
-    // decline the pause entirely. Absent when the customer skipped nothing,
-    // or (back-compat) when an older client only ever sent bare date strings —
-    // those fall through to the dormant reconcile sweep below, same as before
-    // this feature existed.
+    // decline the pause entirely in legacy submissions. Every new pause now
+    // requires an explicit resume date; missing/declined decisions are
+    // rejected below before any meals are saved.
     const pauseDecisionByDate = new Map(
       (Array.isArray(pauseDecisions) ? pauseDecisions : [])
         .map((d) => [toDayKey(d?.date), d])
@@ -4046,6 +4049,24 @@ router.post('/customers/:email/select-meals', async (req, res) => {
         phone: matterSub?.phone || undefined
       });
     }
+
+    // Require an explicit date for every new pause before saving anything.
+    const prior = weeklyMenuId ? await MenuSelectionRecord.findOne({ weeklyMenuId, email: customer.email })
+      .select('skippedDays').lean() : null;
+    const priorByDate = new Map((prior?.skippedDays || []).map((s) => [toDayKey(s.date), s]));
+    skippedDateKeys = [...new Set([...priorByDate.keys(), ...skippedDateKeys])].sort();
+    const alreadyPaused = new Set([...priorByDate].filter(([, p]) => ['success', 'already_paused'].includes(p.pauseStatus)).map(([date]) => date));
+    const claimedExisting = [...pauseDecisionByDate.values()].filter((d) => d.alreadyPaused && !alreadyPaused.has(toDayKey(d.date)));
+    if (claimedExisting.length) {
+      const ctx = await resolveSubscriptionContext({ email: cleanEmail, matterSubscriptionId: matterSub?.subscription_id || resolveMatterSubscriptionId(customer), matterCustomerId: matterSub?.customer_id || null });
+      if (ctx.error) return res.status(502).json({ success: false, message: ctx.error });
+      claimedExisting.forEach((d) => {
+        d.alreadyPaused = ctx.existingPaused.has(toDayKey(d.date));
+        if (d.alreadyPaused) alreadyPaused.add(toDayKey(d.date));
+      });
+    }
+    const resumeError = validateRequiredResumeDates({ skippedDateKeys, decisions: [...pauseDecisionByDate.values()], alreadyPaused });
+    if (resumeError) return res.status(400).json({ success: false, message: resumeError });
 
     // Capture previous menu id AND selections before overwriting them.
     // We'll upsert them into the old menu's MenuSelectionRecord below.
@@ -4156,17 +4177,12 @@ router.post('/customers/:email/select-meals', async (req, res) => {
 
     // Upsert a MenuSelectionRecord so historical selections per menu are preserved
     // even after the customer moves on to a newer menu week.
-    // Hoisted so the synchronous pause-apply step below (after the upsert)
-    // can reuse the same dedupe: a date a prior submit already resolved to
-    // success/already_paused must never be re-applied to Matter.
-    let priorByDate = new Map();
+    // A date a prior submit already resolved to success/already_paused must
+    // never be re-applied to Matter.
     if (weeklyMenuId) {
       // Merge skipped days: keep a prior successful/already-paused outcome for a
       // date that's still skipped (so a re-submit never double-pauses), mark
       // everything else pending for the background processor to (re)try.
-      const prior = await MenuSelectionRecord.findOne({ weeklyMenuId, email: customer.email })
-        .select('skippedDays').lean();
-      priorByDate = new Map((prior?.skippedDays || []).map((s) => [toDayKey(s.date), s]));
       const skippedDays = skippedDateKeys.map((date) => {
         const p = priorByDate.get(date);
         if (p && (p.pauseStatus === 'success' || p.pauseStatus === 'already_paused')) {
@@ -4249,11 +4265,11 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     // synchronously, before responding — the customer only sees "done" once
     // this has actually been attempted, never a server recompute of what
     // skip-pause-preview suggested. Matter failures are caught inside
-    // applyConfirmedPauses and recorded on skippedDays only (admin-only
-    // view) — they never change what the customer sees in the response
-    // below. Skips any date a prior submit already resolved to
+    // applyConfirmedPauses, recorded on skippedDays, and returned for the
+    // customer to review/retry. Skips any date a prior submit already resolved to
     // success/already_paused, same dedupe as the skippedDays build above, so
     // a re-submit never double-pauses.
+    let pauseResults = [];
     if (weeklyMenuId && pauseDecisionByDate.size > 0) {
       const decisions = Array.from(pauseDecisionByDate.values())
         .map((d) => ({
@@ -4285,6 +4301,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
             : await applyConfirmedPauses({ subscriptionId: ctx.subscriptionId, decisions });
         }
 
+        pauseResults = applied;
         const outcomeByDate = new Map(applied.map((r) => [r.date, r]));
         const freshRecord = await MenuSelectionRecord.findOne({ weeklyMenuId, email: customer.email }).select('skippedDays').lean();
         if (freshRecord) {
@@ -4308,6 +4325,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     res.json({
       success: true,
       message: 'Meals selected successfully',
+      pauseResults,
       data: customer
     });
 
@@ -4315,7 +4333,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     // subscription and place the resume day after the cycle end. The customer
     // has already been responded to and sees nothing about this — outcomes are
     // recorded on MenuSelectionRecord.skippedDays for the admin view.
-    if (weeklyMenuId && skippedDateKeys.length > 0) {
+    if (weeklyMenuId && skippedDateKeys.length > 0 && pauseDecisionByDate.size === 0) {
       processSkippedDayPauses({
         weeklyMenuId,
         email: customer.email,

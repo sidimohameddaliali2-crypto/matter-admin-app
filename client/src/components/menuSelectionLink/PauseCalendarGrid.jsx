@@ -101,6 +101,7 @@ const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, on
           const isSkip = kinds.includes('skip');
           const isResume = kinds.includes('resume');
           const isActive = kinds.includes('active');
+          const isSuggested = kinds.includes('suggested');
           const isSelected = key === selectedDate;
           const isPast = key < todayKey;
           const isBelowMin = minSelectableDate ? key < minSelectableDate : false;
@@ -110,7 +111,7 @@ const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, on
           // A marked date (skip or resume) is a full filled circle behind
           // the number, not a small dot — resume wins if a date is somehow
           // both (rare: a resume date landing on another row's skip date).
-          const markerColor = isSkip ? '#DC2626' : isActive ? '#64748B' : isResume ? '#16A34A' : null;
+          const markerColor = isSkip ? '#DC2626' : isActive ? '#64748B' : isResume ? '#16A34A' : isSuggested ? '#2563EB' : null;
           return (
             <button
               key={i}
@@ -131,7 +132,7 @@ const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, on
                 fontSize: 12.5,
                 fontFamily: 'inherit',
               }}
-              aria-label={`${key}${isSkip ? ', paused (fixed)' : isActive ? ', active delivery (unavailable)' : isResume ? ', resume delivery' : ''}`}
+              aria-label={`${key}${isSkip ? ', paused (fixed)' : isActive ? ', active delivery (unavailable)' : isResume ? ', resume delivery' : isSuggested ? ', suggested resume (not selected)' : ''}`}
               aria-pressed={isSelected}
               title={isSkip ? 'Paused day (fixed)' : isActive ? 'Active delivery (unavailable)' : isResume ? 'Resumes here' : undefined}
             >
@@ -140,10 +141,11 @@ const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, on
           );
         })}
       </div>
-      <div style={{ display: 'flex', gap: 14, marginTop: 10, fontSize: 11.5, color: 'var(--color-neutral-600)' }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10, fontSize: 11.5, color: 'var(--color-neutral-600)' }}>
         <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#DC2626', display: 'inline-block', marginRight: 4 }} />Paused</span>
         <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#16A34A', display: 'inline-block', marginRight: 4 }} />Resumes</span>
         <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#64748B', display: 'inline-block', marginRight: 4 }} />Active delivery</span>
+        <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#2563EB', display: 'inline-block', marginRight: 4 }} />Suggested</span>
       </div>
     </div>
   );

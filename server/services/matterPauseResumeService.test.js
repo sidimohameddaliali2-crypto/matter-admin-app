@@ -2,8 +2,9 @@
 // Pure-fixture tests for the resume-date algorithm — no DB, no Matter API.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { suggestResumeDates, applyConfirmedPauses, previewSkipPauses, resolveSubscriptionContext } from './matterPauseResumeService.js';
+import { suggestResumeDates, applyConfirmedPauses, previewSkipPauses, resolveSubscriptionContext, validateRequiredResumeDates } from './matterPauseResumeService.js';
 import matterApiService from './matterApiService.js';
+import { matterWeekendEnabled } from './matterSubscriptionContract.js';
 
 test('one skip, clean subscription -> resumes the day after cycle end', () => {
   const out = suggestResumeDates({
@@ -91,6 +92,21 @@ test('no cycle_end_date -> every date reported with a null resume date, no crash
   assert.deepEqual(out.get('2026-10-22'), { alreadyPaused: false, resumeDate: null });
 });
 
+test('resume date is never before, or on, the skip date it belongs to — even when cycle end is earlier', () => {
+  // Cycle already ended (Oct 25) but the customer is choosing meals for a
+  // later menu (e.g. into their next/renewed cycle) and skips a day in it.
+  // cycle_end+1 alone would suggest 2026-10-26 — before the Nov 2 skip date.
+  const out = suggestResumeDates({
+    skippedDateKeys: ['2026-11-02', '2026-11-03'],
+    cycleEndKey: '2026-10-25',
+    existingPaused: new Set(),
+    usedReturn: new Set(),
+    weekendEnabled: true
+  });
+  assert.equal(out.get('2026-11-02').resumeDate, '2026-11-04');
+  assert.equal(out.get('2026-11-03').resumeDate, '2026-11-05');
+});
+
 test('suggestions skip active Matter deliveries after cycle end', () => {
   const out = suggestResumeDates({
     skippedDateKeys: ['2026-10-21', '2026-10-22'], cycleEndKey: '2026-10-25',
@@ -159,4 +175,43 @@ test('an API outage does not trigger a different subscription lookup', async (t)
   const ctx = await resolveSubscriptionContext({ email: 'customer@example.com', matterSubscriptionId: 'sub' });
   assert.equal(ctx.error, 'Unavailable');
   assert.equal(list.mock.callCount(), 0);
+});
+
+test('Matter weekend deliveries override a false internal flag, including when the weekend is paused', () => {
+  assert.equal(matterWeekendEnabled({ delivery_schedule: [{ date: '2026-10-24', status: 'paused' }] }, false), true);
+  assert.equal(matterWeekendEnabled({ delivery_schedule: [{ date: '2026-10-23', status: 'active' }] }, true), false);
+  assert.equal(matterWeekendEnabled({}, true), true);
+});
+
+test('preview suggests free weekend resume dates for a Matter weekend customer with legacy weekend false', async (t) => {
+  t.mock.method(matterApiService, 'getSubscription', async () => ({ data: {
+    subscription_id: 'sub', cycle_end_date: '2026-11-13', delivery_schedule: [
+      { date: '2026-10-24', status: 'active' },
+    ],
+  } }));
+  t.mock.method(matterApiService, 'getSubscriptionPauses', async () => ({}));
+  const result = await previewSkipPauses({ matterSubscriptionId: 'sub', skippedDateKeys: ['2026-10-24'], weekendEnabled: false });
+  assert.equal(result.weekendEnabled, true);
+  assert.equal(result.pauses[0].suggestedResumeDate, '2026-11-14');
+});
+
+test('every paused day requires its own explicit resume date; a partial selection cannot submit', () => {
+  const skippedDateKeys = ['2026-10-28', '2026-10-30', '2026-10-31'];
+  const decisions = [
+    { date: '2026-10-28', action: 'pause', resumeDate: '2026-11-12' },
+    { date: '2026-10-30', action: 'pause', resumeDate: '2026-11-13' },
+  ];
+  assert.match(validateRequiredResumeDates({ skippedDateKeys, decisions }), /2026-10-31/);
+  assert.match(validateRequiredResumeDates({ skippedDateKeys, decisions: [] }), /2026-10-28/);
+  decisions.push({ date: '2026-10-31', action: 'pause', resumeDate: '2026-11-14' });
+  assert.equal(validateRequiredResumeDates({ skippedDateKeys, decisions }), null);
+});
+
+test('invalid, duplicate, declined, or earlier resume dates are rejected; existing verified pauses need no new selection', () => {
+  for (const resumeDate of [null, '2026-02-30', '2026-10-21', '2026-10-20']) {
+    assert.ok(validateRequiredResumeDates({ skippedDateKeys: ['2026-10-21'], decisions: [{ date: '2026-10-21', action: 'pause', resumeDate }] }));
+  }
+  assert.ok(validateRequiredResumeDates({ skippedDateKeys: ['2026-10-21'], decisions: [{ date: '2026-10-21', action: 'decline', resumeDate: '2026-11-12' }] }));
+  assert.ok(validateRequiredResumeDates({ skippedDateKeys: ['2026-10-21', '2026-10-22'], decisions: ['2026-10-21', '2026-10-22'].map((date) => ({ date, action: 'pause', resumeDate: '2026-11-12' })) }));
+  assert.equal(validateRequiredResumeDates({ skippedDateKeys: ['2026-10-21'], decisions: [], alreadyPaused: new Set(['2026-10-21']) }), null);
 });

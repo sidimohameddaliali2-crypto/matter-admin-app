@@ -174,6 +174,8 @@ function buildRealModel(weeklyMenu, profile) {
   // (paused / skipped days are not in it). Only when Matter sent no calendar
   // do we fall back to the weekend rule.
   const matterDays = Array.isArray(profile?.deliveryDates) ? new Set(profile.deliveryDates) : null;
+  // Keep submitted skips visible even after Matter removes them from active deliveries.
+  (profile?.skippedDays || []).forEach((d) => matterDays?.add(toDateKey(d.date || d)));
 
   const keySet = new Set();
   rows.forEach((row) => {
@@ -416,7 +418,8 @@ const MenuSelectionLink = ({ token }) => {
       // matches a real subscription or gets a clear "contact customer
       // service" error, never a guessed/fuzzy match to someone else's data.
       const res = await api.get(
-        `/menus/customers/${encodeURIComponent(v)}/subscription-profile?email=${encodeURIComponent(v)}`
+        `/menus/customers/${encodeURIComponent(v)}/subscription-profile`,
+        { params: { email: v, menuId: rawMenu?._id } }
       );
       const profile = res.data?.data;
       if (!profile) throw new Error('not found');
@@ -463,7 +466,10 @@ const MenuSelectionLink = ({ token }) => {
         });
       }
       setQty(preQty);
-      setSkipped({});
+      const savedSkipDates = new Set((profile.skippedDays || []).map((d) => toDateKey(d.date || d)));
+      const savedSkips = Object.fromEntries(built.dayKeys.map((key, i) => [i, savedSkipDates.has(key)]));
+      setSkipped(savedSkips);
+      setLockedSkipDays(savedSkips);
       setAcknowledged({});
       // Land on the first day that isn't already closed, instead of always
       // opening on Monday even when Monday (and maybe more) has passed.
@@ -507,6 +513,17 @@ const MenuSelectionLink = ({ token }) => {
     const eligible = dayKeys.filter((k) => k <= account.cycleEndDate);
     return eligible.length ? eligible[eligible.length - 1] : null;
   }, [dayKeys, account]);
+
+  // The day deliveries would resume on with a renewal — the day right after
+  // the subscription's own cycle_end_date (the actual billing boundary, not
+  // just the last scheduled delivery day, which can land a day or two before
+  // it if that boundary itself isn't a delivery day).
+  const continuesFromDate = useMemo(() => {
+    if (!account?.cycleEndDate) return '';
+    const next = dateFromKey(account.cycleEndDate);
+    next.setDate(next.getDate() + 1);
+    return fmtDayLong(toDateKey(next));
+  }, [account]);
 
   const dayCount = useCallback(
     (i) =>
@@ -737,6 +754,20 @@ const MenuSelectionLink = ({ token }) => {
         ...(pauseDecisions ? { pauseDecisions } : {}),
       });
       if (res.data?.success) {
+        const failedPauses = (res.data.pauseResults || []).filter((p) => p.pauseStatus === 'failed');
+        if (failedPauses.length) {
+          setSkipPauseReview((review) => review ? {
+            ...review,
+            submissionError: `Your meals were saved, but ${failedPauses.length} pause(s) could not be applied. Please review the dates and retry, or contact customer service.`,
+            pauses: review.pauses.map((p) => {
+              const result = res.data.pauseResults.find((r) => r.date === p.date);
+              const confirmed = pauseDecisions?.find((d) => d.date === p.date);
+              return { ...p, alreadyPaused: p.alreadyPaused || ['success', 'already_paused'].includes(result?.pauseStatus), suggestedResumeDate: result?.resumeDate || confirmed?.resumeDate || p.suggestedResumeDate };
+            }),
+          } : review);
+          return;
+        }
+        setSkipPauseReview(null);
         setLockedSkipDays(skipped);
         setRenewalEligible(!!lastCycleDayKey);
         setStep('done');
@@ -774,7 +805,6 @@ const MenuSelectionLink = ({ token }) => {
   }, [account, flash]);
 
   const handleConfirmPauseReview = useCallback((decisions) => {
-    setSkipPauseReview(null);
     doSubmit(decisions);
   }, [doSubmit]);
 
@@ -1254,14 +1284,22 @@ const MenuSelectionLink = ({ token }) => {
 
       {!skippedToday && dayKeys[day] === lastCycleDayKey && (
         <div style={{ padding: '18px 22px 0' }}>
-          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10, background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 'var(--radius-lg)', padding: '12px 14px' }}>
-            <span style={{ fontSize: 18, lineHeight: 1 }}>📅</span>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, background: 'var(--color-accent-200)', borderRadius: 'var(--radius-lg)', padding: '14px 16px' }}>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: '#92400E' }}>Last day of your current cycle</div>
-              <p style={{ margin: '2px 0 0', fontSize: 12.5, color: '#92400E', lineHeight: 1.5 }}>
-                Your subscription cycle ends after {dayHeading}. Renew to keep your deliveries going without a gap.
+              <div style={{ fontSize: 15, fontWeight: 700 }}>Last day of your cycle</div>
+              <p className="text-muted" style={{ margin: '2px 0 0', fontSize: 12.5, lineHeight: 1.5 }}>
+                Renew so deliveries continue from {continuesFromDate}.
               </p>
             </div>
+            <a
+              href="https://www.matternutrition.xyz/"
+              target="_blank"
+              rel="noreferrer"
+              className="btn btn-primary"
+              style={{ fontSize: 13, flex: 'none', padding: '10px 18px' }}
+            >
+              Renew
+            </a>
           </div>
         </div>
       )}
@@ -1504,7 +1542,8 @@ const MenuSelectionLink = ({ token }) => {
             pauses={skipPauseReview?.pauses || []}
             submitting={submitting}
             preview={preview}
-            weekendEnabled={!!account?.weekend}
+            weekendEnabled={skipPauseReview?.weekendEnabled ?? !!account?.weekend}
+            submissionError={skipPauseReview?.submissionError}
             activeDeliveryDates={skipPauseReview?.activeDeliveryDates || []}
             unavailableDates={skipPauseReview?.unavailableDates || []}
             availabilityError={skipPauseReview?.availabilityError}
@@ -1519,3 +1558,4 @@ const MenuSelectionLink = ({ token }) => {
 };
 
 export default MenuSelectionLink;
+export { buildRealModel };
