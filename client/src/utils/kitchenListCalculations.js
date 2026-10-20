@@ -1003,6 +1003,11 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     customerId: customer?.customerId,
     calculationStatus: 'complete', inputErrors: [], formulaVersion: KITCHEN_FORMULA_VERSION,
     nutritionResolvedAt: customer?.nutritionResolvedAt || null,
+    matterSourceUpdatedAt: customer?.matterSourceUpdatedAt ?? null,
+    matterSourceSubscriptionId: customer?.matterSourceSubscriptionId ?? null,
+    matterEffectiveState: customer?.matterEffectiveState ?? null,
+    deliveryAddressStatus: customer?.deliveryAddressStatus ?? null,
+    deliveryAddressReason: customer?.deliveryAddressReason ?? null,
     skippedDays: customer?.skippedDays || [],
     // The caller's resolved display name wins (Kitchen List passes the Matter
     // name first, then the saved first/last name) — this used to be rebuilt

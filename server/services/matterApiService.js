@@ -2,6 +2,7 @@ import axios from 'axios';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { cacheGet, cacheSet } from '../config/cache.js';
+import { resolveMatterDeliveryAddress, matterMealContract } from './matterSubscriptionContract.js';
 
 // A customer's macro/plan config on Matter changes on the order of days or
 // weeks (subscription edits, pause/resume), not mid-shift — caching these
@@ -74,7 +75,11 @@ const activeDeliveryDates = (subscription) => (subscription?.delivery_schedule |
 // One shape for every nutrition lookup (by email, subscription id, or Matter
 // customer id), so the Kitchen List gets the same fields whichever path found
 // the subscription. customer_id is Matter's permanent id for the customer.
-const buildNutritionResult = (subscription) => ({
+export const buildNutritionResult = (subscription) => ({
+  delivery_address_resolution: resolveMatterDeliveryAddress(subscription.customer_addresses),
+  meal_contract: matterMealContract(subscription),
+  source_fetched_at: new Date().toISOString(),
+  source_updated_at: subscription.updated_at ?? null,
   subscription_id: subscription.subscription_id,
   customer_id: subscription.customer_id ?? null,
   macros: subscription.macros || null,
@@ -84,7 +89,7 @@ const buildNutritionResult = (subscription) => ({
   // Per-day meal count — total_meals on the subscription is for the whole
   // cycle, not a daily figure (see WebsiteSubscription.js).
   meal_frequency: subscription.plan?.meal_frequency ?? null,
-  breakfast_included: !!subscription.breakfast_included,
+  breakfast_included: typeof subscription.breakfast_included === 'boolean' ? subscription.breakfast_included : null,
   // null when Matter sent no calendar at all, so "no deliveries" (empty list)
   // and "unknown" stay distinct for callers.
   active_delivery_dates: Array.isArray(subscription.delivery_schedule)
@@ -98,7 +103,7 @@ const buildNutritionResult = (subscription) => ({
   delivery_window: subscription.delivery_window || null,
   // Dietary restrictions — surfaced so the Kitchen List customer card can
   // display them.
-  exclusions: (subscription.exclusions || []).map((ex) => ex.title).filter(Boolean),
+  exclusions: Array.isArray(subscription.exclusions) ? subscription.exclusions.map((ex) => ex.title).filter(Boolean) : null,
   // Used to cross-reference this subscription against internal Customer
   // records (customerMatchService) when the subscription's own email
   // doesn't match anything internally.
@@ -224,6 +229,35 @@ class MatterApiService {
     return result;
   }
 
+  // Production kitchen reads deliberately bypass the 15-minute nutrition
+  // cache and never relink Customer records. A known subscription is exact:
+  // renewal/customer/email fallback could select a different paid entitlement.
+  async getKitchenNutrition({ subscriptionId, customerId, email } = {}) {
+    let id = subscriptionId;
+    if (!id) {
+      const list = await this.listSubscriptions({ customerId: customerId || undefined, email: customerId ? undefined : email, pageSize: 100 });
+      const rows = list?.data || [];
+      if (rows.length !== 1 || Number(list?.meta?.total_pages || 1) > 1) {
+        const error = new Error('Kitchen subscription is ambiguous; link the exact Matter subscription before production.');
+        error.statusCode = 409;
+        throw error;
+      }
+      id = rows[0].subscription_id;
+    }
+    const detail = await this.getSubscription(id);
+    if (!detail?.data || String(detail.data.subscription_id) !== String(id)) {
+      const error = new Error('The exact Matter subscription could not be verified.');
+      error.statusCode = 409;
+      throw error;
+    }
+    if (customerId && String(detail.data.customer_id ?? '') !== String(customerId)) {
+      const error = new Error('Matter customer and subscription links conflict.');
+      error.statusCode = 409;
+      throw error;
+    }
+    return buildNutritionResult(detail.data);
+  }
+
   /**
    * Get the pause state for a subscription.
    */
@@ -326,23 +360,26 @@ class MatterApiService {
             // more likely to be missing than the lower-confidence fallbacks.
             email: detail.data.email || sub.email,
             phone: detail.data.phone || '',
-            address: formatAddress(selectBestAddress(detail.data.customer_addresses)),
+            address: formatAddress(resolveMatterDeliveryAddress(detail.data.customer_addresses).address),
             // Raw best-match address (building/floor/unit/coordinates) and
             // the delivery time window — detail is already fetched above for
             // every candidate, so surfacing these costs nothing extra. Added
             // for the Delivery-import job (matterDeliveryImportService.js),
             // which needs real coordinates/address parts and a wall-clock
             // time, not just the flattened display string.
-            address_detail: selectBestAddress(detail.data.customer_addresses),
+            address_detail: resolveMatterDeliveryAddress(detail.data.customer_addresses).address,
+            address_resolution: resolveMatterDeliveryAddress(detail.data.customer_addresses),
+            source_fetched_at: new Date().toISOString(),
+            source_updated_at: detail.data.updated_at ?? null,
             // Raw list too (not just the already-picked best one) — lets a
             // caller tell "exactly one plausible address, picked with zero
             // ambiguity" apart from "guessed among several candidates" (see
             // matterDeliveryImportService.js's unambiguousActiveAddress).
             customer_addresses: detail.data.customer_addresses || [],
             delivery_window: detail.data.delivery_window || null,
-            meal_frequency: detail.data.plan?.meal_frequency ?? 1,
+            meal_frequency: detail.data.plan?.meal_frequency ?? null,
             snacks_per_day: detail.data.snacks_per_day ?? null,
-            breakfast_included: !!detail.data.breakfast_included,
+            breakfast_included: typeof detail.data.breakfast_included === 'boolean' ? detail.data.breakfast_included : null,
             exclusions: (detail.data.exclusions || []).map((ex) => ex.title).filter(Boolean),
             subscription_status: sub.subscription_status,
             plan_name: detail.data.plan?.name ?? null,

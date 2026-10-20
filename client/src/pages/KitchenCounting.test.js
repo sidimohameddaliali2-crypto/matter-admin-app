@@ -28,7 +28,7 @@ beforeEach(async () => {
   api.get.mockImplementation(async (path, config) => {
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', startDate: A, endDate: B }] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [entry] } };
-    if (path.includes('nutrition-by-email')) return { data: { data: { plan_name: 'Custom', macros: { carbohydrates: 60, protein: 60, fat: 20 }, active_delivery_dates: [A, B] } } };
+    if (path.includes('kitchen-inputs')) return { data: { data: { plan_name: 'Custom', macros: { carbohydrates: 60, protein: 60, fat: 20 }, active_delivery_dates: [A, B] } } };
     if (path.includes('delivery-on-date')) {
       if (fail) throw new Error('Fixture roster failure');
       return new Promise((resolve) => { pending[config.params.date] = resolve; });

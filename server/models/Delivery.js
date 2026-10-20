@@ -22,6 +22,7 @@ const deliverySchema = new mongoose.Schema({
     default: null,
     index: true
   },
+  matterSource: { fetchedAt: Date, updatedAt: String, effectiveState: String, pinSource: String },
   // Matter's own id for the saved address this delivery goes to
   // (customer_addresses[].id, as a string) — a stable identity for "this
   // place", unlike customerId (a customer can have several addresses) or the
@@ -92,6 +93,8 @@ const deliverySchema = new mongoose.Schema({
     city: String,
     area: String,
     street: String,
+    additionalDetails: String,
+    sourceCategory: String,
     building: String,
     floor: String,
     apartment: String,

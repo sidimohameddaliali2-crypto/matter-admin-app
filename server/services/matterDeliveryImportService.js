@@ -4,9 +4,11 @@ import { resolveCustomerMatch, createCustomerFromMatterSubscription } from './cu
 import { detectAreaFromAddress } from '../config/areas.js';
 import { getBusinessDayBounds } from '../utils/businessDate.js';
 import { displayMatterName } from '../utils/matterName.js';
+import { resolveMatterDeliveryAddress } from './matterSubscriptionContract.js';
+import { compareMatterDelivery } from './matterDeliveryComparison.js';
 
-// Statuses after which a delivery's record is left exactly as it was.
-const FINISHED_STATUSES = new Set(['delivered', 'completed', 'collected', 'failed']);
+// Only pending/assigned work today or later can receive a name refresh.
+const EDITABLE_STATUSES = new Set(['pending', 'assigned']);
 
 // Owner (2026-09-22): "read all the delivery schedule for the day from the
 // matter api and put them in the delivery page, use sub id for each
@@ -80,15 +82,49 @@ export function buildAddressLine(addr) {
     .join(', ');
 }
 
-// The safe fallback when nothing is flagged current_delivery_address: if the
-// customer has exactly one `status: 'active'` saved address, there's nothing
-// to guess between — using it is as safe as the current flag would've been.
-// Returns null (caller should skip) when there are zero or multiple active
-// addresses and none is marked current, since picking among several really
-// would be a guess.
-function unambiguousActiveAddress(addresses) {
-  const active = (Array.isArray(addresses) ? addresses : []).filter((a) => a.status === 'active');
-  return active.length === 1 ? active[0] : null;
+// One proposal shape for new imports and read-only comparisons. No writes.
+export function buildMatterDeliverySnapshot(sub, dateKey, customer = null) {
+  const useAddr = resolveMatterDeliveryAddress(sub.customer_addresses).address;
+  if (!useAddr) return null;
+  const subscriptionId = String(sub.subscription_id);
+  const hour = parseWindowHour(sub.delivery_window);
+  const addressLine = buildAddressLine(useAddr) || sub.address || '';
+  const savedPin = customer?.gpsLocation;
+  const manualPin = savedPin?.source === 'manual' && useAddr.id != null
+    && String(savedPin.addressId || '') === String(useAddr.id)
+    && String(savedPin.address || '').trim() === addressLine.trim()
+    && Number.isFinite(savedPin.lat) && Number.isFinite(savedPin.lng) ? savedPin : null;
+  return {
+    customerId: customer?.customerId,
+    customerName: displayMatterName(sub.name),
+    scheduledTime: hour == null ? null : scheduledTimeFor(sub.delivery_date || dateKey, hour),
+    company: 'Matter',
+    type: 'Delivery',
+    address: addressLine,
+    addressDetails: {
+      label: useAddr.label ?? null,
+      city: useAddr.emirate ?? null,
+      area: useAddr.area ?? null,
+      street: useAddr.street ?? null,
+      additionalDetails: useAddr.additional_details ?? null,
+      sourceCategory: useAddr.category ?? null,
+      locationType: ['villa', 'apartment'].includes(String(useAddr.category || '').toLowerCase())
+        ? (String(useAddr.category).toLowerCase() === 'villa' ? 'Villa' : 'Apartment') : null,
+      building: useAddr.building ?? null,
+      floor: useAddr.floor ?? null,
+      apartment: useAddr.unit ?? null,
+      addressStatus: useAddr.status ?? null
+    },
+    zone: resolveEnglishArea(useAddr) || detectAreaFromAddress(addressLine) || '',
+    gpsLocation: manualPin ? { lat: manualPin.lat, lng: manualPin.lng } : (useAddr.coordinates && Number.isFinite(useAddr.coordinates.lat) && Number.isFinite(useAddr.coordinates.lng))
+      ? { lat: useAddr.coordinates.lat, lng: useAddr.coordinates.lng }
+      : undefined,
+    matterSource: { fetchedAt: sub.source_fetched_at || new Date(), updatedAt: sub.source_updated_at ?? null, effectiveState: 'current-snapshot-only', pinSource: manualPin ? 'internal-manual-same-address' : 'matter' },
+    matterSubscriptionId: subscriptionId,
+    // Matter's id for this saved address — the stable identity pin
+    // corrections key on (see Delivery.addressId).
+    addressId: useAddr.id != null ? String(useAddr.id) : null
+  };
 }
 
 /**
@@ -115,7 +151,7 @@ export async function importMatterDeliveriesForDate(dateKey) {
     if (error.code !== 'INCOMPLETE_DELIVERY_ROSTER') throw error;
     return { date: dateKey, complete: false, total: error.discovery.candidates, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, failed: error.discovery.failed, discoveryFailed: error.discovery.failed, writeFailed: 0, errors: error.discovery.errors };
   }
-  const summary = { date: dateKey, complete: true, discoveryFailed: 0, writeFailed: 0, total: matches.length, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, failed: 0, errors: [] };
+  const summary = { date: dateKey, complete: true, discoveryFailed: 0, writeFailed: 0, total: matches.length, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, noDeliveryWindow: 0, failed: 0, errors: [], comparisons: [] };
 
   for (const sub of matches) {
     try {
@@ -125,14 +161,18 @@ export async function importMatterDeliveriesForDate(dateKey) {
       const existingFromThisImport = await Delivery.findOne({
         matterSubscriptionId: subscriptionId,
         scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive }
-      }).select('_id customerName status');
+      }).select('_id customerName status addressId address addressDetails zone gpsLocation scheduledTime');
       if (existingFromThisImport) {
         summary.alreadyExisted += 1;
+        const proposed = buildMatterDeliverySnapshot(sub, dateKey);
+        summary.comparisons.push(proposed
+          ? compareMatterDelivery(existingFromThisImport, proposed, { date: dateKey, fetchedAt: sub.source_fetched_at, addressResolution: resolveMatterDeliveryAddress(sub.customer_addresses) })
+          : { deliveryId: String(existingFromThisImport._id), action: 'review-only', effectiveState: 'UNKNOWN', addressResolution: resolveMatterDeliveryAddress(sub.customer_addresses) });
         // A name changed (or was fixed) in Matter after the delivery was
         // imported — keep the sheet in step, unless the delivery is finished.
         const matterName = displayMatterName(sub.name);
-        if (matterName && existingFromThisImport.customerName !== matterName && !FINISHED_STATUSES.has(existingFromThisImport.status)) {
-          await Delivery.updateOne({ _id: existingFromThisImport._id }, { $set: { customerName: matterName } });
+        if (matterName && existingFromThisImport.customerName !== matterName && EDITABLE_STATUSES.has(existingFromThisImport.status) && startOfDay >= getBusinessDayBounds(new Date()).startOfDay) {
+          await Delivery.updateOne({ _id: existingFromThisImport._id, status: { $in: ['pending', 'assigned'] } }, { $set: { customerName: matterName } });
           summary.namesRefreshed = (summary.namesRefreshed || 0) + 1;
         }
         continue;
@@ -154,10 +194,17 @@ export async function importMatterDeliveriesForDate(dateKey) {
       // addresses with none marked current). Checked before customer
       // resolution so a skipped subscription doesn't still leave behind a
       // newly-created Customer record.
-      const addr = sub.address_detail || {};
-      const useAddr = addr.current_delivery_address === true ? addr : unambiguousActiveAddress(sub.customer_addresses);
+      const resolution = resolveMatterDeliveryAddress(sub.customer_addresses);
+      const useAddr = resolution.address;
       if (!useAddr) {
         summary.noCurrentAddress += 1;
+        summary.comparisons.push({ subscriptionId, serviceDate: dateKey, addressResolution: resolution, action: 'review-only', effectiveState: 'UNKNOWN' });
+        continue;
+      }
+
+      if (parseWindowHour(sub.delivery_window) == null) {
+        summary.noDeliveryWindow += 1;
+        summary.comparisons.push({ subscriptionId, serviceDate: dateKey, windowResolution: 'unresolved', action: 'review-only', effectiveState: 'UNKNOWN' });
         continue;
       }
 
@@ -178,47 +225,18 @@ export async function importMatterDeliveriesForDate(dateKey) {
           customerId: customer.customerId,
           type: 'Delivery',
           scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive }
-        }).select('_id');
+        }).select('_id status addressId address addressDetails zone gpsLocation scheduledTime');
         if (existingOtherDelivery) {
           summary.alreadyHadOtherDelivery += 1;
+          summary.comparisons.push(compareMatterDelivery(existingOtherDelivery, buildMatterDeliverySnapshot(sub, dateKey), { date: dateKey, fetchedAt: sub.source_fetched_at, addressResolution: resolution }));
           continue;
         }
       }
 
-      const hour = parseWindowHour(sub.delivery_window) ?? DEFAULT_WINDOW_HOUR;
-      const scheduledTime = scheduledTimeFor(sub.delivery_date || dateKey, hour);
-      const addressLine = buildAddressLine(useAddr) || sub.address || '';
-      // Owner (2026-10-16): the Matter API's name first, so the delivery sheet
-      // matches the kitchen sheet; the internal record's name is only the fallback.
-      const customerName = displayMatterName(sub.name)
-        || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim()
-        || 'Matter Customer';
-
-      await Delivery.create({
-        customerId: customer.customerId,
-        customerName,
-        scheduledTime,
-        company: 'Matter',
-        type: 'Delivery',
-        address: addressLine,
-        addressDetails: {
-          label: useAddr.label || '',
-          city: useAddr.emirate || '',
-          area: useAddr.area || '',
-          building: useAddr.building || '',
-          floor: useAddr.floor || '',
-          apartment: useAddr.unit || '',
-          addressStatus: useAddr.status || ''
-        },
-        zone: resolveEnglishArea(useAddr) || detectAreaFromAddress(addressLine) || '',
-        gpsLocation: (useAddr.coordinates && Number.isFinite(useAddr.coordinates.lat) && Number.isFinite(useAddr.coordinates.lng))
-          ? { lat: useAddr.coordinates.lat, lng: useAddr.coordinates.lng }
-          : undefined,
-        matterSubscriptionId: subscriptionId,
-        // Matter's id for this saved address — the stable identity pin
-        // corrections key on (see Delivery.addressId).
-        addressId: useAddr.id != null ? String(useAddr.id) : null
-      });
+      const snapshot = buildMatterDeliverySnapshot(sub, dateKey, customer);
+      snapshot.customerName = displayMatterName(sub.name)
+        || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || 'Matter Customer';
+      await Delivery.create(snapshot);
       summary.created += 1;
     } catch (err) {
       summary.failed += 1;
@@ -228,5 +246,6 @@ export async function importMatterDeliveriesForDate(dateKey) {
     }
   }
 
+  summary.requiresReview = summary.noCurrentAddress > 0 || summary.noDeliveryWindow > 0 || summary.comparisons.some((item) => item.conflicts?.length || item.addressResolution?.status === 'unresolved');
   return summary;
 }

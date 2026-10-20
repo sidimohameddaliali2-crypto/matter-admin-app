@@ -6,6 +6,14 @@ const validNumber = (value) => (typeof value === 'number' || (typeof value === '
 export const kitchenInputErrors = (customer) => {
   if (customer?.partner) return [];
   const errors = [];
+  if (customer?.matterSourceSubscriptionId != null) {
+    if (!customer.matterName) errors.push('Matter customer name is missing.');
+    if (!validNumber(customer.mealsPerDay) || !Number.isInteger(Number(customer.mealsPerDay)) || Number(customer.mealsPerDay) < 1) errors.push('Matter daily meal count is unresolved.');
+    if (!validNumber(customer.snacksPerDay) || !Number.isInteger(Number(customer.snacksPerDay))) errors.push('Matter daily snack count is unresolved.');
+    if (typeof customer.breakfastIncluded !== 'boolean') errors.push('Matter breakfast entitlement is unresolved.');
+    if (!Array.isArray(customer.dietaryRestrictions)) errors.push('Matter dietary exclusions are unresolved.');
+  }
+  if (customer?.deliveryAddressStatus === 'unresolved') errors.push(`Matter delivery address is unresolved (${customer.deliveryAddressReason || 'unknown'}).`);
   if (customer?.nutritionStatus && customer.nutritionStatus !== 'resolved') errors.push('Nutrition lookup is incomplete; refresh the customer subscription.');
   if (!String(customer?.planName || '').trim()) errors.push('Plan identity is missing; portion units cannot be determined.');
   const expectedUnits = String(customer?.planName || '').trim().toLowerCase() === 'matter core' ? 'food-weight-grams' : 'nutrient-grams';
@@ -55,3 +63,6 @@ export const createKitchenRequestGuard = () => {
   let current = 0;
   return { begin: () => ++current, isCurrent: (id) => id === current, cancel: () => { current++; } };
 };
+
+export const kitchenSourceLabel = (entry) => entry.partner ? 'Partner preset'
+  : `Matter checked ${entry.nutritionResolvedAt || 'UNKNOWN'}; subscription ${entry.matterSourceSubscriptionId || 'UNKNOWN'}; address ${entry.deliveryAddress?.id ?? 'UNKNOWN'}; current snapshot (dated changes unverified)`;

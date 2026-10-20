@@ -1,15 +1,10 @@
-import { enrichSelectionsWithNutrition, fetchBreakfastPresets, fetchSnackPresets, getCustomerName, getDateKey } from './kitchenData';
+import { matchesMatterSubscription, enrichSelectionsWithNutrition, fetchBreakfastPresets, fetchSnackPresets, getCustomerName, getDateKey } from './kitchenData';
 import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
 import { assertKitchenExportReady, prepareKitchenSelections } from '../utils/kitchenIntegrity';
 
-const matchesSubscription = (entry, sub) =>
-  (entry.matterSubscriptionId && String(entry.matterSubscriptionId) === String(sub.subscription_id))
-  || (entry.matterCustomerId && String(entry.matterCustomerId) === String(sub.customer_id))
-  || (entry.email && String(entry.email).trim().toLowerCase() === String(sub.email || '').trim().toLowerCase());
-
 export const assertKitchenRosterCovered = (selections, roster, date) => {
   for (const sub of roster) {
-    const entry = selections.find((candidate) => matchesSubscription(candidate, sub));
+    const entry = selections.find((candidate) => matchesMatterSubscription(candidate, sub));
     if (entry?.skippedDays?.some((day) => getDateKey(day.date || day) === date)) continue;
     const meals = (entry?.selectedMeals || []).filter((meal) => getDateKey(meal.date) === date);
     const core = String(sub.plan_name || '').trim().toLowerCase() === 'matter core';
@@ -41,7 +36,7 @@ export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => 
   }
   const entries = selections.map(transformSelection).map((entry) => {
     const deliveryDates = dayKeys.filter((date) => !(entry.skippedDays || []).some((day) => getDateKey(day.date || day) === date)
-      && (entry.partner || rosters.get(date).some((sub) => matchesSubscription(entry, sub))));
+      && (entry.partner || rosters.get(date).some((sub) => matchesMatterSubscription(entry, sub))));
     // Calculate the entire selection first: the approved fallback delivery-number
     // adjustment depends on its full date order, not the range being printed.
     const calculated = calculateKitchenListEntry({ customer: { ...entry, customerName: getCustomerName(entry) }, selectedMeals: entry.selectedMeals || [], breakfastPreset, snackPreset });

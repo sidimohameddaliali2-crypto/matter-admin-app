@@ -78,13 +78,13 @@ test('a changed roster cannot hide missing customers, partial quantities or inte
 
 test('paper snapshot waits for preparation and uses the same calculator as kitchen screens', async () => {
   const calls = [];
-  const nutrition = { plan_name: 'Custom', macros: { carbohydrates: 38, protein: 32, fat: 10 }, active_delivery_dates: [date] };
+  const nutrition = { delivery_address_resolution: { status: 'resolved', reason: 'current', address: { id: 'fixture', emirate: 'Dubai' } }, plan_name: 'Custom', macros: { carbohydrates: 38, protein: 32, fat: 10 }, active_delivery_dates: [date] };
   const api = {
     post: async () => { calls.push('prepared'); return { data: { success: true, preparation: 'completed' } }; },
     get: async (path) => {
       calls.push(path);
       if (path.endsWith('/selections')) return { data: { success: true, data: [{ ...customer, selectedMeals: [meal] }] } };
-      if (path.includes('nutrition-by-email')) return { data: { data: nutrition } };
+      if (path.includes('kitchen-inputs')) return { data: { data: nutrition } };
       if (path.includes('delivery-on-date')) return { data: { success: true, data: [{ email: customer.email }] } };
       return { data: { success: true, data: {} } };
     },

@@ -29,7 +29,7 @@ const phoneSuffix = (value, len = 9) => normalizePhoneDigits(value).slice(-len);
 const collapseWhitespace = (value) => String(value || '').trim().replace(/\s+/g, ' ');
 const normalizeName = (first, last) => collapseWhitespace([first, last].filter(Boolean).join(' ')).toLowerCase();
 
-export const MATCH_PROJECTION = 'customerId email firstName lastName phone company planStartDate cycleDuration amountPaid discount mealExclusion matterSubscriptionId';
+export const MATCH_PROJECTION = 'customerId email firstName lastName phone company planStartDate cycleDuration amountPaid discount mealExclusion matterSubscriptionId gpsLocation';
 
 /**
  * resolveCustomerMatch({ email, phone, name, subscriptionId })

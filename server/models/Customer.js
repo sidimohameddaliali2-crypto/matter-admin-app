@@ -64,6 +64,7 @@ const customerSchema = new mongoose.Schema({
   gpsLocation: {
     lat: { type: Number, default: null },
     lng: { type: Number, default: null },
+    addressId: { type: String, default: null },
     source: { type: String, default: null }, // 'google' | 'link' | 'manual' | 'unresolved'
     address: { type: String, default: null },
     geocodedAt: { type: Date, default: null }

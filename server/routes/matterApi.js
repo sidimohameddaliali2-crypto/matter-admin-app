@@ -3,7 +3,12 @@ import { protect, authorize } from '../middleware/auth.js';
 import matterApiService, { describeMatterApiError } from '../services/matterApiService.js';
 import { detectAreaFromAddress } from '../config/areas.js';
 import { getNutritionForCustomerLink } from '../services/matterNutritionLookup.js';
-import { importMatterDeliveriesForDate } from '../services/matterDeliveryImportService.js';
+import Delivery from '../models/Delivery.js';
+import Customer from '../models/Customer.js';
+import { isDateKey, getBusinessDayBounds } from '../utils/businessDate.js';
+import { resolveMatterDeliveryAddress, matterMealContract } from '../services/matterSubscriptionContract.js';
+import { compareMatterDelivery } from '../services/matterDeliveryComparison.js';
+import { buildMatterDeliverySnapshot, importMatterDeliveriesForDate } from '../services/matterDeliveryImportService.js';
 
 const router = express.Router();
 
@@ -17,6 +22,22 @@ router.get('/subscriptions', protect, async (req, res) => {
     const status = error?.response?.status || 500;
     console.error('Matter API list subscriptions error:', error.response?.data || error.message);
     res.status(status).json({ success: false, message: describeMatterApiError(error) || 'Failed to fetch subscriptions', error: error.response?.data || error.message });
+  }
+});
+
+// Fresh, read-only kitchen input contract; no cache fallback or customer relinking.
+router.get('/subscriptions/kitchen-inputs', protect, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const { subscriptionId, customerId, email } = req.query;
+  if (![subscriptionId, customerId, email].some((value) => typeof value === 'string' && value.trim())
+    || [subscriptionId, customerId, email].some((value) => value != null && typeof value !== 'string')) {
+    return res.status(400).json({ success: false, message: 'A subscriptionId, customerId or email is required.' });
+  }
+  try {
+    const data = await matterApiService.getKitchenNutrition({ subscriptionId, customerId, email });
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(error.statusCode || error.response?.status || 502).json({ success: false, message: describeMatterApiError(error) || error.message });
   }
 });
 
@@ -166,6 +187,41 @@ router.get('/subscriptions/active-contacts', protect, async (req, res) => {
     const status = error?.response?.status || 500;
     console.error('Matter API active-contacts error:', error.response?.data || error.message);
     res.status(status).json({ success: false, message: describeMatterApiError(error) || 'Failed to fetch active customer contacts', error: error.response?.data || error.message });
+  }
+});
+
+// Bounded, read-only review for a single exact subscription and service day.
+// No relinking, import, pin propagation or correction is performed by this GET.
+router.get('/subscriptions/:id/delivery-comparison', protect, authorize(['dispatcher', 'manager', 'admin', 'super_admin']), async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!isDateKey(req.query.date)) return res.status(400).json({ success: false, message: 'date must be YYYY-MM-DD' });
+  try {
+    const date = req.query.date;
+    const detail = await matterApiService.getSubscription(req.params.id);
+    const sub = detail?.data;
+    if (!sub || String(sub.subscription_id) !== req.params.id) return res.status(409).json({ success: false, message: 'Exact Matter subscription could not be verified.' });
+    const fetchedAt = new Date().toISOString();
+    const addressResolution = resolveMatterDeliveryAddress(sub.customer_addresses);
+    const customer = await Customer.findOne({ matterSubscriptionId: req.params.id }).select('customerId mealPerDay mealPlan gpsLocation');
+    const { startOfDay, endOfDayExclusive } = getBusinessDayBounds(date);
+    const jobs = await Delivery.find({ type: 'Delivery', scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive },
+      $or: [{ matterSubscriptionId: req.params.id }, ...(customer ? [{ customerId: customer.customerId }] : [])] }).lean();
+    const proposed = buildMatterDeliverySnapshot({ ...sub, source_fetched_at: fetchedAt, source_updated_at: sub.updated_at, delivery_date: date }, date);
+    const calendar = Array.isArray(sub.delivery_schedule) ? sub.delivery_schedule.filter((day) => String(day.date).slice(0, 10) === date) : null;
+    const eligibility = calendar?.length === 1 ? calendar[0].status : 'UNKNOWN';
+    const meals = matterMealContract(sub);
+    res.json({ success: true, data: {
+      subscriptionId: req.params.id, serviceDate: date, source: 'matter', fetchedAt,
+      effectiveState: 'UNKNOWN', reason: 'Matter exposes the current address/window without a dated change contract.',
+      eligibility, addressResolution, mealContract: meals,
+      profileComparison: customer ? { source: 'internal-customer-profile', mealsPerDay: customer.mealPerDay ?? null, planName: customer.mealPlan ?? null,
+        conflict: customer.mealPerDay !== meals.mealsPerDay || customer.mealPlan !== meals.planName, action: 'review-only' } : { status: 'unlinked', action: 'review-only' },
+      rosterDisposition: !jobs.length ? 'unresolved-no-job' : jobs.length > 1 ? 'review-multiple-orders' : 'linked-job',
+      deliveries: jobs.map((job) => proposed ? compareMatterDelivery(job, proposed, { date, fetchedAt, addressResolution })
+        : { deliveryId: String(job._id), action: 'review-only', addressResolution, effectiveState: 'UNKNOWN' }),
+    } });
+  } catch (error) {
+    res.status(error.response?.status || 502).json({ success: false, message: describeMatterApiError(error) || error.message });
   }
 });
 

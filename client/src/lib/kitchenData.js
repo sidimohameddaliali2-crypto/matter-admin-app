@@ -252,12 +252,9 @@ export const mapWithConcurrency = async (items, limit, mapper) => {
  * Overwrites each selection's macros/snacks-per-day/plan-name with the
  * customer's live Matter website subscription data — never the internal
  * Customer page's values, even when those already have something. Resolves
- * by matterSubscriptionId first (an internally-matched customer whose Matter
- * email differs from theirs — see customerMatchService on the server), email
- * as fallback. Cached per customer for the page's lifetime via
- * `nutritionCacheRef` (a `useRef(new Map())` from the caller) so switching
- * dates/menus or re-running this doesn't re-fire a network call for a
- * customer already looked up.
+ * by exact matterSubscriptionId first. Production inputs are fetched fresh
+ * from Matter on each load/export; no browser or server nutrition cache is
+ * accepted as proof of a current subscription/address.
  *
  * `extended: true` (KitchenList) also pulls deliveryAddress/deliveryWindow/
  * dietaryRestrictions for its customer-detail card; KitchenCounting only
@@ -281,22 +278,17 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
     return { ...entry, nutritionStatus: 'missing' };
   }
 
-  const cacheKey = matterCustomerId ? `cust:${matterCustomerId}` : (subscriptionId ? `sub:${subscriptionId}` : email.toLowerCase());
-  const cached = nutritionCacheRef.current.get(cacheKey);
-  if (cached && Date.now() - Date.parse(cached.nutritionResolvedAt) < 60000) {
-    onEach?.();
-    return { ...entry, ...cached };
-  }
-
   try {
     // Explicit timeout: the shared axios instance has none configured, and
     // mapWithConcurrency's Promise.all waits for every worker to finish — a
     // single slow/hung Matter API call for one customer would otherwise
     // block the entire page's load indefinitely.
-    const nutritionResponse = (subscriptionId || matterCustomerId)
-      ? await api.get('/matter/subscriptions/nutrition-by-subscription-id', { params: { subscriptionId, customerId: matterCustomerId, email }, timeout: 20000 })
-      : await api.get('/matter/subscriptions/nutrition-by-email', { params: { email }, timeout: 20000 });
+    const nutritionResponse = await api.get('/matter/subscriptions/kitchen-inputs', {
+      params: { subscriptionId, customerId: matterCustomerId, email }, timeout: 20000
+    });
+    if (nutritionResponse.data?.success === false) throw new Error('Matter inputs could not be verified.');
     const nutrition = nutritionResponse.data?.data;
+    if (subscriptionId && String(nutrition?.subscription_id || '') !== subscriptionId) throw new Error('Matter subscription link does not match.');
     const websiteMacros = nutrition?.macros
       ? { C: nutrition.macros.carbohydrates, P: nutrition.macros.protein, F: nutrition.macros.fat }
       : null;
@@ -308,7 +300,10 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
       nutritionSource: 'matter',
       nutritionPlanKind: String(nutrition?.plan_name || '').trim().toLowerCase() === 'matter core' ? 'core' : 'ordinary',
       nutritionUnits: String(nutrition?.plan_name || '').trim().toLowerCase() === 'matter core' ? 'food-weight-grams' : 'nutrient-grams',
-      nutritionResolvedAt: new Date().toISOString(),
+      nutritionResolvedAt: nutrition?.source_fetched_at || new Date().toISOString(),
+      matterSourceUpdatedAt: nutrition?.source_updated_at ?? null,
+      matterSourceSubscriptionId: nutrition?.subscription_id ?? null,
+      matterEffectiveState: nutrition?.meal_contract?.effectiveState || 'current-snapshot-only',
       snacksPerDay: nutrition?.snacks_per_day ?? null,
       planName: nutrition?.plan_name ?? null,
       // Owner (2026-10-07): show the Matter name, not the internal record's
@@ -317,13 +312,14 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
       mealsPerDay: nutrition?.meal_frequency ?? null,
       breakfastIncluded: typeof nutrition?.breakfast_included === 'boolean' ? nutrition.breakfast_included : null,
       deliveryDates: Array.isArray(nutrition?.active_delivery_dates) ? nutrition.active_delivery_dates : null,
+      dietaryRestrictions: Array.isArray(nutrition?.exclusions) ? nutrition.exclusions : null,
       ...(extended ? {
-        deliveryAddress: nutrition?.customer_addresses?.[0] || null,
-        deliveryWindow: nutrition?.delivery_window || null,
-        dietaryRestrictions: Array.isArray(nutrition?.exclusions) ? nutrition.exclusions : []
+        deliveryAddress: nutrition?.delivery_address_resolution?.address || null,
+        deliveryAddressStatus: nutrition?.delivery_address_resolution?.status || 'unresolved',
+        deliveryAddressReason: nutrition?.delivery_address_resolution?.reason || 'missing-address-resolution',
+        deliveryWindow: nutrition?.delivery_window || null
       } : {})
     };
-    nutritionCacheRef.current.set(cacheKey, enrichedFields);
     onEach?.();
     return { ...entry, ...enrichedFields };
   } catch {
@@ -366,4 +362,13 @@ export const deriveDateKeys = ({ menuSelections, mainMealOptionsByDate, breakfas
   }
 
   return Array.from(keys).sort();
+};
+
+// An exact subscription link must never fall through to another renewal that
+// happens to share its permanent customer ID or email.
+export const matchesMatterSubscription = (entry, sub) => {
+  const subscriptionId = entry.matterSourceSubscriptionId ?? entry.matterSubscriptionId;
+  if (subscriptionId) return String(subscriptionId) === String(sub.subscription_id);
+  if (entry.matterCustomerId) return String(entry.matterCustomerId) === String(sub.customer_id);
+  return !!entry.email && String(entry.email).trim().toLowerCase() === String(sub.email || '').trim().toLowerCase();
 };

@@ -1,5 +1,5 @@
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
-import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
+import { kitchenSourceLabel, prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, Shuffle, FileText, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
 import api from '../utils/api';
@@ -203,10 +203,10 @@ const getAttentionReasons = (meal) => {
 // the checked date. Matched by linked subscription id first, then email.
 const hasDeliveryOnCheckedDate = (entry, deliveryCheck) => {
   const subId = String(entry?.matterSubscriptionId || '').trim();
-  if (subId && deliveryCheck.subscriptionIds.has(subId)) return true;
+  if (subId) return deliveryCheck.subscriptionIds.has(subId);
   // Matter's permanent customer id survives renewals and email changes.
   const custId = String(entry?.matterCustomerId || '').trim();
-  if (custId && deliveryCheck.customerIds?.has(custId)) return true;
+  if (custId) return !!deliveryCheck.customerIds?.has(custId);
   const email = String(entry?.email || '').trim().toLowerCase();
   return !!email && deliveryCheck.emails.has(email);
 };
@@ -1683,8 +1683,10 @@ const KitchenList = () => {
       addr.building,
       addr.unit ? `Unit ${addr.unit}` : null,
       addr.floor,
+      addr.street,
       addr.area,
-      addr.emirate
+      addr.emirate,
+      addr.additional_details
     ].filter(Boolean);
     return parts.join(', ') || 'No address on file';
   };
@@ -1865,7 +1867,7 @@ const KitchenList = () => {
         CPF: entry.cpf || '',
         'Meal Plan': entry.planName || '',
         Formula: entry.formulaVersion,
-        'Nutrition checked': entry.nutritionResolvedAt || 'Partner preset',
+        'Nutrition checked': kitchenSourceLabel(entry),
         Attention: mealRemarkText(meal),
         // The customer's daily plan total (what their meals are split from),
         // repeated on each of their rows. Matter Core's "macros" are daily food
@@ -1926,7 +1928,7 @@ const KitchenList = () => {
           Meal: label.mealName,
           Remark: mealRemarkText(meal),
           Formula: entry.formulaVersion,
-          'Nutrition checked': entry.nutritionResolvedAt || '',
+          'Nutrition checked': kitchenSourceLabel(entry),
           'P (g)': Number(meal.proteinWeight) || 0,
           'C (g)': Number(meal.carbWeight) || 0,
           'V (g)': Number(meal.vegWeight) || 0,
@@ -2061,7 +2063,7 @@ const KitchenList = () => {
             &nbsp;&nbsp;<span style="background:${hasWindow ? '#1e293b' : '#94a3b8'};color:#ffffff;font-size:10pt;font-weight:bold">&nbsp;${esc(tagText)}&nbsp;</span></p>
           <p style="margin:0;font-size:10.5pt;page-break-after:avoid">${esc(subLine)}</p>
           ${entry.noDeliveryDate === dateKey ? '<p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>NO MATTER DELIVERY ON THIS DATE - confirm before cooking</b></p>' : ''}
-          <p style="margin:0;font-size:10.5pt;page-break-after:avoid"><b>Plan: ${esc(entry.planName || 'N/A')} | Formula: ${esc(entry.formulaVersion || '')} | Nutrition checked: ${esc(entry.nutritionResolvedAt || 'Partner preset')} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
+          <p style="margin:0;font-size:10.5pt;page-break-after:avoid"><b>Plan: ${esc(entry.planName || 'N/A')} | Formula: ${esc(entry.formulaVersion || '')} | Nutrition checked: ${esc(kitchenSourceLabel(entry))} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
           <p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
           ${dayNote ? `<p style="margin:0;font-size:10.5pt;color:#b45309;page-break-after:avoid"><b>Note: ${esc(dayNote)}</b></p>` : ''}
           <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;width:100%;font-size:10.5pt;margin-top:4pt">
@@ -2255,7 +2257,7 @@ ${body}
           : (entry.breakfastIncluded ? 'Yes' : 'No');
         doc.setFont(undefined, 'bold');
         doc.text(
-          `Formula: ${entry.formulaVersion} | Nutrition checked: ${entry.nutritionResolvedAt || "Partner preset"}\nPlan: ${entry.planName || 'N/A'}  |  Meals/day: ${orDash(entry.mealsPerDay)}  |  Snacks/day: ${orDash(entry.snacksPerDay)}  |  Breakfast included: ${breakfastLabel}`,
+          `Formula: ${entry.formulaVersion} | Nutrition checked: ${kitchenSourceLabel(entry)}\nPlan: ${entry.planName || 'N/A'}  |  Meals/day: ${orDash(entry.mealsPerDay)}  |  Snacks/day: ${orDash(entry.snacksPerDay)}  |  Breakfast included: ${breakfastLabel}`,
           14,
           y,
           { maxWidth: pageWidth - 28 }

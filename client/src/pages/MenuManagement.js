@@ -41,7 +41,7 @@ const FIXED_SELECTION_DEADLINES = [
 ];
 import api from '../utils/api';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
-import { assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
+import { kitchenSourceLabel, assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
 import SupyRecipeSearch from '../components/SupyRecipeSearch';
 import IngredientTagEditor from '../components/IngredientTagEditor';
 import { toSentenceCase } from '../utils/textFormat';
@@ -1216,7 +1216,7 @@ const MenuManagement = () => {
       const totalP = selectedMeals.reduce((sum, meal) => sum + Number(meal.macros?.P || 0), 0);
       const totalF = selectedMeals.reduce((sum, meal) => sum + Number(meal.macros?.F || 0), 0);
       const totalCalories = entry.totalCalories;
-      const exclusion = selectedCustomerDetail.mealExclusion || selectedCustomerDetail.exclusions || 'None';
+      const exclusion = entry.dietaryRestrictions?.join(', ') || 'None';
       const submittedAt = selectedCustomerDetail.lastMenuSelectionDate
         ? new Date(selectedCustomerDetail.lastMenuSelectionDate).toLocaleString('en-US', {
             weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit'
@@ -1251,7 +1251,7 @@ const MenuManagement = () => {
         }
       };
 
-      const customerName = `${selectedCustomerDetail.firstName || ''} ${selectedCustomerDetail.lastName || ''}`.trim() || 'Unnamed Customer';
+      const customerName = entry.customerName || 'Unnamed Customer';
       pdf.setFontSize(18);
       pdf.setFont('helvetica', 'bold');
       pdf.text('Kitchen Paper', margin, currentY);
@@ -1266,7 +1266,7 @@ const MenuManagement = () => {
       currentY += addTextLines(`Submitted: ${submittedAt}`, margin, currentY);
       currentY += addTextLines(`Meal exclusion: ${exclusion}`, margin, currentY);
       currentY += addTextLines(`Total meals selected: ${totalSelectedMeals}`, margin, currentY);
-      currentY += addTextLines(`Formula: ${entry.formulaVersion} | Nutrition checked: ${entry.nutritionResolvedAt || "Partner preset"}`, margin, currentY);
+      currentY += addTextLines(`Formula: ${entry.formulaVersion} | Nutrition checked: ${kitchenSourceLabel(entry)}`, margin, currentY);
       currentY += addTextLines(`Meals in profile: ${profileMeals}`, margin, currentY);
 
       currentY += 4;

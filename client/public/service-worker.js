@@ -59,6 +59,15 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // Production kitchen inputs and reconciliation must fail when offline.
+  // A previously cached successful response cannot establish current Matter data.
+  if (url.pathname === '/api/matter/subscriptions/kitchen-inputs'
+    || url.pathname === '/api/matter/subscriptions/delivery-on-date'
+    || /^\/api\/matter\/subscriptions\/[^/]+\/delivery-comparison$/.test(url.pathname)) {
+    event.respondWith(fetch(request, { cache: 'no-store' }));
+    return;
+  }
+
   // Handle API requests - Network first with offline queue
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(

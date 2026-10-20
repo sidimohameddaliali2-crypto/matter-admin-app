@@ -179,3 +179,19 @@ endpoint is — there's no history, only the current position.
 - Timing (`late`/`early`/`on-time`) is recomputed from `scheduledTime` vs
   `deliveredTime` with the same 3-hour early threshold used elsewhere in the
   app, so it's correct even for older deliveries.
+
+
+### Reconciliation metadata
+
+Responses additionally include `matterSubscriptionId`, `addressDetails` and
+`sources`. `sources.delivery` identifies a saved delivery snapshot, its available
+Matter fetch/update timestamps, effective-state limitation and pin source.
+Legacy rows have unknown source metadata. Nested customer address/pin values
+repeat the job snapshot; they are not an independent Customer-master check.
+
+Existing `customer.mealPerDay` and `customer.mealPlan` remain Internal customer
+profile values for backward compatibility. `sources.meals` explicitly labels
+them unverified against Matter with no known effective date. They must not be
+used as verified kitchen subscription entitlements. Staff can use the bounded
+Matter delivery-comparison endpoint to inspect profile/subscription conflicts
+without overwriting custom profiles or historical jobs.

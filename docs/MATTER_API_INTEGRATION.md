@@ -156,3 +156,54 @@ name cascade) — see that file's own comments, not duplicated here.
   `name`/`email` can be blank even when the full detail record has them —
   bulk matching code prefers `detail.data.name`/`detail.data.email`, falling
   back to the list row only if detail has nothing either.
+
+
+## Kitchen subscription inputs and delivery comparison (2026-10-20)
+
+Matter is authoritative for the kitchen customer's name, plan, daily meal and
+snack entitlements, breakfast inclusion, nutrition targets, exclusions and saved
+address/window. Recipes, assignments, approved portion formulas and explicit
+kitchen adjustments remain local. Ordinary-plan meal frequency includes
+breakfast; Matter Core counts main meals and handles breakfast separately, as
+in the existing assignment/calculation rules. Cycle totals are not daily meals.
+Missing values are not inferred from internal Customer defaults.
+
+`GET /api/matter/subscriptions/kitchen-inputs?subscriptionId=...` requires staff
+authentication. It fetches the exact subscription fresh, bypasses both nutrition
+caches and performs no Customer relinking. Optional `customerId` cross-checks
+identity. Without a subscription ID, customer/email discovery must yield exactly
+one result; multiple subscriptions require an explicit link. A failed read does
+not authorize exporting the previous inputs.
+
+Kitchen and delivery imports share `resolveMatterDeliveryAddress`: one current
+address wins; if none is current, exactly one active address is allowed. Multiple
+current or active candidates remain unresolved. Address IDs and all structured
+parts come from that same record. Unsupported categories retain their raw value
+and have a null local location type. Unresolved kitchen addresses block final
+papers. Export provenance identifies the subscription, address and source fetch
+time and explicitly labels current snapshots as having unverified dated changes.
+
+`GET /api/matter/subscriptions/:id/delivery-comparison?date=YYYY-MM-DD` is a
+read-only dispatcher/manager/admin endpoint for one exact subscription and Dubai
+service day. It compares subscription-linked jobs and same-day jobs belonging to
+an explicitly linked Internal customer, including manual/CSV jobs. It returns
+before/after conflicts, source fetch time, calendar eligibility, profile meal
+conflicts and protected status. Multiple jobs are flagged for review; no stop is
+created, relinked or modified. Name/email guesses are not used for this review.
+Importer deduplication also returns comparison details rather than silently
+hiding existing-job differences.
+
+Approved saved manual pins are reused by new imports only when their saved
+address identity and text both match the selected Matter address. New manual pin
+corrections save this identity. Legacy cached corrections without an address ID
+cannot safely be applied automatically. Existing jobs retain their corrections.
+
+Remaining operational dependencies: Matter's current response does not establish
+historical/future effective address/window state. Comparisons therefore report
+`effectiveState: UNKNOWN` and remain review-only; no automatic reconciliation,
+backfill or cutoff activation is implemented. Confirm the supported upstream
+pending-change contract and Dubai activation cutoff before enabling dated apply.
+The four historical roster exceptions require restricted evidence and owner
+resolution. Runtime revision and live persistence/browser verification are still
+required before closing issue #11. No production verification or writes were
+performed for these changes.

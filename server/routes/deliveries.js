@@ -51,7 +51,7 @@ async function saveCustomerCoords(delivery, lat, lng, link) {
   if (delivery.customerId) {
     await Customer.updateOne(
       { customerId: delivery.customerId },
-      { $set: { gpsLocation: { lat, lng, source: 'manual', address: String(delivery.address || '').trim(), geocodedAt: new Date() } } }
+      { $set: { gpsLocation: { lat, lng, source: 'manual', addressId: delivery.addressId || null, address: String(delivery.address || '').trim(), geocodedAt: new Date() } } }
     ).catch((err) => console.warn('Failed to cache customer coordinates:', err.message));
   }
 }

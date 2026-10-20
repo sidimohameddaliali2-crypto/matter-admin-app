@@ -87,7 +87,7 @@ function timingFor(delivery) {
 // `customersById` is a Map keyed by Customer.customerId (delivery.customerId
 // is the same string, not a Mongo ref) — pass it pre-fetched so a list
 // endpoint doesn't do one Customer lookup per delivery.
-function serializeDelivery(delivery, customersById) {
+export function serializeDelivery(delivery, customersById) {
   const d = typeof delivery.toObject === 'function' ? delivery.toObject() : delivery;
   const t = timingFor(d);
   const proof = d.proof || {};
@@ -103,6 +103,12 @@ function serializeDelivery(delivery, customersById) {
     locationType: d.addressDetails?.locationType || null,
     zone: d.zone || null,
     addressId: d.addressId || null,
+    matterSubscriptionId: d.matterSubscriptionId || null,
+    addressDetails: d.addressDetails || null,
+    sources: {
+      delivery: { type: 'saved-delivery-snapshot', fetchedAt: d.matterSource?.fetchedAt || null, upstreamUpdatedAt: d.matterSource?.updatedAt || null, effectiveState: d.matterSource?.effectiveState || 'UNKNOWN', pinSource: d.matterSource?.pinSource || 'unverified' },
+      meals: { type: 'internal-customer-profile', verifiedAgainstMatter: false, effectiveDate: null },
+    },
     scheduledTime: d.scheduledTime || null,
     status: d.status || null,
     deliveredTime: d.deliveredTime || d.completedAt || null,

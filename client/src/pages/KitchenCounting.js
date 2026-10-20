@@ -1,4 +1,4 @@
-import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
+import { kitchenSourceLabel, prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
 import { assertKitchenRosterCovered } from '../lib/kitchenSnapshot';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { ChefHat, Download, Loader, RefreshCw } from 'lucide-react';
@@ -14,6 +14,7 @@ import api from '../utils/api';
 import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
 import {
+  matchesMatterSubscription,
   getDateKey,
   formatDateLabel,
   fetchBreakfastPresets,
@@ -188,16 +189,10 @@ const KitchenCounting = () => {
       });
       const deliverySubs = deliveryRes.data?.data || [];
       assertKitchenRosterCovered(rawSelections, deliverySubs, selectedDate);
-      const deliveryEmails = new Set(deliverySubs.map((s) => String(s.email || '').trim().toLowerCase()).filter(Boolean));
-      const deliverySubIds = new Set(deliverySubs.map((s) => String(s.subscription_id || '').trim()).filter(Boolean));
-      const deliveryCustIds = new Set(deliverySubs.map((s) => String(s.customer_id ?? '').trim()).filter(Boolean));
       const hasDelivery = (entry) => {
         if ((entry.skippedDays || []).some((day) => getDateKey(day.date || day) === selectedDate)) return false;
         if (entry.partner) return true;
-        const subId = String(entry.matterSubscriptionId || '').trim();
-        const custId = String(entry.matterCustomerId || '').trim();
-        const email = String(entry.email || '').trim().toLowerCase();
-        return (subId && deliverySubIds.has(subId)) || (custId && deliveryCustIds.has(custId)) || (!!email && deliveryEmails.has(email));
+        return deliverySubs.some((sub) => matchesMatterSubscription(entry, sub));
       };
 
       if (!current()) return;
@@ -312,7 +307,7 @@ const KitchenCounting = () => {
     const XLSX = await loadXLSX();
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(customerEntries.map((entry) => ({ Customer: entry.customerName || entry.email, Date: selectedDate, Formula: entry.formulaVersion, 'Nutrition checked': entry.nutritionResolvedAt || 'Partner preset', Plan: entry.planName || 'Partner' }))), 'Inputs');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(customerEntries.map((entry) => ({ Customer: entry.customerName || entry.email, Date: selectedDate, Formula: entry.formulaVersion, 'Nutrition checked': kitchenSourceLabel(entry), Plan: entry.planName || 'Partner' }))), 'Inputs');
     const warnings = customerEntries.flatMap((entry) => (entry.selectedMeals || []).filter((meal) => getDateKey(meal.date) === selectedDate).flatMap((meal) => kitchenMealWarnings(meal).map((warning) => ({ Customer: entry.customerName || entry.email, Meal: meal.mealName, Warning: warning, Date: selectedDate, Formula: entry.formulaVersion }))));
     if (warnings.length) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(warnings), 'Attention');
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Customers');
@@ -335,7 +330,7 @@ const KitchenCounting = () => {
     const XLSX = await loadXLSX();
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(customerEntries.map((entry) => ({ Customer: entry.customerName || entry.email, Date: selectedDate, Formula: entry.formulaVersion, 'Nutrition checked': entry.nutritionResolvedAt || 'Partner preset', Plan: entry.planName || 'Partner' }))), 'Inputs');
+    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(customerEntries.map((entry) => ({ Customer: entry.customerName || entry.email, Date: selectedDate, Formula: entry.formulaVersion, 'Nutrition checked': kitchenSourceLabel(entry), Plan: entry.planName || 'Partner' }))), 'Inputs');
     const warnings = customerEntries.flatMap((entry) => (entry.selectedMeals || []).filter((meal) => getDateKey(meal.date) === selectedDate).flatMap((meal) => kitchenMealWarnings(meal).map((warning) => ({ Customer: entry.customerName || entry.email, Meal: meal.mealName, Warning: warning, Date: selectedDate, Formula: entry.formulaVersion }))));
     if (warnings.length) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(warnings), 'Attention');
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Counting');
