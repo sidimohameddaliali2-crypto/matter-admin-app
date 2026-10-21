@@ -37,6 +37,13 @@ const downloadCsv = (filename, header, rows) => {
 
 const todayKey = () => new Date().toISOString().slice(0, 10);
 
+// "lat, lng" for the sheet, or blank when that source has no pin — e.g. a
+// delivery not yet completed has no driver GPS, and an address Matter never
+// saved coordinates for has no Matter GPS.
+const formatGps = (loc) => (
+  loc && Number.isFinite(loc.lat) && Number.isFinite(loc.lng) ? `${loc.lat}, ${loc.lng}` : ''
+);
+
 function ReportModal({ subscriptions, onClose }) {
   const [downloadingKey, setDownloadingKey] = useState(null);
   const [downloadError, setDownloadError] = useState('');
@@ -112,7 +119,10 @@ function ReportModal({ subscriptions, onClose }) {
           [`Deliveries for ${dateKey}`],
           [`Total: ${dayCustomers.length}`],
           [],
-          ['Customer Name', 'Email', 'Phone', 'Address', 'Zone', 'Delivery Window', 'Plan', 'Meals/Day', 'Snacks/Day', 'Exclusions'],
+          [
+            'Customer Name', 'Email', 'Phone', 'Address', 'Zone', 'Delivery Window', 'Plan', 'Meals/Day', 'Snacks/Day', 'Exclusions',
+            'Matter API GPS', 'Internal GPS (Our System)', 'Driver GPS (At Delivery)',
+          ],
         ];
 
         dayCustomers.forEach((s) => {
@@ -127,11 +137,14 @@ function ReportModal({ subscriptions, onClose }) {
             s.meal_frequency ?? '',
             s.snacks_per_day ?? '',
             (s.exclusions || []).join('; '),
+            formatGps(s.matterGpsLocation),
+            formatGps(s.internalGpsLocation),
+            formatGps(s.driverGpsLocation),
           ]);
         });
 
         const worksheet = XLSX.utils.aoa_to_sheet(sheetData);
-        worksheet['!cols'] = [24, 26, 16, 32, 18, 18, 18, 12, 12, 24].map((w) => ({ wch: w }));
+        worksheet['!cols'] = [24, 26, 16, 32, 18, 18, 18, 12, 12, 24, 20, 24, 24].map((w) => ({ wch: w }));
         // Sheet names can't exceed 31 chars or contain : \ / ? * [ ] — "YYYY-MM-DD" is safe
         XLSX.utils.book_append_sheet(workbook, worksheet, dateKey);
       });

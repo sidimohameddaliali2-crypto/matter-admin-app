@@ -105,13 +105,14 @@ const Subscription = () => {
       for (const day of data.days) {
         const rows = data.details.filter((entry) => entry.date === day.day);
         const sheet = XLSX.utils.aoa_to_sheet([
-          ['Customer ID', 'Matter Customer ID', 'Customer Name', 'Status', 'Captured Subscription', 'Captured Plan', 'Paid Amount (AED)', 'Paid Deliveries', 'Allocated Revenue (AED)', 'Pricing Status'],
-          ...rows.map((entry) => [entry.customerId, entry.matterCustomerId, entry.name, entry.status, entry.subscriptionId, entry.plan, round(entry.amountPaid), entry.paidDeliveries, round(entry.revenue), entry.pricingStatus]),
+          ['Customer ID', 'Matter Customer ID', 'Customer Name', 'Status', 'Captured Subscription', 'Captured Plan', 'Paid Amount (AED)', 'Paid Deliveries', 'Allocated Revenue (AED)', 'Pricing Status', 'Additional Delivery', 'Entitlement Delivery Number', 'Included in Paid Counts'],
+          ...rows.map((entry) => [entry.customerId, entry.matterCustomerId, entry.name, entry.status, entry.subscriptionId, entry.plan, round(entry.amountPaid), entry.paidDeliveries, round(entry.revenue), entry.pricingStatus, entry.additional ? 'Yes' : 'No', entry.entitlementDeliveryNumber, entry.additional ? 'No' : 'Yes']),
           [], ['Known delivery revenue', '', '', '', '', '', '', '', round(day.knownDeliveryRevenue)],
           ['Completed deliveries with unavailable pricing', day.unpriced],
+          ['Additional deliveries (excluded from paid counts and revenue)', day.additional || 0],
           ['Observed payments received (AED)', round(day.paymentsReceived)],
         ]);
-        sheet['!cols'] = [18, 18, 28, 16, 22, 26, 20, 16, 24, 45].map((wch) => ({ wch }));
+        sheet['!cols'] = [18, 18, 28, 16, 22, 26, 20, 16, 24, 45, 22, 28, 26].map((wch) => ({ wch }));
         XLSX.utils.book_append_sheet(wb, sheet, day.day);
       }
       const summary = XLSX.utils.aoa_to_sheet([
@@ -119,13 +120,22 @@ const Subscription = () => {
         ['Source observation', new Date(data.observedAt).toISOString()],
         ['Payment coverage', data.paymentCoverage],
         ['Historical delivery prices are not inferred from current subscriptions. Missing values are blank, not zero.'],
-        [], ['Date', 'Scheduled Deliveries', 'Completed Deliveries', 'Known Delivery Revenue (AED)', 'Unpriced Completed Deliveries', 'Observed Payments Received (AED)', 'Payments Needing Review'],
-        ...data.days.map((day) => [day.day, day.orders, day.completed, round(day.knownDeliveryRevenue), day.unpriced, round(day.paymentsReceived), day.unknownPayments]),
-        [], ['TOTAL', data.totals.orders, data.totals.completed, round(data.totals.knownDeliveryRevenue), data.totals.unpriced, round(data.totals.paymentsReceived), data.totals.unknownPayments],
+        [], ['Date', 'Included Scheduled Deliveries', 'Included Completed Deliveries', 'Known Delivery Revenue (AED)', 'Unpriced Completed Deliveries', 'Observed Payments Received (AED)', 'Payments Needing Review', 'Additional Deliveries (Excluded)'],
+        ...data.days.map((day) => [day.day, day.orders, day.completed, round(day.knownDeliveryRevenue), day.unpriced, round(day.paymentsReceived), day.unknownPayments, day.additional || 0]),
+        [], ['TOTAL', data.totals.orders, data.totals.completed, round(data.totals.knownDeliveryRevenue), data.totals.unpriced, round(data.totals.paymentsReceived), data.totals.unknownPayments, data.totals.additional || 0],
         ['Renewal rate', 'Unavailable: complete renewal event history is not provided by Matter.'],
       ]);
       summary['!cols'] = [35, 24, 24, 32, 30, 34, 28].map((wch) => ({ wch }));
       XLSX.utils.book_append_sheet(wb, summary, 'Summary');
+      const additional = data.details.filter((entry) => entry.additional);
+      if (additional.length) {
+        const sheet = XLSX.utils.aoa_to_sheet([
+          ['Date', 'Customer ID', 'Customer Name', 'Subscription', 'Delivery Number', 'Paid Entitlement', 'Revenue Included (AED)'],
+          ...additional.map((entry) => [entry.date, entry.customerId, entry.name, entry.subscriptionId, entry.entitlementDeliveryNumber, entry.paidEntitlement, 0]),
+        ]);
+        sheet['!cols'] = [16, 20, 30, 22, 20, 20, 26].map((wch) => ({ wch }));
+        XLSX.utils.book_append_sheet(wb, sheet, 'Additional deliveries');
+      }
       XLSX.writeFile(wb, `Sales_Report_${reportMonth}.xlsx`);
     } catch (err) { setError(err.response?.data?.message || err.message || 'Could not build the report. Please retry.'); }
     finally { setExporting(false); }
@@ -136,6 +146,7 @@ const Subscription = () => {
       {error && <p role="alert" className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-800">{error}</p>}
       <p className="text-sm text-gray-600">{report?.observedAt ? `Matter data captured ${new Date(report.observedAt).toLocaleString('en-GB', { timeZone: 'Asia/Dubai' })} (Dubai).` : 'No verified Matter sales capture is available.'} Payments shown are those observed in Matter; unavailable account history may make earlier periods incomplete.</p>
       {!!month.unpriced && <p role="status" className="text-sm text-amber-800">{month.unpriced} completed deliveries this month have unavailable pricing. Their revenue is excluded from the known subtotal, not treated as free deliveries.</p>}
+      {!!month.additional && <p role="status" className="text-sm text-blue-800">{month.additional} additional deliveries this month exceeded the paid entitlement. They are excluded from paid delivery counts and revenue and listed separately below.</p>}
       {!!(report?.unidentifiedPayments || month.unknownPayments) && <p role="status" className="text-sm text-amber-800">Some payment records need review. Only known AED payments are included; comparisons may be unavailable.</p>}
       {/* Header */}
       <div className="flex items-center justify-between flex-wrap gap-3 pb-6 border-b border-black/10">
@@ -202,7 +213,7 @@ const Subscription = () => {
         </div>
 
         <div className="bg-white rounded-2xl border border-matter-dust/40 shadow-md p-5">
-          <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-1">Scheduled Deliveries Per Day</p>
+          <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-1">Scheduled Deliveries Per Day (Additional Excluded)</p>
           <p className="font-serif-mgmt text-lg font-bold text-matter-navy mb-4">{week.orders} in the last 7 days</p>
           <ResponsiveContainer width="100%" height={220}>
             <BarChart data={last7Days} margin={{ top: 4, right: 8, left: -20, bottom: 0 }}>
@@ -217,6 +228,17 @@ const Subscription = () => {
       </div>
 
       {/* Meal Plan Performance */}
+      {!!report?.details?.some((entry) => entry.additional) && (
+        <section className="bg-white rounded-2xl border border-matter-dust/40 p-5">
+          <h2 className="text-lg font-semibold text-matter-navy">Additional deliveries — excluded from paid counts and revenue</h2>
+          <p className="text-sm text-gray-500 mb-3">Showing up to 20 entries in the loaded period. The monthly Excel report contains all entries.</p>
+          <ul className="divide-y divide-gray-100">
+            {report.details.filter((entry) => entry.additional).slice(0, 20).map((entry) => (
+              <li key={entry.id} className="py-2 text-sm"><a className="text-blue-700 underline" href={`/deliveries/${entry.id}`}>{entry.name || entry.customerId}</a> · {entry.date} · Delivery {entry.entitlementDeliveryNumber} of {entry.paidEntitlement} paid · AED 0 included</li>
+            ))}
+          </ul>
+        </section>
+      )}
       {planPerformance.length > 0 && (
         <div className="bg-white rounded-2xl border border-matter-dust/40 shadow-md p-5">
           <div className="flex items-center justify-between mb-4 flex-wrap gap-2">

@@ -72,3 +72,20 @@ test('Excel exports use the same report and leave unknown historical revenue bla
   expect(exported[1][9]).toBe('historical-pricing-unavailable');
   expect(api.get.mock.calls.at(-1)[0]).toBe('/matter/sales-dashboard');
 });
+
+test('additional deliveries are shown separately and exported to their own worksheet', async () => {
+  const additional = { ...report.details[0], id: 'extra', name: 'Extra Customer', additional: true, includedInPaidCounts: false,
+    entitlementDeliveryNumber: 21, paidEntitlement: 20, revenue: 0, pricingStatus: 'additional-delivery-excluded' };
+  api.get.mockResolvedValue({ data: { success: true, data: { ...report,
+    days: [{ ...report.days[0], additional: 1 }], details: [additional], totals: { ...report.totals, additional: 1 } } } });
+  await act(async () => root.render(<Subscription />));
+  expect(screen.getByText('Extra Customer')).toBeTruthy();
+  expect(container.textContent).toContain('Delivery 21 of 20 paid');
+  expect(container.textContent).toContain('excluded from paid delivery counts and revenue');
+  await act(async () => screen.getByText('Download Excel').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+  expect(XLSX.utils.book_append_sheet.mock.calls.some((call) => call[2] === 'Additional deliveries')).toBe(true);
+  const dailyRow = XLSX.utils.aoa_to_sheet.mock.calls[0][0][1];
+  expect(dailyRow[8]).toBe(0);
+  expect(dailyRow[10]).toBe('Yes');
+  expect(dailyRow[12]).toBe('No');
+});

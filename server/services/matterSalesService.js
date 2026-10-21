@@ -96,7 +96,15 @@ export async function getMatterSalesReport(from, to) {
   if (!isDateKey(from) || !isDateKey(to) || from > to || Date.parse(to) - Date.parse(from) > 400 * 86400000) throw Object.assign(new Error('Choose a valid range of at most 400 days.'), { statusCode: 400 });
   const [snapshots, deliveries] = await Promise.all([
     Snapshot.find().sort({ observedAt: 1 }).lean(),
-    Delivery.find({ type: 'Delivery', company: /^matter$/i, scheduledTime: { $gte: getBusinessDayBounds(from).startOfDay, $lt: getBusinessDayBounds(to).endOfDayExclusive } }).select('customerId customerName matterCustomerId +matterRevenue scheduledTime status type company deliveredTime completedAt').lean(),
+    Delivery.find({ type: 'Delivery', company: /^matter$/i, scheduledTime: { $gte: getBusinessDayBounds(from).startOfDay, $lt: getBusinessDayBounds(to).endOfDayExclusive } }).select('customerId customerName matterCustomerId matterSubscriptionId +matterRevenue scheduledTime status type company deliveredTime completedAt').lean(),
   ]);
-  return buildMatterSalesReport({ snapshots, deliveries, from, to, today: toBusinessDateKey(new Date()) });
+  const subscriptionIds = [...new Set(deliveries.filter((delivery) => ['captured', 'verified-history'].includes(delivery.matterRevenue?.state)).map((delivery) => delivery.matterRevenue.matterSubscriptionId).filter(Boolean))];
+  // Load earlier completed deliveries too: selecting a new month must not grant
+  // a fresh allowance. Legacy completion can consume entitlement even when its
+  // historical price is unavailable. Failed/cancelled/pending work cannot.
+  const entitlementHistory = subscriptionIds.length ? await Delivery.find({ type: 'Delivery', company: /^matter$/i,
+    status: { $in: ['delivered', 'completed'] }, scheduledTime: { $lt: getBusinessDayBounds(to).endOfDayExclusive },
+    $or: [{ 'matterRevenue.matterSubscriptionId': { $in: subscriptionIds } }, { matterSubscriptionId: { $in: subscriptionIds } }],
+  }).select('customerId matterCustomerId matterSubscriptionId +matterRevenue scheduledTime status type company deliveredTime completedAt').lean() : [];
+  return buildMatterSalesReport({ snapshots, deliveries, entitlementHistory, from, to, today: toBusinessDateKey(new Date()) });
 }

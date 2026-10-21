@@ -316,3 +316,38 @@ labeled as starts, including renewals, not first-time customers. The API does no
 provide a complete renewal cohort, first-subscription history, or payment-to-plan
 revision allocation contract. Renewal rate therefore remains explicitly
 unavailable; the dashboard never infers 100% from absent expired subscriptions.
+
+Additional completed deliveries beyond a captured paid entitlement are flagged
+`additional-delivery-excluded`. They remain in delivery history and report
+details, with a separate `additional` total, but do not increase included order,
+completed-delivery, unpriced-delivery or revenue totals. Entitlement usage spans
+the captured subscription period, including earlier completed deliveries outside
+the selected report month. Failed/cancelled/pending deliveries do not consume
+completion entitlement. A new pricing hash does not reset the allowance; a new
+subscription has a separate allowance. Missing/conflicting period or entitlement
+history requires review instead of granting extra paid deliveries. The dashboard
+lists additional entries separately, and monthly exports include explicit flags,
+excluded totals and an Additional deliveries worksheet. No delivery is deleted
+or automatically billed for exceeding the allowance.
+
+### Historical pricing verification from existing Matter records
+
+The one-time August–October backfill uses `matterSalesHistory.js`. It reads
+current subscriptions plus the historical subscription IDs already saved on
+completed deliveries. A backfill requires a unique permanent customer/contract,
+matching Matter service date in the returned delivery calendar, bounded cycle
+dates, one active payment matching the paid amount, an integer delivery
+entitlement and payment on/before the service date. A saved subscription link
+cannot silently fall through to a newer renewal. Conflicting locally observed
+pricing versions, multiple payments without separate entitlement allocation,
+missing/ambiguous records and customer identity conflicts remain unresolved.
+
+Verified backfills use `matterRevenue.state = verified-history`, with the actual
+verification/capture time, exact service date, payment ID and an evidence hash.
+They do not pretend the price was captured before service. Evidence is retained
+in `matterhistoricalpricingevidence` and changes in
+`matterhistoricalpricingbackfillaudits`; originals are backed up before applying.
+Existing captured/verified prices are preserved. Only this evidence-backed state
+can recognize historical revenue after a late verification; ordinary late
+captures remain unavailable. Verified history also consumes the same subscription
+entitlement, so additional deliveries remain excluded from paid totals.

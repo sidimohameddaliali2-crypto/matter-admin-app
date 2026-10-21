@@ -27,3 +27,11 @@ test('comparisons require capture coverage before both periods and suppress unkn
   expect(hasSalesComparisonCoverage({ captureStartedOn: '2026-10-01' }, '2026-10-08')).toBe(true);
   expect(salesTrend({ paymentsReceived: 200, unknownPayments: 1 }, { paymentsReceived: 100 })).toBeNull();
 });
+
+test('additional deliveries stay in a separate total without increasing paid orders or revenue', () => {
+  const result = sumSalesDays([{ day: '2026-10-21', orders: 20, completed: 20, additional: 1, knownDeliveryRevenue: 1000 }], '2026-10-21', '2026-10-21');
+  expect(result.orders).toBe(20);
+  expect(result.completed).toBe(20);
+  expect(result.additional).toBe(1);
+  expect(result.knownDeliveryRevenue).toBe(1000);
+});

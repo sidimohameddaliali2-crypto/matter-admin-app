@@ -5,7 +5,7 @@ import { detectAreaFromAddress } from '../config/areas.js';
 import { getNutritionForCustomerLink } from '../services/matterNutritionLookup.js';
 import Delivery from '../models/Delivery.js';
 import Customer from '../models/Customer.js';
-import { isDateKey, getBusinessDayBounds } from '../utils/businessDate.js';
+import { isDateKey, getBusinessDayBounds, toBusinessDateKey } from '../utils/businessDate.js';
 import { resolveMatterDeliveryAddress, matterMealContract } from '../services/matterSubscriptionContract.js';
 import { compareMatterDelivery } from '../services/matterDeliveryComparison.js';
 import { buildMatterDeliverySnapshot, importMatterDeliveriesForDate } from '../services/matterDeliveryImportService.js';
@@ -123,12 +123,45 @@ router.get('/subscriptions/delivery-on-date', protect, async (req, res) => {
       return res.status(400).json({ success: false, message: 'dateTo must be on or after date' });
     }
     const rows = await matterApiService.findSubscriptionsWithDeliveryInRange(date, dateTo || date);
+
+    // Owner (2026-10-21): "add the driver gps location and the internal gps
+    // location and the matter api gps location" to the delivery-sheet
+    // download — three separate sources, so a dispatcher can see at a
+    // glance whether they agree: Matter's own saved address coordinates,
+    // our system's resolved/corrected pin for that delivery, and (once
+    // delivered) where the driver's phone actually was. Matched by
+    // matterSubscriptionId + the delivery's business day, since one
+    // subscription can have a different delivery per day across the range.
+    const subscriptionIds = [...new Set(rows.map((s) => String(s.subscription_id)).filter(Boolean))];
+    const deliveriesByKey = new Map();
+    if (subscriptionIds.length > 0) {
+      const { startOfDay: rangeStart } = getBusinessDayBounds(date);
+      const { endOfDayExclusive: rangeEnd } = getBusinessDayBounds(dateTo || date);
+      const matchingDeliveries = await Delivery.find({
+        matterSubscriptionId: { $in: subscriptionIds },
+        scheduledTime: { $gte: rangeStart, $lt: rangeEnd }
+      }).select('matterSubscriptionId scheduledTime gpsLocation proof.location').lean();
+
+      matchingDeliveries.forEach((d) => {
+        // One key per (subscription, business day) — matches s.delivery_date
+        // below, which is already a business-date "YYYY-MM-DD" string.
+        const dayKey = toBusinessDateKey(d.scheduledTime);
+        deliveriesByKey.set(`${d.matterSubscriptionId}|${dayKey}`, d);
+      });
+    }
+
     // Zone isn't a Matter field — derive it the same way the Matter delivery
     // import does (saved address's own area, else detect from the address text).
-    const data = rows.map((s) => ({
-      ...s,
-      zone: s.address_detail?.area || detectAreaFromAddress(s.address || '') || ''
-    }));
+    const data = rows.map((s) => {
+      const match = deliveriesByKey.get(`${s.subscription_id}|${s.delivery_date || date}`);
+      return {
+        ...s,
+        zone: s.address_detail?.area || detectAreaFromAddress(s.address || '') || '',
+        matterGpsLocation: s.address_detail?.coordinates || null,
+        internalGpsLocation: match?.gpsLocation || null,
+        driverGpsLocation: match?.proof?.location || null,
+      };
+    });
     res.json({ success: true, data });
   } catch (error) {
     const status = error.statusCode || error?.response?.status || 500;

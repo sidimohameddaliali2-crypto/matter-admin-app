@@ -10,9 +10,9 @@ export function salesDashboardDates(today) {
 }
 export function sumSalesDays(days, from, to) {
   return days.filter((day) => day.day >= from && day.day <= to).reduce((sum, day) => {
-    for (const key of ['paymentsReceived', 'knownDeliveryRevenue', 'orders', 'completed', 'unpriced', 'unknownPayments']) sum[key] += day[key] || 0;
+    for (const key of ['paymentsReceived', 'knownDeliveryRevenue', 'orders', 'completed', 'additional', 'unpriced', 'unknownPayments']) sum[key] += day[key] || 0;
     return sum;
-  }, { paymentsReceived: 0, knownDeliveryRevenue: 0, orders: 0, completed: 0, unpriced: 0, unknownPayments: 0 });
+  }, { paymentsReceived: 0, knownDeliveryRevenue: 0, orders: 0, completed: 0, additional: 0, unpriced: 0, unknownPayments: 0 });
 }
 export const salesTrend = (current, previous) => current.unknownPayments || previous.unknownPayments || !previous.paymentsReceived
   ? null : (current.paymentsReceived - previous.paymentsReceived) / previous.paymentsReceived * 100;
