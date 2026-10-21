@@ -569,7 +569,7 @@ router.get('/', async (req, res) => {
     const maxLimit = Math.min(parseInt(limit, 10) || 10000, 10000);
 
     const customers = await Customer.find(query)
-      .select('customerId email cpf macros firstName lastName phone company address gpsLocation planStartDate cycleDuration amountPaid discount')
+      .select('customerId email cpf macros firstName lastName phone company address gpsLocation matterCustomerId planStartDate cycleDuration amountPaid discount')
       .sort({ createdAt: -1 })
       .limit(maxLimit);
 

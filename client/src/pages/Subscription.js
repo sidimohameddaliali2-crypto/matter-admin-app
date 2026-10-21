@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { DollarSign, Wallet, Users, RefreshCw as RenewIcon } from 'lucide-react';
+import { DollarSign, Wallet, Users, RefreshCw as RenewIcon, Download } from 'lucide-react';
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import * as XLSX from 'xlsx';
 import api from '../utils/api';
 import { isCycleEnded } from '../utils/subscriptionFormat';
 import { formatBusinessDateInput } from '../utils/businessTime';
@@ -48,6 +49,8 @@ const Subscription = () => {
   const [windowCounts, setWindowCounts] = useState([]); // [{ day, customerId, count }]
   const [prevMonthCounts, setPrevMonthCounts] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [reportMonth, setReportMonth] = useState(() => formatBusinessDateInput(new Date()).slice(0, 7));
+  const [exporting, setExporting] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -92,41 +95,60 @@ const Subscription = () => {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   // Plan/amount-paid/cycle now come from the real Matter subscription data
-  // (matched by email) instead of the internal Customer record's own
+  // (matched by Matter customer id, then email) instead of the internal Customer record's own
   // amountPaid/cycleDuration/mealPlan fields, which are often stale or blank.
-  const matterByEmail = useMemo(() => {
+  // Customers are linked to their Matter subscription by Matter customer id
+  // first (stable for the life of the customer), then by email as a fallback
+  // for records that don't carry the id yet. If a customer has several
+  // subscriptions, an active one wins, then the latest cycle end.
+  const matterLookup = useMemo(() => {
     const financialsBySubId = new Map(matterFinancials.map((f) => [String(f.subscription_id), f]));
-    const map = new Map();
+    const byCustomerId = new Map();
+    const byEmail = new Map();
+    const better = (candidate, current) => {
+      if (!current) return true;
+      const ca = candidate.subscriptionStatus === 'active';
+      const cu = current.subscriptionStatus === 'active';
+      if (ca !== cu) return ca;
+      return String(candidate.cycleEndDate || '') > String(current.cycleEndDate || '');
+    };
     matterSubscriptions.forEach((s) => {
-      const email = String(s.email || '').trim().toLowerCase();
-      if (!email) return;
       const financial = financialsBySubId.get(String(s.subscription_id));
       const cycleDuration = s.starting_date && s.cycle_end_date
         ? Math.max(0, Math.round((new Date(s.cycle_end_date) - new Date(s.starting_date)) / 86400000) + 1)
         : 0;
-      map.set(email, {
+      const entry = {
         plan: s.plan?.name || 'Standard',
         startingDate: s.starting_date || null,
         cycleEndDate: s.cycle_end_date || null,
         cycleDuration,
         subscriptionStatus: s.subscription_status,
         amountPaid: financial?.gross_paid ?? null
-      });
+      };
+      const custId = s.customer_id != null ? String(s.customer_id) : '';
+      if (custId && better(entry, byCustomerId.get(custId))) byCustomerId.set(custId, entry);
+      const email = String(s.email || '').trim().toLowerCase();
+      if (email && better(entry, byEmail.get(email))) byEmail.set(email, entry);
     });
-    return map;
+    return (customer) => {
+      const custId = customer.matterCustomerId != null ? String(customer.matterCustomerId) : '';
+      return (custId && byCustomerId.get(custId))
+        || byEmail.get(String(customer.email || '').trim().toLowerCase())
+        || null;
+    };
   }, [matterSubscriptions, matterFinancials]);
 
   // Per-customer daily rate lookup
   const dailyRateMap = useMemo(() => {
     const map = {};
     customers.forEach((c) => {
-      const sub = matterByEmail.get(String(c.email || '').trim().toLowerCase());
+      const sub = matterLookup(c);
       const amountPaid = sub?.amountPaid || 0;
       const cycleDuration = sub?.cycleDuration || 0;
       map[c.customerId] = cycleDuration > 0 ? amountPaid / cycleDuration : 0;
     });
     return map;
-  }, [customers, matterByEmail]);
+  }, [customers, matterLookup]);
 
   // dayKey -> revenue / orders (non-cancelled deliveries), from the server's
   // per-day per-customer counts
@@ -178,11 +200,11 @@ const Subscription = () => {
   const weekRevenueTrend = weekRevenueFirstHalf > 0 ? ((weekRevenueSecondHalf - weekRevenueFirstHalf) / weekRevenueFirstHalf) * 100 : null;
 
   // Build enriched customer rows (for filters/table + plan breakdown).
-  // Only customers with a matching real Matter subscription (by email) are
+  // Only customers with a matching real Matter subscription are
   // included — without one there's no real plan/amount/cycle data to show.
   const sevenDaysAgoKey = addDays(todayKey, -6);
   const rows = customers.map(c => {
-    const sub = matterByEmail.get(String(c.email || '').trim().toLowerCase());
+    const sub = matterLookup(c);
     if (!sub) return null;
     const amountPaid = sub.amountPaid || 0;
     const plan = sub.plan;
@@ -215,6 +237,108 @@ const Subscription = () => {
     .sort((a, b) => b.revenue - a.revenue);
   const planRevenueTotal = planPerformance.reduce((s, p) => s + p.revenue, 0);
 
+  // Month report: one worksheet per day (who was delivered to and what that
+  // earned), then a Summary sheet last. Same method as the dashboard: each
+  // delivery earns the customer's daily rate (amount paid / cycle days).
+  const handleDownloadMonthReport = async () => {
+    if (!/^\d{4}-\d{2}$/.test(reportMonth)) return;
+    setExporting(true);
+    try {
+      const [y, m] = reportMonth.split('-').map(Number);
+      const firstKey = `${reportMonth}-01`;
+      const lastOfMonth = utcToKey(new Date(Date.UTC(y, m, 0)));
+      const lastKey = lastOfMonth > todayKey ? todayKey : lastOfMonth;
+      if (lastKey < firstKey) return;
+
+      const res = await api.get('/deliveries/daily-customer-counts', { params: { dateFrom: firstKey, dateTo: lastKey } });
+      const counts = res.data?.data || [];
+      const customerById = new Map(customers.map((c) => [c.customerId, c]));
+      const round2 = (n) => Math.round(n * 100) / 100;
+
+      const infoFor = (customerId) => {
+        const c = customerById.get(customerId);
+        const sub = c ? matterLookup(c) : null;
+        const cycleDays = sub?.cycleDuration || 0;
+        const amountPaid = sub?.amountPaid || 0;
+        return {
+          name: c ? (`${c.firstName || ''} ${c.lastName || ''}`.trim() || customerId) : '(not in customer list)',
+          plan: sub ? sub.plan : 'No active Matter subscription',
+          amountPaid,
+          cycleDays,
+          rate: cycleDays > 0 ? amountPaid / cycleDays : 0,
+        };
+      };
+
+      const wb = XLSX.utils.book_new();
+      const daySummary = [];
+      const planTotals = {};
+      let unmatchedDeliveries = 0;
+
+      for (let key = firstKey; key <= lastKey; key = addDays(key, 1)) {
+        const dayRows = counts
+          .filter((r) => r.day === key)
+          .map((r) => {
+            const info = infoFor(r.customerId);
+            const revenue = info.rate * r.count;
+            if (info.rate === 0) unmatchedDeliveries += r.count;
+            if (!planTotals[info.plan]) planTotals[info.plan] = { customers: new Set(), orders: 0, revenue: 0 };
+            planTotals[info.plan].customers.add(r.customerId);
+            planTotals[info.plan].orders += r.count;
+            planTotals[info.plan].revenue += revenue;
+            return { id: r.customerId, ...info, count: r.count, revenue };
+          })
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        const orders = dayRows.reduce((sum, r) => sum + r.count, 0);
+        const revenue = dayRows.reduce((sum, r) => sum + r.revenue, 0);
+        daySummary.push({ key, orders, revenue });
+
+        const aoa = [
+          ['Customer ID', 'Customer Name', 'Plan', 'Amount Paid (AED)', 'Cycle Days', 'Daily Rate (AED)', 'Deliveries', 'Revenue (AED)'],
+          ...dayRows.map((r) => [r.id, r.name, r.plan, round2(r.amountPaid), r.cycleDays, round2(r.rate), r.count, round2(r.revenue)]),
+          [],
+          ['TOTAL', '', '', '', '', '', orders, round2(revenue)],
+        ];
+        const ws = XLSX.utils.aoa_to_sheet(aoa);
+        ws['!cols'] = [14, 28, 30, 18, 11, 16, 11, 14].map((wch) => ({ wch }));
+        XLSX.utils.book_append_sheet(wb, ws, key);
+      }
+
+      const totalOrders = daySummary.reduce((sum, d) => sum + d.orders, 0);
+      const totalRevenue = daySummary.reduce((sum, d) => sum + d.revenue, 0);
+      const monthLabel = new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+      const summary = [
+        [`Sales summary: ${monthLabel}`],
+        [lastKey < lastOfMonth ? `Month to date, through ${lastKey}` : 'Full month'],
+        [],
+        ['Date', 'Day', 'Deliveries', 'Revenue (AED)'],
+        ...daySummary.map((d) => [d.key, DAY_LABELS[dayOfWeek(d.key)], d.orders, round2(d.revenue)]),
+        [],
+        ['TOTAL', '', totalOrders, round2(totalRevenue)],
+        ['Average per day', '', round2(totalOrders / daySummary.length), round2(totalRevenue / daySummary.length)],
+        [],
+        ['By plan'],
+        ['Plan', 'Customers', 'Deliveries', 'Revenue (AED)'],
+        ...Object.entries(planTotals)
+          .sort((a, b) => b[1].revenue - a[1].revenue)
+          .map(([plan, v]) => [plan, v.customers.size, v.orders, round2(v.revenue)]),
+        [],
+        [`Deliveries with no revenue (no matching active Matter subscription): ${unmatchedDeliveries}`],
+        ['Revenue is an estimate: each non-cancelled delivery earns the customer daily rate (amount paid / cycle days, from Matter), not cash received on the day.'],
+      ];
+      const sws = XLSX.utils.aoa_to_sheet(summary);
+      sws['!cols'] = [34, 12, 12, 16].map((wch) => ({ wch }));
+      XLSX.utils.book_append_sheet(wb, sws, 'Summary');
+
+      XLSX.writeFile(wb, `Sales_Report_${reportMonth}.xlsx`);
+    } catch (err) {
+      console.error('Month report error:', err);
+      alert('Could not build the report. Please try again.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="customer-mgmt min-h-screen p-6 space-y-6">
       {/* Header */}
@@ -224,6 +348,22 @@ const Subscription = () => {
           <p className="text-gray-500 text-sm mt-1">How the plans are selling and what they are earning.</p>
         </div>
         <div className="flex items-center gap-3 flex-wrap">
+          <input
+            type="month"
+            value={reportMonth}
+            max={todayKey.slice(0, 7)}
+            onChange={(e) => setReportMonth(e.target.value)}
+            className="px-3 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-lg text-sm"
+            title="Month for the Excel report"
+          />
+          <button
+            onClick={handleDownloadMonthReport}
+            disabled={loading || exporting || !reportMonth}
+            className="inline-flex items-center gap-2 px-4 py-2.5 bg-white border border-gray-200 text-gray-700 rounded-lg text-sm font-semibold hover:bg-gray-50 disabled:opacity-50 transition"
+          >
+            <Download className="w-4 h-4" />
+            {exporting ? 'Building…' : 'Download Excel'}
+          </button>
           <button
             onClick={fetchData}
             disabled={loading}
