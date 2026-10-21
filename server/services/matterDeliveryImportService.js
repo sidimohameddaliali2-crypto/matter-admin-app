@@ -31,14 +31,16 @@ const DEFAULT_WINDOW_HOUR = 6; // "By 6 AM" — used only if delivery_window is 
 export function parseWindowHour(deliveryWindow) {
   const label = deliveryWindow?.label;
   if (!label) return null;
-  const match = String(label).match(/(\d{1,2})\s*(AM|PM)/i);
+  const match = String(label).match(/(\d{1,2})(?::(\d{2}))?\s*(AM|PM)/i);
   if (!match) return null;
   let hour = parseInt(match[1], 10);
   if (Number.isNaN(hour) || hour < 1 || hour > 12) return null;
-  const isPM = /PM/i.test(match[2]);
+  const minutes = Number(match[2] || 0);
+  if (minutes > 59) return null;
+  const isPM = /PM/i.test(match[3]);
   if (isPM && hour !== 12) hour += 12;
   if (!isPM && hour === 12) hour = 0;
-  return hour;
+  return hour + minutes / 60;
 }
 
 // "YYYY-MM-DD" (business-local calendar date) + an hour -> the UTC instant
@@ -46,7 +48,7 @@ export function parseWindowHour(deliveryWindow) {
 // throughout the app (see routes/deliveries.js's normalizeScheduledTimeInput).
 export function scheduledTimeFor(dateKey, hour) {
   const [y, m, d] = String(dateKey).split('-').map(Number);
-  return new Date(Date.UTC(y, m - 1, d, hour, 0, 0, 0) - LOCAL_TZ_OFFSET_MS);
+  return new Date(Date.UTC(y, m - 1, d, 0, Math.round(hour * 60), 0, 0) - LOCAL_TZ_OFFSET_MS);
 }
 
 
@@ -121,6 +123,7 @@ export function buildMatterDeliverySnapshot(sub, dateKey, customer = null) {
       : undefined,
     matterSource: { fetchedAt: sub.source_fetched_at || new Date(), updatedAt: sub.source_updated_at ?? null, effectiveState: 'current-snapshot-only', pinSource: manualPin ? 'internal-manual-same-address' : 'matter' },
     matterSubscriptionId: subscriptionId,
+    matterCustomerId: sub.customer_id == null ? null : String(sub.customer_id),
     // Matter's id for this saved address — the stable identity pin
     // corrections key on (see Delivery.addressId).
     addressId: useAddr.id != null ? String(useAddr.id) : null

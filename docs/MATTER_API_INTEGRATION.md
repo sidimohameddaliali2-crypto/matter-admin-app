@@ -246,3 +246,28 @@ activation contract, so dated comparisons report UNKNOWN. Future cutoff behavior
 historical exceptions and live runtime/persistence verification remain separate
 requirements before closing issue #11. No production migration/backfill or live
 customer correction was performed for this change.
+
+### Shared kitchen and delivery names/windows (2026-10-21)
+
+`POST /api/matter/standardize-deliveries` takes `{ date: "YYYY-MM-DD" }`
+and is restricted to admin, super admin, dispatcher and manager roles. The
+delivery page calls it in the background on date selection/refresh. Saved rows
+load immediately; changed rows are reloaded after synchronization. Requests for
+the same date are coalesced and successful results reused for 60 seconds.
+
+For today's/future Matter deliveries, a complete Matter date roster supplies
+the name and delivery window. Matching uses the permanent
+Matter customer ID, with an exact subscription link allowed for older rows.
+Internal profiles supply identity links only. Ambiguous/missing accounts are
+reported without guessing. Names use the same casing rule as kitchen output;
+window minutes and Dubai date boundaries are preserved. Updates change only
+name, scheduled time and Matter identity references, with concurrent edit/status
+guards. In-flight records are retained. Owner explicitly approved replacing
+completed historical names and scheduled times with current Matter values on
+2026-10-21, starting with the week of October 12; earlier dates remain intact.
+Historical views resolve the current full subscription by permanent
+customer identity, not an expired subscription or name/email guesses. These are
+current values, not evidence of a historical window. Stored early/late fields
+and affected driver KPIs are refreshed when the scheduled time changes; actual
+completion times are preserved. This synchronization does not apply address,
+pin, driver or route changes.

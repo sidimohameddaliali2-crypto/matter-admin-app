@@ -9,8 +9,19 @@ import { isDateKey, getBusinessDayBounds } from '../utils/businessDate.js';
 import { resolveMatterDeliveryAddress, matterMealContract } from '../services/matterSubscriptionContract.js';
 import { compareMatterDelivery } from '../services/matterDeliveryComparison.js';
 import { buildMatterDeliverySnapshot, importMatterDeliveriesForDate } from '../services/matterDeliveryImportService.js';
+import { standardizeMatterDeliveriesForPage } from '../services/matterDeliveryStandardization.js';
 
 const router = express.Router();
+
+router.post('/standardize-deliveries', protect, authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
+  if (!isDateKey(req.body?.date)) return res.status(400).json({ success: false, message: 'A valid delivery date is required.' });
+  try {
+    const data = await standardizeMatterDeliveriesForPage(req.body.date);
+    res.json({ success: true, data });
+  } catch (error) {
+    res.status(503).json({ success: false, message: describeMatterApiError(error) || 'Matter names and delivery windows could not be synchronized. Retry to refresh them.' });
+  }
+});
 
 // List subscriptions (filterable, paginated)
 router.get('/subscriptions', protect, async (req, res) => {

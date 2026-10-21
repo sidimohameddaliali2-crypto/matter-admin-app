@@ -17,7 +17,7 @@ import { sendDeliveryPushToDriver } from '../services/pushNotificationService.js
 import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 import { recalculateDriverKPI } from '../services/driverKpiService.js';
 import { businessRangeBounds, getTimingOverview, getTimingRecords } from '../services/deliveryTimingHistory.js';
-import { businessOffsetMs, getBusinessDayBounds, setBusinessTimeOfDay } from '../utils/businessDate.js';
+import { businessOffsetMs, getBusinessDayBounds, isDateKey, setBusinessTimeOfDay } from '../utils/businessDate.js';
 import { fillProofAddressInBackground, resolveProofAddressWithin } from '../services/proofLocationAddress.js';
 import {
   optimizeRoutes,
@@ -1300,6 +1300,49 @@ router.get('/monthly-count', async (req, res) => {
   } catch (error) {
     console.error('Monthly count error:', error);
     res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+// Non-cancelled deliveries per business day per customer, for the Subscription
+// & Sales dashboard. The list endpoint caps a page at 500 rows, far below a
+// month of deliveries (~5,000), so the dashboard counts here instead of
+// downloading rows.
+// GET /api/deliveries/daily-customer-counts?dateFrom=2026-10-01&dateTo=2026-10-21
+// (inclusive business-day keys, Dubai time)
+router.get('/daily-customer-counts', async (req, res) => {
+  try {
+    const { dateFrom, dateTo } = req.query;
+    if (!isDateKey(dateFrom) || !isDateKey(dateTo) || dateFrom > dateTo) {
+      return res.status(400).json({ success: false, message: 'dateFrom and dateTo must be YYYY-MM-DD, dateFrom not after dateTo' });
+    }
+    const start = getBusinessDayBounds(dateFrom).startOfDay;
+    const end = getBusinessDayBounds(dateTo).endOfDayExclusive;
+    const offsetMin = Math.round(businessOffsetMs() / 60000);
+    const sign = offsetMin < 0 ? '-' : '+';
+    const hh = String(Math.floor(Math.abs(offsetMin) / 60)).padStart(2, '0');
+    const mm = String(Math.abs(offsetMin) % 60).padStart(2, '0');
+
+    const results = await Delivery.aggregate([
+      { $match: {
+        scheduledTime: { $gte: start, $lt: end },
+        type: 'Delivery',
+        status: { $ne: 'cancelled' },
+        customerId: { $nin: [null, ''] }
+      } },
+      { $group: {
+        _id: {
+          day: { $dateToString: { format: '%Y-%m-%d', date: '$scheduledTime', timezone: `${sign}${hh}:${mm}` } },
+          customerId: '$customerId'
+        },
+        count: { $sum: 1 }
+      } },
+      { $project: { _id: 0, day: '$_id.day', customerId: '$_id.customerId', count: 1 } }
+    ]);
+
+    res.json({ success: true, data: results });
+  } catch (error) {
+    console.error('Daily customer counts error:', error);
+    res.status(500).json({ success: false, message: 'Error fetching delivery counts' });
   }
 });
 

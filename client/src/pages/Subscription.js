@@ -3,13 +3,14 @@ import { DollarSign, Wallet, Users, RefreshCw as RenewIcon } from 'lucide-react'
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import api from '../utils/api';
 import { isCycleEnded } from '../utils/subscriptionFormat';
+import { formatBusinessDateInput } from '../utils/businessTime';
 
-const toISODateLocal = (date) => {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
-};
+// Day keys ("YYYY-MM-DD") are business-local (Dubai), matching how the server
+// buckets deliveries, not the viewer's own device timezone.
+const keyToUtc = (key) => { const [y, m, d] = key.split('-').map(Number); return new Date(Date.UTC(y, m - 1, d)); };
+const utcToKey = (date) => date.toISOString().slice(0, 10);
+const addDays = (key, n) => { const d = keyToUtc(key); d.setUTCDate(d.getUTCDate() + n); return utcToKey(d); };
+const dayOfWeek = (key) => keyToUtc(key).getUTCDay();
 
 const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
@@ -44,43 +45,41 @@ const Subscription = () => {
   const [customers, setCustomers] = useState([]);
   const [matterSubscriptions, setMatterSubscriptions] = useState([]);
   const [matterFinancials, setMatterFinancials] = useState([]);
-  const [windowDeliveries, setWindowDeliveries] = useState([]);
-  const [prevMonthDeliveries, setPrevMonthDeliveries] = useState([]);
+  const [windowCounts, setWindowCounts] = useState([]); // [{ day, customerId, count }]
+  const [prevMonthCounts, setPrevMonthCounts] = useState([]);
   const [loading, setLoading] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const now = new Date();
-      const todayEnd = new Date(); todayEnd.setHours(23, 59, 59, 999);
-      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-      const sevenDaysAgo = new Date(now); sevenDaysAgo.setDate(now.getDate() - 6); sevenDaysAgo.setHours(0, 0, 0, 0);
-      const windowStart = monthStart < sevenDaysAgo ? monthStart : sevenDaysAgo;
+      const today = formatBusinessDateInput(new Date());
+      const monthStart = `${today.slice(0, 8)}01`;
+      const windowStart = monthStart < addDays(today, -6) ? monthStart : addDays(today, -6);
 
-      const dayOfMonth = now.getDate();
-      const prevMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      const prevMonthSameDayEnd = new Date(now.getFullYear(), now.getMonth() - 1, dayOfMonth);
-      prevMonthSameDayEnd.setHours(23, 59, 59, 999);
+      // Same span last month: the 1st up to the same day-of-month (clamped for
+      // shorter months, so e.g. 31 Mar compares against all of February).
+      const prevMonthStart = `${utcToKey(new Date(Date.UTC(Number(today.slice(0, 4)), Number(today.slice(5, 7)) - 2, 1))).slice(0, 8)}01`;
+      const prevMonthLastDay = Number(addDays(monthStart, -1).slice(8, 10));
+      const prevMonthSameDayEnd = `${prevMonthStart.slice(0, 8)}${String(Math.min(Number(today.slice(8, 10)), prevMonthLastDay)).padStart(2, '0')}`;
 
       // /subscriptions/financials fetches full detail per active subscription
       // (hundreds of calls) to get real amount-paid — noticeably slower than
       // the rest of this fetch, but the plan/amount/cycle data has to come
       // from Matter, not the internal Customer record.
+      // Delivery counts come from an aggregate endpoint: the plain list caps a
+      // page at 500 rows, well under a month of deliveries.
       const [custRes, windowRes, prevMonthRes, matterSubsRes, matterFinRes] = await Promise.all([
         api.get('/customers', { params: { limit: 10000 } }),
-        api.get('/deliveries', { params: { dateFrom: windowStart.toISOString(), dateTo: todayEnd.toISOString(), limit: 20000 } }),
-        api.get('/deliveries', { params: { dateFrom: prevMonthStart.toISOString(), dateTo: prevMonthSameDayEnd.toISOString(), limit: 20000 } }),
+        api.get('/deliveries/daily-customer-counts', { params: { dateFrom: windowStart, dateTo: today } }),
+        api.get('/deliveries/daily-customer-counts', { params: { dateFrom: prevMonthStart, dateTo: prevMonthSameDayEnd } }),
         api.get('/matter/subscriptions/all'),
         api.get('/matter/subscriptions/financials'),
       ]);
 
       const dbCustomers = custRes.data?.data || [];
-      const windowList = windowRes.data?.data?.deliveries || [];
-      const prevMonthList = prevMonthRes.data?.data?.deliveries || [];
-
       setCustomers(dbCustomers);
-      setWindowDeliveries(windowList);
-      setPrevMonthDeliveries(prevMonthList);
+      setWindowCounts(windowRes.data?.data || []);
+      setPrevMonthCounts(prevMonthRes.data?.data || []);
       setMatterSubscriptions(matterSubsRes.data?.data || []);
       setMatterFinancials(matterFinRes.data?.data || []);
     } catch (err) {
@@ -129,36 +128,26 @@ const Subscription = () => {
     return map;
   }, [customers, matterByEmail]);
 
-  // dayKey -> revenue / orders, built from windowDeliveries (skips cancelled)
+  // dayKey -> revenue / orders (non-cancelled deliveries), from the server's
+  // per-day per-customer counts
   const perDayStats = useMemo(() => {
     const stats = {};
-    windowDeliveries.forEach((d) => {
-      if (d.status === 'cancelled') return;
-      const id = d.customerId || d.customerID;
-      if (!id) return;
-      const dayKey = toISODateLocal(new Date(d.scheduledTime));
-      if (!stats[dayKey]) stats[dayKey] = { revenue: 0, orders: 0 };
-      stats[dayKey].revenue += dailyRateMap[id] || 0;
-      stats[dayKey].orders += 1;
+    windowCounts.forEach(({ day, customerId, count }) => {
+      if (!stats[day]) stats[day] = { revenue: 0, orders: 0 };
+      stats[day].revenue += (dailyRateMap[customerId] || 0) * count;
+      stats[day].orders += count;
     });
     return stats;
-  }, [windowDeliveries, dailyRateMap]);
+  }, [windowCounts, dailyRateMap]);
 
-  const prevMonthRevenue = useMemo(() => {
-    let total = 0;
-    prevMonthDeliveries.forEach((d) => {
-      if (d.status === 'cancelled') return;
-      const id = d.customerId || d.customerID;
-      if (id) total += dailyRateMap[id] || 0;
-    });
-    return total;
-  }, [prevMonthDeliveries, dailyRateMap]);
+  const prevMonthRevenue = useMemo(
+    () => prevMonthCounts.reduce((sum, { customerId, count }) => sum + (dailyRateMap[customerId] || 0) * count, 0),
+    [prevMonthCounts, dailyRateMap]
+  );
 
-  const now = new Date();
-  const todayKey = toISODateLocal(now);
-  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
-  const yesterdayKey = toISODateLocal(yesterday);
-  const monthStartKey = toISODateLocal(new Date(now.getFullYear(), now.getMonth(), 1));
+  const todayKey = formatBusinessDateInput(new Date());
+  const yesterdayKey = addDays(todayKey, -1);
+  const monthStartKey = `${todayKey.slice(0, 8)}01`;
 
   const salesToday = perDayStats[todayKey]?.revenue || 0;
   const ordersToday = perDayStats[todayKey]?.orders || 0;
@@ -173,16 +162,15 @@ const Subscription = () => {
   const last7Days = useMemo(() => {
     const days = [];
     for (let i = 6; i >= 0; i -= 1) {
-      const d = new Date(now); d.setDate(now.getDate() - i);
-      const key = toISODateLocal(d);
+      const key = addDays(todayKey, -i);
       days.push({
-        label: DAY_LABELS[d.getDay()],
+        label: DAY_LABELS[dayOfWeek(key)],
         revenue: Math.round((perDayStats[key]?.revenue || 0) * 100) / 100,
         orders: perDayStats[key]?.orders || 0,
       });
     }
     return days;
-  }, [perDayStats, now]);
+  }, [perDayStats, todayKey]);
 
   const ordersThisWeek = last7Days.reduce((s, d) => s + d.orders, 0);
   const weekRevenueFirstHalf = last7Days.slice(0, 4).reduce((s, d) => s + d.revenue, 0);
@@ -192,7 +180,7 @@ const Subscription = () => {
   // Build enriched customer rows (for filters/table + plan breakdown).
   // Only customers with a matching real Matter subscription (by email) are
   // included — without one there's no real plan/amount/cycle data to show.
-  const sevenDaysAgoKey = last7Days.length ? toISODateLocal(new Date(new Date(now).setDate(now.getDate() - 6))) : todayKey;
+  const sevenDaysAgoKey = addDays(todayKey, -6);
   const rows = customers.map(c => {
     const sub = matterByEmail.get(String(c.email || '').trim().toLowerCase());
     if (!sub) return null;

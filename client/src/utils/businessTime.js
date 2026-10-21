@@ -5,7 +5,7 @@
 // happens to be set to Dubai — anywhere else, times drift by the difference
 // between the two zones. These helpers always read/write the fixed business
 // offset instead, matching the server's normalizeScheduledTimeInput.
-const BUSINESS_TZ_OFFSET_MINUTES = Number(process.env.REACT_APP_LOCAL_TIMEZONE_OFFSET_MINUTES || 0);
+const BUSINESS_TZ_OFFSET_MINUTES = Number(process.env.REACT_APP_LOCAL_TIMEZONE_OFFSET_MINUTES || 240);
 const MS_PER_MINUTE = 60 * 1000;
 
 const pad2 = (n) => String(n).padStart(2, '0');

@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { useSelector } from 'react-redux';
 import * as XLSX from 'xlsx';
 import api from '../utils/api';
 import PrintConfigModal from '../components/deliveries/PrintConfigModal';
 import DeliveryDetailModal from '../components/deliveries/DeliveryDetailModal';
-import { toBusinessComponents } from '../utils/businessTime';
+import { toBusinessComponents, businessComponentsToUtcDate, formatBusinessDateInput } from '../utils/businessTime';
 import { useSocket } from '../contexts/SocketContext';
 
 const COMPLETED_STATUSES = ['delivered', 'completed', 'collected'];
@@ -102,6 +103,7 @@ const getDriverDisplayName = (driver) => {
 };
 
 const Deliveries = () => {
+  const role = useSelector((state) => state.auth.user?.role);
   const [searchParams] = useSearchParams();
   const [deliveries, setDeliveries] = useState([]);
   const [filteredDeliveries, setFilteredDeliveries] = useState([]);
@@ -114,7 +116,11 @@ const Deliveries = () => {
   const [driverFilter, setDriverFilter] = useState(() => searchParams.get('driver') || 'all');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [selectedDate, setSelectedDate] = useState(() => formatBusinessDateInput(new Date()));
+  const selectedDateRef = React.useRef(selectedDate);
+  selectedDateRef.current = selectedDate;
+  const [matterSyncError, setMatterSyncError] = useState('');
+  const [refreshVersion, setRefreshVersion] = useState(0);
   const [selectedDeliveries, setSelectedDeliveries] = useState(() => new Set());
   const [allDrivers, setAllDrivers] = useState([]);
   const [isPrintConfigOpen, setIsPrintConfigOpen] = useState(false);
@@ -129,23 +135,24 @@ const Deliveries = () => {
   // Fetch every delivery for the selected date (all statuses) — status/type/area/timing/
   // driver/search are all applied client-side below, so the 5 stat cards always reflect
   // the whole day regardless of which table filters are active.
-  const fetchDeliveries = useCallback(async () => {
+  const fetchDeliveries = useCallback(async (quiet = false) => {
+    quiet = quiet === true;
     try {
-      setIsLoading(true);
+      if (!quiet) setIsLoading(true);
       setError(null);
 
       const params = { page: 1, limit: MAX_FETCH_LIMIT };
       if (selectedDate) {
-        const start = new Date(`${selectedDate}T00:00:00`);
-        if (!Number.isNaN(start.getTime())) {
-          const end = new Date(start);
-          end.setDate(end.getDate() + 1);
+        const start = businessComponentsToUtcDate(selectedDate, '00:00');
+        if (start) {
+          const end = new Date(start.getTime() + 86400000 - 1);
           params.dateFrom = start.toISOString();
           params.dateTo = end.toISOString();
         }
       }
 
       const response = await api.get('/deliveries', { params });
+      if (selectedDateRef.current !== selectedDate) return;
       if (!response.data?.success) {
         throw new Error(response.data?.message || 'Failed to load deliveries');
       }
@@ -161,15 +168,31 @@ const Deliveries = () => {
         return next;
       });
     } catch (err) {
+      if (selectedDateRef.current !== selectedDate) return;
       console.error('Error fetching deliveries:', err);
       setDeliveries([]);
       setError(err.response?.data?.message || 'Failed to load deliveries');
     } finally {
-      setIsLoading(false);
+      if (selectedDateRef.current === selectedDate && !quiet) setIsLoading(false);
     }
   }, [selectedDate]);
 
-  useEffect(() => { fetchDeliveries(); }, [fetchDeliveries]);
+  useEffect(() => {
+    let cancelled = false;
+    setMatterSyncError('');
+    const loaded = fetchDeliveries();
+    if (selectedDate && ['admin', 'super_admin', 'dispatcher', 'manager'].includes(role)) {
+      const synchronized = api.post('/matter/standardize-deliveries', { date: selectedDate });
+      Promise.all([loaded, synchronized]).then(([, response]) => {
+        if (cancelled) return;
+        if (response.data?.data?.updated) fetchDeliveries(true);
+        if (response.data?.data?.unresolved?.length) setMatterSyncError('Some deliveries could not be matched uniquely to a Matter account. Their saved details were retained.');
+      }).catch((err) => {
+        if (!cancelled) setMatterSyncError(err.response?.data?.message || 'Matter names and delivery windows could not be synchronized. Refresh to retry.');
+      });
+    }
+    return () => { cancelled = true; };
+  }, [fetchDeliveries, selectedDate, role, refreshVersion]);
 
   // Owner (2026-10-10): "auto refresh whenever someone completes the
   // delivery, and a popup that goes away after 2s" — later refined to "top
@@ -439,7 +462,7 @@ const Deliveries = () => {
         <div className="bg-red-50 border border-red-200 rounded-lg p-4">
           <div className="flex items-center">
             <div className="text-red-600 font-medium">Error loading deliveries</div>
-            <button onClick={fetchDeliveries} className="ml-auto flex items-center px-3 py-1 text-sm bg-red-100 text-red-700 rounded">
+            <button onClick={() => setRefreshVersion((value) => value + 1)} className="ml-auto flex items-center px-3 py-1 text-sm bg-red-100 text-red-700 rounded">
               <span className="material-symbols-outlined text-[16px] mr-1">refresh</span>
               Retry
             </button>
@@ -452,6 +475,7 @@ const Deliveries = () => {
 
   return (
     <div className="matter-analytics p-6 bg-gray-50 min-h-screen">
+      {matterSyncError && <p role="status" className="mb-4 text-sm text-amber-800">{matterSyncError}</p>}
       {completionToast && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-lg bg-emerald-600 text-white font-medium shadow-lg">
           {completionToast}
@@ -466,7 +490,7 @@ const Deliveries = () => {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button onClick={fetchDeliveries} className="p-2 text-gray-500 hover:text-blue-600 hover:bg-gray-100 rounded-lg transition-colors" title="Refresh">
+          <button onClick={() => setRefreshVersion((value) => value + 1)} className="p-2 text-gray-500 hover:text-blue-600 hover:bg-gray-100 rounded-lg transition-colors" title="Refresh">
             <span className={`material-symbols-outlined ${isLoading ? 'animate-spin' : ''}`}>refresh</span>
           </button>
           <button

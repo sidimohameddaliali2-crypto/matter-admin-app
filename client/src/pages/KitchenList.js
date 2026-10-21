@@ -621,7 +621,7 @@ const KitchenList = () => {
             sub,
             resolvedEmail: matched?.email || sub.email || '',
             resolvedCustomerId: matched?.customerId || String(sub.customer_id ?? sub.subscription_id),
-            resolvedName: matched ? getCustomerName(matched) : sub.name
+            resolvedName: getCustomerName({ matterName: sub.name })
           };
         })
         .filter(({ resolvedEmail }) => !coveredEmails.has(String(resolvedEmail).trim().toLowerCase()))
