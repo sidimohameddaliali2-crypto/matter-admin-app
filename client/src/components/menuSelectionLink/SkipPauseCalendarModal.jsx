@@ -22,12 +22,13 @@ const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, we
 
   const markers = useMemo(() => {
     const out = activeDeliveryDates.map((date) => ({ date, kind: 'active' }));
+    unavailableDates.forEach((date) => out.push({ date, kind: 'website' }));
     drafts.forEach((d) => {
       out.push({ date: d.date, kind: 'skip' });
       if (d.resumeDate) out.push({ date: d.resumeDate, kind: 'resume' });
     });
     return out;
-  }, [drafts, activeDeliveryDates]);
+  }, [drafts, activeDeliveryDates, unavailableDates]);
 
   const editable = drafts.filter((d) => !d.alreadyPaused);
   const selected = editable.map((d) => d.resumeDate).filter(Boolean);

@@ -101,16 +101,16 @@ const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, se
           const isSkip = kinds.includes('skip');
           const isResume = kinds.includes('resume');
           const isActive = kinds.includes('active');
+          const isWebsite = kinds.includes('website');
           const isSelected = key === selectedDate || selectedDates.includes(key);
           const isPast = key < todayKey;
           const isBelowMin = minSelectableDate ? key < minSelectableDate : false;
           const weekday = fromKey(key).getDay();
-          const isBlocked = isSkip || isActive || blockedDates.includes(key) || (!weekendEnabled && (weekday === 0 || weekday === 6));
+          const isBlocked = isSkip || isWebsite || isActive || blockedDates.includes(key) || (!weekendEnabled && (weekday === 0 || weekday === 6));
           const selectable = !!onSelectDate && !isPast && !isBelowMin && !isBlocked;
-          // A marked date (skip or resume) is a full filled circle behind
-          // the number, not a small dot — resume wins if a date is somehow
-          // both (rare: a resume date landing on another row's skip date).
-          const markerColor = isSkip ? '#DC2626' : isActive ? '#2F80FF' : isResume ? '#16A34A' : null;
+          // Existing website pauses/resumes stay red even when Matter also
+          // lists a reserved resume day as an active delivery.
+          const markerColor = isSkip || isWebsite ? '#DC2626' : isActive ? '#2F80FF' : isResume ? '#16A34A' : null;
           return (
             <button
               key={i}
@@ -131,9 +131,9 @@ const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, se
                 fontSize: 12.5,
                 fontFamily: 'inherit',
               }}
-              aria-label={`${key}${isSkip ? ', paused (fixed)' : isActive ? ', active delivery (unavailable)' : isResume ? ', resume delivery' : ''}`}
+              aria-label={`${key}${isSkip ? ', paused (fixed)' : isWebsite ? ', website pause or resume (unavailable)' : isActive ? ', active delivery (unavailable)' : isResume ? ', resume delivery' : ''}`}
               aria-pressed={isSelected}
-              title={isSkip ? 'Paused day (fixed)' : isActive ? 'Active delivery (unavailable)' : isResume ? 'Resumes here' : undefined}
+              title={isSkip ? 'Paused day (fixed)' : isWebsite ? 'Website pause or resume (unavailable)' : isActive ? 'Active delivery (unavailable)' : isResume ? 'Resumes here' : undefined}
             >
               {Number(key.slice(8, 10))}
             </button>
@@ -141,7 +141,7 @@ const PauseCalendarGrid = ({ initialMonth, markers = [], selectedDate = null, se
         })}
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginTop: 10, fontSize: 11.5, color: 'var(--color-neutral-600)' }}>
-        <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#DC2626', display: 'inline-block', marginRight: 4 }} />Paused</span>
+        <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#DC2626', display: 'inline-block', marginRight: 4 }} />Paused / website dates</span>
         <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#16A34A', display: 'inline-block', marginRight: 4 }} />Resumes</span>
         <span><span style={{ width: 9, height: 9, borderRadius: 999, background: '#2F80FF', display: 'inline-block', marginRight: 4 }} />Active delivery</span>
       </div>

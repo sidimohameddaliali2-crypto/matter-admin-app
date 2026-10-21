@@ -8,6 +8,7 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 
 const mockPdfSave = jest.fn();
 const mockExcelSave = jest.fn();
+const mockExcelRows = jest.fn((rows) => rows);
 jest.mock('jspdf', () => ({ __esModule: true, default: function FixturePDF() {
   const doc = { internal: { pageSize: { getWidth: () => 210, getHeight: () => 297 } },
     splitTextToSize: (text) => [String(text)], getTextWidth: () => 20, getNumberOfPages: () => 1,
@@ -17,7 +18,7 @@ jest.mock('jspdf', () => ({ __esModule: true, default: function FixturePDF() {
   return doc;
 } }));
 jest.mock('jspdf-autotable', () => ({ __esModule: true, default: (doc) => { doc.lastAutoTable = { finalY: 140 }; } }));
-jest.mock('xlsx', () => ({ utils: { book_new: () => ({}), json_to_sheet: (rows) => rows, book_append_sheet: () => {} }, writeFile: (...args) => mockExcelSave(...args) }));
+jest.mock('xlsx', () => ({ utils: { book_new: () => ({}), json_to_sheet: (rows) => mockExcelRows(rows), book_append_sheet: () => {} }, writeFile: (...args) => mockExcelSave(...args) }));
 
 
 const thursday = '2026-10-22', friday = '2026-10-23';
@@ -41,6 +42,7 @@ const dateSelect = () => [...container.querySelectorAll('h3')].find((node) => no
 const paperSelect = () => [...container.querySelectorAll('label')].find((node) => node.textContent === 'Day kitchen paper').parentElement.querySelector('select');
 
 beforeEach(async () => {
+  mockExcelRows.mockImplementation((rows) => rows);
   api.get.mockImplementation(async (path) => {
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', startDate: thursday, endDate: friday }] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [{ email, firstName: 'Internal stale name', matterCustomerId: 'permanent', mealPerDay: 9, selectedMeals: [thursday, friday].map((date) => ({ date, mealType: 'main', mealName: 'Fixture dish' })) }] } };
@@ -113,4 +115,37 @@ test('PDF and Excel buttons generate files after Matter verification', async () 
   expect(mockPdfSave).toHaveBeenCalledWith(`kitchen-paper-${thursday}.pdf`);
   await act(async () => downloadButton('Download Day Excel').click());
   expect(mockExcelSave.mock.calls[0][1]).toBe(`kitchen-paper-${thursday}.xlsx`);
+});
+
+test('an unavailable subscription stays on its customer while the page and verified day exports keep working', async () => {
+  const expiredEmail = 'expired@example.invalid';
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, options) => {
+    if (path.endsWith('/selections')) {
+      const response = await originalGet(path, options);
+      return { data: { success: true, data: [...response.data.data, {
+        email: expiredEmail, matterEmail: expiredEmail, matterCustomerId: 'expired-permanent-id',
+        selectedMeals: [{ date: friday, mealType: 'main', mealName: 'Expired account dish' }],
+      }] } };
+    }
+    if (path.includes('kitchen-inputs')) {
+      expect(options.params.customerId).toBe('expired-permanent-id');
+      throw { response: { status: 404, data: { message: 'No current Matter subscription.' } } };
+    }
+    return originalGet(path, options);
+  });
+  await select(paperSelect(), friday);
+  expect(container.textContent).toContain('Matter Fixture');
+  expect(container.textContent).toContain(expiredEmail);
+  expect(container.textContent).toContain('No current Matter subscription.');
+  expect(container.textContent).toContain('Unavailable');
+  expect(container.textContent).not.toContain('Saved selection has no verified Matter customer ID.');
+  expect(container.textContent).not.toContain('No customer selections found for this menu.');
+  expect(downloadButton('Download Day Excel').disabled).toBe(false);
+  await act(async () => downloadButton('Download Day Excel').click());
+  expect(mockExcelSave).toHaveBeenCalledWith(expect.anything(), `kitchen-paper-${friday}.xlsx`);
+  const exportedRows = mockExcelRows.mock.calls.at(-1)[0];
+  expect(exportedRows).toHaveLength(1);
+  expect(exportedRows[0]).toMatchObject({ Customer: 'Matter Fixture', Meal: 'Fixture dish' });
+  expect(container.textContent).toContain('Matter Fixture');
 });
