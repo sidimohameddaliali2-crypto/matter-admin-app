@@ -108,6 +108,7 @@ export const buildNutritionResult = (subscription) => ({
   // Used to cross-reference this subscription against internal Customer
   // records (customerMatchService) when the subscription's own email
   // doesn't match anything internally.
+  customer_email: subscription.email ?? null,
   customer_name: subscription.name || null,
   phone: subscription.phone || null
 });
@@ -230,39 +231,60 @@ class MatterApiService {
     return result;
   }
 
-  // Production kitchen reads deliberately bypass the 15-minute nutrition
-  // cache and never relink Customer records. Email is the primary lookup
-  // (owner request); saved IDs are used only when email is unavailable.
+  // Owner (2026-10-20): permanent Matter customer ID owns kitchen identity.
+  // Email discovers that ID at sign-in. Subscription IDs are legacy references.
+  // Every read is from Matter; no Internal Customer lookup or relinking occurs.
   async getKitchenNutrition({ subscriptionId, customerId, email } = {}) {
-    const normalizedEmail = String(email || '').trim().toLowerCase();
-    let id = subscriptionId;
-    if (normalizedEmail || !id) {
-      const list = await this.listSubscriptions({ customerId: normalizedEmail ? undefined : customerId || undefined, email: normalizedEmail || undefined, pageSize: 100 });
-      const rows = list?.data || [];
-      if (rows.length !== 1 || Number(list?.meta?.total_pages || 1) > 1) {
-        const error = new Error('Kitchen subscription lookup is missing or ambiguous; verify the customer email and Matter subscription.');
-        error.statusCode = 409;
-        throw error;
-      }
-      if (normalizedEmail && String(rows[0].email || '').trim().toLowerCase() !== normalizedEmail) {
-        const error = new Error('Matter subscription email does not match the requested customer.');
-        error.statusCode = 409;
-        throw error;
-      }
-      id = rows[0].subscription_id;
+    try {
+      const normalize = (value) => String(value || '').trim().toLowerCase();
+      const fail = (message) => { const error = new Error(message); error.statusCode = 409; throw error; };
+      const one = (list) => {
+        const rows = list?.data || [];
+        const active = rows.filter((row) => row.subscription_status === 'active');
+        const candidates = active.length === 1 ? active : rows;
+        if (candidates.length !== 1 || Number(list?.meta?.total_pages || 1) > 1) fail('Kitchen subscription lookup is missing or ambiguous; verify the Matter customer ID and website email.');
+        return candidates[0];
+      };
+      const load = async (id) => {
+        const data = (await this.getSubscription(id))?.data;
+        if (!data || String(data.subscription_id) !== String(id)) fail('The current Matter subscription could not be verified.');
+        return data;
+      };
+      const byCustomer = async (id) => {
+        if (!String(id ?? '').trim()) fail('Permanent Matter customer ID is missing. Verify this account in Matter.');
+        const row = one(await this.listSubscriptions({ customerId: id, pageSize: 100 }));
+        const data = await load(row.subscription_id);
+        if (String(data.customer_id ?? '') !== String(id)) fail('Matter customer identity does not match the requested permanent ID.');
+        return data;
+      };
+      let subscription;
+      const requestedEmail = normalize(email);
+      if (customerId) subscription = await byCustomer(customerId);
+      else if (requestedEmail) {
+        const list = await this.listSubscriptions({ email: requestedEmail, pageSize: 100 });
+        if ((list?.data || []).length) {
+          const row = one(list);
+          if (normalize(row.email) !== requestedEmail) fail('Matter subscription email does not match the requested customer.');
+          subscription = await load(row.subscription_id);
+          if (normalize(subscription.email) !== requestedEmail) fail('Matter subscription email does not match the requested customer.');
+        } else if (subscriptionId) {
+          // Recover only a verifiable legacy reference, then follow the stable ID.
+          const legacy = await load(subscriptionId);
+          subscription = await byCustomer(legacy.customer_id);
+        } else one(list);
+      } else if (subscriptionId) {
+        const legacy = await load(subscriptionId);
+        subscription = await byCustomer(legacy.customer_id);
+      } else fail('A Matter customer ID or verified website email is required.');
+      if (!String(subscription?.customer_id ?? '').trim()) fail('Permanent Matter customer ID is missing. Verify this account in Matter.');
+      return buildNutritionResult(subscription);
+    } catch (error) {
+      if (!error.isAxiosError) throw error;
+      const safe = new Error(describeMatterApiError(error) || 'Matter lookup failed. Please retry.');
+      safe.statusCode = error.response?.status || 502;
+      safe.code = error.code;
+      throw safe;
     }
-    const detail = await this.getSubscription(id);
-    if (!detail?.data || String(detail.data.subscription_id) !== String(id)) {
-      const error = new Error('The exact Matter subscription could not be verified.');
-      error.statusCode = 409;
-      throw error;
-    }
-    if (customerId && String(detail.data.customer_id ?? '') !== String(customerId)) {
-      const error = new Error('Matter customer and subscription links conflict.');
-      error.statusCode = 409;
-      throw error;
-    }
-    return buildNutritionResult(detail.data);
   }
 
   /**
@@ -326,7 +348,7 @@ class MatterApiService {
    * already fetched in one shot and just gets checked against every date in
    * range.
    */
-  async findSubscriptionsWithDeliveryInRange(startDateKey, endDateKey) {
+  async findSubscriptionsWithDeliveryInRange(startDateKey, endDateKey, { includeKitchenInputs = false } = {}) {
     const all = await this.listAllSubscriptions();
     const candidates = all.filter((sub) =>
       ['active', 'paused', 'cancelled'].includes(sub.subscription_status)
@@ -342,6 +364,7 @@ class MatterApiService {
       const results = await Promise.all(batch.map(async (sub) => {
         try {
           const detail = await this.getSubscription(sub.subscription_id);
+          if (includeKitchenInputs && String(detail?.data?.subscription_id ?? '') !== String(sub.subscription_id)) throw new Error('Matter subscription identity could not be verified');
           const schedule = detail?.data?.delivery_schedule;
           if (!Array.isArray(schedule)) throw new Error('Delivery schedule is missing');
           const deliveryDates = schedule
@@ -353,8 +376,9 @@ class MatterApiService {
             .sort();
           if (deliveryDates.length === 0) return [];
           return deliveryDates.map((deliveryDate) => ({
+            ...(includeKitchenInputs ? { kitchen_inputs: buildNutritionResult({ ...detail.data, email: detail.data.email || sub.email }) } : {}),
             subscription_id: sub.subscription_id,
-            customer_id: sub.customer_id,
+            customer_id: detail.data.customer_id ?? sub.customer_id,
             // The list/summary endpoint's `name` can be sparser than the
             // full detail record (same reason `phone`/`address` below are
             // sourced from `detail.data`, not `sub`) — falling back to the
@@ -415,8 +439,8 @@ class MatterApiService {
   }
 
   /** Single-date convenience wrapper around findSubscriptionsWithDeliveryInRange. */
-  async findSubscriptionsWithDeliveryOnDate(dateKey) {
-    return this.findSubscriptionsWithDeliveryInRange(dateKey, dateKey);
+  async findSubscriptionsWithDeliveryOnDate(dateKey, options) {
+    return this.findSubscriptionsWithDeliveryInRange(dateKey, dateKey, options);
   }
 
   /**

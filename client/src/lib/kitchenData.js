@@ -263,16 +263,13 @@ export const mapWithConcurrency = async (items, limit, mapper) => {
 export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritionCacheRef, {
   concurrency = 8,
   extended = false,
+  matterInputs = [],
   onEach
 } = {}) => mapWithConcurrency(rawSelections, concurrency, async (entry) => {
-  const email = String(entry?.email || '').trim();
+  const email = String(entry?.matterEmail || entry?.email || '').trim();
   const subscriptionId = String(entry?.matterSubscriptionId || '').trim();
   // Matter's permanent customer id — survives renewals, unlike subscriptionId.
   const matterCustomerId = String(entry?.matterCustomerId || '').trim();
-  if (entry?.partner) {
-    onEach?.();
-    return { ...entry, nutritionStatus: 'resolved', nutritionSource: 'partner-preset', nutritionResolvedAt: new Date().toISOString() };
-  }
   if (!email && !subscriptionId && !matterCustomerId) {
     onEach?.();
     return { ...entry, nutritionStatus: 'missing' };
@@ -283,9 +280,24 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
     // mapWithConcurrency's Promise.all waits for every worker to finish — a
     // single slow/hung Matter API call for one customer would otherwise
     // block the entire page's load indefinitely.
-    const nutritionResponse = await api.get('/matter/subscriptions/kitchen-inputs', {
-      params: { subscriptionId, customerId: matterCustomerId, email }, timeout: 20000
+    // These are the fresh Matter details fetched by this preparation, not
+    // internal profiles or a browser cache. Reuse by exact email so hundreds
+    // of customers do not each repeat the list+detail requests just made.
+    const normalizedEmail = email.toLowerCase();
+    const fresh = (Array.isArray(matterInputs) ? matterInputs : []).filter((input) => {
+      const age = Date.now() - Date.parse(input.source_fetched_at);
+      return input.subscription_id != null && input.customer_email && age >= 0 && age < 180000;
     });
+    const emailMatches = fresh.filter((input) => normalizedEmail && String(input.customer_email).trim().toLowerCase() === normalizedEmail);
+    const candidates = matterCustomerId
+      ? fresh.filter((input) => String(input.customer_id) === matterCustomerId)
+      : emailMatches.length ? emailMatches : fresh.filter((input) => subscriptionId && String(input.subscription_id) === subscriptionId);
+    const unique = new Map(candidates.map((input) => [String(input.subscription_id), input]));
+    const nutritionResponse = unique.size === 1
+      ? { data: { success: true, data: [...unique.values()][0] } }
+      : await api.get('/matter/subscriptions/kitchen-inputs', {
+        params: { email, subscriptionId, customerId: matterCustomerId }, timeout: 20000
+      });
     if (nutritionResponse.data?.success === false) throw new Error('Matter inputs could not be verified.');
     const nutrition = nutritionResponse.data?.data;
     if (!email && subscriptionId && String(nutrition?.subscription_id || '') !== subscriptionId) throw new Error('Matter subscription link does not match.');
@@ -294,10 +306,26 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
       : null;
 
     const enrichedFields = {
+      customerId: nutrition?.customer_id == null ? null : String(nutrition.customer_id),
+      matterCustomerId: nutrition?.customer_id == null ? null : String(nutrition.customer_id),
+      firstName: String(nutrition?.customer_name || '').trim().split(/\s+/)[0] || '',
+      lastName: String(nutrition?.customer_name || '').trim().split(/\s+/).slice(1).join(' '),
+      mealExclusion: Array.isArray(nutrition?.exclusions) ? nutrition.exclusions.join(', ') : null,
+      partner: null,
+      unlimitedMeals: false,
       targetMacros: websiteMacros || {},
       customerMacros: websiteMacros || {},
+      // Replace legacy aliases too so no downstream fallback reads a stale
+      // internal customer meal count, plan or breakfast preference.
+      macros: websiteMacros || {},
+      mealPerDay: nutrition?.meal_frequency ?? null,
+      mealPlan: nutrition?.plan_name ?? null,
+      mealSnack: nutrition?.snacks_per_day ?? null,
+      breakfastInclude: typeof nutrition?.breakfast_included === 'boolean' ? nutrition.breakfast_included : null,
       nutritionStatus: nutrition ? 'resolved' : 'missing',
       nutritionSource: 'matter',
+      matterEmail: nutrition?.customer_email ?? null,
+      nutritionError: null,
       nutritionPlanKind: String(nutrition?.plan_name || '').trim().toLowerCase() === 'matter core' ? 'core' : 'ordinary',
       nutritionUnits: String(nutrition?.plan_name || '').trim().toLowerCase() === 'matter core' ? 'food-weight-grams' : 'nutrient-grams',
       nutritionResolvedAt: nutrition?.source_fetched_at || new Date().toISOString(),
@@ -322,9 +350,14 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
     };
     onEach?.();
     return { ...entry, ...enrichedFields };
-  } catch {
+  } catch (error) {
     onEach?.();
-    return { ...entry, nutritionStatus: 'failed', nutritionSource: 'matter' };
+    const serverMessage = error?.response?.data?.message;
+    const nutritionError = typeof serverMessage === 'string' && serverMessage.trim()
+      ? serverMessage
+      : error?.code === 'ECONNABORTED' ? 'Matter lookup timed out. Refresh to retry.'
+        : 'Matter subscription could not be verified. Refresh to retry.';
+    return { ...entry, nutritionStatus: 'failed', nutritionSource: 'matter', nutritionError };
   }
 });
 
@@ -367,8 +400,8 @@ export const deriveDateKeys = ({ menuSelections, mainMealOptionsByDate, breakfas
 // An exact subscription link must never fall through to another renewal that
 // happens to share its permanent customer ID or email.
 export const matchesMatterSubscription = (entry, sub) => {
+  if (entry.matterCustomerId) return String(entry.matterCustomerId) === String(sub.customer_id);
   const subscriptionId = entry.matterSourceSubscriptionId ?? entry.matterSubscriptionId;
   if (subscriptionId) return String(subscriptionId) === String(sub.subscription_id);
-  if (entry.matterCustomerId) return String(entry.matterCustomerId) === String(sub.customer_id);
   return !!entry.email && String(entry.email).trim().toLowerCase() === String(sub.email || '').trim().toLowerCase();
 };

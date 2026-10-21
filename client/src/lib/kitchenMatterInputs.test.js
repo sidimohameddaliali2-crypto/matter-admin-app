@@ -57,13 +57,53 @@ test('paper provenance identifies the exact subscription/address and dated-chang
 });
 
 
-test('roster identity does not fall through an exact subscription link to a different renewal', () => {
-  expect(matchesMatterSubscription({ ...raw, email: 'same@example.invalid' }, { subscription_id: 'renewal', customer_id: raw.matterCustomerId, email: 'same@example.invalid' })).toBe(false);
-  expect(matchesMatterSubscription(raw, { subscription_id: 'fixture' })).toBe(true);
+test('permanent Matter identity follows renewals without matching a different customer', () => {
+  expect(matchesMatterSubscription({ ...raw, email: 'same@example.invalid' }, { subscription_id: 'renewal', customer_id: raw.matterCustomerId, email: 'same@example.invalid' })).toBe(true);
+  expect(matchesMatterSubscription(raw, { subscription_id: 'fixture', customer_id: raw.matterCustomerId })).toBe(true);
 });
 
 
 test.each([{ meal_frequency: null }, { breakfast_included: null }, { snacks_per_day: null }, { exclusions: null }, { customer_name: '' }])('unknown Matter entitlement/details cannot use local defaults: %p', async (missing) => {
   const [entry] = await enrichSelectionsWithNutrition({ get: async () => ({ data: { success: true, data: { ...nutrition, ...missing } } }) }, [raw], { current: new Map() }, { extended: true });
   expect(() => assertKitchenExportReady([calculate(entry)])).toThrow('blocked');
+});
+
+
+test('fresh preparation inputs reuse only the same Matter email and replace internal aliases', async () => {
+  const email = 'fixture@example.invalid';
+  const api = { get: jest.fn() };
+  const [entry] = await enrichSelectionsWithNutrition(api, [{ ...raw, email, matterCustomerId: 'customer', mealPerDay: 99, breakfastInclude: true, mealSnack: 9, mealPlan: 'Internal plan' }], { current: new Map() }, {
+    extended: true, matterInputs: [{ ...nutrition, customer_email: email.toUpperCase(), source_fetched_at: new Date().toISOString() }],
+  });
+  expect(api.get).not.toHaveBeenCalled();
+  expect(entry.matterName).toBe('Matter name');
+  expect(entry.mealPerDay).toBe(3);
+  expect(entry.mealSnack).toBe(0);
+  expect(entry.breakfastInclude).toBe(false);
+  expect(entry.mealPlan).toBe('Custom');
+});
+
+test.each(['stale', 'different-email', 'ambiguous'])('unusable prepared inputs require a verified fresh lookup: %s', async (kind) => {
+  const fresh = { ...nutrition, customer_email: 'fixture@example.invalid', source_fetched_at: new Date().toISOString() };
+  const inputs = kind === 'stale' ? [{ ...fresh, source_fetched_at: '2000-01-01T00:00:00Z' }]
+    : kind === 'different-email' ? [{ ...fresh, customer_email: 'another@example.invalid', subscription_id: 'another', customer_id: 'another' }]
+      : [fresh, { ...fresh, subscription_id: 'other' }];
+  const api = { get: jest.fn().mockRejectedValue(new Error('No verified match')) };
+  const [entry] = await enrichSelectionsWithNutrition(api, [{ ...raw, email: 'fixture@example.invalid' }], { current: new Map() }, { matterInputs: inputs });
+  expect(api.get).toHaveBeenCalledTimes(1);
+  expect(api.get.mock.calls[0][1].params).toEqual({ email: 'fixture@example.invalid', subscriptionId: raw.matterSubscriptionId, customerId: raw.matterCustomerId });
+  expect(entry.nutritionStatus).toBe('failed');
+});
+
+
+test('legacy storage email resolves through a unique Matter identity without borrowing Internal profile data', async () => {
+  const api = { get: jest.fn() };
+  const [entry] = await enrichSelectionsWithNutrition(api, [{ ...raw, email: 'internal@example.invalid', matterCustomerId: 'customer', mealPerDay: 99 }], { current: new Map() }, {
+    extended: true, matterInputs: [{ ...nutrition, customer_email: 'website@example.invalid', source_fetched_at: new Date().toISOString() }],
+  });
+  expect(entry.email).toBe('internal@example.invalid');
+  expect(entry.matterEmail).toBe('website@example.invalid');
+  expect(entry.matterSourceSubscriptionId).toBe('fixture');
+  expect(entry.mealsPerDay).toBe(3);
+  expect(api.get).not.toHaveBeenCalled();
 });

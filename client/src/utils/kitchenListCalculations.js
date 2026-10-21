@@ -1005,6 +1005,7 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     nutritionResolvedAt: customer?.nutritionResolvedAt || null,
     matterSourceUpdatedAt: customer?.matterSourceUpdatedAt ?? null,
     matterSourceSubscriptionId: customer?.matterSourceSubscriptionId ?? null,
+    matterEmail: customer?.matterEmail ?? null,
     matterEffectiveState: customer?.matterEffectiveState ?? null,
     deliveryAddressStatus: customer?.deliveryAddressStatus ?? null,
     deliveryAddressReason: customer?.deliveryAddressReason ?? null,

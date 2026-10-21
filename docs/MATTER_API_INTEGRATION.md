@@ -158,52 +158,75 @@ name cascade) — see that file's own comments, not duplicated here.
   back to the list row only if detail has nothing either.
 
 
-## Kitchen subscription inputs and delivery comparison (2026-10-20)
+## Matter-only kitchen and menu identity (2026-10-20)
 
-Matter is authoritative for the kitchen customer's name, plan, daily meal and
-snack entitlements, breakfast inclusion, nutrition targets, exclusions and saved
-address/window. Recipes, assignments, approved portion formulas and explicit
-kitchen adjustments remain local. Ordinary-plan meal frequency includes
-breakfast; Matter Core counts main meals and handles breakfast separately, as
-in the existing assignment/calculation rules. Cycle totals are not daily meals.
-Missing values are not inferred from internal Customer defaults.
+Matter's permanent `customer_id` is the kitchen account identity. A subscription
+ID identifies a billing cycle and may change on renewal; it is a current source
+reference, not a customer account key. Email verifies menu sign-in and discovers
+the permanent ID. Subsequent customer lookups use that ID against Matter.
+Exactly one active subscription can resolve a renewal; ambiguous or missing
+results stay unresolved, rather than selecting by array position/name/phone.
 
-`GET /api/matter/subscriptions/kitchen-inputs?subscriptionId=...` requires staff
-authentication. It fetches the exact subscription fresh, bypasses both nutrition
-caches and performs no Customer relinking. Optional `customerId` cross-checks
-identity. Without a subscription ID, customer/email discovery must yield exactly
-one result; multiple subscriptions require an explicit link. A failed read does
-not authorize exporting the previous inputs.
+`MenuSelectionRecord` stores per-menu meal choices, skips, notes and explicit
+kitchen adjustments, keyed by `weeklyMenuId + matterCustomerId`. It retains
+`matterEmail` and the current `matterSubscriptionId` for traceability. New records
+have no Internal Customer reference. The partial unique index prevents creating
+a second kitchen account when a subscription renews. No Internal Customer
+collection read, create, update or save is part of kitchen preparation, menu
+sign-in/submission, assignment, selection viewing, editing or deletion.
+Existing legacy fields remain stored for history and are not customer profiles.
+The Internal Customer Management meal-profile endpoints remain separate legacy
+admin features; kitchen and menu clients do not call them.
 
-Kitchen and delivery imports share `resolveMatterDeliveryAddress`: one current
-address wins; if none is current, exactly one active address is allowed. Multiple
-current or active candidates remain unresolved. Address IDs and all structured
-parts come from that same record. Unsupported categories retain their raw value
-and have a null local location type. Unresolved kitchen addresses block final
-papers. Export provenance identifies the subscription, address and source fetch
-time and explicitly labels current snapshots as having unverified dated changes.
+Matter supplies customer names, contact/address/window details, plan, nutrition
+targets, daily meal/snack entitlements, breakfast inclusion, exclusions and dated
+delivery eligibility. Local menus/recipes/portion tables and approved selection
+adjustments supply the food calculations. Ordinary meal frequency includes
+breakfast; Core main meals and extra breakfast use the existing separate rules.
+Core protein/carbohydrate targets are food weights; its missing fat target is
+normal, and final meal macros come from the approved weight lookup. Required
+missing fields cannot be replaced with Internal defaults. Allergies absent from
+Matter are shown as unavailable. Legacy partner assignment based on Internal
+Customer membership is disabled; these members need verified Matter accounts.
 
-`GET /api/matter/subscriptions/:id/delivery-comparison?date=YYYY-MM-DD` is a
-read-only dispatcher/manager/admin endpoint for one exact subscription and Dubai
-service day. It compares subscription-linked jobs and same-day jobs belonging to
-an explicitly linked Internal customer, including manual/CSV jobs. It returns
-before/after conflicts, source fetch time, calendar eligibility, profile meal
-conflicts and protected status. Multiple jobs are flagged for review; no stop is
-created, relinked or modified. Name/email guesses are not used for this review.
-Importer deduplication also returns comparison details rather than silently
-hiding existing-job differences.
+`GET /api/matter/subscriptions/kitchen-inputs` requires staff authentication and
+accepts `customerId` (permanent Matter ID), or email for discovery. It reads Matter
+fresh and never relinks Internal records. A legacy selection's captured
+subscription ID may help establish a missing identity only when Matter still
+verifies it. Unlinked old selections cannot be recovered by guessing an Internal
+name or email. A stored selection by itself is not proof of a currently active
+Matter account or of service on a particular day.
 
-Approved saved manual pins are reused by new imports only when their saved
-address identity and text both match the selected Matter address. New manual pin
-corrections save this identity. Legacy cached corrections without an address ID
-cannot safely be applied automatically. Existing jobs retain their corrections.
+Preparation (`POST /api/menus/:id/auto-populate-missing`, `freshInputs: true`)
+performs a complete Matter roster/detail read. The date's calendar status governs
+eligibility. Incomplete discovery fails before preparation can be called complete.
+The same source read returns `kitchenInputs`, `kitchenRoster`, and `rosterComplete`;
+these are reused by permanent customer ID rather than fetching every customer a
+second time. Assignment writes only MenuSelectionRecord. Exact legacy records
+identified by Matter email or a still-valid captured subscription can receive
+the verified permanent ID there; Internal customer records are never consulted.
+Multiple matching selections require review, and existing skips are preserved.
+The summary cache excludes the source payload.
 
-Remaining operational dependencies: Matter's current response does not establish
-historical/future effective address/window state. Comparisons therefore report
-`effectiveState: UNKNOWN` and remain review-only; no automatic reconciliation,
-backfill or cutoff activation is implemented. Confirm the supported upstream
-pending-change contract and Dubai activation cutoff before enabling dated apply.
-The four historical roster exceptions require restricted evidence and owner
-resolution. Runtime revision and live persistence/browser verification are still
-required before closing issue #11. No production verification or writes were
-performed for these changes.
+Both kitchen date controls select the same day; reselecting it preserves loaded
+selections. Immediate day downloads reuse that exact verified load version for
+up to 60 seconds, including source timestamps and current local adjustments.
+They still verify roster coverage and required portion inputs. Different dates,
+older versions, failed refreshes and incomplete preparation require a fresh
+Matter read. This is bounded request-local memory, not persistent/offline data.
+Download progress/errors appear next to the buttons, and failures can be retried.
+
+Address resolution is shared: one current address wins; without a current flag,
+exactly one active address is allowed. Multiple candidates remain unresolved.
+Address identity, written details and coordinates stay together. Unsupported
+categories retain their source value with a null local location type.
+
+`GET /api/matter/subscriptions/:id/delivery-comparison?date=YYYY-MM-DD` remains a
+bounded, read-only dispatch/admin comparison of a saved delivery and Matter.
+This separate delivery reconciliation endpoint may inspect Internal delivery and
+profile records; it is not used by kitchen/menu customer lookup. It never applies
+changes. Matter currently supplies no proven historical/future address/window
+activation contract, so dated comparisons report UNKNOWN. Future cutoff behavior,
+historical exceptions and live runtime/persistence verification remain separate
+requirements before closing issue #11. No production migration/backfill or live
+customer correction was performed for this change.

@@ -1,4 +1,4 @@
-import { kitchenSourceLabel, assertKitchenExportReady } from './kitchenIntegrity';
+import { assertKitchenExportReady } from './kitchenIntegrity';
 // Kitchen paper for ONE customer over a custom date range (PDF and Word).
 //
 // One page per delivery date, each laid out like the customer's block on the
@@ -44,7 +44,7 @@ const isLargeBreakfast = (meal) => String(meal?.mealType || '').toLowerCase() ==
 
 export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers }) => {
   assertKitchenExportReady([entry]);
-  const { getDateKey, formatDateLabel, getMealLabel, mealRemarkText, exclusionsText, formatAddress, loadJsPDF, loadAutoTable } = helpers;
+  const { getDateKey, formatDateLabel, getMealLabel, exclusionsText, formatAddress, loadJsPDF, loadAutoTable } = helpers;
   const { days, skipped, deliveryKnown } = getCustomerPaperDays({ entry, fromKey, toKey, getDateKey });
   if (days.length === 0) return { ok: false, days, skipped };
 
@@ -94,7 +94,7 @@ export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers 
 
     doc.setFont(undefined, 'bold');
     const planLines = doc.splitTextToSize(
-      `Formula: ${entry.formulaVersion} | Nutrition checked: ${kitchenSourceLabel(entry)}\nPlan: ${entry.planName || 'N/A'}  |  Meals/day: ${orNA(entry.mealsPerDay)}  |  Snacks/day: ${orNA(entry.snacksPerDay)}  |  Breakfast included: ${breakfastLabelFor(entry)}`,
+      `Plan: ${entry.planName || 'N/A'}  |  Meals/day: ${orNA(entry.mealsPerDay)}  |  Snacks/day: ${orNA(entry.snacksPerDay)}  |  Breakfast included: ${breakfastLabelFor(entry)}`,
       pageWidth - 28
     );
     doc.text(planLines, 14, y);
@@ -133,19 +133,15 @@ export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers 
     const large = day.meals.map(isLargeBreakfast);
     autoTable(doc, {
       startY: y,
-      head: [['Type', 'Meal', 'Remark', 'P', 'C', 'V']],
+      head: [['Type', 'Meal', 'P', 'C', 'V']],
       body: day.meals.map((meal, i) => {
         const label = getMealLabel(meal);
-        return [label.mealType, large[i] ? `${label.mealName}   [LARGE]` : label.mealName, mealRemarkText(meal), `${meal.proteinWeight || 0}g`, `${meal.carbWeight || 0}g`, `${meal.vegWeight || 0}g`];
+        return [label.mealType, large[i] ? `${label.mealName}   [LARGE]` : label.mealName, `${meal.proteinWeight || 0}g`, `${meal.carbWeight || 0}g`, `${meal.vegWeight || 0}g`];
       }),
       theme: 'grid',
       styles: { fontSize: 11, cellPadding: 2.4 },
       headStyles: { fillColor: [30, 41, 59] },
       didParseCell: (data) => {
-        if (data.section === 'body' && data.column.index === 2 && data.cell.raw) {
-          data.cell.styles.textColor = [194, 65, 12];
-          data.cell.styles.fontStyle = 'bold';
-        }
         if (data.section === 'body' && large[data.row.index] && data.column.index <= 1) {
           data.cell.styles.textColor = [109, 40, 217];
           data.cell.styles.fontStyle = 'bold';
@@ -177,7 +173,7 @@ export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers 
 
 export const downloadCustomerPaperWord = ({ entry, fromKey, toKey, helpers }) => {
   assertKitchenExportReady([entry]);
-  const { getDateKey, formatDateLabel, getMealLabel, mealRemarkText, exclusionsText, formatAddress } = helpers;
+  const { getDateKey, formatDateLabel, getMealLabel, exclusionsText, formatAddress } = helpers;
   const { days, skipped, deliveryKnown } = getCustomerPaperDays({ entry, fromKey, toKey, getDateKey });
   if (days.length === 0) return { ok: false, days, skipped };
   const esc = (v) => String(v ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -192,7 +188,6 @@ export const downloadCustomerPaperWord = ({ entry, fromKey, toKey, helpers }) =>
         ? ' <span style="background:#6d28d9;color:#ffffff;font-size:9pt;font-weight:bold">&nbsp;LARGE&nbsp;</span>'
         : '';
       return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}${largeTag}</td>`
-        + `<td style="color:#c2410c;font-weight:bold">${esc(mealRemarkText(meal))}</td>`
         + `<td>${esc(meal.proteinWeight || 0)}g</td><td>${esc(meal.carbWeight || 0)}g</td><td>${esc(meal.vegWeight || 0)}g</td></tr>`;
     }).join('');
     const dayNote = (entry.dayNotes || []).find((note) => note.date === day.dateKey)?.note;
@@ -208,12 +203,12 @@ export const downloadCustomerPaperWord = ({ entry, fromKey, toKey, helpers }) =>
       <h1 style="font-size:18pt;margin:0;${dayIndex > 0 ? 'page-break-before:always' : ''}">Kitchen Prep Sheet — ${esc(formatDateLabel(day.dateKey))}</h1>
       <p style="margin:8pt 0 0 0;font-size:15pt"><b>${esc(name)}</b>${tag ? ` &nbsp;&nbsp;<span style="background:${tag.has ? '#1e293b' : '#94a3b8'};color:#ffffff;font-size:10pt;font-weight:bold">&nbsp;${esc(tag.text)}&nbsp;</span>` : ''}</p>
       <p style="margin:0;font-size:11pt">${esc(entry.partner ? `Partner: ${entry.partner?.businessName || 'Partner'}` : `Address: ${formatAddress(entry.deliveryAddress)}`)}</p>
-      <p style="margin:0;font-size:11pt"><b>Plan: ${esc(entry.planName || 'N/A')} | ${esc(entry.formulaVersion || '')} | ${esc(kitchenSourceLabel(entry))} | Meals/day: ${esc(orNA(entry.mealsPerDay))} | Snacks/day: ${esc(orNA(entry.snacksPerDay))} | Breakfast included: ${breakfastLabelFor(entry)}</b></p>
+      <p style="margin:0;font-size:11pt"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orNA(entry.mealsPerDay))} | Snacks/day: ${esc(orNA(entry.snacksPerDay))} | Breakfast included: ${breakfastLabelFor(entry)}</b></p>
       <p style="margin:0;font-size:11pt;color:#be123c"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
       ${dayNote ? `<p style="margin:0;font-size:11pt;color:#b45309"><b>Note: ${esc(dayNote)}</b></p>` : ''}
       ${summary.length ? `<p style="margin:4pt 0 0 0;font-size:9.5pt;color:#787878">${esc(summary.join('   |   '))}</p>` : ''}
       <table border="1" cellspacing="0" cellpadding="5" style="border-collapse:collapse;width:100%;font-size:11pt;margin-top:8pt">
-        <tr style="background:#1e293b;color:#ffffff"><th>Type</th><th>Meal</th><th>Remark</th><th>P</th><th>C</th><th>V</th></tr>
+        <tr style="background:#1e293b;color:#ffffff"><th>Type</th><th>Meal</th><th>P</th><th>C</th><th>V</th></tr>
         ${rows}
       </table>
       <p style="margin:8pt 0 0 0;font-size:13pt"><b>Total Macros: C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}</b></p>`;

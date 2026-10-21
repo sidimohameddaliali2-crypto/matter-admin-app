@@ -1,3 +1,4 @@
+import { enrichSelectionsWithNutrition } from '../lib/kitchenData';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Plus,
@@ -41,7 +42,7 @@ const FIXED_SELECTION_DEADLINES = [
 ];
 import api from '../utils/api';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
-import { kitchenSourceLabel, assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
+import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
 import SupyRecipeSearch from '../components/SupyRecipeSearch';
 import IngredientTagEditor from '../components/IngredientTagEditor';
 import { toSentenceCase } from '../utils/textFormat';
@@ -874,7 +875,7 @@ const MenuManagement = () => {
 
       const response = await api.get(`/menus/${menuId}/selections`);
       if (response.data?.success) {
-        const data = response.data.data || [];
+        const data = await enrichSelectionsWithNutrition(api, response.data.data || [], { current: new Map() }, { extended: true });
         setMenuSelections(data);
         // Update the menu card's selectionCount in local state so the badge stays accurate
         setMenus(prev => prev.map(m =>
@@ -1266,7 +1267,6 @@ const MenuManagement = () => {
       currentY += addTextLines(`Submitted: ${submittedAt}`, margin, currentY);
       currentY += addTextLines(`Meal exclusion: ${exclusion}`, margin, currentY);
       currentY += addTextLines(`Total meals selected: ${totalSelectedMeals}`, margin, currentY);
-      currentY += addTextLines(`Formula: ${entry.formulaVersion} | Nutrition checked: ${kitchenSourceLabel(entry)}`, margin, currentY);
       currentY += addTextLines(`Meals in profile: ${profileMeals}`, margin, currentY);
 
       currentY += 4;
@@ -1310,8 +1310,6 @@ const MenuManagement = () => {
             const height = addTextLines(mealLine, margin + 2, currentY);
             currentY += height;
             currentY += addTextLines(`  P: ${meal.proteinWeight}g | C: ${meal.carbWeight}g | V: ${meal.vegWeight}g`, margin + 4, currentY);
-            const warnings = kitchenMealWarnings(meal);
-            if (warnings.length) currentY += addTextLines(`  Review: ${warnings.join(' | ')}`, margin + 4, currentY);
             if (meal.carbVegAction) {
               currentY += addTextLines(`  - Carb/Veg action: ${meal.carbVegAction}`, margin + 4, currentY);
             }
@@ -2819,7 +2817,7 @@ const MenuManagement = () => {
                             (!editMenuData || editMenuData._id !== selectionMenuId)
                               ? api.get(`/menus/${selectionMenuId}`)
                               : Promise.resolve(null),
-                            api.get(`/menus/customers/${selectedCustomerDetail.customerId}/meal-profile`)
+                            api.get(`/menus/customers/${encodeURIComponent(selectedCustomerDetail.matterEmail || selectedCustomerDetail.email)}/subscription-profile`, { params: { menuId: selectionMenuId } })
                           ]);
                           if (menuRes?.data?.success) setEditMenuData(menuRes.data.data);
                           if (profileRes?.data?.success) {

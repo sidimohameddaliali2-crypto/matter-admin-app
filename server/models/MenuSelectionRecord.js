@@ -15,10 +15,8 @@ const menuSelectionRecordSchema = new mongoose.Schema({
     required: true,
     index: true
   },
-  // Primary join to Customer going forward. Records created/updated before
-  // this field existed (or where matching couldn't resolve a Customer) may
-  // have this unset — see the {weeklyMenuId, email} fallback index below and
-  // server/scripts/migrate-customer-ref.js for backfilling existing records.
+  // Deprecated reference retained for historical records. Kitchen/menu code
+  // never resolves or writes an Internal Customer through this field.
   customer: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Customer',
@@ -31,6 +29,10 @@ const menuSelectionRecordSchema = new mongoose.Schema({
     lowercase: true,
     trim: true
   },
+  // Website sign-in identity is separate from the Internal storage email.
+  matterEmail: { type: String, lowercase: true, trim: true },
+  legacyStorageEmail: String,
+  matterCustomerId: { type: String, index: true },
   customerId: {
     type: String,
     index: true
@@ -185,16 +187,13 @@ const menuSelectionRecordSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Unique: one record per customer per weekly menu. Partial (only applies once
-// `customer` is set) rather than a plain unique index on the whole
-// collection, because MongoDB partial indexes can't express "customer is
-// missing" (no $exists:false/$not support) — there's deliberately no
-// fallback index protecting not-yet-linked records; those are an edge case
-// (customerMatchService resolves a Customer on every write path now) that
-// needs a human's attention anyway, not a database constraint.
+// Retained legacy constraint; new Matter-only records do not set customer.
 menuSelectionRecordSchema.index(
   { weeklyMenuId: 1, customer: 1 },
   { unique: true, partialFilterExpression: { customer: { $type: 'objectId' } } }
 );
+
+// One kitchen account/selection per permanent Matter customer and menu.
+menuSelectionRecordSchema.index({ weeklyMenuId: 1, matterCustomerId: 1 }, { unique: true, partialFilterExpression: { matterCustomerId: { $type: 'string' } } });
 
 export default mongoose.model('MenuSelectionRecord', menuSelectionRecordSchema);

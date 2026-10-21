@@ -31,23 +31,49 @@ export const assertKitchenRosterCovered = (selections, roster, date) => {
 };
 
 // Every retained production paper uses the same prepared inputs and formula.
-export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => true, transformSelection = (entry) => entry) => {
+export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => true, transformSelection = (entry) => entry, prepared = null) => {
   const dayKeys = [...new Set(dates)].sort();
   if (!menuId || !dayKeys.length) throw new Error('Select a menu and delivery date first.');
-  for (const date of dayKeys) await prepareKitchenSelections(api, menuId, date, isCurrent);
+  // Export the exact verified load version for up to 60 seconds. This is
+  // request-local memory, never a persistent/offline cache. Failed refreshes
+  // clear it; older or different-date versions still require a fresh read.
+  const ages = (prepared?.selections || []).filter((entry) => entry.nutritionStatus === 'resolved')
+    .map((entry) => Date.now() - Date.parse(entry.nutritionResolvedAt));
+  if (prepared?.menuId === menuId && dayKeys.length === 1 && prepared.date === dayKeys[0]
+    && prepared.complete === true && Array.isArray(prepared.roster)
+    && Date.now() - prepared.receivedAt < 60000 && Date.now() >= prepared.receivedAt
+    && ages.length > 0 && ages.every((age) => Number.isFinite(age) && age >= 0 && age < 60000)) {
+    if (!isCurrent()) throw new Error('Selection changed during preparation.');
+    return calculateKitchenSnapshot({ ...prepared, dayKeys, menuId,
+      rosters: new Map([[prepared.date, prepared.roster]]), transformSelection,
+      checkedAt: prepared.checkedAt,
+    });
+  }
+
+  const preparations = new Map();
+  for (const date of dayKeys) preparations.set(date, await prepareKitchenSelections(api, menuId, date, isCurrent));
   if (!isCurrent()) throw new Error('Selection changed during preparation.');
   const [response, breakfastPreset, snackPreset] = await Promise.all([
     api.get(`/menus/${menuId}/selections`), fetchBreakfastPresets(api, menuId), fetchSnackPresets(api),
   ]);
   if (!response.data?.success) throw new Error('Selections could not be verified.');
-  const selections = await enrichSelectionsWithNutrition(api, response.data.data || [], { current: new Map() }, { extended: true });
+  const selections = await enrichSelectionsWithNutrition(api, response.data.data || [], { current: new Map() }, { extended: true, matterInputs: [...preparations.values()].flatMap((result) => result.cached ? [] : result.data?.kitchenInputs || []) });
   const rosters = new Map();
   for (const date of dayKeys) {
-    const result = await api.get('/matter/subscriptions/delivery-on-date', { params: { date }, timeout: 180000 });
-    const roster = verifiedKitchenRoster(result.data);
+    const preparation = preparations.get(date);
+    const source = preparation?.data;
+    const roster = !preparation?.cached && source?.rosterComplete === true && Array.isArray(source.kitchenRoster)
+      ? source.kitchenRoster
+      : verifiedKitchenRoster((await api.get('/matter/subscriptions/delivery-on-date', { params: { date }, timeout: 180000 })).data);
     assertKitchenRosterCovered(selections, roster, date);
     rosters.set(date, roster);
   }
+  if (!isCurrent()) throw new Error('Selection changed during preparation.');
+  return calculateKitchenSnapshot({ selections, rosters, dayKeys, menuId, breakfastPreset, snackPreset, transformSelection });
+};
+
+export const calculateKitchenSnapshot = ({ selections, rosters, dayKeys, menuId, breakfastPreset, snackPreset, transformSelection = (entry) => entry, checkedAt }) => {
+  for (const date of dayKeys) assertKitchenRosterCovered(selections, rosters.get(date) || [], date);
   const entries = selections.map(transformSelection).map((entry) => {
     const deliveryDates = dayKeys.filter((date) => hasKitchenDeliveryOnDate(entry, rosters.get(date), date));
     // Calculate the entire selection first: the approved fallback delivery-number
@@ -62,8 +88,7 @@ export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => 
       hasMacroShortfall: selectedMeals.some((meal) => meal.flags?.macroShortfall),
     };
   }).filter((entry) => entry.selectedMeals.length);
-  if (!isCurrent()) throw new Error('Selection changed during preparation.');
-  return { entries, menuId, dates: dayKeys, preparedAt: new Date().toISOString() };
+  return { entries, menuId, dates: dayKeys, preparedAt: checkedAt || new Date().toISOString() };
 };
 
 export const requireKitchenSnapshot = (snapshot) => {

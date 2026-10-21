@@ -1,4 +1,4 @@
-import { kitchenSourceLabel, prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
+import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady } from '../utils/kitchenIntegrity';
 import { assertKitchenRosterCovered, verifiedKitchenRoster, hasKitchenDeliveryOnDate } from '../lib/kitchenSnapshot';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { ChefHat, Download, Loader, RefreshCw } from 'lucide-react';
@@ -139,7 +139,7 @@ const KitchenCounting = () => {
     setError('');
     try {
       // Explicit preparation must finish before the selections snapshot is read.
-      await prepareKitchenSelections(api, selectedMenuId, selectedDate, current);
+      const preparation = await prepareKitchenSelections(api, selectedMenuId, selectedDate, current);
       if (!current()) return;
       const response = await api.get(`/menus/${selectedMenuId}/selections`);
       const rawSelections = response.data?.success ? (response.data.data || []) : [];
@@ -156,6 +156,7 @@ const KitchenCounting = () => {
       if (!current()) return;
       setLoadProgress({ done: 0, total: rawSelections.length });
       const enrichedSelections = await enrichSelectionsWithNutrition(api, rawSelections, nutritionCacheRef, {
+        matterInputs: preparation.cached ? [] : preparation.data?.kitchenInputs,
         onEach: () => { if (current()) setLoadProgress((prev) => ({ ...prev, done: prev.done + 1 })); }
       });
 
@@ -177,10 +178,10 @@ const KitchenCounting = () => {
       // subscription of their own and are always kept. If Matter can't be
       // reached the counts are not shown, rather than counting customers who
       // may not be delivered.
-      const deliveryRes = await api.get('/matter/subscriptions/delivery-on-date', {
-        params: { date: selectedDate },
-        timeout: 180000
-      });
+      const source = preparation.data;
+      const deliveryRes = !preparation.cached && source?.rosterComplete === true && Array.isArray(source.kitchenRoster)
+        ? { data: { success: true, data: source.kitchenRoster } }
+        : await api.get('/matter/subscriptions/delivery-on-date', { params: { date: selectedDate }, timeout: 180000 });
       const deliverySubs = verifiedKitchenRoster(deliveryRes.data);
       assertKitchenRosterCovered(enrichedSelections, deliverySubs, selectedDate);
       const hasDelivery = (entry) => hasKitchenDeliveryOnDate(entry, deliverySubs, selectedDate);
@@ -297,9 +298,6 @@ const KitchenCounting = () => {
     const XLSX = await loadXLSX();
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(customerEntries.map((entry) => ({ Customer: entry.customerName || entry.email, Date: selectedDate, Formula: entry.formulaVersion, 'Nutrition checked': kitchenSourceLabel(entry), Plan: entry.planName || 'Partner' }))), 'Inputs');
-    const warnings = customerEntries.flatMap((entry) => (entry.selectedMeals || []).filter((meal) => getDateKey(meal.date) === selectedDate).flatMap((meal) => kitchenMealWarnings(meal).map((warning) => ({ Customer: entry.customerName || entry.email, Meal: meal.mealName, Warning: warning, Date: selectedDate, Formula: entry.formulaVersion }))));
-    if (warnings.length) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(warnings), 'Attention');
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Customers');
     const safeName = mealName.replace(/[^a-z0-9]+/gi, '-').toLowerCase().replace(/^-+|-+$/g, '');
     XLSX.writeFile(workbook, `kitchen-counting-${safeName}-${selectedDate}.xlsx`);
@@ -320,9 +318,6 @@ const KitchenCounting = () => {
     const XLSX = await loadXLSX();
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(customerEntries.map((entry) => ({ Customer: entry.customerName || entry.email, Date: selectedDate, Formula: entry.formulaVersion, 'Nutrition checked': kitchenSourceLabel(entry), Plan: entry.planName || 'Partner' }))), 'Inputs');
-    const warnings = customerEntries.flatMap((entry) => (entry.selectedMeals || []).filter((meal) => getDateKey(meal.date) === selectedDate).flatMap((meal) => kitchenMealWarnings(meal).map((warning) => ({ Customer: entry.customerName || entry.email, Meal: meal.mealName, Warning: warning, Date: selectedDate, Formula: entry.formulaVersion }))));
-    if (warnings.length) XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(warnings), 'Attention');
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Counting');
     XLSX.writeFile(workbook, `kitchen-counting-${selectedDate || 'export'}.xlsx`);
   };

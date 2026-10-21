@@ -97,7 +97,7 @@ test('paper snapshot waits for preparation and uses the same calculator as kitch
   expect(snapshot.entries[0].nutritionResolvedAt).toBeTruthy();
 });
 
-test('PDF and Word retain calculated portion quantities, warnings, date and formula provenance', async () => {
+test('PDF and Word retain calculated quantities and dates with the original simple layout', async () => {
   const entry = { ...calculate({}, [{ ...meal, quantity: 2 }]), deliveryDates: [date], nutritionResolvedAt: '2026-10-20T08:00:00Z' };
   entry.selectedMeals[0].flags.macroCapped = true;
   const tables = [], texts = [];
@@ -118,9 +118,10 @@ test('PDF and Word retain calculated portion quantities, warnings, date and form
   };
   expect((await downloadCustomerPaperPdf({ entry, fromKey: date, toKey: date, helpers })).ok).toBe(true);
   expect(tables[0]).toHaveLength(2);
-  expect(tables[0][0][2]).toContain('capped');
-  expect(tables[0][0].slice(3)).toEqual([`${entry.selectedMeals[0].proteinWeight}g`, `${entry.selectedMeals[0].carbWeight}g`, '80g']);
-  expect(texts.join(' ')).toContain(entry.formulaVersion);
+  expect(tables[0][0]).toHaveLength(5);
+  expect(tables[0][0].slice(2)).toEqual([`${entry.selectedMeals[0].proteinWeight}g`, `${entry.selectedMeals[0].carbWeight}g`, '80g']);
+  expect(texts.join(' ')).not.toContain(entry.formulaVersion);
+  expect(texts.join(' ')).not.toContain('Nutrition checked');
   expect(texts.join(' ')).toContain(date);
   const originalBlob = global.Blob;
   const originalCreate = URL.createObjectURL, originalRevoke = URL.revokeObjectURL;
@@ -131,9 +132,10 @@ test('PDF and Word retain calculated portion quantities, warnings, date and form
   jest.useFakeTimers();
   try {
     expect(downloadCustomerPaperWord({ entry, fromKey: date, toKey: date, helpers }).ok).toBe(true);
-    expect(html).toContain('capped');
-    expect(html).toContain(entry.formulaVersion);
-    expect(html).toContain(entry.nutritionResolvedAt);
+    expect(html).not.toContain('capped');
+    expect(html).not.toContain('<th>Remark</th>');
+    expect(html).not.toContain(entry.formulaVersion);
+    expect(html).not.toContain(entry.nutritionResolvedAt);
     expect(html).toContain(`<td>${entry.selectedMeals[0].proteinWeight}g</td>`);
     expect((html.match(/Fixture<\/td>/g) || [])).toHaveLength(2);
     jest.runOnlyPendingTimers();
@@ -189,4 +191,28 @@ test('paper snapshot retains meals only on dates with an active Matter delivery'
   expect(snapshot.entries).toHaveLength(1);
   expect(snapshot.entries[0].selectedMeals.map(m => m.date)).toEqual([day2]);
   expect(snapshot.entries[0].deliveryDates).toEqual([day2]);
+});
+
+
+test('a failed Matter lookup exposes the specific reason on the incomplete customer', async () => {
+  const api = { get: async () => { throw { response: { data: { message: 'Matter customer and subscription links conflict.' } } }; } };
+  const [entry] = await enrichSelectionsWithNutrition(api, [customer], { current: new Map() });
+  expect(calculateKitchenListEntry({ customer: entry, selectedMeals: [meal] }).inputErrors).toContain('Matter customer and subscription links conflict.');
+});
+
+
+test('export reuses its fresh preparation roster instead of running a second Matter sweep', async () => {
+  const nutrition = { subscription_id: 'source-fixture', customer_name: 'Fixture', meal_frequency: 1, snacks_per_day: 0, breakfast_included: false, exclusions: [], customer_email: customer.email, source_fetched_at: new Date().toISOString(), delivery_address_resolution: { status: 'resolved', reason: 'current', address: { id: 'fixture' } }, plan_name: 'Custom', macros: { carbohydrates: 38, protein: 32, fat: 10 }, active_delivery_dates: [date] };
+  const api = {
+    post: async () => ({ data: { success: true, preparation: 'completed', data: { kitchenInputs: [nutrition], kitchenRoster: [{ subscription_id: 'source-fixture', email: customer.email, meal_frequency: 1 }], rosterComplete: true } } }),
+    get: jest.fn(async (path) => {
+      if (path.endsWith('/selections')) return { data: { success: true, data: [{ ...customer, selectedMeals: [meal] }] } };
+      if (path.includes('/matter/')) throw new Error('Duplicate Matter read');
+      return { data: { success: true, data: {} } };
+    }),
+  };
+  const snapshot = await loadKitchenSnapshot(api, 'menu', [date]);
+  expect(snapshot.entries).toHaveLength(1);
+  expect(snapshot.entries[0].selectedMeals[0].weight).toBe(calculate().selectedMeals[0].weight);
+  expect(api.get.mock.calls.some(([path]) => path.includes('/matter/'))).toBe(false);
 });

@@ -451,6 +451,8 @@ const MenuSelectionLink = ({ token }) => {
       setAccount({
         name: `${profile.firstName || ''} ${profile.lastName || ''}`.trim() || profile.email || v,
         email: profile.email || v,
+        matterCustomerId: profile.matterCustomerId || profile.customerId || null,
+        allergensKnown: profile.allergiesAvailable !== false,
         plan: profile.mealPlan || 'Meal plan',
         perDay: Number(profile.mealPerDay) || 1,
         weekend: !!profile.weekend,
@@ -772,6 +774,7 @@ const MenuSelectionLink = ({ token }) => {
         weeklyMenuId: rawMenu._id,
         selections,
         skippedDates,
+        matterCustomerId: account.matterCustomerId || undefined,
         subscriptionId: account.subscriptionId || undefined,
         ...(pauseDecisions ? { pauseDecisions } : {}),
       });
@@ -1192,7 +1195,7 @@ const MenuSelectionLink = ({ token }) => {
               <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--color-neutral-600)', marginBottom: 6 }}>Allergens</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
                 {customer.allergenFlags.length === 0 ? (
-                  <span className="text-muted" style={{ fontSize: 12 }}>None on file</span>
+                  <span className="text-muted" style={{ fontSize: 12 }}>{account?.allergensKnown === false ? 'Not supplied by Matter' : 'None on file'}</span>
                 ) : (
                   customer.allergenFlags.map((f, i) => (
                     <span key={i} className="tag" style={{ fontSize: 11, padding: '3px 9px', background: f.bg, color: f.fg }}>{f.label}</span>
@@ -1204,7 +1207,7 @@ const MenuSelectionLink = ({ token }) => {
               <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--color-neutral-600)', marginBottom: 6 }}>Exclusions</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
                 {customer.exclusionFlags.length === 0 ? (
-                  <span className="text-muted" style={{ fontSize: 12 }}>None on file</span>
+                  <span className="text-muted" style={{ fontSize: 12 }}>{account?.allergensKnown === false ? 'Not supplied by Matter' : 'None on file'}</span>
                 ) : (
                   customer.exclusionFlags.map((f, i) => (
                     <span key={i} className="tag" style={{ fontSize: 11, padding: '3px 9px', background: f.bg, color: f.fg }}>{f.label}</span>

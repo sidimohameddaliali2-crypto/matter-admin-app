@@ -50,3 +50,34 @@ export const preparationHasFailures = (value) => {
     || preparationHasFailures(item)
   );
 };
+
+// Report only assignment failures, never the source nutrition payload or API errors' request config.
+export const kitchenPreparationFailure = (summary, dateKey) => {
+  const failures = [];
+  const stages = {
+    assignedMainMeals: 'Standard plan',
+    assignedSnacks: 'Standard plan snacks',
+    assignedSnacksOnly: 'Standard plan snacks',
+    assignedMatterCore: 'Matter Core',
+    assignedMatterCoreSnacksOnly: 'Matter Core',
+  };
+  for (const [key, label] of Object.entries(stages)) {
+    const result = summary[key];
+    if (!result) continue;
+    if (result.error) failures.push({ stage: label, reason: String(result.error) });
+    for (const [counter, mealType] of Object.entries({ skippedNoOption: 'main', skippedNoOptions: 'snack', skippedBreakfastNoOption: 'breakfast', skippedSnackNoOption: 'snack' })) {
+      const count = Number(result[counter]) || 0;
+      if (count > 0) failures.push({ stage: label, mealType, count,
+        reason: mealType === 'main' && label === 'Matter Core'
+          ? 'Configure enough Matter Core meal options for this date, or mark dishes "Also tag for Core Plan" in Menu Management.'
+          : `No available ${mealType} option for the remaining selections. Check this date's menu options and customer exclusions.` });
+    }
+  }
+  const detail = failures.map(({ stage, mealType, count, reason }) =>
+    `${stage}${mealType ? `: ${count} ${mealType} slot(s) unassigned` : ''}. ${reason}`).join(' ');
+  const error = new Error(`Kitchen preparation for ${dateKey} is incomplete. ${detail || 'Check the remaining menu assignments and retry.'}`);
+  error.statusCode = 409;
+  error.code = 'KITCHEN_ASSIGNMENT_INCOMPLETE';
+  error.failures = failures;
+  return error;
+};

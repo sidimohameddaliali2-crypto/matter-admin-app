@@ -13,7 +13,7 @@ import matterRouter from '../routes/matterApi.js';
 
 const old = { id: 1, status: 'active', building: 'Old', current_delivery_address: false };
 const current = { id: 2, status: 'active', building: 'Current', current_delivery_address: true, street: 'Street', additional_details: 'Door instruction', category: 'Apartment', coordinates: { lat: 25, lng: 55 } };
-const sub = { subscription_id: 'fixture', name: 'Fixture', customer_addresses: [old, current], delivery_window: { label: 'By 3 AM' }, plan: { name: 'Custom', meal_frequency: 3 }, snacks_per_day: 0, breakfast_included: false };
+const sub = { customer_id: 'fixture-person', subscription_id: 'fixture', name: 'Fixture', customer_addresses: [old, current], delivery_window: { label: 'By 3 AM' }, plan: { name: 'Custom', meal_frequency: 3 }, snacks_per_day: 0, breakfast_included: false };
 
 test('current address identity is shared by kitchen nutrition and delivery proposals', () => {
   const nutrition = buildNutritionResult(sub);
@@ -56,21 +56,22 @@ test('manual pin reuse requires matching customer pin source and exact address i
   }
 });
 
-test('fresh kitchen reads keep the exact subscription across renewals and changes', async () => {
+test('fresh kitchen reads follow the permanent customer across renewals without stale cache fallback', async () => {
   const original = { get: matter.getSubscription, list: matter.listSubscriptions };
   let calls = 0;
-  matter.listSubscriptions = async () => assert.fail('must not follow renewal for an exact subscription');
+  matter.listSubscriptions = async ({ customerId }) => { assert.equal(customerId, 'fixture-person'); return { data: [{ subscription_id: 'fixture' }] }; };
   matter.getSubscription = async (id) => { calls++; assert.equal(id, 'fixture'); return { data: { ...sub, customer_addresses: calls === 1 ? [old] : [current] } }; };
   try {
-    assert.equal((await matter.getKitchenNutrition({ subscriptionId: 'fixture' })).delivery_address_resolution.address.id, 1);
-    assert.equal((await matter.getKitchenNutrition({ subscriptionId: 'fixture' })).delivery_address_resolution.address.id, 2);
+    const identity = { customerId: 'fixture-person', subscriptionId: 'expired' };
+    assert.equal((await matter.getKitchenNutrition(identity)).delivery_address_resolution.address.id, 1);
+    assert.equal((await matter.getKitchenNutrition(identity)).delivery_address_resolution.address.id, 2);
     assert.equal(calls, 2);
     matter.getSubscription = async () => { throw new Error('upstream unavailable'); };
-    await assert.rejects(matter.getKitchenNutrition({ subscriptionId: 'fixture' }), /unavailable/);
-    matter.getSubscription = async () => ({ data: { ...sub, subscription_id: 'renewed' } });
-    await assert.rejects(matter.getKitchenNutrition({ subscriptionId: 'fixture' }), /exact Matter subscription/);
-    matter.listSubscriptions = async () => ({ data: [sub, { subscription_id: 'renewed' }] });
-    await assert.rejects(matter.getKitchenNutrition({ email: 'fixture@example.invalid' }), /ambiguous/);
+    await assert.rejects(matter.getKitchenNutrition(identity), /unavailable/);
+    matter.getSubscription = async () => ({ data: { ...sub, subscription_id: 'unrelated' } });
+    await assert.rejects(matter.getKitchenNutrition(identity), /current Matter subscription/);
+    matter.listSubscriptions = async () => ({ data: [] });
+    await assert.rejects(matter.getKitchenNutrition(identity), /missing or ambiguous/);
   } finally { matter.getSubscription = original.get; matter.listSubscriptions = original.list; }
 });
 
@@ -175,22 +176,62 @@ test('kitchen email lookup takes priority over stale saved links and rejects unc
   const original = { get: matter.getSubscription, list: matter.listSubscriptions };
   const current = { ...sub, subscription_id: 'renewed', customer_id: 'same-customer', email: 'fixture@example.invalid' };
   matter.listSubscriptions = async (params) => {
-    assert.equal(params.email, 'fixture@example.invalid');
-    assert.equal(params.customerId, undefined);
+    if (params.customerId) assert.equal(params.customerId, 'same-customer');
+    else assert.equal(params.email, 'fixture@example.invalid');
     return { data: [current] };
   };
   matter.getSubscription = async (id) => { assert.equal(id, 'renewed'); return { data: current }; };
   try {
     const input = { email: ' Fixture@Example.Invalid ', subscriptionId: 'stale', customerId: 'same-customer' };
     assert.equal((await matter.getKitchenNutrition(input)).subscription_id, 'renewed');
-    await assert.rejects(matter.getKitchenNutrition({ ...input, customerId: 'different-person' }), /conflict/);
+    await assert.rejects(matter.getKitchenNutrition({ ...input, customerId: 'another' }), /another/);
     for (const rows of [[], [current, current]]) {
       matter.listSubscriptions = async () => ({ data: rows });
       await assert.rejects(matter.getKitchenNutrition(input), /missing or ambiguous/);
     }
     matter.listSubscriptions = async () => ({ data: [{ ...current, email: 'other@example.invalid' }] });
-    await assert.rejects(matter.getKitchenNutrition(input), /email does not match/);
+    await assert.rejects(matter.getKitchenNutrition({ email: input.email }), /email does not match/);
     matter.listSubscriptions = async () => { throw new Error('upstream unavailable'); };
     await assert.rejects(matter.getKitchenNutrition(input), /unavailable/);
+  } finally { matter.getSubscription = original.get; matter.listSubscriptions = original.list; }
+});
+
+
+test('preparation supplies Matter inputs with the same sweep and no repeated detail reads', async () => {
+  const original = { list: matter.listAllSubscriptions, get: matter.getSubscription };
+  let calls = 0;
+  matter.listAllSubscriptions = async () => [{ ...sub, email: 'fixture@example.invalid', subscription_status: 'active', cycle_end_date: '2026-10-30' }];
+  matter.getSubscription = async () => { calls++; return { data: { ...sub, email: 'fixture@example.invalid', macros: { protein: 150, carbohydrates: 150, fat: null }, delivery_schedule: [{ date: '2026-10-22', status: 'active' }] } }; };
+  try {
+    const rows = await matter.findSubscriptionsWithDeliveryOnDate('2026-10-22', { includeKitchenInputs: true });
+    assert.equal(calls, 1);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].kitchen_inputs.customer_email, 'fixture@example.invalid');
+    assert.equal(rows[0].kitchen_inputs.macros.fat, null);
+    assert.equal(rows[0].kitchen_inputs.delivery_address_resolution.address.id, 2);
+    assert.ok(rows[0].kitchen_inputs.source_fetched_at);
+    const ordinary = await matter.findSubscriptionsWithDeliveryOnDate('2026-10-22');
+    assert.equal(ordinary[0].kitchen_inputs, undefined);
+  } finally { matter.listAllSubscriptions = original.list; matter.getSubscription = original.get; }
+});
+
+
+test('legacy storage emails are recovered through Matter permanent identity and verified by website email', async () => {
+  const original = { get: matter.getSubscription, list: matter.listSubscriptions };
+  const current = { ...sub, subscription_id: 'renewed', customer_id: 'permanent', email: 'website@example.invalid' };
+  const calls = [];
+  matter.listSubscriptions = async (params) => {
+    calls.push(params);
+    return { data: params.email === 'internal@example.invalid' ? [] : [current] };
+  };
+  matter.getSubscription = async (id) => { assert.equal(id, 'renewed'); return { data: current }; };
+  try {
+    const result = await matter.getKitchenNutrition({ email: 'internal@example.invalid', subscriptionId: 'expired', customerId: 'permanent' });
+    assert.equal(result.customer_email, 'website@example.invalid');
+    assert.equal(result.customer_name, 'Fixture');
+    assert.equal(calls[0].customerId, 'permanent');
+    assert.equal(calls.length, 1);
+    matter.getSubscription = async () => ({ data: { ...current, customer_id: 'unrelated' } });
+    await assert.rejects(matter.getKitchenNutrition({ email: 'internal@example.invalid', customerId: 'permanent' }), /conflict|identity/);
   } finally { matter.getSubscription = original.get; matter.listSubscriptions = original.list; }
 });

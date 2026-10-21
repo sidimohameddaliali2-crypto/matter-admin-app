@@ -8,13 +8,13 @@ import matter from './matterApiService.js';
 test('the menu profile restores a submission consisting entirely of skipped days', async (t) => {
   const skippedDays = ['2026-10-28', '2026-10-30', '2026-10-31'].map((date) => ({ date, pauseStatus: 'success' }));
   const customer = { _id: 'customer', email: 'customer@example.com', selectedMeals: [], weekend: false };
-  t.mock.method(matter, 'getSubscriptionNutritionByEmail', async () => ({
-    subscription_id: 'current', customer_name: 'Customer', active_delivery_dates: [],
+  t.mock.method(matter, 'getKitchenNutrition', async () => ({
+    subscription_id: 'current', customer_name: 'Customer', customer_id: 'matter-person', customer_email: 'customer@example.com', active_delivery_dates: [],
     weekend_enabled: true, exclusions: [],
   }));
   t.mock.method(Customer, 'findOne', () => ({ select: async () => customer }));
   t.mock.method(Customer, 'findById', async () => customer);
-  t.mock.method(MenuSelectionRecord, 'findOne', async () => ({ selectedMeals: [], skippedDays }));
+  t.mock.method(MenuSelectionRecord, 'findOne', () => ({ lean: async () => ({ selectedMeals: [], skippedDays }) }));
   const handler = router.stack.find((layer) => layer.route?.path === '/customers/:email/subscription-profile').route.stack[0].handle;
   let response;
   const res = { json: (value) => { response = value; }, status: () => res };
@@ -27,10 +27,11 @@ test('the menu profile restores a submission consisting entirely of skipped days
 
 test('an incomplete set of resume dates is rejected before saving meals or writing any Matter pauses', async (t) => {
   const customer = { _id: 'customer', email: 'customer@example.com' };
-  t.mock.method(matter, 'getSubscriptionNutritionByEmail', async () => ({ subscription_id: 'current', customer_name: 'Customer' }));
+  t.mock.method(matter, 'getKitchenNutrition', async () => ({ subscription_id: 'current', customer_name: 'Customer', customer_id: 'matter-person', customer_email: 'customer@example.com' }));
   t.mock.method(matter, 'getSubscription', async () => ({ data: { subscription_id: 'current', cycle_end_date: '2026-11-11', delivery_schedule: [
     { date: '2026-10-31', status: 'active' }, { date: '2026-11-01', status: 'active' },
   ] } }));
+  t.mock.method(matter, 'listSubscriptions', async () => ({ data: [{ subscription_id: 'current', customer_id: 'matter-person', subscription_status: 'active' }] }));
   t.mock.method(matter, 'getSubscriptionPauses', async () => ({}));
   t.mock.method(Customer, 'findOne', () => ({ select: async () => customer }));
   t.mock.method(MenuSelectionRecord, 'findOne', () => ({ select: () => ({ lean: async () => null }) }));

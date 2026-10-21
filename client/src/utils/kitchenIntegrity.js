@@ -5,6 +5,7 @@ const validNumber = (value) => (typeof value === 'number' || (typeof value === '
 
 export const kitchenInputErrors = (customer) => {
   if (customer?.partner) return [];
+  if (customer?.nutritionStatus && customer.nutritionStatus !== 'resolved') return [customer.nutritionError || 'Nutrition lookup is incomplete; refresh the customer subscription.'];
   const errors = [];
   if (customer?.matterSourceSubscriptionId != null) {
     if (!customer.matterName) errors.push('Matter customer name is missing.');
@@ -14,14 +15,19 @@ export const kitchenInputErrors = (customer) => {
     if (!Array.isArray(customer.dietaryRestrictions)) errors.push('Matter dietary exclusions are unresolved.');
   }
   if (customer?.deliveryAddressStatus === 'unresolved') errors.push(`Matter delivery address is unresolved (${customer.deliveryAddressReason || 'unknown'}).`);
-  if (customer?.nutritionStatus && customer.nutritionStatus !== 'resolved') errors.push('Nutrition lookup is incomplete; refresh the customer subscription.');
   if (!String(customer?.planName || '').trim()) errors.push('Plan identity is missing; portion units cannot be determined.');
   const expectedUnits = String(customer?.planName || '').trim().toLowerCase() === 'matter core' ? 'food-weight-grams' : 'nutrient-grams';
   if (customer?.nutritionUnits && customer.nutritionUnits !== expectedUnits) errors.push('Nutrition units do not match the customer plan.');
   const raw = customer?.targetMacros || customer?.customerMacros || customer?.macros || customer?.mealMacros || customer || {};
   const macros = raw.total || raw;
-  if (!['C', 'P', 'F'].every((key) => validNumber(macros[key]))) errors.push('Complete, finite C/P/F targets are required.');
-  else if (!['C', 'P', 'F'].some((key) => Number(macros[key]) > 0)) errors.push('The daily nutrition target is unresolved or empty.');
+  // Matter Core C/P are food weights, not nutrient targets. Its fat field is
+  // normally null; the approved weight lookup supplies the meal's actual fat.
+  // Ordinary plans still require all three daily nutrient targets.
+  const requiredTargets = expectedUnits === 'food-weight-grams' ? ['C', 'P'] : ['C', 'P', 'F'];
+  if (!requiredTargets.every((key) => validNumber(macros[key]))) errors.push(expectedUnits === 'food-weight-grams'
+    ? 'Complete, finite carbohydrate/protein food weights are required for Matter Core.'
+    : 'Complete, finite C/P/F targets are required.');
+  else if (!requiredTargets.some((key) => Number(macros[key]) > 0)) errors.push('The daily nutrition target is unresolved or empty.');
   return errors;
 };
 
@@ -48,7 +54,7 @@ export const prepareKitchenSelections = async (api, menuId, dateKey, isCurrent =
   const deadline = Date.now() + 180000;
   while (isCurrent()) {
     try {
-      const response = await api.post(`/menus/${menuId}/auto-populate-missing`, { date: dateKey }, { timeout: 180000 });
+      const response = await api.post(`/menus/${menuId}/auto-populate-missing`, { date: dateKey, freshInputs: true }, { timeout: 180000 });
       if (!response.data?.success || response.data?.preparation !== 'completed') throw new Error('Kitchen preparation did not complete.');
       return response.data;
     } catch (error) {

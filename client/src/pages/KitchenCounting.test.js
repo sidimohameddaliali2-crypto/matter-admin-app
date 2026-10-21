@@ -52,11 +52,11 @@ test('obsolete date A cannot overwrite date B, and a failed refresh cannot expor
   expect(pending[A]).toBeDefined();
   await select(1, B);
   expect(pending[B]).toBeDefined();
-  await act(async () => pending[B]({ data: { data: [{ email: entry.email }] } }));
+  await act(async () => pending[B]({ data: { success: true, data: [{ email: entry.email }] } }));
   const exportButton = () => [...container.querySelectorAll('button')].find((button) => button.textContent.includes('Export Excel'));
   expect(exportButton().disabled).toBe(false);
   expect(container.textContent).toContain('1 main meal(s) total');
-  await act(async () => pending[A]({ data: { data: [] } }));
+  await act(async () => pending[A]({ data: { success: true, data: [] } }));
   expect(container.textContent).toContain('1 main meal(s) total');
   expect(exportButton().disabled).toBe(false);
   fail = true;
@@ -70,7 +70,7 @@ test('obsolete date A cannot overwrite date B, and a failed refresh cannot expor
 test('clearing the date invalidates a request still loading', async () => {
   await select(1, A);
   await select(1, '');
-  await act(async () => pending[A]({ data: { data: [{ email: entry.email }] } }));
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
   expect(container.textContent).not.toContain('Cook counts');
   expect(container.textContent).not.toContain('Export Excel');
 });

@@ -1,5 +1,6 @@
+import KitchenInputWarnings from '../components/KitchenInputWarnings';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
-import { kitchenSourceLabel, prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealWarnings } from '../utils/kitchenIntegrity';
+import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady } from '../utils/kitchenIntegrity';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, Shuffle, FileText, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
 import api from '../utils/api';
@@ -202,12 +203,10 @@ const getAttentionReasons = (meal) => {
 // true/false = Matter does / doesn't show a delivery for this customer on
 // the checked date. Matched by linked subscription id first, then email.
 const hasDeliveryOnCheckedDate = (entry, deliveryCheck) => {
-  const subId = String(entry?.matterSubscriptionId || '').trim();
+  if (entry?.matterCustomerId) return !!deliveryCheck.customerIds?.has(String(entry.matterCustomerId));
+  const subId = String(entry?.matterSourceSubscriptionId || entry?.matterSubscriptionId || '').trim();
   if (subId) return deliveryCheck.subscriptionIds.has(subId);
-  // Matter's permanent customer id survives renewals and email changes.
-  const custId = String(entry?.matterCustomerId || '').trim();
-  if (custId) return !!deliveryCheck.customerIds?.has(custId);
-  const email = String(entry?.email || '').trim().toLowerCase();
+  const email = String(entry?.matterEmail || entry?.email || '').trim().toLowerCase();
   return !!email && deliveryCheck.emails.has(email);
 };
 
@@ -244,8 +243,6 @@ const exclusionsText = (entry) => {
   return entry?.planName ? 'None' : 'Not available';
 };
 
-// Remark column text for the kitchen paper PDF/Excel.
-const mealRemarkText = (meal) => kitchenMealWarnings(meal).join(' | ');
 
 const normalizeSelectionForSave = (meal) => ({
   date: meal?.date,
@@ -321,6 +318,9 @@ const KitchenList = () => {
   const [customerPaperMsg, setCustomerPaperMsg] = useState(null);
   const [paperPlan, setPaperPlan] = useState('');
   const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState('');
+  const exportInFlight = useRef(false);
   const [missingSelectionEntries, setMissingSelectionEntries] = useState([]);
   const [showOnlyMissing, setShowOnlyMissing] = useState(false);
   const [planFilter, setPlanFilter] = useState('');
@@ -348,6 +348,7 @@ const KitchenList = () => {
   // only for ones not seen yet. Cleared by the menu refresh button.
   const nutritionCacheRef = useRef(new Map());
   const selectionRequests = useRef(createKitchenRequestGuard());
+  const preparedSnapshot = useRef(null);
   const activeSelectionScope = useRef('');
   activeSelectionScope.current = `${selectedMenuId}:${missingCheckDate}`;
   const [loadedSelectionScope, setLoadedSelectionScope] = useState('');
@@ -396,16 +397,30 @@ const KitchenList = () => {
     setMatterCoreMealInput('');
   }, [selectedMenuId]);
 
+  // Both controls choose one preparation date. Selecting the current day is
+  // a no-op: clearing its loaded scope without changing state strands the UI.
+  const changeKitchenDate = (date) => {
+    setPdfDate(date);
+    setExportError('');
+    if (date === missingCheckDate) return;
+    selectionRequests.current.cancel();
+    setLoadedSelectionScope('');
+    setMissingCheckDate(date);
+  };
+
   const loadSelections = useCallback(async () => {
     // Selecting a menu alone must not trigger the nutrition-lookup-per-customer
     // fetch below — that only happens once a date is picked too.
+    preparedSnapshot.current = null;
     const request = selectionRequests.current.begin();
     const scope = `${selectedMenuId}:${missingCheckDate}`;
     const current = () => selectionRequests.current.isCurrent(request) && activeSelectionScope.current === scope;
     setMenuSelections([]);
     setLoadedSelectionScope('');
+    setExportError('');
     if (!selectedMenuId || !missingCheckDate) { setLoadingSelections(false); return []; }
     nutritionCacheRef.current.clear();
+    setDeliveryCheck(null);
 
     try {
         setLoadingSelections(true);
@@ -424,7 +439,7 @@ const KitchenList = () => {
         // its own failure handling: a snack-preset failure still falls back
         // silently (matches prior behavior), while a `/selections` failure
         // still throws to the outer catch below.
-        await prepareKitchenSelections(api, selectedMenuId, missingCheckDate, current);
+        const preparation = await prepareKitchenSelections(api, selectedMenuId, missingCheckDate, current);
         if (!current()) return [];
         const [response, breakfastState, snackState] = await Promise.all([
           api.get(`/menus/${selectedMenuId}/selections`),
@@ -447,10 +462,13 @@ const KitchenList = () => {
           // Read fresh website nutrition by email first. Saved Matter IDs are
           // used only when no email is available; customer identity conflicts
           // and ambiguous matches remain unresolved rather than guessed.
-          const enrichedSelections = await enrichSelectionsWithNutrition(api, rawSelections, nutritionCacheRef, { extended: true });
+          const enrichedSelections = await enrichSelectionsWithNutrition(api, rawSelections, nutritionCacheRef, { extended: true, matterInputs: preparation.cached ? [] : preparation.data?.kitchenInputs });
 
           const keyedSelections = enrichedSelections.map((entry) => attachStableMealKeys(entry));
           if (!current()) return [];
+          preparedSnapshot.current = { menuId: selectedMenuId, date: missingCheckDate, receivedAt: Date.now(), checkedAt: preparation.preparedAt,
+            complete: !preparation.cached && preparation.data?.rosterComplete === true, roster: preparation.data?.kitchenRoster,
+            selections: keyedSelections, breakfastPreset: breakfastState, snackPreset: snackState };
           setMenuSelections(keyedSelections);
           setLoadedSelectionScope(scope);
           return keyedSelections;
@@ -583,7 +601,7 @@ const KitchenList = () => {
       // their real one.
       const internalBySubscriptionId = new Map();
       activeSelections.forEach((entry) => {
-        const subId = String(entry?.matterSubscriptionId || '').trim();
+        const subId = String(entry?.matterSourceSubscriptionId || entry?.matterSubscriptionId || '').trim();
         if (subId) internalBySubscriptionId.set(subId, entry);
       });
 
@@ -1445,6 +1463,7 @@ const KitchenList = () => {
     try {
       setSavingOverrideKey(key);
       await api.put(`/menus/${selectedMenuId}/selections/${encodeURIComponent(entry.email)}`, {
+        matterCustomerId: entry.matterCustomerId,
         selections: updatedSelections.map(normalizeSelectionForSave)
       });
     } catch (saveError) {
@@ -1489,7 +1508,7 @@ const KitchenList = () => {
 
   // Meal-card "Change" checkboxes (carb / veg / garnish / sauce). Saves the
   // combined remark string through the same endpoint as Upload Meal Remarks,
-  // so the kitchen paper's Remark column picks it up automatically.
+  // for the Kitchen List's meal flags.
   const saveMealRemark = useCallback(async ({ entry, meal, remark }) => {
     const email = entry?.email;
     if (!email || !selectedMenuId || !meal?.date || !meal?.mealName) return;
@@ -1770,22 +1789,34 @@ const KitchenList = () => {
       return { ...meal, _overrideKey: key, manualProteinType: mealTypeOverrides[key] || meal.manualProteinType || '' };
     }),
   });
+  const runKitchenExport = async (action) => {
+    if (exportInFlight.current) return;
+    const scope = activeSelectionScope.current;
+    exportInFlight.current = true;
+    setExportBusy(true);
+    setExportError('');
+    try { await action(); }
+    catch (err) { if (activeSelectionScope.current === scope) setExportError(err.response?.data?.message || err.message || 'Download failed. Please retry.'); }
+    finally { exportInFlight.current = false; setExportBusy(false); }
+  };
+
   const getDeliverableRows = async (dateKey) => {
     const scope = `${selectedMenuId}:${missingCheckDate}`;
-    if (loadingSelections || error || loadedSelectionScope !== scope || dateKey !== missingCheckDate) {
-      setError('Load and finish preparing the selected date before exporting.'); return null;
+    if (loadingSelections || loadedSelectionScope !== scope || dateKey !== missingCheckDate) {
+      setExportError('Load and finish preparing the selected date before exporting.'); return null;
     }
     try {
-      const snapshot = await loadKitchenSnapshot(api, selectedMenuId, [dateKey], () => activeSelectionScope.current === scope, applyKitchenOverrides);
+      const snapshot = await loadKitchenSnapshot(api, selectedMenuId, [dateKey], () => activeSelectionScope.current === scope, applyKitchenOverrides, preparedSnapshot.current && { ...preparedSnapshot.current, selections: menuSelections, breakfastPreset, snackPreset });
       const selectedKeys = new Set(customerRows.map((entry) => String(entry.email || entry.customerId)));
       const filteredView = search || showOnlyMissing || planFilter || showOnlyAttention;
-      const rows = snapshot.entries.filter((entry) => !filteredView || selectedKeys.has(String(entry.email || entry.customerId)));
+      const rows = snapshot.entries.filter((entry) => (!filteredView || selectedKeys.has(String(entry.email || entry.customerId))) && (!paperPlan || entry.planName === paperPlan));
+      if (!rows.length) throw new Error('No confirmed meals match this date and the current filters. Clear the search and plan filters, or choose a different date.');
       assertKitchenExportReady(rows);
       if (activeSelectionScope.current !== scope) return null;
       setPaperExcluded({ dateKey, names: [] });
       return rows.map((entry) => ({ ...entry, mealsByDay: groupMealsByDay(entry.selectedMeals) }));
     } catch (err) {
-      if (activeSelectionScope.current === scope) setError(err.response?.data?.message || err.message || 'Kitchen export could not be verified.');
+      if (activeSelectionScope.current === scope) setExportError(err.response?.data?.message || err.message || 'Kitchen export could not be verified.');
       return null;
     }
   };
@@ -1857,9 +1888,6 @@ const KitchenList = () => {
         Name: entry.customerName || entry.email || 'Unknown',
         CPF: entry.cpf || '',
         'Meal Plan': entry.planName || '',
-        Formula: entry.formulaVersion,
-        'Nutrition checked': kitchenSourceLabel(entry),
-        Attention: mealRemarkText(meal),
         // The customer's daily plan total (what their meals are split from),
         // repeated on each of their rows. Matter Core's "macros" are daily food
         // weights rather than macro grams, so those rows show the weights.
@@ -1883,7 +1911,7 @@ const KitchenList = () => {
   // Excel version of the Day Kitchen Paper: one row per meal, in exactly the
   // PDF's order (buildKitchenPaperOrder), carrying everything the printed
   // sheet shows per customer — delivery time, plan line, exclusions, day note,
-  // the meal's remark and P/C/V weights, and the customer's total macros — so
+  // the meal's P/C/V weights, and the customer's total macros — so
   // the sheet can be filtered/sorted in Excel. Same customers as the PDF (no
   // Matter delivery that day = left out).
   const exportDayKitchenPaperToExcel = async (dateKey) => {
@@ -1917,9 +1945,6 @@ const KitchenList = () => {
           Address: entry.partner ? '' : formatAddress(entry.deliveryAddress),
           Type: label.mealType,
           Meal: label.mealName,
-          Remark: mealRemarkText(meal),
-          Formula: entry.formulaVersion,
-          'Nutrition checked': kitchenSourceLabel(entry),
           'P (g)': Number(meal.proteinWeight) || 0,
           'C (g)': Number(meal.carbWeight) || 0,
           'V (g)': Number(meal.vegWeight) || 0,
@@ -1932,7 +1957,7 @@ const KitchenList = () => {
     });
     const worksheet = XLSX.utils.json_to_sheet(rows);
     // Readable out of the box: sensible column widths and a filter on the header row.
-    const widths = { Section: 24, 'Delivery time': 14, Customer: 28, Plan: 16, 'Meals/day': 9, 'Snacks/day': 10, 'Breakfast included': 11, Exclusions: 34, Address: 48, Type: 10, Meal: 44, Remark: 22, 'P (g)': 7, 'C (g)': 7, 'V (g)': 7, 'Total C': 8, 'Total P': 8, 'Total F': 8, Note: 30 };
+    const widths = { Section: 24, 'Delivery time': 14, Customer: 28, Plan: 16, 'Meals/day': 9, 'Snacks/day': 10, 'Breakfast included': 11, Exclusions: 34, Address: 48, Type: 10, Meal: 44, 'P (g)': 7, 'C (g)': 7, 'V (g)': 7, 'Total C': 8, 'Total P': 8, 'Total F': 8, Note: 30 };
     const headers = Object.keys(rows[0] || {});
     worksheet['!cols'] = headers.map((h) => ({ wch: widths[h] || 12 }));
     worksheet['!autofilter'] = { ref: worksheet['!ref'] };
@@ -1962,14 +1987,14 @@ const KitchenList = () => {
     setCustomerPaperBusy(true);
     setCustomerPaperMsg(null);
     try {
-      if (loadingSelections || error || loadedSelectionScope !== `${selectedMenuId}:${missingCheckDate}`) throw new Error('Finish preparing the selected date before exporting.');
+      if (loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${missingCheckDate}`) throw new Error('Finish preparing the selected date before exporting.');
       const scope = activeSelectionScope.current;
       const dates = menuDateKeys.filter((day) => day >= fromKey && day <= toKey);
       const snapshot = await loadKitchenSnapshot(api, selectedMenuId, dates, () => activeSelectionScope.current === scope, applyKitchenOverrides);
       entry = snapshot.entries.find((row) => String(row.email || '').toLowerCase() === customerPaperEmail.toLowerCase());
       if (!entry) throw new Error('No confirmed meals for this customer in the chosen date range.');
       assertKitchenExportReady([entry]);
-      const helpers = { getDateKey, formatDateLabel, getMealLabel, mealRemarkText, exclusionsText, formatAddress, parseDeliveryHour, formatDeliveryHourLabel, loadJsPDF, loadAutoTable };
+      const helpers = { getDateKey, formatDateLabel, getMealLabel, exclusionsText, formatAddress, parseDeliveryHour, formatDeliveryHourLabel, loadJsPDF, loadAutoTable };
       const result = format === 'word'
         ? downloadCustomerPaperWord({ entry, fromKey, toKey, helpers })
         : await downloadCustomerPaperPdf({ entry, fromKey, toKey, helpers });
@@ -2034,13 +2059,11 @@ const KitchenList = () => {
       const dayNote = (entry.dayNotes || []).find((n) => n.date === dateKey)?.note;
       const rows = dayMeals.map((meal) => {
         const label = getMealLabel(meal);
-        const remark = mealRemarkText(meal);
         const isLarge = String(meal?.mealType || '').toLowerCase() === 'breakfast' && !!meal?.flags?.isLargeBreakfast;
         const largeTag = isLarge
           ? ' <span style="background:#6d28d9;color:#ffffff;font-size:10.5pt;font-weight:bold">&nbsp;LARGE&nbsp;</span>'
           : '';
         return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}${largeTag}</td>`
-          + `<td style="color:#c2410c;font-weight:bold">${esc(remark)}</td>`
           + `<td>${esc(meal.proteinWeight || 0)}g</td><td>${esc(meal.carbWeight || 0)}g</td><td>${esc(meal.vegWeight || 0)}g</td></tr>`;
       }).join('');
       // The whole customer block sits in ONE table row that Word may not split
@@ -2054,11 +2077,11 @@ const KitchenList = () => {
             &nbsp;&nbsp;<span style="background:${hasWindow ? '#1e293b' : '#94a3b8'};color:#ffffff;font-size:10pt;font-weight:bold">&nbsp;${esc(tagText)}&nbsp;</span></p>
           <p style="margin:0;font-size:10.5pt;page-break-after:avoid">${esc(subLine)}</p>
           ${entry.noDeliveryDate === dateKey ? '<p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>NO MATTER DELIVERY ON THIS DATE - confirm before cooking</b></p>' : ''}
-          <p style="margin:0;font-size:10.5pt;page-break-after:avoid"><b>Plan: ${esc(entry.planName || 'N/A')} | Formula: ${esc(entry.formulaVersion || '')} | Nutrition checked: ${esc(kitchenSourceLabel(entry))} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
+          <p style="margin:0;font-size:10.5pt;page-break-after:avoid"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
           <p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
           ${dayNote ? `<p style="margin:0;font-size:10.5pt;color:#b45309;page-break-after:avoid"><b>Note: ${esc(dayNote)}</b></p>` : ''}
           <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;width:100%;font-size:10.5pt;margin-top:4pt">
-            <tr style="background:#1e293b;color:#ffffff"><th>Type</th><th>Meal</th><th>Remark</th><th>P</th><th>C</th><th>V</th></tr>
+            <tr style="background:#1e293b;color:#ffffff"><th>Type</th><th>Meal</th><th>P</th><th>C</th><th>V</th></tr>
             ${rows}
           </table>
           <p style="margin:4pt 0 0 0;font-size:12pt"><b>Total Macros: C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}</b></p>
@@ -2248,7 +2271,7 @@ ${body}
           : (entry.breakfastIncluded ? 'Yes' : 'No');
         doc.setFont(undefined, 'bold');
         doc.text(
-          `Formula: ${entry.formulaVersion} | Nutrition checked: ${kitchenSourceLabel(entry)}\nPlan: ${entry.planName || 'N/A'}  |  Meals/day: ${orDash(entry.mealsPerDay)}  |  Snacks/day: ${orDash(entry.snacksPerDay)}  |  Breakfast included: ${breakfastLabel}`,
+          `Plan: ${entry.planName || 'N/A'}  |  Meals/day: ${orDash(entry.mealsPerDay)}  |  Snacks/day: ${orDash(entry.snacksPerDay)}  |  Breakfast included: ${breakfastLabel}`,
           14,
           y,
           { maxWidth: pageWidth - 28 }
@@ -2285,7 +2308,6 @@ ${body}
           return [
             label.mealType,
             isLargeRow[mealIndex] ? `${label.mealName}   [LARGE]` : label.mealName,
-            mealRemarkText(meal),
             `${meal.proteinWeight || 0}g`,
             `${meal.carbWeight || 0}g`,
             `${meal.vegWeight || 0}g`
@@ -2294,19 +2316,12 @@ ${body}
 
         autoTable(doc, {
           startY: y,
-          head: [['Type', 'Meal', 'Remark', 'P', 'C', 'V']],
+          head: [['Type', 'Meal', 'P', 'C', 'V']],
           body: tableRows,
           theme: 'grid',
           styles: { fontSize: 10.5, cellPadding: 2.2 },
           headStyles: { fillColor: [30, 41, 59] },
-          // The Remark column only has content some of the time — call it
-          // out in orange (matching the Kitchen List badge) so a flagged
-          // meal is impossible to miss on a busy prep sheet.
           didParseCell: (data) => {
-            if (data.section === 'body' && data.column.index === 2 && data.cell.raw) {
-              data.cell.styles.textColor = [194, 65, 12];
-              data.cell.styles.fontStyle = 'bold';
-            }
             // Large breakfast: whole row in purple bold so it stands out.
             if (data.section === 'body' && isLargeRow[data.row.index] && data.column.index <= 1) {
               data.cell.styles.textColor = [109, 40, 217];
@@ -2501,7 +2516,7 @@ ${body}
                 <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-300">Day kitchen paper</label>
                 <select
                   value={pdfDate}
-                  onChange={(e) => { selectionRequests.current.cancel(); setLoadedSelectionScope(''); setPdfDate(e.target.value); setMissingCheckDate(e.target.value); }}
+                  onChange={(e) => changeKitchenDate(e.target.value)}
                   className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white [&>option]:text-slate-900"
                 >
                   <option value="">Select a date...</option>
@@ -2526,16 +2541,16 @@ ${body}
               </div>
               <button
                 type="button"
-                onClick={() => downloadDayKitchenPaper(pdfDate)}
-                disabled={!pdfDate || generatingPdf || loadingSelections || !!error || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
+                onClick={() => runKitchenExport(() => downloadDayKitchenPaper(pdfDate))}
+                disabled={!pdfDate || exportBusy || generatingPdf || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
                 <FileText size={16} className={generatingPdf ? 'animate-pulse' : ''} /> {generatingPdf ? 'Generating...' : 'Download Day PDF'}
               </button>
               <button
                 type="button"
-                onClick={() => downloadDayKitchenPaperWord(pdfDate)}
-                disabled={!pdfDate || loadingSelections || !!error || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
+                onClick={() => runKitchenExport(() => downloadDayKitchenPaperWord(pdfDate))}
+                disabled={!pdfDate || exportBusy || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
                 title="Word version of the Day PDF — same sections, order and per-customer tables"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
@@ -2543,8 +2558,8 @@ ${body}
               </button>
               <button
                 type="button"
-                onClick={() => exportDayKitchenPaperToExcel(pdfDate)}
-                disabled={!pdfDate || loadingSelections || !!error || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
+                onClick={() => runKitchenExport(() => exportDayKitchenPaperToExcel(pdfDate))}
+                disabled={!pdfDate || exportBusy || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
                 title="Excel version of the Day PDF — one row per meal (emirate, delivery window, customer, plan, P/C/V weights, remark, day note), in the same order as the PDF"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
@@ -2552,13 +2567,15 @@ ${body}
               </button>
               <button
                 type="button"
-                onClick={() => exportCustomerMacrosToExcel(pdfDate)}
-                disabled={!pdfDate || loadingSelections || !!error || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
+                onClick={() => runKitchenExport(() => exportCustomerMacrosToExcel(pdfDate))}
+                disabled={!pdfDate || exportBusy || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
                 title="Export customer ID, name, CPF, meal plan, the customer's total daily C/P/F, meal name, and that meal's C/P/F/calories — one row per meal, in the same customer/meal order as the Day PDF above"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
                 <Download size={16} /> Export Customer List (Excel)
               </button>
+              {exportBusy && <p role="status" className="w-full text-sm text-amber-200">Verifying Matter data and generating your download?</p>}
+              {exportError && <p role="alert" className="w-full rounded-lg bg-red-950/50 p-3 text-sm text-red-100">{exportError}</p>}
               {paperExcluded && paperExcluded.dateKey === pdfDate && (
                 <p
                   className="w-full text-xs text-amber-200"
@@ -2620,7 +2637,7 @@ ${body}
                 <button
                   type="button"
                   onClick={() => runCustomerPaper('pdf')}
-                  disabled={!customerPaperEmail || customerPaperBusy || loadingSelections || !!error || loadedSelectionScope !== `${selectedMenuId}:${missingCheckDate}`}
+                  disabled={!customerPaperEmail || customerPaperBusy || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${missingCheckDate}`}
                   title="One page per delivery date for this customer, between the From and To dates"
                   className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
                 >
@@ -2629,7 +2646,7 @@ ${body}
                 <button
                   type="button"
                   onClick={() => runCustomerPaper('word')}
-                  disabled={!customerPaperEmail || customerPaperBusy || loadingSelections || !!error || loadedSelectionScope !== `${selectedMenuId}:${missingCheckDate}`}
+                  disabled={!customerPaperEmail || customerPaperBusy || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${missingCheckDate}`}
                   title="Word version of the customer's paper for the same dates"
                   className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
                 >
@@ -2686,6 +2703,7 @@ ${body}
                 type="button"
                 onClick={() => {
                   nutritionCacheRef.current.clear();
+                  setDeliveryCheck(null);
                   loadSelections();
                 }}
                 title="Reload selections and re-fetch nutrition data from the website"
@@ -2747,7 +2765,7 @@ ${body}
                 <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Date</label>
                 <select
                   value={missingCheckDate}
-                  onChange={(e) => { selectionRequests.current.cancel(); setLoadedSelectionScope(''); setMissingCheckDate(e.target.value); }}
+                  onChange={(e) => changeKitchenDate(e.target.value)}
                   className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
                 >
                   <option value="">Select a date...</option>
@@ -3157,18 +3175,15 @@ ${body}
           </div>
         )}
 
-        {selectedMenuId && menuDateKeys.length > 0 && (
-          <PartnerMealAssigner
-            menuId={selectedMenuId}
-            dateKeys={menuDateKeys}
-            onAssigned={loadSelections}
-          />
-        )}
 
         <div className="space-y-4">
-          {allComputedRows.some((entry) => entry.calculationStatus === 'incomplete') && (
-          <div role="alert" className="mb-4 rounded-xl bg-amber-50 p-4 text-amber-900">Some customer inputs are incomplete. Their portion weights are unavailable; refresh or fix the subscription before exporting.</div>
-        )}
+          <KitchenInputWarnings entries={allComputedRows} onShowCustomer={(entry) => {
+            setSearchInput(entry.email || entry.customerName || '');
+            setSearch(entry.email || entry.customerName || '');
+            setPlanFilter('');
+            setShowOnlyMissing(false);
+            setShowOnlyAttention(false);
+          }} />
         {customerRows.map((entry) => (
             <CustomerCard
               key={`${entry.email || entry.customerId}`}
@@ -3256,7 +3271,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
             )}
           </div>
           <p className="text-sm text-slate-500">
-            {entry.email || 'No email'} • {entry.mealCount} meal(s) selected • Meal frequency: {entry.mealsPerDay ?? '—'}/day
+            {entry.matterEmail || 'Matter email unavailable'} • {entry.mealCount} meal(s) selected • Meal frequency: {entry.mealsPerDay ?? '—'}/day
           </p>
           {entry.dietaryRestrictions?.length > 0 && (
             <div className="mt-1.5 flex flex-wrap items-center gap-1">
@@ -3498,164 +3513,6 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
 // Customer.partner) → a date → that date's dishes with quantities. Partner
 // members get fixed Lean macros (C35 P30 F15 per main meal) in the
 // calculation, and print under the kitchen paper's "Partners" section.
-const MEAL_TYPE_LABELS = { main: 'Meal', breakfast: 'Breakfast', snack: 'Snack' };
-
-const PartnerMealAssigner = ({ menuId, dateKeys, onAssigned }) => {
-  const [open, setOpen] = useState(false);
-  const [partners, setPartners] = useState([]);
-  const [partnerId, setPartnerId] = useState('');
-  const [members, setMembers] = useState([]);
-  const [memberId, setMemberId] = useState('');
-  const [dateKey, setDateKey] = useState('');
-  const [dishes, setDishes] = useState([]);
-  const [quantities, setQuantities] = useState({});
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState(null);
-
-  useEffect(() => {
-    if (!open || partners.length > 0) return;
-    api.get('/menus/kitchen-partners')
-      .then((res) => setPartners(res.data?.data || []))
-      .catch(() => setMessage({ type: 'error', text: 'Failed to load partners' }));
-  }, [open, partners.length]);
-
-  useEffect(() => {
-    setMembers([]);
-    setMemberId('');
-    if (!partnerId) return;
-    api.get(`/menus/kitchen-partners/${partnerId}/members`)
-      .then((res) => setMembers(res.data?.data || []))
-      .catch(() => setMessage({ type: 'error', text: 'Failed to load partner members' }));
-  }, [partnerId]);
-
-  useEffect(() => {
-    setDishes([]);
-    setQuantities({});
-    if (!dateKey || !menuId) return;
-    api.get(`/menus/${menuId}/day-dishes`, { params: { date: dateKey } })
-      .then((res) => setDishes(res.data?.data || []))
-      .catch(() => setMessage({ type: 'error', text: 'Failed to load dishes for this date' }));
-  }, [dateKey, menuId]);
-
-  const dishKey = (dish) => `${dish.mealType}::${dish.mealName}`;
-  const chosen = dishes.filter((dish) => (Number(quantities[dishKey(dish)]) || 0) > 0);
-
-  const save = async () => {
-    if (!memberId || !dateKey || chosen.length === 0) return;
-    setSaving(true);
-    setMessage(null);
-    try {
-      await api.post(`/menus/${menuId}/partner-meals`, {
-        date: dateKey,
-        customerId: memberId,
-        meals: chosen.map((dish) => ({
-          mealType: dish.mealType,
-          mealName: dish.mealName,
-          menuItemId: dish.menuItemId,
-          quantity: Number(quantities[dishKey(dish)]) || 1
-        }))
-      });
-      const total = chosen.reduce((sum, dish) => sum + (Number(quantities[dishKey(dish)]) || 0), 0);
-      setMessage({ type: 'ok', text: `Added ${total} item(s) for ${formatDateLabel(dateKey)}.` });
-      setQuantities({});
-      await onAssigned?.();
-    } catch (err) {
-      setMessage({ type: 'error', text: err.response?.data?.message || 'Failed to assign partner meals' });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between text-left"
-      >
-        <h3 className="text-sm font-semibold text-slate-700">Assign Partner Meals</h3>
-        {open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-      </button>
-      {open && (
-        <div className="mt-3 space-y-3">
-          <p className="text-xs text-slate-400">
-            Partner members get fixed macros of C35 / P30 / F15 per meal (same as Lean Plan 1 &amp; 2) and print under the "Partners" section of the kitchen paper.
-          </p>
-          <div className="flex flex-wrap items-end gap-3">
-            <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Partner</label>
-              <select value={partnerId} onChange={(e) => setPartnerId(e.target.value)} className="rounded-xl border border-slate-300 px-3 py-2 text-sm">
-                <option value="">Select a partner...</option>
-                {partners.map((p) => <option key={p._id} value={p._id}>{p.businessName}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Member</label>
-              <select value={memberId} onChange={(e) => setMemberId(e.target.value)} disabled={!partnerId} className="rounded-xl border border-slate-300 px-3 py-2 text-sm disabled:opacity-50">
-                <option value="">Select a member...</option>
-                {members.map((m) => (
-                  <option key={m._id} value={m._id}>
-                    {[m.firstName, m.lastName].filter(Boolean).join(' ') || m.email}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Date</label>
-              <select value={dateKey} onChange={(e) => setDateKey(e.target.value)} className="rounded-xl border border-slate-300 px-3 py-2 text-sm">
-                <option value="">Select a date...</option>
-                {dateKeys.map((key) => <option key={key} value={key}>{formatDateLabel(key)}</option>)}
-              </select>
-            </div>
-          </div>
-          {partnerId && members.length === 0 && (
-            <p className="text-xs text-amber-700">
-              No customers are linked to this partner yet — link them in Customer Management → meal preferences → Partner.
-            </p>
-          )}
-          {dateKey && dishes.length === 0 && (
-            <p className="text-xs text-amber-700">No dishes found for {formatDateLabel(dateKey)} — upload the weekly menu for this date first.</p>
-          )}
-          {dishes.length > 0 && (
-            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-              {dishes.map((dish) => (
-                <div key={dishKey(dish)} className="flex items-center justify-between gap-2 rounded-xl border border-slate-200 px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">{MEAL_TYPE_LABELS[dish.mealType] || dish.mealType}</div>
-                    <div className="truncate text-sm text-slate-700" title={dish.mealName}>{dish.mealName}</div>
-                  </div>
-                  <input
-                    type="number"
-                    min="0"
-                    max="50"
-                    value={quantities[dishKey(dish)] ?? ''}
-                    placeholder="0"
-                    onChange={(e) => setQuantities((prev) => ({ ...prev, [dishKey(dish)]: e.target.value }))}
-                    className="w-16 rounded-lg border border-slate-300 px-2 py-1 text-sm"
-                  />
-                </div>
-              ))}
-            </div>
-          )}
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={save}
-              disabled={saving || !memberId || !dateKey || chosen.length === 0}
-              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
-            >
-              {saving ? 'Assigning...' : 'Assign meals'}
-            </button>
-            {message && (
-              <span className={`text-xs ${message.type === 'error' ? 'text-rose-600' : 'text-emerald-700'}`}>{message.text}</span>
-            )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
-
 const Stat = ({ label, value }) => (
   <div className="rounded-2xl bg-slate-50 px-3 py-2">
     <div className="text-[11px] uppercase tracking-wide text-slate-400">{label}</div>

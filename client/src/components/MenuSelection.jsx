@@ -214,7 +214,7 @@ const MenuSelection = ({ token }) => {
     try {
       const menuIdParam = weeklyMenu?._id ? `&menuId=${encodeURIComponent(weeklyMenu._id)}` : '';
       const response = await api.get(
-        `/menus/customers/${encodeURIComponent(trimmed)}/meal-profile?email=${encodeURIComponent(trimmed)}${menuIdParam}`
+        `/menus/customers/${encodeURIComponent(trimmed)}/subscription-profile?email=${encodeURIComponent(trimmed)}${menuIdParam}`
       );
 
       if (response.data?.success) {
@@ -332,7 +332,7 @@ const MenuSelection = ({ token }) => {
       // (from MenuSelectionRecord) rather than the customer's latest selections.
       const menuIdParam = weeklyMenu?._id ? `&menuId=${encodeURIComponent(weeklyMenu._id)}` : '';
       const response = await api.get(
-        `/menus/customers/${encodeURIComponent(trimmed)}/meal-profile?email=${encodeURIComponent(trimmed)}${menuIdParam}`
+        `/menus/customers/${encodeURIComponent(trimmed)}/subscription-profile?email=${encodeURIComponent(trimmed)}${menuIdParam}`
       );
 
       if (response.data?.success) {
