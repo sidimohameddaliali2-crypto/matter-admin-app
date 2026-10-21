@@ -271,3 +271,48 @@ current values, not evidence of a historical window. Stored early/late fields
 and affected driver KPIs are refreshed when the scheduled time changes; actual
 completion times are preserved. This synchronization does not apply address,
 pin, driver or route changes.
+
+### Subscription & Sales Dashboard (2026-10-21)
+
+The dashboard and monthly Excel report use `GET /api/matter/sales-dashboard`
+with inclusive Dubai `from`/`to` dates (maximum 400 days). Subscription/report
+permissions are required. `POST /api/matter/sales-dashboard/refresh` verifies
+the complete paginated list and full details for every returned subscription,
+including paused subscriptions. Partial/failed source reads retain the prior
+capture and return an error. Refreshes are coalesced for 60 seconds per process.
+The page loads the saved report first and reuses a verification younger than
+15 minutes; the explicit Refresh button requests a new source verification.
+
+`MatterSalesSnapshot` preserves complete source observations. Unchanged source
+data only updates its last-verification timestamp; changed data appends an
+observation. Payment IDs are deduplicated by permanent customer ID across
+subscriptions and observations. Observed receipts use payment date and currency,
+not delivery date or `gross_paid` divided by calendar days. Accounts disappearing
+from Matter do not erase observed payment history. Older accounts absent before
+capture began cannot be reconstructed. Invalid, conflicting, non-AED and changed
+payment-status records are reported for review rather than silently valued at
+zero. Comparisons require capture coverage for both periods; seven-day trends
+compare seven days against the preceding seven days.
+
+Future pending deliveries can receive an independent `matterRevenue` capture:
+subscription/customer IDs, source hash, capture time, plan, paid amount,
+`total_deliveries`, currency and allocated unit value. Captures never replace an
+existing allocation or backfill completed work from today's prices. Allocation
+requires an unambiguous single active payment matching `gross_paid`; multiple
+payments without entitlement allocation history, or an observed same-subscription
+pricing change without an effective date, require review. Recognized allocated
+revenue includes only completed deliveries with a valid pre-service capture.
+Historical missing prices stay unavailable, distinct from a verified free plan.
+Changing editable names, scheduled times or subscription links never rewrites
+the financial capture. Ordinary delivery input cannot supply/overwrite captures,
+and driver-facing delivery queries exclude them; only the authorized sales report
+selects pricing information. New imports use a fresh saved capture where available;
+an hourly background job and dashboard refresh collect source observations and
+capture upcoming deliveries without depending on driver completion/network flows.
+
+Active subscription counts and plan distribution come directly from Matter.
+Subscription starts include only the last seven days through today and are
+labeled as starts, including renewals, not first-time customers. The API does not
+provide a complete renewal cohort, first-subscription history, or payment-to-plan
+revision allocation contract. Renewal rate therefore remains explicitly
+unavailable; the dashboard never infers 100% from absent expired subscriptions.

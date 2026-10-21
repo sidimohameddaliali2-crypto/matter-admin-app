@@ -23,6 +23,9 @@ const deliverySchema = new mongoose.Schema({
     index: true
   },
   matterCustomerId: { type: String, default: null, index: true },
+  // Independent of editable delivery names, times and subscription references.
+  // Never reprice completed work from a newer subscription.
+  matterRevenue: { type: mongoose.Schema.Types.Mixed, default: undefined, select: false },
   matterSource: { fetchedAt: Date, updatedAt: String, effectiveState: String, pinSource: String },
   // Matter's own id for the saved address this delivery goes to
   // (customer_addresses[].id, as a string) — a stable identity for "this

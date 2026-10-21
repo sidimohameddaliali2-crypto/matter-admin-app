@@ -6,6 +6,7 @@ import { getBusinessDayBounds } from '../utils/businessDate.js';
 import { displayMatterName } from '../utils/matterName.js';
 import { resolveMatterDeliveryAddress } from './matterSubscriptionContract.js';
 import { compareMatterDelivery } from './matterDeliveryComparison.js';
+import { capturePendingMatterRevenue } from './matterSalesService.js';
 
 // Only pending/assigned work today or later can receive a name refresh.
 const EDITABLE_STATUSES = new Set(['pending', 'assigned']);
@@ -249,6 +250,12 @@ export async function importMatterDeliveriesForDate(dateKey) {
     }
   }
 
+  // Best effort from the already verified local Matter capture. Import and
+  // driver operation must never depend on financial API availability.
+  if (summary.created) {
+    try { await capturePendingMatterRevenue(); }
+    catch { summary.pricingCapturePending = true; }
+  }
   summary.requiresReview = summary.noCurrentAddress > 0 || summary.noDeliveryWindow > 0 || summary.comparisons.some((item) => item.conflicts?.length || item.addressResolution?.status === 'unresolved');
   return summary;
 }

@@ -10,8 +10,24 @@ import { resolveMatterDeliveryAddress, matterMealContract } from '../services/ma
 import { compareMatterDelivery } from '../services/matterDeliveryComparison.js';
 import { buildMatterDeliverySnapshot, importMatterDeliveriesForDate } from '../services/matterDeliveryImportService.js';
 import { standardizeMatterDeliveriesForPage } from '../services/matterDeliveryStandardization.js';
+import { refreshMatterSales, getMatterSalesReport } from '../services/matterSalesService.js';
+import { effectivePermissions } from '../models/User.js';
 
 const router = express.Router();
+
+const salesAccess = [protect, (req, res, next) => {
+  const permissions = effectivePermissions(req.user);
+  if (req.user.role === 'super_admin' || permissions.subscription || permissions.reports) return next();
+  return res.status(403).json({ success: false, message: 'Subscription dashboard permission is required.' });
+}];
+router.post('/sales-dashboard/refresh', ...salesAccess, async (req, res) => {
+  try { res.json({ success: true, data: await refreshMatterSales() }); }
+  catch (error) { res.status(503).json({ success: false, message: describeMatterApiError(error) || 'Matter refresh was incomplete. Previously captured information was retained.' }); }
+});
+router.get('/sales-dashboard', ...salesAccess, async (req, res) => {
+  try { res.json({ success: true, data: await getMatterSalesReport(req.query.from, req.query.to) }); }
+  catch (error) { res.status(error.statusCode || 503).json({ success: false, message: error.statusCode === 400 ? error.message : 'The sales report could not be loaded.' }); }
+});
 
 router.post('/standardize-deliveries', protect, authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
   if (!isDateKey(req.body?.date)) return res.status(400).json({ success: false, message: 'A valid delivery date is required.' });

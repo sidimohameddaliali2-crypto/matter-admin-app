@@ -18,6 +18,7 @@ import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 import { recalculateDriverKPI } from '../services/driverKpiService.js';
 import { businessRangeBounds, getTimingOverview, getTimingRecords } from '../services/deliveryTimingHistory.js';
 import { businessOffsetMs, getBusinessDayBounds, isDateKey, setBusinessTimeOfDay } from '../utils/businessDate.js';
+import { protectMatterRevenueInput } from '../middleware/matterRevenueInput.js';
 import { fillProofAddressInBackground, resolveProofAddressWithin } from '../services/proofLocationAddress.js';
 import {
   optimizeRoutes,
@@ -352,6 +353,7 @@ async function checkAndApplyPendingChanges(delivery) {
 
 // All routes are protected
 router.use(protect);
+router.use(protectMatterRevenueInput);
 router.use('/delivery-order', deliveryOrderRouter);
 
 // @desc    Depot (kitchen) location used by map views — same env the route optimizer uses.

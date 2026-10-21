@@ -32,6 +32,7 @@ import { startFlaggedNotifier } from './jobs/flaggedCustomerNotifier.js';
 import { startMoveUncollectedCollectionsJob } from './jobs/moveUncollectedCollections.js';
 import { startRecalculateDriverKpisJob } from './jobs/recalculateDriverKpis.js';
 import { startImportMatterDeliveriesJob } from './jobs/importMatterDeliveries.js';
+import { startCaptureMatterSalesJob } from './jobs/captureMatterSales.js';
 import { startRecordVehicleLocationsJob } from './jobs/recordVehicleLocations.js';
 import { authenticateSocket, registerStaffSocket } from './middleware/socketAuth.js';
 
@@ -389,6 +390,7 @@ startFlaggedNotifier();
 startMoveUncollectedCollectionsJob();
 startRecalculateDriverKpisJob();
 startImportMatterDeliveriesJob();
+startCaptureMatterSalesJob();
 startRecordVehicleLocationsJob();
 
 // Warm the Supy recipe search cache so the first meal-editor search of the
