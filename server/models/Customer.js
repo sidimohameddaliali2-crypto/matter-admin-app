@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { nextCustomerId, isEmailDerivedCustomerId } from '../services/customerIdSequence.js';
 
 const customerSchema = new mongoose.Schema({
   // Basic information
@@ -237,6 +238,12 @@ const customerSchema = new mongoose.Schema({
 });
 
 // Indexes for searches
+customerSchema.pre('validate', async function () {
+  if (this.isNew && (!this.customerId || isEmailDerivedCustomerId(this.customerId, this.email))) {
+    this.customerId = await nextCustomerId({ session: this.$session() || undefined });
+  }
+});
+
 customerSchema.index({ customerId: 1 }, { unique: true });
 customerSchema.index({ email: 1 }, { unique: true, sparse: true }); // Sparse allows multiple null values
 customerSchema.index({ athleatId: 1 }, { sparse: true });

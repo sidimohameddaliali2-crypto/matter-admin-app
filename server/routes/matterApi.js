@@ -37,7 +37,7 @@ router.get('/subscriptions/kitchen-inputs', protect, async (req, res) => {
     const data = await matterApiService.getKitchenNutrition({ subscriptionId, customerId, email });
     res.json({ success: true, data });
   } catch (error) {
-    res.status(error.statusCode || error.response?.status || 502).json({ success: false, message: describeMatterApiError(error) || error.message });
+    res.status(error.statusCode || error.response?.status || 502).json({ success: false, code: error.code, message: describeMatterApiError(error) || error.message });
   }
 });
 

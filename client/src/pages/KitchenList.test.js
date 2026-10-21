@@ -137,7 +137,8 @@ test('an unavailable subscription stays on its customer while the page and verif
   await select(paperSelect(), friday);
   expect(container.textContent).toContain('Matter Fixture');
   expect(container.textContent).toContain(expiredEmail);
-  expect(container.textContent).toContain('No current Matter subscription.');
+  expect(container.textContent).toContain('Not scheduled for');
+  expect(container.textContent).not.toContain('customer(s) have incomplete kitchen inputs');
   expect(container.textContent).toContain('Unavailable');
   expect(container.textContent).not.toContain('Saved selection has no verified Matter customer ID.');
   expect(container.textContent).not.toContain('No customer selections found for this menu.');

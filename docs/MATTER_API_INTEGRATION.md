@@ -197,6 +197,22 @@ verifies it. Unlinked old selections cannot be recovered by guessing an Internal
 name or email. A stored selection by itself is not proof of a currently active
 Matter account or of service on a particular day.
 
+A confirmed empty subscription lookup by permanent customer ID returns
+`MATTER_SUBSCRIPTION_UNAVAILABLE` (404), keeping the identity separate from
+subscription availability. This does not prove whether an account was cancelled
+or expired. After a complete selected-date delivery roster is verified, a linked
+account absent from that roster is marked not scheduled and excluded from the
+incomplete-production warning. An outage, partial roster, or missing identity
+cannot trigger this exclusion. A renewed account is included as soon as Matter
+schedules delivery for that date; cancelled accounts still owed a scheduled
+delivery remain included too.
+
+Selections GET also checks approved recovery archives. A recreated unlinked alias
+is omitted only when its retained Matter-linked selection exists and it adds no
+meal choices, notes, or pauses beyond the archived copy. Reads never delete or
+recreate records. A changed alias remains visible for staff review. Old processes
+must still be updated to stop writing the legacy copies.
+
 Preparation (`POST /api/menus/:id/auto-populate-missing`, `freshInputs: true`)
 performs a complete Matter roster/detail read. The date's calendar status governs
 eligibility. Incomplete discovery fails before preparation can be called complete.

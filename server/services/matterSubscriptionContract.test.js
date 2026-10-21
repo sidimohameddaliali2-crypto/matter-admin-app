@@ -71,7 +71,7 @@ test('fresh kitchen reads follow the permanent customer across renewals without 
     matter.getSubscription = async () => ({ data: { ...sub, subscription_id: 'unrelated' } });
     await assert.rejects(matter.getKitchenNutrition(identity), /current Matter subscription/);
     matter.listSubscriptions = async () => ({ data: [] });
-    await assert.rejects(matter.getKitchenNutrition(identity), /missing or ambiguous/);
+    await assert.rejects(matter.getKitchenNutrition(identity), { code: 'MATTER_SUBSCRIPTION_UNAVAILABLE', statusCode: 404 });
   } finally { matter.getSubscription = original.get; matter.listSubscriptions = original.list; }
 });
 
@@ -187,7 +187,7 @@ test('kitchen email lookup takes priority over stale saved links and rejects unc
     await assert.rejects(matter.getKitchenNutrition({ ...input, customerId: 'another' }), /another/);
     for (const rows of [[], [current, current]]) {
       matter.listSubscriptions = async () => ({ data: rows });
-      await assert.rejects(matter.getKitchenNutrition(input), /missing or ambiguous/);
+      await assert.rejects(matter.getKitchenNutrition(input), rows.length ? /missing or ambiguous/ : { code: 'MATTER_SUBSCRIPTION_UNAVAILABLE' });
     }
     matter.listSubscriptions = async () => ({ data: [{ ...current, email: 'other@example.invalid' }] });
     await assert.rejects(matter.getKitchenNutrition({ email: input.email }), /email does not match/);

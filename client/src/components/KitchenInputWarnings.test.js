@@ -21,3 +21,13 @@ test('does not show a warning when all inputs are complete', async () => {
   await act(async () => root.render(<KitchenInputWarnings entries={[{ calculationStatus: 'complete' }]} onShowCustomer={() => {}} />));
   expect(container.querySelector('[role="alert"]')).toBeNull();
 });
+
+test('a linked account excluded by a complete date roster is not an incomplete production warning', async () => {
+  await act(async () => root.render(<KitchenInputWarnings entries={[
+    { email: 'not-due@example.invalid', calculationStatus: 'incomplete', kitchenProductionExcluded: true },
+    { email: 'due@example.invalid', calculationStatus: 'incomplete', inputErrors: ['Required nutrition unavailable.'] },
+  ]} onShowCustomer={() => {}} />));
+  expect(container.textContent).toContain('1 customer(s)');
+  expect(container.textContent).toContain('due@example.invalid');
+  expect(container.textContent).not.toContain('not-due@example.invalid');
+});

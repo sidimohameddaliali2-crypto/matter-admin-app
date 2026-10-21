@@ -264,12 +264,23 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
   concurrency = 8,
   extended = false,
   matterInputs = [],
+    productionScope = null,
   onEach
 } = {}) => mapWithConcurrency(rawSelections, concurrency, async (entry) => {
+    entry = { ...entry, kitchenProductionExcluded: false, kitchenExclusionDate: null };
   const email = String(entry?.matterEmail || entry?.email || '').trim();
   const subscriptionId = String(entry?.matterSubscriptionId || '').trim();
   // Matter's permanent customer id — survives renewals, unlike subscriptionId.
   const matterCustomerId = String(entry?.matterCustomerId || '').trim();
+    // Absence is meaningful only after a complete, fresh delivery roster was
+    // verified. A cancelled/expired account's saved identity stays intact.
+    if (matterCustomerId && productionScope?.complete === true && productionScope.date
+      && Array.isArray(productionScope.roster)
+      && !productionScope.roster.some((sub) => matchesMatterSubscription(entry, sub))) {
+      onEach?.();
+      return { ...entry, nutritionStatus: 'not-scheduled', nutritionSource: 'matter', nutritionError: null,
+        kitchenProductionExcluded: true, kitchenExclusionDate: productionScope.date, deliveryDates: [] };
+    }
   if (!email && !subscriptionId && !matterCustomerId) {
     onEach?.();
     return { ...entry, nutritionStatus: 'missing' };

@@ -134,7 +134,7 @@ function getMealPlanFromMacros(C, P, F) {
 }
 
 const AddCustomerModal = ({ onClose, onSubmit, isSubmitting, submitError }) => {
-  const [form, setForm] = useState({ customerName: '', customerId: 'CUST-', email: '', mealPerDay: 1, mealPlan: 'Standard', breakfastInclude: false, snackCount: 0, mealExclusion: '' });
+  const [form, setForm] = useState({ customerName: '', email: '', mealPerDay: 1, mealPlan: 'Standard', breakfastInclude: false, snackCount: 0, mealExclusion: '' });
   const [exclusionSearch, setExclusionSearch] = useState('');
   const set = (field) => (e) => setForm(p => ({ ...p, [field]: e.target.value }));
 
@@ -164,8 +164,8 @@ const AddCustomerModal = ({ onClose, onSubmit, isSubmitting, submitError }) => {
             <input type="text" required value={form.customerName} onChange={set('customerName')} placeholder="Full name" className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Customer ID <span className="text-red-500">*</span></label>
-            <input type="text" required value={form.customerId} onChange={e => { const v = e.target.value; setForm(p => ({ ...p, customerId: v.startsWith('CUST-') ? v : 'CUST-' })); }} className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            <label className="block text-sm font-medium text-gray-700 mb-1">Customer ID</label>
+            <p className="text-sm text-gray-500">Assigned automatically when you save.</p>
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Email <span className="text-red-500">*</span></label>
@@ -356,7 +356,6 @@ const Customers = () => {
       const firstName = nameParts[0] || '';
       const lastName = nameParts.slice(1).join(' ') || '';
       const { data } = await api.post('/customers', {
-        customerId: formData.customerId,
         firstName,
         lastName,
         email: formData.email,

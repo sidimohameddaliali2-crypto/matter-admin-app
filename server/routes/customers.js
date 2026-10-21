@@ -12,6 +12,7 @@ import SlackLog from '../models/SlackLog.js';
 import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import { resolveCustomerMatch, resolveCustomerMatchBulk } from '../services/customerMatchService.js';
 import { classifyUploadRow } from '../services/customerUploadIdentity.js';
+import { nextCustomerId, isEmailDerivedCustomerId } from '../services/customerIdSequence.js';
 import { relinkSubscription, LinkTargetNotFoundError } from '../services/subscriptionLink.js';
 import { parsePinInput, isPlausibleCoordinate } from '../services/geocoding.js';
 import { protect } from '../middleware/auth.js';
@@ -141,7 +142,7 @@ router.post('/upload-emails', async (req, res) => {
           Customer.findOne({ customerId: customerId.trim() })
         ]);
         const decision = classifyUploadRow(
-          { customerId: customerId.trim(), idGenerated: customerData.idGenerated === true },
+          { customerId: customerId.trim(), idGenerated: customerData.idGenerated === true || isEmailDerivedCustomerId(customerId, email) },
           { byEmail, byId }
         );
 
@@ -165,7 +166,7 @@ router.post('/upload-emails', async (req, res) => {
 
         // Create new customer
         const newCustomer = new Customer({
-          customerId: customerId.trim(),
+          customerId: customerData.idGenerated === true || isEmailDerivedCustomerId(customerId, email) ? await nextCustomerId() : customerId.trim(),
           email: email,
           firstName: name.trim().split(' ')[0] || 'Unknown',
           lastName: name.trim().split(' ').slice(1).join(' ') || '',
@@ -305,7 +306,7 @@ router.post('/upload-bulk', async (req, res) => {
     const conflicts = [];
     for (const doc of parsed) {
       const decision = classifyUploadRow(
-        { customerId: doc.customerId },
+        { customerId: doc.customerId, idGenerated: isEmailDerivedCustomerId(doc.customerId, doc.email) },
         { byEmail: byEmailMap.get(doc.email) || null, byId: byIdMap.get(doc.customerId) || null }
       );
 
@@ -326,6 +327,7 @@ router.post('/upload-bulk', async (req, res) => {
         const { customerId: _keepExistingId, ...fields } = doc;
         ops.push({ updateOne: { filter: { customerId: decision.customer.customerId }, update: { $set: fields } } });
       } else {
+        if (isEmailDerivedCustomerId(doc.customerId, doc.email)) doc.customerId = await nextCustomerId();
         ops.push({
           updateOne: {
             filter: { customerId: doc.customerId },
@@ -483,10 +485,10 @@ router.post('/', async (req, res) => {
     const { customerId, firstName, lastName, email, phone, company } = req.body;
 
     // Validate required fields
-    if (!customerId || !firstName || !email) {
+    if (!firstName || !email) {
       return res.status(400).json({
         success: false,
-        message: 'Missing required fields: customerId, firstName, and email are required'
+        message: 'Missing required fields: firstName and email are required'
       });
     }
 
@@ -503,7 +505,7 @@ router.post('/', async (req, res) => {
     const existingCustomer = await Customer.findOne({
       $or: [
         { email: buildEmailRegex(email) },
-        { customerId: customerId.trim() }
+        ...(customerId ? [{ customerId: customerId.trim() }] : [])
       ]
     });
 
@@ -518,7 +520,7 @@ router.post('/', async (req, res) => {
 
     // Create new customer
     const newCustomer = new Customer({
-      customerId: customerId.trim(),
+      customerId: !customerId || customerId === 'CUST-' || isEmailDerivedCustomerId(customerId, email) ? await nextCustomerId() : customerId.trim(),
       firstName: firstName.trim(),
       lastName: lastName?.trim() || '',
       email: email.trim(),

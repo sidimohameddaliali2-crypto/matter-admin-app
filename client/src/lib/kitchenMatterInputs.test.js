@@ -13,6 +13,35 @@ const nutrition = {
 };
 const calculate = (customer) => calculateKitchenListEntry({ customer, selectedMeals: [{ date: '2026-10-20', mealType: 'main', mealName: 'Fixture' }] });
 
+test('a saved Matter account absent from a complete date roster needs no subscription lookup and keeps its identity', async () => {
+  const api = { get: jest.fn() };
+  const [entry] = await enrichSelectionsWithNutrition(api, [raw], { current: new Map() }, {
+    productionScope: { complete: true, date: '2026-10-23', roster: [] },
+  });
+  expect(api.get).not.toHaveBeenCalled();
+  expect(entry.matterCustomerId).toBe('customer');
+  expect(entry.nutritionStatus).toBe('not-scheduled');
+  expect(calculate(entry).kitchenProductionExcluded).toBe(true);
+});
+
+test.each([null, { complete: false, date: '2026-10-23', roster: [] },
+  { complete: true, date: '2026-10-23', roster: [{ customer_id: 'customer', subscription_id: 'fixture' }] }])('incomplete discovery or a customer due delivery cannot be hidden: %p', async (productionScope) => {
+  const api = { get: jest.fn().mockRejectedValue({ response: { status: 404, data: { code: 'MATTER_SUBSCRIPTION_UNAVAILABLE', message: 'No current subscription.' } } }) };
+  const [entry] = await enrichSelectionsWithNutrition(api, [{ ...raw, kitchenProductionExcluded: true }], { current: new Map() }, { productionScope });
+  expect(api.get).toHaveBeenCalled();
+  expect(entry.kitchenProductionExcluded).toBe(false);
+  expect(() => assertKitchenExportReady([calculate(entry)])).toThrow('blocked');
+});
+
+test('renewal restores an excluded account as soon as the verified roster schedules it', async () => {
+  const api = { get: jest.fn().mockResolvedValue({ data: { success: true, data: nutrition } }) };
+  const [entry] = await enrichSelectionsWithNutrition(api, [{ ...raw, kitchenProductionExcluded: true }], { current: new Map() }, {
+    productionScope: { complete: true, date: '2026-10-23', roster: [{ customer_id: 'customer', subscription_id: 'fixture' }] },
+  });
+  expect(entry.kitchenProductionExcluded).toBe(false);
+  expect(entry.nutritionStatus).toBe('resolved');
+});
+
 test('Matter resolution, name, daily quantities and zero snacks replace saved kitchen profile fields', async () => {
   const api = { get: jest.fn().mockResolvedValue({ data: { success: true, data: nutrition } }) };
   const [entry] = await enrichSelectionsWithNutrition(api, [raw], { current: new Map() }, { extended: true });

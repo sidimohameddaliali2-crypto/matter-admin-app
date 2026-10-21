@@ -462,7 +462,9 @@ const KitchenList = () => {
           // Read fresh website nutrition by email first. Saved Matter IDs are
           // used only when no email is available; customer identity conflicts
           // and ambiguous matches remain unresolved rather than guessed.
-          const enrichedSelections = await enrichSelectionsWithNutrition(api, rawSelections, nutritionCacheRef, { extended: true, matterInputs: preparation.cached ? [] : preparation.data?.kitchenInputs });
+          const enrichedSelections = await enrichSelectionsWithNutrition(api, rawSelections, nutritionCacheRef, { extended: true, matterInputs: preparation.cached ? [] : preparation.data?.kitchenInputs,
+            productionScope: !preparation.cached && preparation.data?.rosterComplete === true
+              ? { complete: true, date: missingCheckDate, roster: preparation.data.kitchenRoster } : null });
 
           const keyedSelections = enrichedSelections.map((entry) => attachStableMealKeys(entry));
           if (!current()) return [];
@@ -3240,6 +3242,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
                 {entry.planName}
               </span>
             )}
+            {entry.kitchenProductionExcluded && <span className="text-xs text-slate-500">Not scheduled for {formatDateLabel(entry.kitchenExclusionDate)}</span>}
             {entry.missingSelection && (
               <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
                 No Meal Selection — {formatDateLabel(entry.missingSelectionDate)}

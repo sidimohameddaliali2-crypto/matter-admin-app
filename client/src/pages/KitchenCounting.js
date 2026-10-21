@@ -157,6 +157,8 @@ const KitchenCounting = () => {
       setLoadProgress({ done: 0, total: rawSelections.length });
       const enrichedSelections = await enrichSelectionsWithNutrition(api, rawSelections, nutritionCacheRef, {
         matterInputs: preparation.cached ? [] : preparation.data?.kitchenInputs,
+        productionScope: !preparation.cached && preparation.data?.rosterComplete === true
+          ? { complete: true, date: selectedDate, roster: preparation.data.kitchenRoster } : null,
         onEach: () => { if (current()) setLoadProgress((prev) => ({ ...prev, done: prev.done + 1 })); }
       });
 

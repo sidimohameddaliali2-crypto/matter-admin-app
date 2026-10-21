@@ -8,6 +8,8 @@ import KitchenBreakfastPreset from '../models/KitchenBreakfastPreset.js';
 import KitchenSnackPreset from '../models/KitchenSnackPreset.js';
 import WeeklyMenu from '../models/WeeklyMenu.js';
 import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
+import MenuSelectionArchive from '../models/MenuSelectionArchive.js';
+import { excludeRecreatedArchivedAliases } from '../services/archivedMenuAliases.js';
 import { protect } from '../middleware/auth.js';
 import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
 import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
@@ -3205,7 +3207,13 @@ router.get('/:id/selections', protect, async (req, res) => {
     const records = await MenuSelectionRecord.find({ weeklyMenuId: req.params.id })
       .populate('selectedMeals.menuItemId', '_id mealName mealType itemDate portionType rotationCategory usedForCorePlan')
       .sort({ submittedAt: -1 });
-    res.json({ success: true, data: records.map((record) => {
+    const rows = records.map(record => record.toObject ? record.toObject() : record);
+    const aliases = rows.filter(row => !row.matterCustomerId).map(row => row.email);
+    const archives = aliases.length ? await MenuSelectionArchive.find({
+      'original.weeklyMenuId': new mongoose.Types.ObjectId(req.params.id), 'original.email': { $in: aliases },
+    }).lean() : [];
+    const visible = excludeRecreatedArchivedAliases(rows, archives);
+    res.json({ success: true, data: visible.map((record) => {
       const row = record.toObject ? record.toObject() : record;
       return { _id: row._id, email: row.email, matterEmail: row.matterEmail || null,
         customerId: row.matterCustomerId || null, matterCustomerId: row.matterCustomerId || null,

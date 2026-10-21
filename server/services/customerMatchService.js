@@ -1,4 +1,5 @@
 import Customer from '../models/Customer.js';
+import { nextCustomerId } from './customerIdSequence.js';
 
 /**
  * Single place that decides "which internal Customer does this external
@@ -161,9 +162,7 @@ export async function createCustomerFromMatterSubscription(sub) {
   const [firstName, ...rest] = name.split(/\s+/).filter(Boolean);
   const subscriptionId = String(sub?.subscription_id || sub?.subscriptionId || '').trim();
 
-  const customerId = email
-    ? email.split('@')[0]
-    : `matter_${subscriptionId || Date.now()}`;
+  const customerId = await nextCustomerId();
 
   const customer = new Customer({
     customerId,
@@ -172,6 +171,7 @@ export async function createCustomerFromMatterSubscription(sub) {
     email: email || undefined,
     phone: sub?.phone || '',
     matterSubscriptionId: subscriptionId || undefined,
+    matterCustomerId: sub?.customer_id == null ? undefined : String(sub.customer_id),
     dataSource: 'MatterApi'
   });
 

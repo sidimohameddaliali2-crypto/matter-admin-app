@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import Customer from '../models/Customer.js';
 import Record from '../models/MenuSelectionRecord.js';
+import Archive from '../models/MenuSelectionArchive.js';
 import Menu from '../models/WeeklyMenu.js';
 import MenuItem from '../models/MenuItem.js';
 import Lease from '../models/KitchenPreparationLease.js';
@@ -65,6 +66,24 @@ test('staff selection edits and deletion never mirror changes onto Internal cust
   const deleted = response();
   await route('/:menuId/selections/:email', 'delete')({ params: { menuId: 'menu', email: 'old-storage@example.invalid' } }, deleted);
   assert.equal(deleted.body.success, true);
+});
+
+test('selections GET suppresses only an approved archived alias and never recreates or deletes records', async (t) => {
+  blockInternal(t);
+  const menuId = '507f1f77bcf86cd799439012';
+  const meal = { date: new Date('2026-10-23'), mealType: 'main', mealName: 'Saved choice', quantity: 1 };
+  const alias = { _id: 'new-alias', weeklyMenuId: menuId, email: 'alias@example.invalid', selectedMeals: [meal] };
+  const retained = { _id: 'retained', weeklyMenuId: menuId, matterCustomerId: '42', email: source.customer_email, selectedMeals: [meal] };
+  t.mock.method(Record, 'find', () => query([alias, retained]));
+  t.mock.method(Archive, 'find', filter => {
+    assert.equal(String(filter['original.weeklyMenuId']), menuId);
+    return query([{ retainedSelectionId: 'retained', matterCustomerId: '42', original: alias }]);
+  });
+  for (const method of ['create', 'deleteOne', 'updateOne', 'findOneAndUpdate']) t.mock.method(Record, method, () => assert.fail('GET must not write selections'));
+  const res = response();
+  await route('/:id/selections', 'get')({ params: { id: menuId } }, res);
+  assert.equal(res.body.success, true);
+  assert.deepEqual(res.body.data.map(row => row.email), [source.customer_email]);
 });
 
 test('missing Core rotation returns the actual date and missing main slots without exposing source inputs', async (t) => {

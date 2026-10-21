@@ -57,7 +57,10 @@ export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => 
     api.get(`/menus/${menuId}/selections`), fetchBreakfastPresets(api, menuId), fetchSnackPresets(api),
   ]);
   if (!response.data?.success) throw new Error('Selections could not be verified.');
-  const selections = await enrichSelectionsWithNutrition(api, response.data.data || [], { current: new Map() }, { extended: true, matterInputs: [...preparations.values()].flatMap((result) => result.cached ? [] : result.data?.kitchenInputs || []) });
+  const single = dayKeys.length === 1 ? preparations.get(dayKeys[0]) : null;
+  const selections = await enrichSelectionsWithNutrition(api, response.data.data || [], { current: new Map() }, { extended: true, matterInputs: [...preparations.values()].flatMap((result) => result.cached ? [] : result.data?.kitchenInputs || []),
+    productionScope: single && !single.cached && single.data?.rosterComplete === true
+      ? { complete: true, date: dayKeys[0], roster: single.data.kitchenRoster } : null });
   const rosters = new Map();
   for (const date of dayKeys) {
     const preparation = preparations.get(date);

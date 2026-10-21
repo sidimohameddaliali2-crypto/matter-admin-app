@@ -1,7 +1,7 @@
 import React from 'react';
 
 export default function KitchenInputWarnings({ entries, onShowCustomer }) {
-  const incomplete = entries.filter(entry => entry.calculationStatus === 'incomplete');
+  const incomplete = entries.filter(entry => entry.calculationStatus === 'incomplete' && !entry.kitchenProductionExcluded);
   if (!incomplete.length) return null;
   return <div role="alert" className="mb-4 rounded-xl bg-amber-50 p-4 text-amber-900">
     <p className="font-semibold">{incomplete.length} customer(s) have incomplete kitchen inputs</p>

@@ -252,7 +252,14 @@ class MatterApiService {
       };
       const byCustomer = async (id) => {
         if (!String(id ?? '').trim()) fail('Permanent Matter customer ID is missing. Verify this account in Matter.');
-        const row = one(await this.listSubscriptions({ customerId: id, pageSize: 100 }));
+        const list = await this.listSubscriptions({ customerId: id, pageSize: 100 });
+        if (list?.success !== false && Array.isArray(list?.data) && !list.data.length && Number(list.meta?.total_pages || 1) === 1) {
+          const error = new Error('No current subscription is returned by Matter. The saved customer ID is retained for renewal.');
+          error.statusCode = 404;
+          error.code = 'MATTER_SUBSCRIPTION_UNAVAILABLE';
+          throw error;
+        }
+        const row = one(list);
         const data = await load(row.subscription_id);
         if (String(data.customer_id ?? '') !== String(id)) fail('Matter customer identity does not match the requested permanent ID.');
         return data;
