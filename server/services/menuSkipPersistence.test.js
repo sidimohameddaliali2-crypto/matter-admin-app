@@ -14,6 +14,7 @@ test('the menu profile restores a submission consisting entirely of skipped days
   }));
   t.mock.method(Customer, 'findOne', () => ({ select: async () => customer }));
   t.mock.method(Customer, 'findById', async () => customer);
+  t.mock.method(Customer, 'find', () => ({ select: () => ({ lean: async () => [{ ...customer, allergies: ['Milk'] }] }) }));
   t.mock.method(MenuSelectionRecord, 'findOne', () => ({ lean: async () => ({ selectedMeals: [], skippedDays }) }));
   const handler = router.stack.find((layer) => layer.route?.path === '/customers/:email/subscription-profile').route.stack[0].handle;
   let response;
@@ -23,6 +24,8 @@ test('the menu profile restores a submission consisting entirely of skipped days
   assert.equal(response.data.hasSubmittedForRequestedMenu, true);
   assert.deepEqual(response.data.skippedDays, skippedDays);
   assert.equal(response.data.weekend, true);
+  assert.deepEqual(response.data.allergies, ['Milk']);
+  assert.equal(response.data.allergiesAvailable, true);
 });
 
 test('an incomplete set of resume dates is rejected before saving meals or writing any Matter pauses', async (t) => {

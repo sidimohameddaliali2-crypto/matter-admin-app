@@ -36,8 +36,13 @@ test('preparation follows permanent Matter ID across renewal without Internal re
   assert.equal(writes[0].$set.customerId, '42');
 });
 
-test('menu sign-in and selections GET do not read Internal profiles or legacy Customer selections', async (t) => {
+test('menu sign-in reads only Internal allergies; identity and saved selections remain Matter-owned', async (t) => {
   blockInternal(t);
+  // Owner (2026-10-21): internal allergy profiles are the sole exception.
+  t.mock.method(Customer, 'find', () => ({ select(fields) {
+    assert.equal(fields, 'allergies email matterCustomerId matterSubscriptionId');
+    return query([{ matterCustomerId: '42', allergies: ['Milk'], firstName: 'Internal name', mealPerDay: 99 }]);
+  } }));
   const record = { email: source.customer_email, matterCustomerId: '42', selectedMeals: [{ date: '2026-10-22', mealType: 'main' }], skippedDays: [], firstName: 'Untrusted legacy name' };
   t.mock.method(matter, 'getKitchenNutrition', async () => source);
   t.mock.method(Record, 'findOne', () => query(record)); t.mock.method(Record, 'find', () => query([record]));
@@ -45,9 +50,12 @@ test('menu sign-in and selections GET do not read Internal profiles or legacy Cu
   await route('/customers/:email/subscription-profile', 'get')({ params: { email: source.customer_email }, query: { menuId: 'menu' } }, res);
   assert.equal(res.body.data.customerId, '42');
   assert.equal(res.body.data.firstName, 'Matter');
-  assert.equal(res.body.data.allergies, null);
+  assert.deepEqual(res.body.data.allergies, ['Milk']);
+  assert.equal(res.body.data.allergiesAvailable, true);
+  assert.equal(res.body.data.mealPerDay, 1);
   assert.equal(res.body.data.hasSubmittedForRequestedMenu, true);
   const list = response();
+  t.mock.method(Customer, 'find', () => assert.fail('Selections GET must not read Internal profiles'));
   await route('/:id/selections', 'get')({ params: { id: 'menu' } }, list);
   assert.equal(list.body.data[0].firstName, undefined);
   assert.equal(list.body.data[0].customer, undefined);

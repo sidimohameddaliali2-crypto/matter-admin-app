@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/api';
-import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm } from '../../constants/exclusionList';
+import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm, allergenMatchesAny } from '../../constants/exclusionList';
 import { toSentenceCase } from '../../utils/textFormat';
 import MatterLogo from './MatterLogo';
 import SkipPauseCalendarModal from './SkipPauseCalendarModal';
@@ -569,11 +569,9 @@ const MenuSelectionLink = ({ token }) => {
     (m) => {
       if (!account) return null;
 
-      // hard block — meal's allergen tokens ∩ customer's allergy list
+      // Hard block using complete ingredient phrases, including hidden tags.
       const allergenTokens = preview ? m.allergens || [] : m.allergenMatchTokens || [];
-      const al = allergenTokens
-        .map((a) => String(a).toLowerCase())
-        .filter((a) => account.allergensLc.includes(a));
+      const al = account.allergensLc.filter((allergy) => allergenMatchesAny(allergy, allergenTokens));
       if (al.length) return { kind: 'allergen', items: Array.from(new Set(al.map(titleCase))) };
 
       // soft warn — customer's exclusions found among the meal's dietary tokens.
@@ -744,6 +742,13 @@ const MenuSelectionLink = ({ token }) => {
   // about pausing is ever recomputed server-side from this; the server
   // applies these decisions verbatim (routes/menus.js select-meals).
   const doSubmit = useCallback(async (pauseDecisions) => {
+    // Recheck restored selections too: a customer's allergy profile may have
+    // changed since their previous submission, without going through tryAdd.
+    const blockedMeal = (model?.meals || []).find((m) => qty[m.key] > 0 && !skipped[m.dayIndex] && conflictOf(m)?.kind === 'allergen');
+    if (blockedMeal) {
+      flash(`Remove ${blockedMeal.name} before submitting: it conflicts with your allergy profile.`);
+      return;
+    }
     if (preview) {
       setLockedSkipDays(skipped);
       setStep('done');
@@ -804,7 +809,7 @@ const MenuSelectionLink = ({ token }) => {
     } finally {
       setSubmitting(false);
     }
-  }, [account, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped]);
+  }, [account, conflictOf, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped]);
 
   // Fetches available dates for the currently-skipped days and opens
   // the pause-confirmation calendar. Never calls select-meals itself — the
@@ -913,10 +918,10 @@ const MenuSelectionLink = ({ token }) => {
           const tags = (m.allergens || [])
             .map((x) => ({
               label: x,
-              bg: account.allergensLc.includes(String(x).toLowerCase())
+              bg: account.allergensLc.some((allergy) => allergenMatchesAny(allergy, [x]))
                 ? '#FEE2E2'
                 : 'var(--color-neutral-200)',
-              fg: account.allergensLc.includes(String(x).toLowerCase())
+              fg: account.allergensLc.some((allergy) => allergenMatchesAny(allergy, [x]))
                 ? '#991B1B'
                 : 'var(--color-neutral-700)',
             }))
@@ -1195,7 +1200,7 @@ const MenuSelectionLink = ({ token }) => {
               <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--color-neutral-600)', marginBottom: 6 }}>Allergens</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
                 {customer.allergenFlags.length === 0 ? (
-                  <span className="text-muted" style={{ fontSize: 12 }}>{account?.allergensKnown === false ? 'Not supplied by Matter' : 'None on file'}</span>
+                  <span className="text-muted" style={{ fontSize: 12 }}>{account?.allergensKnown === false ? 'No internal allergy profile found' : 'None on file'}</span>
                 ) : (
                   customer.allergenFlags.map((f, i) => (
                     <span key={i} className="tag" style={{ fontSize: 11, padding: '3px 9px', background: f.bg, color: f.fg }}>{f.label}</span>
@@ -1207,7 +1212,7 @@ const MenuSelectionLink = ({ token }) => {
               <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--color-neutral-600)', marginBottom: 6 }}>Exclusions</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
                 {customer.exclusionFlags.length === 0 ? (
-                  <span className="text-muted" style={{ fontSize: 12 }}>{account?.allergensKnown === false ? 'Not supplied by Matter' : 'None on file'}</span>
+                  <span className="text-muted" style={{ fontSize: 12 }}>None on file</span>
                 ) : (
                   customer.exclusionFlags.map((f, i) => (
                     <span key={i} className="tag" style={{ fontSize: 11, padding: '3px 9px', background: f.bg, color: f.fg }}>{f.label}</span>

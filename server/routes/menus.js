@@ -18,6 +18,7 @@ import matterApiService, { describeMatterApiError } from '../services/matterApiS
 import supyService from '../services/supyService.js';
 import { withKitchenPreparation, preparationHasFailures, kitchenPreparationFailure } from '../services/kitchenPreparation.js';
 import { matterSelectionIdentity, matterSelectionFilter, normalizeMatterEmail } from '../services/matterKitchenIdentity.js';
+import { resolveMenuAllergyProfile } from '../services/menuAllergyProfileService.js';
 import { syncMenuSelectionMainMealsToPartnerMenu } from '../services/menuSelectionPartnerSync.js';
 import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, validateRequiredResumeDates, expandSaturdaySkips } from '../services/matterPauseResumeService.js';
 
@@ -379,11 +380,9 @@ router.get('/customers/:customerId/meal-profile', async (req, res) => {
  * name, macros) is resolved straight from Matter by an EXACT email lookup —
  * never internal Customer matching, and never a fuzzy phone/name fallback.
  * If the typed email has no Matter subscription, this returns a clear error
- * instead of guessing. Exclusions/allergens (which Matter doesn't reliably
- * curate) and Partner membership (which Matter doesn't know about at all)
- * still come from an internal Customer record when one exists under this
- * exact email — absent internally is not a blocker, those fields are just
- * empty/default since Matter already confirmed the account exists.
+ * instead of guessing. Owner (2026-10-21): allergies alone come from the
+ * linked internal Customer allergy profile. Identity, entitlements and
+ * dietary exclusions remain Matter-owned.
  */
 router.get('/customers/:email/subscription-profile', async (req, res) => {
   try {
@@ -413,6 +412,7 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
     }
 
     const identity = matterSelectionIdentity(nutrition);
+    const allergyProfile = await resolveMenuAllergyProfile(nutrition);
     const record = menuId ? await MenuSelectionRecord.findOne(matterSelectionFilter(menuId, nutrition)).lean() : null;
     const consolidatedMeals = record?.selectedMeals || [];
     const savedSkippedDays = record?.skippedDays || [];
@@ -438,8 +438,7 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
         deliveryDates: nutrition.active_delivery_dates,
         cycleEndDate: nutrition.cycle_end_date,
         mealExclusion: (nutrition.exclusions || []).join(', '),
-        allergies: null,
-        allergiesAvailable: false,
+        ...allergyProfile,
         partner: null,
         selectedMeals: consolidatedMeals,
         skippedDays: savedSkippedDays,
@@ -452,7 +451,7 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
     });
   } catch (error) {
     console.error('Error in GET subscription-profile:', error);
-    return res.status(500).json({ success: false, error: error.message });
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 });
 
