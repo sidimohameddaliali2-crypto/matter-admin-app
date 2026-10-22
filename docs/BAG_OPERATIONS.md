@@ -1,4 +1,4 @@
-# Bag operations: stages 1–4
+# Bag operations: stages 1–5
 
 The combined Admin & Warehouse workspace is `/bags`. `/store-keeper` redirects
 there. Staff authentication and effective `bags` permissions remain in force.
@@ -80,6 +80,64 @@ available. New Mongo model indexes must exist before enabling production writes.
 Refund endpoints bypass service-worker caching and offline queues. An offline
 approval or completion fails rather than displaying a cached successful result.
 
+## Stage 5: internal reminders and accountability
+
+Owner (2026-10-22): internal staff reminders only. Two or more distinct
+outstanding customer bag tags trigger a follow-up flag. Driver-collected and
+warehouse-received bags no longer count toward that customer flag. Unverified
+legacy associations get a separate verification flag, never a statement of
+proven physical custody. Duplicate tag rows and aggregate quantities do not
+manufacture extra physical bags. Customer balances and overview display flags.
+
+The Reminders & reports tab derives its queue on read without creating tasks or
+changing inventory. New flags and overdue verified return deadlines are due
+immediately for internal review. Operators can assign an active responsible
+staff member, set a Dubai reminder date, escalate, and record actual contact
+made outside the app. Contact logging requires a channel and explicit
+confirmation. No email, WhatsApp or other external notification is sent.
+
+Saved reminder times apply only to the recorded custody cycle. Changed bags
+require fresh review rather than silently reusing an old contact or snoozed
+date. Follow-ups continue while bags remain; they resolve automatically when
+customer associations clear. Histories are retained. Flags clear below two
+outstanding tags; that does not itself settle any refund or prove all bags have
+returned. No missing return date is fabricated.
+
+Reports cover current staff ownership, due/escalated work, unassigned or inactive
+owners, driver-held collections awaiting warehouse receipt, and pending refund
+approvals/completion. Customer follow-up details export to CSV with spreadsheet
+formula prefixes escaped. Accountability identifies current custody and the
+next responsible person; it does not infer loss or blame. The internal queue
+refreshes every 30 seconds when no form is open; it is not a background push
+notification service. `/api/bag-followups` reads/writes require warehouse or
+management bag access. Writes use version and custody checks, stable event IDs,
+and notes. Service-worker caches and offline queues are bypassed.
+
+Stages 6 (a separate reporting project) and 8 (subscription integration) are
+removed from the proposed roadmap. Reporting above is included in stage 5.
+Stage 7 customer self-service remains optional; stage 9 is the operational pilot
+and rollout, independent of subscription integration.
+
+## Stage 9: pilot and operational rollout
+
+1. Prepare a staging environment with separate data. Verify collection,
+   warehouse receipt, inspection, refund approval/manual completion, two-bag
+   flags and scheduled staff reminders. Check role restrictions, offline
+   failures, duplicate retries and stale custody conflicts.
+2. Count and reconcile opening warehouse stock. Keep uncertain historical
+   customer associations in verification, with named owners and evidence.
+3. Pilot with one warehouse lead, a small delivery group and one refund
+   approver. Train staff on scanning at handover, receipt vs collection, damage
+   evidence, reminder ownership and recording refunds already paid externally.
+4. Review the pilot each day: unassigned/due tasks, unresolved legacy links,
+   bags still held by drivers and approved refunds without completion evidence.
+   Agree who covers each queue and what follow-up timing the team can meet.
+5. Expand after the team completes the journeys reliably. Before production,
+   back up data, verify the new indexes, deploy server and client together and
+   verify one controlled case. Retain a rollback plan; never delete custody or
+   refund history to hide pilot discrepancies. No live rollout is performed by
+   these code changes.
+
 ## Data and concurrency
 
 Each movement uses a stable `eventId`, actor, fingerprint, before-state, timestamp
@@ -134,12 +192,12 @@ Previously cached clients get explicit conflicts for deprecated inventory writes
 Validation from `server/`:
 
 ```
-node --test services/bagLifecycleService.test.js services/bagMovementStore.test.js services/bagRefundPolicy.test.js services/bagRefundRoutes.test.js services/bagRefundWorker.test.js
+node --test services/bagLifecycleService.test.js services/bagMovementStore.test.js services/bagRefundPolicy.test.js services/bagRefundRoutes.test.js services/bagRefundWorker.test.js services/bagFollowupPolicy.test.js services/bagFollowupRoutes.test.js
 ```
 
 Validation from `client/`:
 
 ```
-npm test -- --watchAll=false --runInBand --runTestsByPath src/pages/BagOperations.test.js src/utils/offlineSync.test.js src/components/bags/BagRefundTracker.test.js
+npm test -- --watchAll=false --runInBand --runTestsByPath src/pages/BagOperations.test.js src/utils/offlineSync.test.js src/components/bags/BagRefundTracker.test.js src/components/bags/BagFollowups.test.js
 npm run build
 ```

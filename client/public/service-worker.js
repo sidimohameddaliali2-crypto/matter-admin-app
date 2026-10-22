@@ -1,6 +1,6 @@
 /* eslint-disable no-restricted-globals */
 
-const CACHE_NAME = 'delivery-tracker-v4-bag-refunds';
+const CACHE_NAME = 'delivery-tracker-v5-bag-reminders';
 const OFFLINE_URL = '/driver-mobile';
 
 // Assets to cache on install
@@ -64,6 +64,8 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname === '/api/matter/subscriptions/kitchen-inputs'
     || url.pathname === '/api/matter/subscriptions/delivery-on-date'
     || /^\/api\/bag-refunds(?:\/|$)/.test(url.pathname)
+    || /^\/api\/bag-followups(?:\/|$)/.test(url.pathname)
+    || /^\/api\/bag-operations(?:\/|$)/.test(url.pathname)
     || /^\/api\/matter\/subscriptions\/[^/]+\/delivery-comparison$/.test(url.pathname)) {
     event.respondWith(fetch(request, { cache: 'no-store' }));
     return;

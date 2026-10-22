@@ -1,4 +1,5 @@
 import {auditBagInventory,normalizeBagId} from './bagInventoryAudit.js';
+import {customerBagBalances} from './bagFollowupPolicy.js';
 export async function loadBagSnapshot(db) {
   const read=(name,query,projection)=>db.collection(name).find(query,{projection,maxTimeMS:30000}).toArray();
   const bags=await read('bags',{},{});
@@ -26,12 +27,7 @@ export function buildBagWorkspace(snapshot,reviews=[],now=new Date()) {
     isFlagged:!!b.isFlagged,flagReason:b.flagReason||'',historyCount:b.history?.length||0,
     reasons:reasons.get(String(b._id))||[],review:reviewMap.get(`bag:${b._id}`)||null
   }));
-  const groups=new Map();
-  for(const b of bags.filter(b=>b.customerId)){
-    if(!groups.has(b.customerId))groups.set(b.customerId,{customerId:b.customerId,customerName:b.customerName||b.customerId,bags:[],confirmed:0,collected:0,ambiguous:0});
-    const c=groups.get(b.customerId);c.bags.push(b.bagId);if(b.lifecycleState==='with_customer'&&b.verifiedAt)c.confirmed++;else if(b.lifecycleState==='collected'&&b.verifiedAt)c.collected++;else c.ambiguous++;
-  }
-  return {generatedAt:audit.generatedAt,summary:audit.summary,checks:audit.findings.map(({records,...f})=>f),unknownCodes:audit.unknownCodes,bags,customers:[...groups.values()],limitations:audit.limitations};
+  return {generatedAt:audit.generatedAt,summary:audit.summary,checks:audit.findings.map(({records,...f})=>f),unknownCodes:audit.unknownCodes,bags,customers:customerBagBalances(snapshot.bags,[],snapshot.users,now),limitations:audit.limitations};
 }
 export function compareStockCount(bags,scannedCodes) {
   if(!Array.isArray(scannedCodes)||scannedCodes.length>20000||scannedCodes.some(c=>typeof c!=='string'||!c.trim()||c.length>160))throw new Error('Provide up to 20,000 non-empty bag IDs.');

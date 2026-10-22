@@ -15,3 +15,6 @@ test('refund queue reads use live network evidence and never store financial res
 test('offline refund reads and completion writes fail instead of falling back to cached success or a queue',async()=>{
   const w=worker(async()=>{throw new Error('offline');});await assert.rejects(w.request('/api/bag-refunds'),/offline/);await assert.rejects(w.request('/api/bag-refunds/case/actions','POST'),/offline/);assert.deepEqual(w.counts(),{cacheReads:0,cacheWrites:0});
 });
+test('internal bag follow-ups never use cached balances or silently queue a staff update while offline',async()=>{
+  const w=worker(async()=>{throw new Error('offline');});await assert.rejects(w.request('/api/bag-followups'),/offline/);await assert.rejects(w.request('/api/bag-followups','POST'),/offline/);await assert.rejects(w.request('/api/bag-operations'),/offline/);assert.deepEqual(w.counts(),{cacheReads:0,cacheWrites:0});
+});
