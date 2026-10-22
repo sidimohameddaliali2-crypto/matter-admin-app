@@ -31,3 +31,22 @@ test('a linked account excluded by a complete date roster is not an incomplete p
   expect(container.textContent).toContain('due@example.invalid');
   expect(container.textContent).not.toContain('not-due@example.invalid');
 });
+
+
+test('selected date hides old selections but retains current meal and missing-selection problems', async () => {
+  const broken = { calculationStatus: 'incomplete', inputErrors: ['Missing inputs'] };
+  const entries = [
+    { ...broken, email: 'old@example.invalid', selectedMeals: [{ date: '2026-10-21' }] },
+    { ...broken, email: 'current@example.invalid', selectedMeals: [{ date: '2026-10-24' }] },
+    { ...broken, email: 'missing@example.invalid', missingSelection: true, missingSelectionDate: '2026-10-24' },
+    { ...broken, email: 'not-due@example.invalid', selectedMeals: [{ date: '2026-10-24' }], noDeliveryDate: '2026-10-24' },
+    { ...broken, email: 'skipped@example.invalid', selectedMeals: [{ date: '2026-10-24' }], skippedDays: [{ date: '2026-10-24' }] },
+  ];
+  await act(async () => root.render(<KitchenInputWarnings entries={entries} selectedDate="2026-10-24" onShowCustomer={() => {}} />));
+  expect(container.textContent).toContain('2 customer(s)');
+  expect(container.textContent).toContain('current@example.invalid');
+  expect(container.textContent).toContain('missing@example.invalid');
+  for (const email of ['old@example.invalid', 'not-due@example.invalid', 'skipped@example.invalid']) expect(container.textContent).not.toContain(email);
+  await act(async () => root.render(<KitchenInputWarnings entries={entries} selectedDate="2026-10-25" onShowCustomer={() => {}} />));
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+});

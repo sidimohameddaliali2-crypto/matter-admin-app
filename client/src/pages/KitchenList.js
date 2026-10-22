@@ -3179,7 +3179,7 @@ ${body}
 
 
         <div className="space-y-4">
-          <KitchenInputWarnings entries={allComputedRows} onShowCustomer={(entry) => {
+          <KitchenInputWarnings entries={allComputedRows} selectedDate={missingCheckDate} onShowCustomer={(entry) => {
             setSearchInput(entry.email || entry.customerName || '');
             setSearch(entry.email || entry.customerName || '');
             setPlanFilter('');

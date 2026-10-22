@@ -1,11 +1,19 @@
 import React from 'react';
+import { getDateKey } from '../lib/kitchenData';
 
-export default function KitchenInputWarnings({ entries, onShowCustomer }) {
-  const incomplete = entries.filter(entry => entry.calculationStatus === 'incomplete' && !entry.kitchenProductionExcluded);
+export default function KitchenInputWarnings({ entries, selectedDate, onShowCustomer }) {
+  const incomplete = entries.filter(entry => {
+    if (entry.calculationStatus !== 'incomplete' || entry.kitchenProductionExcluded) return false;
+    if (!selectedDate) return true;
+    if (entry.noDeliveryDate === selectedDate) return false;
+    if ((entry.skippedDays || []).some(day => getDateKey(day.date || day) === selectedDate)) return false;
+    return (entry.selectedMeals || []).some(meal => getDateKey(meal.date) === selectedDate)
+      || (entry.missingSelection && entry.missingSelectionDate === selectedDate);
+  });
   if (!incomplete.length) return null;
   return <div role="alert" className="mb-4 rounded-xl bg-amber-50 p-4 text-amber-900">
     <p className="font-semibold">{incomplete.length} customer(s) have incomplete kitchen inputs</p>
-    <p className="mt-1 text-sm">Affected customers are listed below, including those hidden by your current filters. Portion weights are unavailable until their inputs are resolved. Export eligibility is checked separately for the selected delivery date.</p>
+    <p className="mt-1 text-sm">These customers have unresolved inputs for the selected kitchen date, including customers hidden by your current filters.</p>
     <ul className="mt-3 space-y-3">
       {incomplete.map((entry, index) => <li key={`${entry.email || entry.customerId || 'customer'}:${index}`} className="rounded-lg border border-amber-200 p-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
