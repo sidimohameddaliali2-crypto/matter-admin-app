@@ -1,4 +1,4 @@
-# Bag operations: stages 1–3
+# Bag operations: stages 1–4
 
 The combined Admin & Warehouse workspace is `/bags`. `/store-keeper` redirects
 there. Staff authentication and effective `bags` permissions remain in force.
@@ -35,8 +35,50 @@ management and physical stock at warehouse. Hard deletion and quantity overrides
 are rejected by the legacy adapter.
 
 Customer associations, confirmed customer holdings, and driver-collected bags
-are displayed separately. No deposit deduction or refund is executed. Final
-subscription return cases and payments belong to the later deposit stage.
+are displayed separately. The Deposit refunds tab tracks final-return cases.
+This application does not execute payments or deposit deductions.
+
+## Stage 4: manual deposit refund tracker
+
+Owner (2026-10-22): AED 155 bag deposit; no damage deduction policy and no
+payment integration requested. One customer case represents one AED 155 deposit,
+not AED 155 per bag. Management verifies the deposit is unpaid and the
+subscription has ended before opening a case. There is no imported payment
+ledger or automatic subscription-end verification, so this attestation matters.
+
+Stage 3 collection events automatically appear as potential refunds in the
+review queue, grouped by customer. A later warehouse receipt retains the same
+return key. Read endpoints never create cases. Generic legacy return statuses
+are insufficient evidence. Regular exchanges can be closed as not due with a
+reason. Historical exchanges are not treated as proven unpaid deposits.
+
+Flow: collection detected → final-return review → warehouse receipt → physical
+inspection → management approval → completion recorded manually. Warehouse
+staff can inspect; only admin, super admin and managers with bag permissions can
+open, approve, reopen or complete cases. Drivers and dispatchers cannot access
+the refund tracker, regardless of their bag permission.
+
+All linked returns must reach warehouse and receive inspection before approval.
+Any remaining customer association (including ambiguous legacy bags) blocks
+approval. Further returns can be added during review. Approval captures the
+exact evidence fingerprint; changed evidence requires approval again. Damage
+needs management acknowledgement but the amount remains the full AED 155.
+Bag repair and cleaning are independent of refund eligibility after inspection.
+
+Completion records who verified an externally completed refund, its Dubai date
+and time, optional reference and evidence notes. No bank details, payment API,
+money movement or customer notification is involved. Closed cases cannot be
+edited. Request IDs, optimistic versions, unique return ownership, and one active
+case per customer prevent duplicate recording. A later return for a new
+subscription still requires management to verify a new unpaid deposit.
+
+API: GET/POST `/api/bag-refunds`, POST `/api/bag-refunds/:id/actions` with
+`inspect`, `approve`, `reopen`, `complete`, `not_due` or `add_returns`. Writes need
+a stable event ID, version and evidence note. Lists refresh every 30 seconds
+while no case is being edited. The manual Refresh refunds button is always
+available. New Mongo model indexes must exist before enabling production writes.
+Refund endpoints bypass service-worker caching and offline queues. An offline
+approval or completion fails rather than displaying a cached successful result.
 
 ## Data and concurrency
 
@@ -92,12 +134,12 @@ Previously cached clients get explicit conflicts for deprecated inventory writes
 Validation from `server/`:
 
 ```
-node --test services/bagLifecycleService.test.js services/bagMovementStore.test.js
+node --test services/bagLifecycleService.test.js services/bagMovementStore.test.js services/bagRefundPolicy.test.js services/bagRefundRoutes.test.js services/bagRefundWorker.test.js
 ```
 
 Validation from `client/`:
 
 ```
-npm test -- --watchAll=false --runInBand --runTestsByPath src/pages/BagOperations.test.js src/utils/offlineSync.test.js
+npm test -- --watchAll=false --runInBand --runTestsByPath src/pages/BagOperations.test.js src/utils/offlineSync.test.js src/components/bags/BagRefundTracker.test.js
 npm run build
 ```

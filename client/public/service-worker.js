@@ -1,6 +1,6 @@
 /* eslint-disable no-restricted-globals */
 
-const CACHE_NAME = 'delivery-tracker-v3-bag-custody';
+const CACHE_NAME = 'delivery-tracker-v4-bag-refunds';
 const OFFLINE_URL = '/driver-mobile';
 
 // Assets to cache on install
@@ -63,6 +63,7 @@ self.addEventListener('fetch', (event) => {
   // A previously cached successful response cannot establish current Matter data.
   if (url.pathname === '/api/matter/subscriptions/kitchen-inputs'
     || url.pathname === '/api/matter/subscriptions/delivery-on-date'
+    || /^\/api\/bag-refunds(?:\/|$)/.test(url.pathname)
     || /^\/api\/matter\/subscriptions\/[^/]+\/delivery-comparison$/.test(url.pathname)) {
     event.respondWith(fetch(request, { cache: 'no-store' }));
     return;
