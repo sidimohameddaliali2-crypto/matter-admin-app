@@ -1,6 +1,6 @@
 /* eslint-disable no-restricted-globals */
 
-const CACHE_NAME = 'delivery-tracker-v2';
+const CACHE_NAME = 'delivery-tracker-v3-bag-custody';
 const OFFLINE_URL = '/driver-mobile';
 
 // Assets to cache on install

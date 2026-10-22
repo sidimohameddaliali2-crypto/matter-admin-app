@@ -46,6 +46,7 @@ import { syncOfflineData, setupAutoSync, setupAutoRetry, onSyncStatusChange } fr
 import { useSyncStatus, getSyncStatusIndicator } from '../hooks/useSyncStatus';
 import api from '../utils/api';
 import HandoffCard from '../components/driver/HandoffCard';
+import BagHandoverPanel from '../components/driver/BagHandoverPanel';
 import { motion } from 'framer-motion';
 import offlineStorage from '../utils/offlineStorage';
 
@@ -1060,19 +1061,7 @@ const DriverMobile = () => {
         return;
       }
 
-      // Update each scanned bag to available status and clear customer assignment
-      for (const bagId of bagState.collectionScans) {
-        try {
-          await api.patch(`/bags/${bagId}/return`, {
-            status: 'available',
-            notes: `Returned from bag collection task on ${new Date().toLocaleString()}`
-          });
-        } catch (bagError) {
-          console.error(`Error updating bag ${bagId}:`, bagError);
-        }
-      }
-
-      // Don't pass bagId for bag collection tasks - bags are already set to available above
+      // The status endpoint commits typed collection movements; failed bags remain retryable.
       await dispatch(
         updateDeliveryStatus({
           deliveryId: currentDelivery._id,
@@ -1353,19 +1342,12 @@ const DriverMobile = () => {
     if (!currentDelivery) {
       setFeedback(prev => ({ ...prev, isUploading: true }));
       try {
-        // Mark each bag as available on the server
-        for (const bagId of bagState.toReturn) {
-          try {
-            await api.patch(`/bags/${bagId}/return`, {
-              status: 'available',
-              notes: `Returned on ${new Date().toLocaleString()}`
-            });
-          } catch (returnError) {
-            console.error(`❌ Failed to mark bag ${bagId} as returned:`, returnError);
-          }
-        }
-        
-        setFeedback({ scanError: '', scanSuccess: `${bagState.toReturn.length} bag(s) returned successfully!`, isUploading: false });
+        const eventId = 'collection-' + Date.now() + '-' + Math.random().toString(36).slice(2);
+        await queueDeliveryUpdate({kind:'bag_collection',bagIds:bagState.toReturn,eventId});
+        if(navigator.onLine) await syncOfflineData();
+        const pending = await getPendingCount();
+        setOfflineState(prev=>({...prev,queue:Array(pending.total).fill(null)}));
+        setFeedback({scanError:'',scanSuccess:pending.total?'Collection saved. Check pending sync before warehouse handover.':'Bags recorded with you. Warehouse receipt is still required.',isUploading:false});
         setTimeout(() => {
           setFlowState(prev => ({ ...prev, isReturningBags: false }));
           setBagState(prev => ({ ...prev, toReturn: [] }));
@@ -1797,39 +1779,7 @@ const DriverMobile = () => {
 
         setFeedback(prev => ({...prev, scanSuccess: 'Completing delivery...'}));
         
-        // If bags are scanned, reassign them all to this customer
-        if (bagIdsToUse && bagIdsToUse.length > 0) {
-          for (const bagId of bagIdsToUse) {
-            try {
-              await api.patch('/bags/reassign', {
-                bagId: bagId,
-                customerId: currentDelivery.customerId,
-                customerName: currentDelivery.customerName,
-                deliveryId: currentDelivery._id
-              });
-            } catch (reassignError) {
-              console.warn('Bag reassignment failed (non-critical):', reassignError);
-              // Continue with delivery completion even if reassignment fails
-            }
-          }
-        }
-        
-        // Handle returned bags - mark them as available
-        if (bagState.toReturn.length > 0) {
-          for (const returnBagId of bagState.toReturn) {
-            try {
-              const response = await api.patch(`/bags/${returnBagId}/return`, {
-                status: 'available',
-                notes: `Returned from delivery on ${new Date().toLocaleString()}`
-              });
-            } catch (returnError) {
-              console.error(`❌ Failed to mark bag ${returnBagId} as returned:`, returnError);
-            }
-          }
-        } else {
-          // Nothing to return
-        }
-        
+        // One server request handles all outgoing and collected bag movements.
         await dispatch(updateDeliveryStatus({
           deliveryId: currentDelivery._id,
           status: 'delivered',
@@ -5418,6 +5368,7 @@ const DriverMobile = () => {
         </div>
       )}
 
+      {!currentDelivery && currentStep === 'delivery' && <BagHandoverPanel />}
       {/* Fixed Return Bag Button - Only show when not in a delivery flow */}
       {!currentDelivery && currentStep === 'delivery' && (
         <button

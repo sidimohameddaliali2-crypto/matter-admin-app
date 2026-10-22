@@ -1,6 +1,14 @@
 import mongoose from 'mongoose';
 
 const bagSchema = new mongoose.Schema({
+  // Absent on legacy records until an explicit physical observation. Never
+  // default old inventory to ready or verified (owner, 2026-10-22).
+  lifecycleState: {type:String,enum:['ready','packed','outbound','with_customer','collected','received','cleaning','quarantined','retired']},
+  custodyVersion: {type:Number},
+  verifiedAt: Date,
+  lastCustomer: {customerId:String,customerName:String},
+  pendingHandover: {driver:{type:mongoose.Schema.Types.ObjectId,ref:'User'},preparedBy:{type:mongoose.Schema.Types.ObjectId,ref:'User'},preparedAt:Date,transfer:Boolean},
+  damageEvidence: {description:String,proofPhotoUrl:String,reportedBy:{type:mongoose.Schema.Types.ObjectId,ref:'User'},reportedAt:Date},
   bagId: {
     type: String,
     required: [true, 'Bag ID is required'],
@@ -97,6 +105,12 @@ const bagSchema = new mongoose.Schema({
     }
   }],
   history: [{
+    eventId:String,
+    fingerprint:String,
+    occurredAt:Date,
+    lifecycleState:String,
+    proofPhotoUrl:String,
+    before:mongoose.Schema.Types.Mixed,
     eventType: String,
     status: String,
     location: String,
@@ -179,95 +193,14 @@ bagSchema.pre('save', function(next) {
 bagSchema.statics.getDriverBags = function(driverId) {
   return this.find({
     'assignedTo.driver': driverId,
+    location: 'driver',
     isActive: true
   }).populate('assignedTo.driver', 'profile firstName lastName');
 };
 
-// Instance method to assign bag
-bagSchema.methods.assignToDriver = function(driverId, deliveryId = null) {
-  this.status = deliveryId ? 'in_use' : 'assigned';
-  this.location = 'driver';
-  this.assignedTo = {
-    driver: driverId,
-    assignmentTime: new Date()
-  };
-  this.currentDelivery = deliveryId;
-  return this.save();
-};
-
-// Instance method to return bag
-bagSchema.methods.returnToWarehouse = function(meta = {}) {
-  const {
-    returnedBy,
-    returnedByName,
-    location,
-    notes,
-    returnedAt,
-    historyNote,
-  } = meta || {};
-
-  const resolvedReturnedAt =
-    returnedAt instanceof Date ? returnedAt : new Date();
-
-  this.status = 'available';
-  this.location = 'warehouse';
-  this.assignedTo = undefined;
-  this.currentDelivery = undefined;
-  this.returnedAt = resolvedReturnedAt;
-
-  if (returnedBy) {
-    this.returnedBy = returnedBy;
-  } else {
-    this.returnedBy = undefined;
-  }
-
-  if (returnedByName) {
-    this.returnedByName = returnedByName;
-  } else {
-    this.returnedByName = undefined;
-  }
-
-  if (location && typeof location === 'object') {
-    const lat =
-      typeof location.lat === 'number'
-        ? location.lat
-        : typeof location.latitude === 'number'
-        ? location.latitude
-        : undefined;
-    const lng =
-      typeof location.lng === 'number'
-        ? location.lng
-        : typeof location.longitude === 'number'
-        ? location.longitude
-        : undefined;
-    const accuracy =
-      typeof location.accuracy === 'number'
-        ? location.accuracy
-        : typeof location.precision === 'number'
-        ? location.precision
-        : undefined;
-
-    if (typeof lat === 'number' && typeof lng === 'number') {
-      this.returnLocation = {
-        lat,
-        lng,
-        accuracy,
-      };
-    }
-  } else if (location === null) {
-    this.returnLocation = undefined;
-  }
-
-  if (typeof notes === 'string' && notes.trim()) {
-    this.notes = notes.trim();
-  }
-
-  if (!this.$locals) {
-    this.$locals = {};
-  }
-  this.$locals.historyNote = historyNote || 'Bag returned to warehouse';
-
-  return this.save();
-};
+// Legacy direct state writes are intentionally unavailable. Every physical
+// transition must include an actor, event ID and atomic movement history.
+bagSchema.methods.assignToDriver = function(){throw new Error('Use verified bag preparation and receiving acceptance.');};
+bagSchema.methods.returnToWarehouse = function(){throw new Error('Use an authorized warehouse receipt movement.');};
 
 export default mongoose.model('Bag', bagSchema);

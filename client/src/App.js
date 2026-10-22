@@ -15,7 +15,7 @@ import DriverDetail from './pages/DriverDetail';
 import Deliveries from './pages/Deliveries';
 import DeliveryDetail from './pages/DeliveryDetail';
 import AddDelivery from './pages/AddDelivery';
-import BagTracking from './pages/BagTracking';
+import BagTracking from './pages/BagOperations';
 import Reports from './pages/Reports';
 import CreateDriver from './pages/CreateDriver';
 import DriverMobile from './pages/DriverMobile';
@@ -26,7 +26,6 @@ import AddDeliveryChange from './pages/AddDeliveryChange';
 import DispatcherMobile from './pages/DispatcherMobile';
 import DispatcherDesktop from './pages/DispatcherDesktop';
 import DriverRoutesPage from './pages/DriverRoutesPage';
-import StoreKeeper from './pages/StoreKeeper';
 import Customers from './pages/Customers';
 import Events from './pages/Events';
 import Complaints from './pages/Complaints';
@@ -123,7 +122,7 @@ const getFirstAvailablePath = (user) => {
 
   if (user.role === 'driver') return '/driver-mobile';
   if (user.role === 'dispatcher') return '/dispatcher';
-  if (user.role === 'store_keeper') return '/store-keeper';
+  if (user.role === 'store_keeper') return '/bags';
   if (user.role === 'yellowblock_user') return '/yellowblock';
 
   // Ordered by likelihood of being granted — first page the user can actually
@@ -189,7 +188,7 @@ const ProtectedRoute = ({ children, allowDrivers = false, allowDispatchers = fal
   
   // Redirect store keepers to store-keeper page only
   if (user.role === 'store_keeper' && !allowStoreKeepers) {
-    return <Navigate to="/store-keeper" replace />;
+    return <Navigate to="/bags" replace />;
   }
 
   // Redirect yellowblock users to yellowblock page only
@@ -361,7 +360,7 @@ function App() {
               <ProtectedRoute allowStoreKeepers>
                 <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'store_keeper']}>
                   <Layout>
-                    <StoreKeeper />
+                    <Navigate to="/bags" replace />
                   </Layout>
                 </RoleBasedRoute>
               </ProtectedRoute>
@@ -466,7 +465,7 @@ function App() {
             } />
             
             <Route path="/bags" element={
-              <ProtectedRoute>
+              <ProtectedRoute allowStoreKeepers>
                 <PermissionBasedRoute permission="bags">
                   <Layout>
                     <BagTracking />

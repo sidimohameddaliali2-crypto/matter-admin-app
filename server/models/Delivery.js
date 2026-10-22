@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 import { applyZoneRules, isAbuDhabiEmirate, ABU_DHABI_ZONE } from '../config/zoneRules.js';
 
 const deliverySchema = new mongoose.Schema({
+  bagReturnReceipts: [{bagId:String,eventId:String,receivedAt:Date}],
   
   customerId: {
     type: String,
@@ -200,6 +201,12 @@ deliveryType: {
     photoUrl: String, // Primary photo URL (kept in sync with images[0])
     signature: String,
     bagId: String,
+    bagIds: [String],
+    scannedBags: [String],
+    returnedBags: [String],
+    bagEventId: String,
+    qrSkipped: Boolean,
+    type: String,
     timestamp: Date,
     location: {
       lat: Number,

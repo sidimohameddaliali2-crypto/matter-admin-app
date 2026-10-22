@@ -1,3 +1,5 @@
+import { recordDeliveryBagMovements, legacyBagReturn } from '../services/deliveryBagMovements.js';
+import { moveBag } from '../services/bagMovementStore.js';
 import deliveryOrderRouter from './deliveryOrder.js';
 import express from 'express';
 import mongoose from 'mongoose';
@@ -969,72 +971,6 @@ function getDeliveryDriverId(delivery) {
   } catch {
     return null;
   }
-}
-
-async function releaseBagAssignment(bagId) {
-  const normalizedId = normalizeBagId(bagId);
-  if (!normalizedId) return;
-
-  const bag = await Bag.findOne({ bagId: normalizedId });
-  if (!bag) return;
-
-  bag.status = 'available';
-  bag.location = 'warehouse';
-  bag.assignedTo = undefined;
-  bag.currentDelivery = undefined;
-  await bag.save();
-}
-
-async function applyBagAssignmentToDelivery(delivery, bagId, assignedBy) {
-  const normalizedId = normalizeBagId(bagId);
-  if (!normalizedId) {
-    throw Object.assign(new Error('Bag ID is required'), { statusCode: 400 });
-  }
-
-  if (delivery.bagAssignment?.bagId && delivery.bagAssignment.bagId !== normalizedId) {
-    await releaseBagAssignment(delivery.bagAssignment.bagId);
-  }
-
-  let bag = await Bag.findOne({ bagId: normalizedId });
-  let isNewBag = false;
-  if (!bag) {
-    // Drivers scan physical bag tags that may not have been registered in
-    // inventory yet (new bags, warehouse onboarding gaps). Auto-provision
-    // the bag instead of blocking delivery completion — but still reject
-    // scans that clearly aren't a bag code at all (garbage QR, wrong item).
-    if (!/^BAG[-_]/.test(normalizedId)) {
-      throw Object.assign(new Error('Bag not found'), { statusCode: 404 });
-    }
-    isNewBag = true;
-    bag = new Bag({
-      bagId: normalizedId,
-      notes: 'Auto-created on first scan — bag was not pre-registered in inventory',
-    });
-  }
-
-  bag.status = 'assigned';
-  bag.location = 'driver';
-  bag.currentDelivery = delivery._id;
-  bag.assignedTo = {
-    driver: delivery.driver,
-    customer: {
-      customerId: delivery.customerId,
-      customerName: delivery.customerName
-    },
-    assignmentTime: new Date()
-  };
-  if (isNewBag) {
-    if (!bag.$locals) bag.$locals = {};
-    bag.$locals.historyNote = 'Auto-created and assigned (bag ID not found in inventory)';
-  }
-  await bag.save();
-
-  delivery.bagAssignment = {
-    bagId: normalizedId,
-    assignedAt: new Date(),
-    assignedBy,
-    status: 'assigned'
-  };
 }
 
 function enrichDeliveryTiming(delivery) {
@@ -2372,19 +2308,16 @@ router.post('/:id/start', [
       });
     }
 
-    if (bag.status !== 'available') {
+    if (bag.lifecycleState !== 'packed') {
       return res.status(400).json({
         success: false,
-        message: 'Bag is not available'
+        message: 'Warehouse must verify, clean and prepare this bag for your acceptance.'
       });
     }
 
     // Assign bag to delivery
-    await bag.assignToDriver(req.user._id, deliveryId);
-    delivery.bag = {
-      bagId: bag.bagId,
-      assignedAt: new Date()
-    };
+    await moveBag(bag.bagId,{action:'accept',eventId:`accept:${bag._id}:${bag.custodyVersion||0}`,note:'Driver accepted physical handover'},req.user);
+    delivery.bagAssignment = {bagId:bag.bagId,assignedAt:new Date(),assignedBy:req.user._id,status:'assigned'};
 
     // Update delivery status
     await delivery.updateStatus('picked_up', 'Package picked up and bag assigned', location);
@@ -2541,53 +2474,14 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
       location: proofLocation
     };
 
+    await recordDeliveryBagMovements(delivery,{status:'delivered',proof:delivery.proof,bagId:delivery.bagAssignment?.bagId||delivery.bag?.bagId},req.user);
+
     // Complete delivery
     await delivery.updateStatus(
       'delivered',
       notes || 'Delivery completed',
       normalizedLocation || location
     );
-
-    // Return bag to warehouse
-    if (delivery.bag && delivery.bag.bagId) {
-      const bag = await Bag.findOne({ bagId: delivery.bag.bagId });
-      if (bag) {
-        const userName = resolveUserDisplayName(req.user);
-        const updatedBag = await bag.returnToWarehouse({
-          returnedBy: req.user?._id,
-          returnedByName: userName,
-          location: normalizedLocation,
-          historyNote: `Bag returned after completing delivery ${deliveryId}`,
-        });
-
-        const bagReturnedAt = updatedBag.returnedAt || new Date();
-
-        if (!Array.isArray(delivery.timeline)) {
-          delivery.timeline = [];
-        }
-        delivery.timeline.push({
-          status: 'bag_returned',
-          timestamp: bagReturnedAt,
-          notes: `Bag ${delivery.bag.bagId} returned to warehouse`,
-        });
-
-        if (delivery.bagAssignment) {
-          delivery.bagAssignment.status = 'returned';
-          delivery.bagAssignment.returnedAt = bagReturnedAt;
-        }
-
-        if (delivery.bag) {
-          delivery.bag.returnedAt = bagReturnedAt;
-        } else {
-          delivery.bag = {
-            bagId: delivery.bagAssignment?.bagId || delivery.bag?.bagId,
-            returnedAt: bagReturnedAt,
-          };
-        }
-
-        await delivery.save();
-      }
-    }
 
     // Update driver status; KPI counts are recomputed from scratch below
     // (month-to-date, not incremented) since they reset every calendar month.
@@ -2626,125 +2520,7 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
   }
 });
 
-router.post('/return-bag', async (req, res) => {
-  try {
-    const {
-      bagId,
-      bagQRCode,
-      notes,
-      reason,
-      location,
-      driverId,
-      driverName,
-      timestamp,
-    } = req.body || {};
-
-    const identifier = bagId ?? bagQRCode;
-    const normalizedBagId = normalizeBagId(identifier);
-
-    if (!normalizedBagId) {
-      return res.status(400).json({
-        success: false,
-        message: 'bagId or bagQRCode is required to return a bag',
-      });
-    }
-
-    const lookupConditions = [{ bagId: normalizedBagId }];
-    if (identifier) {
-      lookupConditions.push({ qrCode: identifier });
-      if (identifier !== normalizedBagId) {
-        lookupConditions.push({ qrCode: normalizedBagId });
-      }
-    }
-
-    const bag = await Bag.findOne({ $or: lookupConditions });
-
-    if (!bag) {
-      return res.status(404).json({
-        success: false,
-        message: 'Bag not found',
-      });
-    }
-
-    const normalizedLocation = normalizeLocationPayload(location);
-    const resolvedDriverId =
-      driverId && mongoose.Types.ObjectId.isValid(driverId)
-        ? driverId
-        : req.user?._id;
-
-    const resolvedDriverName =
-      (typeof driverName === 'string' && driverName.trim()) ||
-      resolveUserDisplayName(req.user) ||
-      undefined;
-
-    const historyNote = resolvedDriverName
-      ? `Bag returned by ${resolvedDriverName}`
-      : 'Bag returned to warehouse';
-
-    const updatedBag = await bag.returnToWarehouse({
-      returnedBy: resolvedDriverId,
-      returnedByName: resolvedDriverName,
-      location: normalizedLocation,
-      notes: notes || reason,
-      returnedAt: timestamp ? new Date(timestamp) : undefined,
-      historyNote,
-    });
-
-    const bagReturnedAt = updatedBag.returnedAt || new Date();
-
-    const deliveriesToUpdate = await Delivery.find({
-      'bagAssignment.bagId': normalizedBagId,
-      'bagAssignment.status': { $ne: 'returned' },
-    });
-
-    for (const delivery of deliveriesToUpdate) {
-      if (delivery.bagAssignment) {
-        delivery.bagAssignment.status = 'returned';
-        delivery.bagAssignment.returnedAt = bagReturnedAt;
-      }
-
-      if (!Array.isArray(delivery.timeline)) {
-        delivery.timeline = [];
-      }
-
-      delivery.timeline.push({
-        status: 'bag_returned',
-        timestamp: bagReturnedAt,
-        notes: `Bag ${normalizedBagId} returned to warehouse`,
-      });
-
-      if (delivery.bag) {
-        delivery.bag.returnedAt = bagReturnedAt;
-      } else {
-        delivery.bag = {
-          bagId: normalizedBagId,
-          returnedAt: bagReturnedAt,
-        };
-      }
-
-      await delivery.save();
-    }
-
-    await updatedBag.populate('assignedTo.driver', 'profile.firstName profile.lastName profile.colorCode');
-
-    res.json({
-      success: true,
-      message: 'Bag returned successfully',
-      data: {
-        bag: updatedBag,
-        bagId: updatedBag.bagId,
-        returnedAt: bagReturnedAt,
-      },
-    });
-  } catch (error) {
-    console.error('Error processing bag return:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Server error',
-      error: error.message,
-    });
-  }
-});
+router.post('/return-bag',async(req,res)=>{try{const result=await legacyBagReturn(req.body.bagId||req.body.bagQRCode,req.body,req.user);res.json({success:true,data:result.bag,message:'Collection recorded; warehouse receipt is separate.'});}catch(e){res.status(e.statusCode||400).json({success:false,message:e.message});}});
 
 
 // @desc    Get driver's today deliveries
@@ -2863,9 +2639,7 @@ router.patch('/:id/bag-assignment', async (req, res) => {
     delivery.deliveryType = isEarly ? 'early' : diffMinutes > 0 ? 'late' : 'on-time';
 
     // Add bag assignment and proof
-    if (bagId) {
-      await applyBagAssignmentToDelivery(delivery, bagId, req.user.id);
-    }
+    await recordDeliveryBagMovements(delivery,{...req.body,status:delivery.status},req.user);
 
     if (proof) {
       delivery.proof = { ...delivery.proof, ...proof };
@@ -2983,9 +2757,7 @@ router.patch('/:id/status', async (req, res) => {
     }
 
     // Add bag assignment if provided
-    if (bagId) {
-      await applyBagAssignmentToDelivery(delivery, bagId, req.user.id);
-    }
+    await recordDeliveryBagMovements(delivery,{...req.body,status:delivery.status},req.user);
 
     // Add to timeline
     delivery.timeline.push({

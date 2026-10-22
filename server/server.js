@@ -156,6 +156,7 @@ import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
 import deliveryRoutes from './routes/deliveries.js';
 import bagRoutes from './routes/bags.js';
+import bagOperationsRoutes from './routes/bagOperations.js';
 import reportRoutes from './routes/reports.js';
 import driverRoutes from './routes/drivers.js';
 import uploadRoutes from './routes/upload.js';
@@ -197,6 +198,7 @@ app.use('/api/users/drivers', driverRoutes); // Allow driver routes under /api/u
 app.use('/api/users', userRoutes);
 app.use('/api/deliveries', deliveryRoutes);
 app.use('/api/bags', bagRoutes);
+app.use('/api/bag-operations', bagOperationsRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/drivers', driverRoutes);

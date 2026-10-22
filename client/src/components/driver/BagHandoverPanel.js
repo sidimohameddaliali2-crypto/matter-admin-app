@@ -1,0 +1,11 @@
+import React,{useCallback,useEffect,useState} from 'react';
+import api from '../../utils/api';
+
+// Adds receipt confirmation to the existing driver screen; no separate role UI.
+export default function BagHandoverPanel(){
+  const [bags,setBags]=useState([]),[selected,setSelected]=useState([]),[error,setError]=useState(''),[busy,setBusy]=useState(false);
+  const load=useCallback(async()=>{if(!navigator.onLine)return;try{const r=await api.get('/bag-operations/pending');setBags(r.data.data||[]);setError('');}catch(e){setError(e.response?.data?.message||'Unable to check bag handovers.');}},[]);
+  useEffect(()=>{load();const timer=window.setInterval(load,30000);window.addEventListener('online',load);return()=>{window.clearInterval(timer);window.removeEventListener('online',load);};},[load]);
+  if(!bags.length&&!error)return null;
+  return <section className="rounded-lg border border-blue-200 bg-blue-50 p-4 mb-4"><h2 className="font-semibold text-gray-900">Bags awaiting your acceptance</h2><p className="text-xs text-gray-600 my-2">Check the physical IDs. Accept only bags you received. Warehouse retains the others.</p>{error&&<p role="alert" className="text-red-700 text-sm">{error}</p>}{bags.map(b=><label key={b._id} className="flex gap-3 items-center py-3 text-sm"><input type="checkbox" checked={selected.includes(b._id)} onChange={e=>setSelected(prev=>e.target.checked?[...prev,b._id]:prev.filter(id=>id!==b._id))}/>{b.bagId}{b.pendingHandover?.transfer?' · driver transfer':''}</label>)}<button className="bg-blue-700 text-white rounded px-4 py-3 text-sm disabled:opacity-50" disabled={busy||!selected.length||!navigator.onLine} onClick={async()=>{setBusy(true);setError('');try{for(const b of bags.filter(b=>selected.includes(b._id))){await api.post('/bag-operations/movements',{bagId:b.bagId,action:b.pendingHandover?.transfer?'accept_transfer':'accept',eventId:`accept:${b._id}:${b.custodyVersion||0}`,expectedVersion:b.custodyVersion||0,note:'Driver checked the physical bag and accepted handover.'});}setSelected([]);await load();}catch(e){await load();setError(e.response?.data?.message||'Acceptance failed; refresh and check each bag.');}finally{setBusy(false);}}}>Accept selected physical bags</button></section>;
+}

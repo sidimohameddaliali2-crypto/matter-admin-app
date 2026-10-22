@@ -42,7 +42,7 @@ const NAV_ITEMS = [
   { name: 'Fleet', href: '/fleet', icon: Truck, permission: 'fleet', group: 'Operations' },
   { name: 'Live Tracking', href: '/live-tracking', icon: Radar, permission: 'live_map', group: 'Operations' },
   { name: 'Delivery Changes', href: '/delivery-changes', icon: ReplaceAll, permission: 'delivery_changes', group: 'Operations' },
-  { name: 'Bag Tracking', href: '/bags', icon: ShoppingBag, permission: 'bags', group: 'Operations' },
+  { name: 'Bag Operations', href: '/bags', icon: ShoppingBag, permission: 'bags', group: 'Operations' },
   { name: 'Report', href: '/reports', icon: BarChart3, permission: 'reports', group: 'Operations' },
   { name: 'Events', href: '/events', icon: Calendar, permission: 'events', group: 'Operations' },
   { name: 'Complaints', href: '/complaints', icon: AlertTriangle, permission: 'complaints', group: 'Operations' },
@@ -63,7 +63,6 @@ const NAV_ITEMS = [
   { name: 'Users', href: '/users', icon: Users, permission: 'users', group: 'Admin' },
   { name: 'Employees', href: '/employees', icon: Briefcase, permission: 'employees', group: 'Admin' },
 
-  { name: 'Store Keeper', href: '/store-keeper', icon: ShoppingBag, roles: ['store_keeper'], group: 'Store Keeper' },
 ];
 
 const Layout = ({ children }) => {

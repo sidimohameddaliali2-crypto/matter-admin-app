@@ -106,12 +106,13 @@ export const fetchDriverDeliveries = createAsyncThunk(
 
 export const updateDeliveryStatus = createAsyncThunk(
   'driverMobile/updateDeliveryStatus',
-  async ({ deliveryId, status, proof, bagId }, { rejectWithValue }) => {
+  async ({ deliveryId, status, proof, bagId, bagIds }, { rejectWithValue }) => {
     try {
       const response = await api.patch(`/deliveries/${deliveryId}/status`, {
         status,
         proof,
-        bagId
+        bagId,
+        bagIds
       });
       
       console.log('Update delivery response:', response.data);

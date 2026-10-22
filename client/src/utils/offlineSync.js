@@ -73,6 +73,14 @@ const processDeliveryUpdate = async (queueItem, photoUrl = null) => {
   try {
     console.log('📤 Processing delivery update:', queueItem.deliveryId);
 
+    if(queueItem.kind==='bag_collection'){
+      await updateQueueItemSyncStatus(queueItem.id,'syncing');
+      for(const bagId of queueItem.bagIds||[]){
+        await api.post('/bag-operations/movements',{bagId,action:'collect',eventId:queueItem.eventId+':'+bagId,occurredAt:queueItem.timestamp,note:'Physical customer pickup; pending warehouse receipt.'});
+      }
+      await updateQueueItemSyncStatus(queueItem.id,'synced');
+      return;
+    }
     // Mark as syncing
     await updateQueueItemSyncStatus(queueItem.id, 'syncing');
 
@@ -103,7 +111,8 @@ const processDeliveryUpdate = async (queueItem, photoUrl = null) => {
       status: updateData.status,
       proof: updateData.proof,
       // Provide a primary bag for association on the delivery record
-      bagId: bagIds && bagIds.length > 0 ? bagIds[0] : undefined
+      bagIds,
+      bagId: queueItem.proof?.type === 'bag_collection' ? undefined : bagIds[0]
     });
 
     console.log('✅ Delivery update response:', {
@@ -111,49 +120,6 @@ const processDeliveryUpdate = async (queueItem, photoUrl = null) => {
       deliveryId: deliveryResponse.data?.delivery?._id,
       status: deliveryResponse.data?.delivery?.status
     });
-
-    // Reassign bags if applicable
-    if (bagIds && bagIds.length > 0 && queueItem.customerId) {
-      console.log(`📦 Reassigning ${bagIds.length} bag(s):`, bagIds);
-      // Reassign each bag
-      for (const bagId of bagIds) {
-        console.log(`📦 Reassigning bag ${bagId} to customer ${queueItem.customerName}`);
-                try {
-          await api.patch('/bags/reassign', {
-            bagId: bagId,
-            customerId: queueItem.customerId,
-            customerName: queueItem.customerName,
-            deliveryId: queueItem.deliveryId
-          });
-          console.log('✅ Bag reassigned:', bagId);
-        } catch (error) {
-          console.warn('⚠️ Bag reassignment failed (non-critical):', {
-            bagId,
-            error: error.response?.data || error.message
-          });
-        }
-      }
-    }
-
-    // Handle returned bags (mark as available)
-    const returnedBags = updateData?.proof?.returnedBags || [];
-    if (Array.isArray(returnedBags) && returnedBags.length > 0) {
-      console.log(`↩️ Processing ${returnedBags.length} returned bag(s):`, returnedBags);
-      for (const returnBagId of returnedBags) {
-        try {
-          await api.patch(`/bags/${returnBagId}/return`, {
-            status: 'available',
-            notes: `Returned via offline sync on ${new Date().toLocaleString()}`
-          });
-          console.log('✅ Bag returned (available):', returnBagId);
-        } catch (error) {
-          console.warn('⚠️ Return bag update failed (non-critical):', {
-            bagId: returnBagId,
-            error: error.response?.data || error.message
-          });
-        }
-      }
-    }
 
     // Mark as synced
     await updateQueueItemSyncStatus(queueItem.id, 'synced');
@@ -224,23 +190,26 @@ export const syncOfflineData = async () => {
       try {
         const deliveryPhotos = photoMap.get(queueItem.deliveryId) || [];
         let uploadedPhotoUrl = null;
+        let uploadedPhotoId = null;
 
         // Upload the first photo for this delivery
         if (deliveryPhotos.length > 0) {
           const photo = deliveryPhotos[0];
           try {
             uploadedPhotoUrl = await uploadSinglePhoto(photo);
-            await markPhotoSynced(photo.id);
+            uploadedPhotoId = photo.id;
             successCount++;
           } catch (error) {
             console.error('Photo upload failed:', error);
             failedCount++;
-            // Continue with delivery update even if photo fails
+            // Keep the movement and proof pending together when evidence fails.
+            throw error;
           }
         }
 
         // Process the delivery update
         await processDeliveryUpdate(queueItem, uploadedPhotoUrl);
+        if (uploadedPhotoId != null) await markPhotoSynced(uploadedPhotoId);
         await markQueueItemSynced(queueItem.id);
         successCount++;
 
