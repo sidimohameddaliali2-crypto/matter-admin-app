@@ -32,7 +32,8 @@ const eventSchema = new mongoose.Schema(
     venue: {
       type: {
         type: String,
-        enum: ['Private Villa', 'Hotel', 'Restaurant', 'Beach', 'Park', 'Convention Center', 'Gym', 'Outdoor Set up', 'Other'],
+        // The event form's Add Venue action supports custom company venue names.
+        trim: true,
         required: true
       },
       address: {
