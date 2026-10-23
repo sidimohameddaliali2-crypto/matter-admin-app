@@ -1,7 +1,6 @@
 import PartnerMenuItem from '../models/PartnerMenuItem.js';
 import MenuItem from '../models/MenuItem.js';
-import Partner from '../models/Partner.js';
-import SpaceMenu from '../models/SpaceMenu.js';
+import { assignItemToAllActivePartners } from './partnerMenuAssignment.js';
 
 // Owner (2026-10-19): the kitchen's daily chicken/beef/fish main-meal rotation
 // in the customer Menu Selection should also be orderable by partners from the
@@ -11,36 +10,6 @@ const PROTEIN_PRICING = {
   chicken: { price: 7, sellingPrice: 28 },
   beef: { price: 11, sellingPrice: 32 },
   fish: { price: 13, sellingPrice: 32 },
-};
-
-// Makes one master-menu item orderable by every active partner (upsert into
-// SpaceMenu, their sub-menu assignment table). Idempotent — safe to re-run.
-// No SpacePrice is written, so each partner sees the fixed sellingPrice above
-// unless they already have their own per-partner price override.
-const assignItemToAllActivePartners = async (menuItemId) => {
-  const partners = await Partner.find({ isActive: true }).select('_id').lean();
-  await Promise.all(partners.map((p) =>
-    SpaceMenu.findOneAndUpdate(
-      { space: p._id, menuItem: menuItemId },
-      { $set: { isActive: true } },
-      { upsert: true }
-    )
-  ));
-};
-
-// Gives one partner (typically a newly created one) every menu-selection-
-// sourced item that already exists, so they aren't missing the chicken/beef/
-// fish rotation just because they signed up after the last sync ran. Call
-// this from wherever a Partner is created (see routes/adminPartners.js).
-export const assignMenuSelectionItemsToPartner = async (partnerId) => {
-  const items = await PartnerMenuItem.find({ source: 'menu-selection' }).select('_id').lean();
-  await Promise.all(items.map((it) =>
-    SpaceMenu.findOneAndUpdate(
-      { space: partnerId, menuItem: it._id },
-      { $set: { isActive: true } },
-      { upsert: true }
-    )
-  ));
 };
 
 /**
@@ -61,7 +30,7 @@ export const assignMenuSelectionItemsToPartner = async (partnerId) => {
  *
  * Every item this creates/updates is also assigned to every active partner
  * (SpaceMenu), so it's immediately orderable without a manual Space Setup
- * step — see assignItemToAllActivePartners below.
+ * step — see services/partnerMenuAssignment.js.
  *
  * @param {import('../models/WeeklyMenu.js').default} weeklyMenu - a saved WeeklyMenu document
  * @returns {Promise<{created: number, updated: number}>}

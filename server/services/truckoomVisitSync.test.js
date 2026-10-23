@@ -188,6 +188,16 @@ test('saved snapshot survives a later driver reassignment', async t => {
   assert.equal(fixture.writes[0].update.$set.trackerVisit.status, 'inside_window');
 });
 
+test('a completed proof with no captured vehicle cannot borrow a later tracker mapping', async t => {
+  const fixture = setup(t);
+  fixture.row.trackerVisit = { geofenceId: 'G1', geofenceName: fixture.identity.name,
+    businessDate: fixture.identity.businessDate, driverId: 'driver1' };
+  await syncCustomerTrackerVisits({ now: fixture.now });
+  const visit = fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.status, 'no_tracker');
+  assert.equal(visit.vehicleNo, undefined);
+});
+
 test('token authentication, private list filtering and 50 m creation match the supplied API', async t => {
   const original = { username: truckoom.username, password: truckoom.password, companyName: truckoom.companyName,
     accessToken: truckoom.accessToken, accessTokenExpiresAt: truckoom.accessTokenExpiresAt };

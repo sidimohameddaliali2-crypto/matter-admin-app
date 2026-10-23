@@ -53,6 +53,20 @@ test('failed requests cannot cause a retry storm inside the one-minute limit', a
   assert.equal(calls, 1);
 });
 
+test('one-minute spacing includes the authentication and network response time', async () => {
+  let now = 100000;
+  let calls = 0;
+  const cache = createTruckoomLiveCache({ sharedAvailable: () => false, clock: () => now });
+  const fetch = async () => { calls++; now += 5000; return [{ vehicleNo: 'V1' }]; };
+  await cache(fetch); // completes at 105000
+  now = 160000; // only 55 seconds since completion
+  await cache(fetch);
+  assert.equal(calls, 1);
+  now = 165000;
+  await cache(fetch);
+  assert.equal(calls, 2);
+});
+
 test('separate PM2 workers share a Mongo snapshot without Redis', async () => {
   let now = 100000;
   let snapshot;

@@ -64,7 +64,7 @@ export function createTruckoomLiveCache({ store = TruckoomLiveSnapshot,
         try {
           await store.findOneAndUpdate({ _id: 'fleet', $or: [
             { nextRequestAt: { $lte: new Date(now) } }, { nextRequestAt: { $exists: false } },
-          ] }, { $set: { requestId, nextRequestAt: new Date(now + INTERVAL) } }, { upsert: true, new: true });
+          ] }, { $set: { requestId, nextRequestAt: new Date(now + 2 * INTERVAL) } }, { upsert: true, new: true });
         } catch (error) {
           if (error.code !== 11000) throw error;
           const latest = await store.findById('fleet').lean();
@@ -75,13 +75,26 @@ export function createTruckoomLiveCache({ store = TruckoomLiveSnapshot,
       } else if (now < nextRequestAt) {
         throw new Error('Truckoom live refresh cooling down; retry shortly');
       }
-      nextRequestAt = now + INTERVAL;
-      const vehicles = await fetchLive();
-      // Timestamp the request start so slow requests cannot extend freshness.
-      if (shared) await store.updateOne({ _id: 'fleet', requestId },
-        { $set: { vehicles, fetchedAt: new Date(now) } });
-      cached = vehicles; fetchedAt = now;
-      return vehicles;
+      nextRequestAt = now + 2 * INTERVAL;
+      try {
+        const vehicles = await fetchLive();
+        const completedAt = clock();
+        // Count the cooldown after completion. Starting it before token/network
+        // latency can put consecutive upstream calls less than 60 seconds apart.
+        nextRequestAt = completedAt + INTERVAL;
+        if (shared) await store.updateOne({ _id: 'fleet', requestId }, { $set: {
+          vehicles, fetchedAt: new Date(completedAt), nextRequestAt: new Date(nextRequestAt),
+        } });
+        cached = vehicles; fetchedAt = completedAt;
+        return vehicles;
+      } catch (error) {
+        nextRequestAt = clock() + INTERVAL;
+        if (shared) {
+          try { await store.updateOne({ _id: 'fleet', requestId }, { $set: { nextRequestAt: new Date(nextRequestAt) } }); }
+          catch { /* The original claim still prevents an immediate retry storm. */ }
+        }
+        throw error;
+      }
     })();
     try { return await pending; } finally { pending = null; }
   };

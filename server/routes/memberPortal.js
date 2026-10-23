@@ -155,7 +155,7 @@ router.post('/orders', async (req, res) => {
       return res.status(400).json({ success: false, message: 'There is no delivery on Sunday — pick another date.' });
     }
     if (isInLockWindow(deliveryDate)) {
-      return res.status(400).json({ success: false, message: 'This delivery date is within the 2-day advance lock window and cannot be ordered for.' });
+      return res.status(400).json({ success: false, message: 'This delivery date is past its ordering deadline and can no longer be ordered for.' });
     }
 
     let order = await MemberOrder.findOne({ member: memberId, deliveryDate: new Date(deliveryDate) });
@@ -204,7 +204,7 @@ router.post('/orders/:id/submit', async (req, res) => {
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
     if (order.status === 'locked') return res.status(400).json({ success: false, message: 'Order is already locked.' });
     if (order.status === 'submitted') return res.status(400).json({ success: false, message: 'Order already submitted.' });
-    if (isInLockWindow(order.deliveryDate)) return res.status(400).json({ success: false, message: 'Delivery date is within the 2-day lock window.' });
+    if (isInLockWindow(order.deliveryDate)) return res.status(400).json({ success: false, message: 'Delivery date is past its ordering deadline.' });
 
     const lines = await MemberOrderLine.find({ order: order._id }).populate('menuItem', 'name');
     if (!lines.length) return res.status(400).json({ success: false, message: 'Order has no items.' });
@@ -267,7 +267,7 @@ router.post('/orders/:id/cancel', async (req, res) => {
     if (order.status === 'locked') return res.status(400).json({ success: false, message: 'Locked orders cannot be cancelled.' });
     if (order.status === 'cancelled') return res.status(400).json({ success: false, message: 'Order is already cancelled.' });
     if (isInLockWindow(order.deliveryDate)) {
-      return res.status(400).json({ success: false, message: 'This order is within the 2-day lock window and can no longer be cancelled.' });
+      return res.status(400).json({ success: false, message: 'This order is past its ordering deadline and can no longer be cancelled.' });
     }
     order.status = 'cancelled';
     order.cancelledAt = new Date();

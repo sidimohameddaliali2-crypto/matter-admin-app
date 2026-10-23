@@ -70,7 +70,7 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
       try {
         const pin = await resolveDeliveryCoordinatesCached(delivery);
         const driverId = String(delivery.driver?._id || '');
-        const vehicleNo = delivery.proof?.receivedAt && previous.vehicleNo
+        const vehicleNo = delivery.proof?.receivedAt && previous.geofenceId
           ? previous.vehicleNo : delivery.driver?.profile?.truckoomVehicleNo;
         if (!pin && !(previous.geofenceId && delivery.proof?.receivedAt)) visit.status = 'missing_pin';
         else {

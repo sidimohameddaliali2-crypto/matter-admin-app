@@ -10,6 +10,7 @@ import {
   DollarSign, AlertCircle, RefreshCw, Users, CheckCheck
 } from 'lucide-react';
 import api from '../utils/api';
+import { partnerAdminOrderStatus, canInvoicePartnerOrder } from '../utils/partnerOrderStatus';
 import { groupExclusions } from '../constants/exclusionList';
 
 /*  MATTER Admin — Partner operations
@@ -31,8 +32,10 @@ const initials = (name = '') => name.split(/\s+/).filter((w) => /^[A-Za-z]/.test
 const marginPct = (price, cost) => (price > 0 ? Math.round(((price - cost) / price) * 100) : 0);
 const marginColor = (m) => (m >= 50 ? '#3f8500' : m >= 35 ? '#0b1a3f' : '#ff3b00');
 
-const MEAL_TYPES = ['main', 'snack', 'bowl', 'wraps-buns', 'oats'];
-const MEAL_TYPE_LABEL = { main: 'Main', snack: 'Snack', bowl: 'Bowl', 'wraps-buns': 'Wraps/Buns', oats: 'Oats' };
+// Category display order: Oats, Wraps/Buns, Snack, Bowl, Main (Bowl wasn't
+// in the list given — placed just before Main since it's not mentioned).
+const MEAL_TYPES = ['oats', 'wraps-buns', 'snack', 'bowl', 'main'];
+const MEAL_TYPE_LABEL = { oats: 'Oats', 'wraps-buns': 'Wraps/Buns', snack: 'Snack', bowl: 'Bowl', main: 'Main' };
 const TYPE_BADGE = { cafe: '#fff2d9', gym: '#e3edff', restaurant: '#e3f3d9', other: '#f1ebe2' };
 const WASTE_REASONS = ['over-order', 'spoilage', 'returns', 'prep-error'];
 
@@ -620,17 +623,19 @@ const AdminPartners = () => {
   const sel = useMemo(() => spaces.find((p) => p._id === selId) || null, [spaces, selId]);
 
   const orderChips = useMemo(() => {
-    const statusOf = (o) => (o.status === 'locked' ? 'invoiced' : o.acknowledgedAt ? 'acked' : 'new');
+    const statusOf = partnerAdminOrderStatus;
     return [
       ['all', 'All', allOrders.length],
       ['new', 'New', allOrders.filter((o) => statusOf(o) === 'new').length],
       ['acked', 'Acknowledged', allOrders.filter((o) => statusOf(o) === 'acked').length],
       ['invoiced', 'Invoiced', allOrders.filter((o) => statusOf(o) === 'invoiced').length],
+      ['locked', 'Awaiting invoice', allOrders.filter((o) => statusOf(o) === 'locked').length],
+      ['cancelled', 'Cancelled', allOrders.filter((o) => statusOf(o) === 'cancelled').length],
     ];
   }, [allOrders]);
 
   const shownOrders = useMemo(() => {
-    const statusOf = (o) => (o.status === 'locked' ? 'invoiced' : o.acknowledgedAt ? 'acked' : 'new');
+    const statusOf = partnerAdminOrderStatus;
     return orderChip === 'all' ? allOrders : allOrders.filter((o) => statusOf(o) === orderChip);
   }, [allOrders, orderChip]);
 
@@ -1011,11 +1016,13 @@ const AdminPartners = () => {
               : (
                 <div className="flex flex-col gap-2.5">
                   {shownOrders.map((order) => {
-                    const st = order.status === 'locked'
-                      ? { label: 'Invoiced', bg: '#bcf679', color: '#051747' }
-                      : order.acknowledgedAt
-                        ? { label: 'Acknowledged', bg: '#051747', color: '#ede5de' }
-                        : { label: 'New', bg: '#ff3b00', color: '#ede5de' };
+                    const st = {
+                      cancelled: { label: 'Cancelled', bg: '#f1ebe2', color: '#6b7894' },
+                      invoiced: { label: 'Invoiced', bg: '#bcf679', color: '#051747' },
+                      locked: { label: 'Awaiting invoice', bg: '#fff2d9', color: '#7b5210' },
+                      acked: { label: 'Acknowledged', bg: '#051747', color: '#ede5de' },
+                      new: { label: 'New', bg: '#ff3b00', color: '#ede5de' },
+                    }[partnerAdminOrderStatus(order)];
                     return (
                       <div key={order._id} className={`${card} overflow-hidden`}>
                         <div className="px-5 py-3.5 flex items-center gap-4">
@@ -1023,7 +1030,7 @@ const AdminPartners = () => {
                             <div className="flex items-center gap-2 flex-wrap">
                               <span className="font-bold text-[14.5px]">{order.space?.businessName}</span>
                               <span className="rounded-full px-2.5 py-1 text-[11px] font-bold" style={{ background: st.bg, color: st.color }}>{st.label}</span>
-                              {order.isLocked && order.status !== 'locked' && <span className="text-[11px] text-[#c67139] flex items-center gap-1"><Lock className="w-3 h-3" />In lock window</span>}
+                              {order.isLocked && order.status === 'submitted' && <span className="text-[11px] text-[#c67139] flex items-center gap-1"><Lock className="w-3 h-3" />In lock window</span>}
                             </div>
                             <div className="text-xs text-[#6b7894] mt-1">Delivery {fmtDate(order.deliveryDate)} · {order.lines?.length || 0} items</div>
                           </div>
@@ -1034,7 +1041,7 @@ const AdminPartners = () => {
                                 {workingOrder === order._id ? <Loader className="w-3.5 h-3.5 animate-spin" /> : <CheckCheck className="w-3.5 h-3.5" />}Acknowledge
                               </button>
                             )}
-                            {order.status === 'submitted' && (
+                            {canInvoicePartnerOrder(order) && (
                               <button onClick={() => lockOrder(order._id)} disabled={workingOrder === order._id}
                                 className={`${pillBtn} flex items-center gap-1.5 bg-[#bcf679] text-[#051747] hover:opacity-90 disabled:opacity-40 text-xs py-2`}>
                                 {workingOrder === order._id ? <Loader className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5" />}Lock & invoice

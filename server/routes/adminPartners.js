@@ -18,7 +18,10 @@ import WasteLog, { WASTE_REASONS } from '../models/WasteLog.js';
 import Member from '../models/Member.js';
 import MemberOrder from '../models/MemberOrder.js';
 import { protect, admin, authorize } from '../middleware/auth.js';
-import { assignMenuSelectionItemsToPartner } from '../services/menuSelectionPartnerSync.js';
+import { assignItemToAllActivePartners, assignAllMasterItemsToPartner } from '../services/partnerMenuAssignment.js';
+import { invoicedPartnerOrders } from '../services/partnerInvoiceState.js';
+import { partnerReportScope } from '../services/partnerReportScope.js';
+import { partnerUnitPrice } from '../services/partnerOrderValidation.js';
 
 const adminOrKitchen = authorize(['admin', 'super_admin', 'kitchen']);
 
@@ -48,6 +51,9 @@ router.post('/menu', async (req, res) => {
       return res.status(400).json({ success: false, message: 'name, mealType and price are required' });
     }
     const item = await PartnerMenuItem.create({ name, mealType, description, price, sellingPrice: sellingPrice === '' || sellingPrice == null ? null : Number(sellingPrice), isAvailable, category, sortOrder, availableFrom: availableFrom || null, availableTo: availableTo || null, ingredients: Array.isArray(ingredients) ? ingredients : [] });
+    // Owner (2026-10-23): every master-menu item is available to every
+    // partner by default — no manual Space Setup step needed anymore.
+    await assignItemToAllActivePartners(item._id);
     res.status(201).json({ success: true, data: item });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -147,6 +153,7 @@ router.get('/orders/all', async (req, res) => {
       .populate('space', 'businessName businessType email')
       .sort({ deliveryDate: 1, createdAt: -1 });
     const orderIds = orders.map(o => o._id);
+    const invoiced = await invoicedPartnerOrders(orderIds);
     const lines = await OrderLine.find({ order: { $in: orderIds } }).populate('menuItem', 'name mealType');
     const linesByOrder = {};
     lines.forEach(l => {
@@ -157,6 +164,7 @@ router.get('/orders/all', async (req, res) => {
     const result = orders.map(o => ({
       ...o.toObject(),
       lines: linesByOrder[String(o._id)] || [],
+      invoiced: invoiced.has(String(o._id)),
       isLocked: isInLockWindow(o.deliveryDate)
     }));
     res.json({ success: true, data: result });
@@ -216,10 +224,16 @@ router.patch('/orders/:orderId/lock', admin, async (req, res) => {
   try {
     const order = await SpaceOrder.findById(req.params.orderId).populate('space');
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    if (order.status === 'locked') return res.status(400).json({ success: false, message: 'Already locked' });
+    if (!['submitted', 'locked'].includes(order.status)) {
+      return res.status(400).json({ success: false, message: 'Only submitted orders can be invoiced.' });
+    }
+    if ((await invoicedPartnerOrders([order._id])).has(String(order._id))) {
+      return res.status(400).json({ success: false, message: 'Order is already invoiced.' });
+    }
 
     const lines = await OrderLine.find({ order: order._id }).populate('menuItem');
     if (!lines.length) return res.status(400).json({ success: false, message: 'No order lines to lock' });
+    if (lines.some(l => !l.menuItem)) return res.status(400).json({ success: false, message: 'An order item has been deleted. Restore it before invoicing.' });
 
     const spaceObjId = new mongoose.Types.ObjectId(String(order.space._id));
 
@@ -241,11 +255,6 @@ router.patch('/orders/:orderId/lock', admin, async (req, res) => {
     ]);
     const costMap = {};
     costs.forEach(c => { costMap[String(c._id)] = c.cost; });
-
-    // Lock the order
-    order.status = 'locked';
-    order.lockedAt = new Date();
-    await order.save();
 
     // Build snapshots
     let totalRevenue = 0, totalCost = 0;
@@ -286,6 +295,12 @@ router.patch('/orders/:orderId/lock', admin, async (req, res) => {
       matterInv = await Invoice.create({ order: order._id, space: order.space._id, type: 'matter', totalRevenue, totalCost, totalMargin: totalRevenue - totalCost, status: 'locked', lockedAt: new Date() });
     }
     await InvoiceLine.insertMany(snapshots.map(s => ({ invoice: matterInv._id, ...s })));
+
+    // Set the invoiced state only after both sets of snapshots exist. Failed
+    // writes can be retried, including for old auto-locked orders.
+    order.status = 'locked';
+    order.lockedAt = new Date();
+    await order.save();
 
     res.json({ success: true, data: { order, partnerInvoice: partnerInv, matterStatement: matterInv } });
   } catch (err) {
@@ -380,12 +395,10 @@ router.post('/waste', admin, async (req, res) => {
 router.get('/reports/consolidated', async (req, res) => {
   try {
     const { from, to } = req.query;
-    const dateFilter = {};
-    if (from) dateFilter.$gte = new Date(from);
-    if (to) dateFilter.$lte = new Date(to);
+    const { dateFilter, invoiceOrderFilter } = await partnerReportScope({ from, to });
 
     const spaceStats = await Invoice.aggregate([
-      { $match: { type: 'matter', status: 'locked' } },
+      { $match: { type: 'matter', status: 'locked', ...invoiceOrderFilter } },
       { $group: { _id: '$space', totalRevenue: { $sum: '$totalRevenue' }, totalCost: { $sum: '$totalCost' }, totalMargin: { $sum: '$totalMargin' }, count: { $sum: 1 } } },
       { $lookup: { from: 'partners', localField: '_id', foreignField: '_id', as: 'space' } },
       { $unwind: { path: '$space', preserveNullAndEmptyArrays: true } },
@@ -406,7 +419,7 @@ router.get('/reports/consolidated', async (req, res) => {
     const topItems = await InvoiceLine.aggregate([
       { $lookup: { from: 'invoices', localField: 'invoice', foreignField: '_id', as: 'inv' } },
       { $unwind: '$inv' },
-      { $match: { 'inv.type': 'matter', 'inv.status': 'locked' } },
+      { $match: { 'inv.type': 'matter', 'inv.status': 'locked', ...(invoiceOrderFilter.order ? { 'inv.order': invoiceOrderFilter.order } : {}) } },
       { $group: { _id: '$itemName', totalQty: { $sum: '$quantity' }, totalRevenue: { $sum: '$lineRevenue' }, totalCost: { $sum: '$lineCost' }, totalMargin: { $sum: '$lineMargin' } } },
       { $sort: { totalQty: -1 } },
       { $limit: 20 }
@@ -423,18 +436,16 @@ router.get('/reports/consolidated', async (req, res) => {
     res.json({ success: true, data: { totals, spaceStats, wasteStats, topItems } });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(err.status || 500).json({ success: false, message: err.status ? err.message : 'Server error' });
   }
 });
 
 router.get('/reports/space/:spaceId', async (req, res) => {
   try {
     const { from, to } = req.query;
-    const dateFilter = {};
-    if (from) dateFilter.$gte = new Date(from);
-    if (to) dateFilter.$lte = new Date(to);
+    const { dateFilter, orderFilter, invoiceOrderFilter } = await partnerReportScope({ from, to, spaceId: req.params.spaceId });
 
-    const invoices = await Invoice.find({ space: req.params.spaceId, type: 'matter', status: 'locked' })
+    const invoices = await Invoice.find({ space: req.params.spaceId, type: 'matter', status: 'locked', ...invoiceOrderFilter })
       .populate('order', 'deliveryDate').sort({ createdAt: -1 });
 
     const totals = invoices.reduce((a, i) => ({
@@ -455,14 +466,14 @@ router.get('/reports/space/:spaceId', async (req, res) => {
     const waste = await WasteLog.find(wasteQ).sort({ deliveryDate: -1 });
 
     const orderCounts = await SpaceOrder.aggregate([
-      { $match: { space: new mongoose.Types.ObjectId(req.params.spaceId) } },
+      { $match: { ...orderFilter, space: new mongoose.Types.ObjectId(req.params.spaceId) } },
       { $group: { _id: '$status', count: { $sum: 1 } } }
     ]);
 
     res.json({ success: true, data: { totals, invoiceCount: invoices.length, invoices, topItems, waste, orderCounts } });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(err.status || 500).json({ success: false, message: err.status ? err.message : 'Server error' });
   }
 });
 
@@ -595,10 +606,10 @@ router.post('/', admin, async (req, res) => {
       profilePicture: profilePicture || ''
     });
     partner.password = undefined;
-    // New partner should already have every Menu Selection chicken/beef/fish
-    // item, not just whatever's been manually assigned since.
-    assignMenuSelectionItemsToPartner(partner._id)
-      .catch((err) => console.error('[menu-selection->partner-menu sync] new-partner assign failed:', err.message));
+    // New partner should already have every master-menu item, not just
+    // whatever's been manually assigned since.
+    assignAllMasterItemsToPartner(partner._id)
+      .catch((err) => console.error('[partner-menu assignment] new-partner assign failed:', err.message));
     res.status(201).json({ success: true, data: partner });
   } catch (err) {
     console.error(err);
@@ -665,7 +676,7 @@ router.get('/:id/menu', async (req, res) => {
       _id: a._id,
       isActive: a.isActive,
       menuItem: a.menuItem,
-      price: priceMap[String(a.menuItem?._id)] ?? a.menuItem?.sellingPrice ?? null,
+      price: partnerUnitPrice(a.menuItem, priceMap[String(a.menuItem?._id)]),
       cost: costMap[String(a.menuItem?._id)] ?? null
     }));
 

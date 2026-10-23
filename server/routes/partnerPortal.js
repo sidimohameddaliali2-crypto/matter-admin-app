@@ -12,6 +12,8 @@ import { partnerProtect } from '../middleware/partnerAuth.js';
 import { sendNewOrderEmail } from '../services/emailService.js';
 import Partner from '../models/Partner.js';
 import Member from '../models/Member.js';
+import { normalizePartnerLines, validatePartnerOrder, isPartnerItemAvailable, partnerUnitPrice } from '../services/partnerOrderValidation.js';
+import { partnerReportScope } from '../services/partnerReportScope.js';
 
 const router = express.Router();
 router.use(partnerProtect);
@@ -23,17 +25,8 @@ const buildJoinUrl = (req, token) => {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-// Auto-lock any submitted orders that have passed the 2-day window
-const autoLockOrders = async (spaceId) => {
-  const submitted = await SpaceOrder.find({ space: spaceId, status: 'submitted' });
-  const tolock = submitted.filter(o => isInLockWindow(o.deliveryDate));
-  if (tolock.length) {
-    await SpaceOrder.updateMany(
-      { _id: { $in: tolock.map(o => o._id) } },
-      { $set: { status: 'locked', lockedAt: new Date() } }
-    );
-  }
-};
+// Deadline locking is derived from the delivery date. Only invoicing sets the
+// stored status to locked; reading an order must never change its workflow.
 
 // Get current price for a space+item pair
 const currentPrice = async (spaceId, menuItemId) => {
@@ -46,7 +39,7 @@ const currentPrice = async (spaceId, menuItemId) => {
 // Partner-facing unit price: partner's own price -> master selling price -> base price.
 const effectiveUnitPrice = async (spaceId, menuItem) => {
   const own = menuItem ? await currentPrice(spaceId, menuItem._id) : null;
-  return Number(own ?? menuItem?.sellingPrice ?? menuItem?.price ?? 0) || 0;
+  return partnerUnitPrice(menuItem, own);
 };
 
 // Partners can edit or cancel an order until 48 hours before its delivery date.
@@ -75,7 +68,7 @@ const decorateOrders = async (orders, spaceId) => {
       lines: ls,
       total: ls.reduce((s, l) => s + l.unitPrice * l.quantity, 0),
       isLocked: isInLockWindow(o.deliveryDate),
-      editable: ['draft', 'submitted'].includes(o.status) && !isPastEditWindow(o.deliveryDate),
+      editable: ['draft', 'submitted'].includes(o.status) && !isInLockWindow(o.deliveryDate) && !isPastEditWindow(o.deliveryDate),
       invoice: inv ? { _id: inv._id, invoiceNumber: inv.invoiceNumber, totalRevenue: inv.totalRevenue } : null
     };
   });
@@ -169,22 +162,11 @@ router.get('/menu', async (req, res) => {
 
     const items = assignments
       .filter(a => {
-        if (!a.menuItem || a.menuItem.isAvailable === false) return false;
-        if (!checkDate) return true;
-        const item = a.menuItem;
-        if (item.availableFrom) {
-          const from = new Date(item.availableFrom); from.setUTCHours(0,0,0,0);
-          if (checkDate < from) return false;
-        }
-        if (item.availableTo) {
-          const to = new Date(item.availableTo); to.setUTCHours(0,0,0,0);
-          if (checkDate > to) return false;
-        }
-        return true;
+        return checkDate ? isPartnerItemAvailable(a.menuItem, checkDate) : a.menuItem && a.menuItem.isAvailable !== false;
       })
       .map(a => ({
         ...a.menuItem.toObject(),
-        price: priceMap[String(a.menuItem._id)] ?? a.menuItem.sellingPrice ?? null
+        price: partnerUnitPrice(a.menuItem, priceMap[String(a.menuItem._id)])
       }));
 
     res.json({ success: true, data: items });
@@ -200,7 +182,6 @@ router.get('/menu', async (req, res) => {
 router.get('/orders', async (req, res) => {
   try {
     const spaceId = req.partner._id;
-    await autoLockOrders(spaceId);
 
     const { status, from, to } = req.query;
     const q = { space: spaceId };
@@ -237,31 +218,45 @@ router.post('/orders', async (req, res) => {
   try {
     const { deliveryDate, lines, notes, deliveryTime, orderType, weekGroupId } = req.body;
     if (!deliveryDate) return res.status(400).json({ success: false, message: 'deliveryDate is required' });
-    if (!Array.isArray(lines)) return res.status(400).json({ success: false, message: 'lines must be an array' });
+    const deliveryDay = new Date(deliveryDate);
+    if (!Number.isFinite(deliveryDay.getTime())) return res.status(400).json({ success: false, message: 'Invalid delivery date.' });
+    deliveryDay.setUTCHours(0, 0, 0, 0);
+    const changes = normalizePartnerLines(lines);
 
     const spaceId = req.partner._id;
-    if (new Date(deliveryDate).getUTCDay() === 0) {
+    if (deliveryDay.getUTCDay() === 0) {
       return res.status(400).json({ success: false, message: 'There is no delivery on Sunday — pick another date.' });
     }
-    if (isInLockWindow(deliveryDate)) {
-      return res.status(400).json({ success: false, message: 'This delivery date is within the 2-day advance lock window and cannot be ordered for.' });
+    if (isInLockWindow(deliveryDay)) {
+      return res.status(400).json({ success: false, message: 'This delivery date is past its ordering deadline and can no longer be ordered for.' });
     }
 
-    let order = await SpaceOrder.findOne({ space: spaceId, deliveryDate: new Date(deliveryDate) });
+    // Keep cancelled orders as history; a replacement starts as a new draft.
+    let order = await SpaceOrder.findOne({ space: spaceId, deliveryDate: deliveryDay, status: { $ne: 'cancelled' } });
+    if (order && !['draft', 'submitted'].includes(order.status)) {
+      return res.status(400).json({ success: false, message: 'Order is locked and cannot be edited.' });
+    }
+    if (order && isPastEditWindow(order.deliveryDate)) {
+      return res.status(400).json({ success: false, message: 'This order is within 48 hours of delivery and can no longer be edited.' });
+    }
+    const existingLines = order ? await OrderLine.find({ order: order._id }) : [];
+    const proposed = new Map(existingLines.map(l => [String(l.menuItem), l.quantity]));
+    changes.forEach(l => l.quantity > 0 ? proposed.set(l.menuItemId, l.quantity) : proposed.delete(l.menuItemId));
+    await validatePartnerOrder({
+      spaceId, deliveryDate: deliveryDay,
+      lines: normalizePartnerLines([...proposed].map(([menuItemId, quantity]) => ({ menuItemId, quantity }))),
+      requireItems: order?.status === 'submitted',
+      minimumOrder: order?.status === 'submitted' ? Number(req.partner.minimumOrder) || 0 : 0
+    });
     if (!order) {
       order = await SpaceOrder.create({
-        space: spaceId, deliveryDate: new Date(deliveryDate), createdBy: spaceId,
+        space: spaceId, deliveryDate: deliveryDay, createdBy: spaceId,
         notes: notes || '',
         deliveryTime: deliveryTime || null,
         orderType: orderType || 'single',
         weekGroupId: weekGroupId || null
       });
     } else {
-      if (order.status === 'locked') return res.status(400).json({ success: false, message: 'Order is locked and cannot be edited.' });
-      if (order.status === 'cancelled') return res.status(400).json({ success: false, message: 'Cancelled orders cannot be edited.' });
-      if (isPastEditWindow(order.deliveryDate)) {
-        return res.status(400).json({ success: false, message: 'This order is within 48 hours of delivery and can no longer be edited.' });
-      }
       if (notes !== undefined) order.notes = notes;
       if (deliveryTime !== undefined) order.deliveryTime = deliveryTime;
       // A partner edit goes back to the kitchen as unacknowledged
@@ -270,17 +265,16 @@ router.post('/orders', async (req, res) => {
     }
 
     // Upsert lines
-    for (const line of lines) {
+    for (const line of changes) {
       const { menuItemId, quantity } = line;
-      if (!menuItemId) continue;
-      const qty = Number(quantity) || 0;
+      const qty = quantity;
       if (qty <= 0) {
         await OrderLine.deleteOne({ order: order._id, menuItem: menuItemId });
       } else {
         await OrderLine.findOneAndUpdate(
           { order: order._id, menuItem: menuItemId },
           { quantity: qty },
-          { upsert: true, new: true }
+          { upsert: true, new: true, runValidators: true }
         );
       }
     }
@@ -289,7 +283,7 @@ router.post('/orders', async (req, res) => {
     res.json({ success: true, data: { ...order.toObject(), lines: updatedLines } });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(err.status || 500).json({ success: false, message: err.status ? err.message : 'Server error' });
   }
 });
 
@@ -300,22 +294,15 @@ router.post('/orders/:id/submit', async (req, res) => {
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
     if (order.status === 'locked') return res.status(400).json({ success: false, message: 'Order is already locked.' });
     if (order.status === 'submitted') return res.status(400).json({ success: false, message: 'Order already submitted.' });
-    if (isInLockWindow(order.deliveryDate)) return res.status(400).json({ success: false, message: 'Delivery date is within the 2-day lock window.' });
+    if (order.status !== 'draft') return res.status(400).json({ success: false, message: 'Only draft orders can be submitted.' });
+    if (isInLockWindow(order.deliveryDate)) return res.status(400).json({ success: false, message: 'Delivery date is past its ordering deadline.' });
 
-    const lines = await OrderLine.find({ order: order._id }).populate('menuItem', 'name price sellingPrice');
-    if (!lines.length) return res.status(400).json({ success: false, message: 'Order has no items.' });
-
-    const pricedLines = await Promise.all(lines.map(async l => ({
-      line: l,
-      unitPrice: await effectiveUnitPrice(req.partner._id, l.menuItem)
-    })));
-    const totalAmount = pricedLines.reduce((sum, p) => sum + p.unitPrice * p.line.quantity, 0);
-
-    // Minimum order comes from the partner's own setting; 0 means no minimum
-    const minimumOrder = Number(req.partner.minimumOrder) || 0;
-    if (minimumOrder > 0 && totalAmount < minimumOrder) {
-      return res.status(400).json({ success: false, message: `Minimum order is AED ${minimumOrder.toFixed(2)}. Current total: AED ${totalAmount.toFixed(2)}.` });
-    }
+    const lines = await OrderLine.find({ order: order._id });
+    const { pricedLines, totalAmount } = await validatePartnerOrder({
+      spaceId: req.partner._id, deliveryDate: order.deliveryDate,
+      lines: normalizePartnerLines(lines.map(l => ({ menuItemId: String(l.menuItem), quantity: l.quantity }))),
+      requireItems: true, minimumOrder: Number(req.partner.minimumOrder) || 0
+    });
 
     order.status = 'submitted';
     order.submittedAt = new Date();
@@ -325,18 +312,18 @@ router.post('/orders/:id/submit', async (req, res) => {
     sendNewOrderEmail({
       partner: req.partner,
       order,
-      lines: pricedLines.map(({ line, unitPrice }) => ({
-        itemName: line.menuItem?.name || '—',
-        quantity: line.quantity,
+      lines: pricedLines.map(({ menuItem, quantity, unitPrice }) => ({
+        itemName: menuItem.name,
+        quantity,
         unitPrice,
-        lineTotal: unitPrice * line.quantity,
+        lineTotal: unitPrice * quantity,
       })),
       totalAmount,
     }).catch(err => console.error('[email] Order notification failed:', err?.message || err));
 
     res.json({ success: true, data: order });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(err.status || 500).json({ success: false, message: err.status ? err.message : 'Server error' });
   }
 });
 
@@ -361,6 +348,9 @@ router.post('/orders/:id/cancel', async (req, res) => {
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
     if (order.status === 'locked') return res.status(400).json({ success: false, message: 'Locked orders cannot be cancelled.' });
     if (order.status === 'cancelled') return res.status(400).json({ success: false, message: 'Order is already cancelled.' });
+    if (isInLockWindow(order.deliveryDate)) {
+      return res.status(400).json({ success: false, message: 'This order is past its ordering deadline and can no longer be cancelled.' });
+    }
     if (isPastEditWindow(order.deliveryDate)) {
       return res.status(400).json({ success: false, message: 'This order is within 48 hours of delivery and can no longer be cancelled.' });
     }
@@ -454,9 +444,7 @@ router.get('/reports', async (req, res) => {
   try {
     const spaceId = req.partner._id;
     const { from, to } = req.query;
-    const dateFilter = {};
-    if (from) dateFilter.$gte = new Date(from);
-    if (to) dateFilter.$lte = new Date(to);
+    const { dateFilter, invoiceOrderFilter } = await partnerReportScope({ from, to, spaceId });
 
     // Orders summary
     const orderQ = { space: spaceId, status: { $in: ['submitted', 'locked'] } };
@@ -465,7 +453,7 @@ router.get('/reports', async (req, res) => {
     const orderIds = orders.map(o => o._id);
 
     // Invoice totals
-    const invQ = { space: spaceId, type: 'partner', status: 'locked' };
+    const invQ = { space: spaceId, type: 'partner', status: 'locked', ...invoiceOrderFilter };
     const invoices = await Invoice.find(invQ).sort({ createdAt: -1 });
     const totalSpend = invoices.reduce((s, i) => s + i.totalRevenue, 0);
 
@@ -498,7 +486,7 @@ router.get('/reports', async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(err.status || 500).json({ success: false, message: err.status ? err.message : 'Server error' });
   }
 });
 

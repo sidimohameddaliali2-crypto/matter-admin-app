@@ -91,7 +91,7 @@ export function recordProofReceipt(delivery, incoming, now = new Date()) {
   const snapshot = delivery.trackerVisit;
   const driverId = String(delivery.driver?._id || delivery.driver || '');
   if (firstReceipt && snapshot?.geofenceId && (
-    (snapshot.driverId && snapshot.driverId !== driverId) ||
+    (String(snapshot.driverId || '') !== driverId) ||
     (Number.isFinite(delivery.gpsLocation?.lat) && Number.isFinite(delivery.gpsLocation?.lng) &&
       (snapshot.lat !== delivery.gpsLocation.lat || snapshot.lng !== delivery.gpsLocation.lng))
   )) delivery.trackerVisit = undefined;

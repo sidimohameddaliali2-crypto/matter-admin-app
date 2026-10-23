@@ -99,6 +99,13 @@ test('editing proof notes does not erase recorded shutter evidence', () => {
   assert.equal(d.trackerVisit.status, 'inside_window');
 });
 
+test('first photo after assignment invalidates the earlier unassigned tracker snapshot', () => {
+  const d = { driver: 'driver1', gpsLocation: { lat: 25.1, lng: 55.2 },
+    proof: { photoUrl: '/photo.jpg' }, trackerVisit: { geofenceId: 'G1', driverId: '', lat: 25.1, lng: 55.2 } };
+  recordProofReceipt(d, { photoSource: 'camera', photoCapturedAt: at('04:05:00').toISOString() }, at('04:06:00'));
+  assert.equal(d.trackerVisit, undefined);
+});
+
 test('legacy completion preserves the address pin and records the driver separately', async () => {
   const d = new Delivery({ customerId: 'C1', customerName: 'Customer', scheduledTime: start,
     gpsLocation: { lat: 25.1, lng: 55.2 } });

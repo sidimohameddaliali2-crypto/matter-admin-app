@@ -33,12 +33,11 @@ const fmtDay = (iso) =>
   new Date(iso + 'T00:00:00').toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' });
 const initials = (s = '') =>
   s.trim().split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase() || 'M';
-// Menu item name display: only the first letter capitalised, everything else lowercase
-const sentenceCase = (s = '') => {
-  const lower = String(s).trim().toLowerCase();
-  return lower ? lower.charAt(0).toUpperCase() + lower.slice(1) : '';
-};
-const MEAL_TYPE_LABEL = { main: 'Main', bowl: 'Bowl', 'wraps-buns': 'Wraps/Buns', oats: 'Oats', snack: 'Snack' };
+// Menu item name display: every word capitalised ("Title Case")
+const titleCase = (s = '') => String(s).trim().toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+// Category display order: Oats, Wraps/Buns, Snack, Bowl, Main (Bowl wasn't
+// in the list given — placed just before Main since it's not mentioned).
+const MEAL_TYPE_LABEL = { oats: 'Oats', 'wraps-buns': 'Wraps/Buns', snack: 'Snack', bowl: 'Bowl', main: 'Main' };
 // Main meals are further split by protein (the category tag set by the Menu
 // Selection sync) so a partner can jump straight to chicken/beef/fish.
 const MAIN_PROTEIN_ORDER = ['Chicken', 'Beef', 'Fish'];
@@ -63,12 +62,38 @@ const buildCalendar = (year, month) => {
 // No deliveries on Sunday
 const isSunday = (iso) => new Date(iso + 'T00:00:00').getDay() === 0;
 
-// earliest orderable date — server locks anything inside a ~2-day advance window
+// Same fixed, company-wide ordering-deadline policy as the customer Menu
+// Selection (server/config/selectionDeadlines.js and its client-side mirror
+// in menuSelectionLink/MenuSelectionLink.jsx) — ported here so the calendar
+// greys out exactly the dates the server will reject, instead of a flat
+// "+3 days" guess.
+const FIXED_SELECTION_DEADLINES = [
+  { deliveryDay: 'Monday', daysBefore: 3, deadlineTime: '15:00' },
+  { deliveryDay: 'Tuesday', daysBefore: 2, deadlineTime: '00:00' },
+  { deliveryDay: 'Wednesday', daysBefore: 2, deadlineTime: '00:00' },
+  { deliveryDay: 'Thursday', daysBefore: 2, deadlineTime: '00:00' },
+  { deliveryDay: 'Friday', daysBefore: 2, deadlineTime: '00:00' },
+  { deliveryDay: 'Saturday', daysBefore: 3, deadlineTime: '00:00' },
+  { deliveryDay: 'Sunday', daysBefore: 4, deadlineTime: '00:00' },
+];
+const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// Whether a delivery date's ordering deadline has already passed.
+const isPastOrderDeadline = (iso) => {
+  const deliveryDate = new Date(iso + 'T00:00:00');
+  const rule = FIXED_SELECTION_DEADLINES.find((r) => r.deliveryDay === DAY_NAMES[deliveryDate.getDay()]);
+  const daysBefore = rule?.daysBefore ?? 2;
+  const deadline = new Date(deliveryDate.getFullYear(), deliveryDate.getMonth(), deliveryDate.getDate() - daysBefore);
+  const [hh, mm] = String(rule?.deadlineTime || '00:00').split(':').map(Number);
+  deadline.setHours(hh, mm, 59, 999);
+  return new Date() > deadline;
+};
+
+// earliest orderable date — the first day (not Sunday, not past its own deadline)
 const firstOrderableISO = () => {
   const d = new Date();
-  d.setDate(d.getDate() + 3);
   let iso = toISO(d);
-  while (isSunday(iso)) { d.setDate(d.getDate() + 1); iso = toISO(d); }
+  while (isSunday(iso) || isPastOrderDeadline(iso)) { d.setDate(d.getDate() + 1); iso = toISO(d); }
   return iso;
 };
 
@@ -84,7 +109,7 @@ const statusOf = (s) => STATUS[s] || { label: s || '—', bg: '#12275e', color: 
 const orderTotal = (o) =>
   (o.lines || []).reduce((s, l) => s + (Number(l.unitPrice ?? l.menuItem?.price) || 0) * l.quantity, 0);
 const orderItemsLine = (o) =>
-  (o.lines || []).map((l) => `${l.quantity}× ${sentenceCase(l.menuItem?.name || l.itemName) || 'Item'}`).join(', ') || 'No items';
+  (o.lines || []).map((l) => `${l.quantity}× ${titleCase(l.menuItem?.name || l.itemName) || 'Item'}`).join(', ') || 'No items';
 
 const NAV_ICON = {
   order: 'M3 5h18v16H3zM3 10h18M8 3v4M16 3v4',
@@ -123,13 +148,10 @@ const PartnerPortal = () => {
   const now = useMemo(() => new Date(), []);
   const [calY, setCalY] = useState(now.getFullYear());
   const [calM, setCalM] = useState(now.getMonth());
-  const [selMode, setSelMode] = useState('single'); // 'single' | 'multi'
-  const [selectedDates, setSelectedDates] = useState(() => new Set([firstOrderableISO()]));
-  const [cart, setCart] = useState({}); // { [menuItemId]: qty } — same cart applied to every selected day
+  const [selectedDates, setSelectedDates] = useState(() => new Set([firstOrderableISO()])); // always exactly one day — single-day ordering only
+  const [cart, setCart] = useState({}); // { [menuItemId]: qty }
   const [editing, setEditing] = useState(null); // { id, date, ref, originalIds } while editing an existing order
-  const [deliveryWindow, setDeliveryWindow] = useState(DELIVERY_WINDOWS[0]); // default window for every selected day
-  const [dayWindows, setDayWindows] = useState({}); // { [iso]: window } — per-day overrides on top of deliveryWindow
-  const [perDayOpen, setPerDayOpen] = useState(false); // mobile: per-day window overrides collapsed behind a dropdown
+  const [deliveryWindow, setDeliveryWindow] = useState(DELIVERY_WINDOWS[0]);
   const [sheet, setSheet] = useState(null); // null | 'checkout'  (mobile only)
   const [placing, setPlacing] = useState(false);
   const [orderErr, setOrderErr] = useState('');
@@ -138,6 +160,7 @@ const PartnerPortal = () => {
   // data
   const [menu, setMenu] = useState([]);
   const [menuLoading, setMenuLoading] = useState(false);
+  const [menuTypeFilter, setMenuTypeFilter] = useState('all');
   const [orders, setOrders] = useState([]);
   const [ordersView, setOrdersView] = useState('up'); // 'up' | 'past'
   const [reports, setReports] = useState(null);
@@ -150,7 +173,6 @@ const PartnerPortal = () => {
   const [linkCopied, setLinkCopied] = useState(false);
   const qrRef = useRef(null);
 
-  const minISO = firstOrderableISO();
   const todayISO = toISO(new Date());
 
   // ── loaders ───────────────────────────────────────────────────────────────
@@ -205,10 +227,8 @@ const PartnerPortal = () => {
     }
   }, []);
 
-  // Sorted list of every day currently selected on the calendar (single mode
-  // always holds exactly one), and the earliest of them — the "anchor" day
-  // whose menu/availability is shown and used to build the one shared cart
-  // that gets placed on every selected day.
+  // The one selected delivery day (a Set for symmetry with how it's stored/
+  // compared elsewhere, but ordering only ever has a single day selected).
   const sortedSelected = useMemo(() => Array.from(selectedDates).sort(), [selectedDates]);
   const anchorDate = sortedSelected[0] || firstOrderableISO();
 
@@ -259,34 +279,12 @@ const PartnerPortal = () => {
   // ── actions ───────────────────────────────────────────────────────────────
   const prevMonth = () => (calM === 0 ? (setCalY(calY - 1), setCalM(11)) : setCalM(calM - 1));
   const nextMonth = () => (calM === 11 ? (setCalY(calY + 1), setCalM(0)) : setCalM(calM + 1));
-  const setDayMode = (mode) => {
-    setSelMode(mode);
-    if (mode === 'single') {
-      setSelectedDates((prev) => new Set([Array.from(prev).sort()[0] || firstOrderableISO()]));
-      setDayWindows({});
-      setPerDayOpen(false);
-    }
-  };
   const toggleDay = (iso) => {
     if (editing) return; // an existing order is edited on its own day
-    if (isSunday(iso)) return; // no deliveries on Sunday
+    if (isSunday(iso) || isPastOrderDeadline(iso)) return; // no deliveries on Sunday, or past that day's deadline
     setOrderErr('');
-    if (selMode === 'single') { setSelectedDates(new Set([iso])); return; }
-    setSelectedDates((prev) => {
-      const next = new Set(prev);
-      if (next.has(iso)) {
-        if (next.size > 1) {
-          next.delete(iso);
-          setDayWindows((w) => { if (!(iso in w)) return w; const n = { ...w }; delete n[iso]; return n; });
-        }
-      } else next.add(iso);
-      return next;
-    });
+    setSelectedDates(new Set([iso]));
   };
-  // Effective delivery window for a given selected day — its own override, or the default
-  const windowFor = (iso) => dayWindows[iso] || deliveryWindow;
-  const setWindowForDay = (iso, win) => setDayWindows((w) => ({ ...w, [iso]: win }));
-  const mixedWindows = sortedSelected.length > 1 && new Set(sortedSelected.map(windowFor)).size > 1;
   const inc = (id) => { setOrderErr(''); setCart((c) => ({ ...c, [id]: (c[id] || 0) + 1 })); };
   const dec = (id) =>
     setCart((c) => {
@@ -305,12 +303,9 @@ const PartnerPortal = () => {
       if (id && l.quantity > 0) next[id] = l.quantity;
     });
     setEditing({ id: o._id, date, ref: `PO-${String(o._id).slice(-4).toUpperCase()}`, originalIds: Object.keys(next) });
-    setSelMode('single');
     setSelectedDates(new Set([date]));
     setCart(next);
     setDeliveryWindow(DELIVERY_WINDOWS.includes(o.deliveryTime) ? o.deliveryTime : DELIVERY_WINDOWS[0]);
-    setDayWindows({});
-    setPerDayOpen(false);
     setOrderErr('');
     setSheet(null);
     setTab('order');
@@ -319,8 +314,6 @@ const PartnerPortal = () => {
     setEditing(null);
     setCart({});
     setDeliveryWindow(DELIVERY_WINDOWS[0]);
-    setDayWindows({});
-    setPerDayOpen(false);
     setOrderErr('');
   };
   const cancelOrder = async (o) => {
@@ -364,7 +357,7 @@ const PartnerPortal = () => {
       y += 18;
       doc.setFont('helvetica', 'normal');
       (inv.lines || []).forEach((l) => {
-        doc.text(sentenceCase(l.itemName) || 'Item', 40, y);
+        doc.text(titleCase(l.itemName) || 'Item', 40, y);
         doc.text(String(l.quantity), 360, y, { align: 'right' });
         doc.text(fmtAED(l.unitPrice), 440, y, { align: 'right' });
         doc.text(fmtAED(l.lineRevenue), right, y, { align: 'right' });
@@ -408,16 +401,13 @@ const PartnerPortal = () => {
     }
     const results = [];
     const dates = editing ? [editing.date] : sortedSelected;
-    const usedWindows = {};
     for (const date of dates) {
-      const win = windowFor(date);
-      usedWindows[date] = win;
       try {
         const r = await partnerApi.post('/partner/orders', {
           deliveryDate: date,
           lines,
           notes: '',
-          deliveryTime: win,
+          deliveryTime: deliveryWindow,
         });
         try {
           await partnerApi.post(`/partner/orders/${r.data.data._id}/submit`);
@@ -435,13 +425,10 @@ const PartnerPortal = () => {
     const okResults = results.filter((r) => r.ok);
     const failResults = results.filter((r) => !r.ok);
     if (okResults.length > 0) {
-      const winByDate = okResults.map((r) => ({ day: fmtDay(r.date), win: usedWindows[r.date] }));
       setDone({
         count: okResults.length,
         days: okResults.map((r) => fmtDay(r.date)),
-        winByDate,
-        sameWindow: new Set(winByDate.map((w) => w.win)).size <= 1,
-        win: winByDate[0]?.win || deliveryWindow,
+        win: deliveryWindow,
         perDay: subtotal,
         total: subtotal * okResults.length,
         failed: failResults.map((r) => `${fmtDay(r.date)}: ${r.message}`),
@@ -449,8 +436,6 @@ const PartnerPortal = () => {
       setCart({});
       setEditing(null);
       setDeliveryWindow(DELIVERY_WINDOWS[0]);
-      setDayWindows({});
-      setPerDayOpen(false);
       setSheet(null);
       loadOrders();
       setReports(null);
@@ -470,21 +455,6 @@ const PartnerPortal = () => {
   const card = 'bg-[#051747] border border-[#12275e] rounded-[20px]';
 
   // ── render helpers (plain functions) ──────────────────────────────────────
-  const renderDayModeSwitch = () => (
-    <div className="flex gap-1 bg-[#0a1230] border-[1.5px] border-[#12275e] rounded-full p-1 mb-3">
-      {[['single', 'Single day'], ['multi', 'Multiple days']].map(([v, label]) => {
-        const on = selMode === v;
-        return (
-          <button key={v} onClick={() => setDayMode(v)}
-            className="flex-1 py-2 rounded-full text-[12px] font-bold transition-colors"
-            style={{ background: on ? '#bcf679' : 'transparent', color: on ? '#051747' : '#a8ccf5' }}>
-            {label}
-          </button>
-        );
-      })}
-    </div>
-  );
-
   const renderCalendar = ({ cellH = 46, radius = 14 }) => (
     <>
       <div className="flex items-center gap-2">
@@ -501,7 +471,7 @@ const PartnerPortal = () => {
         {buildCalendar(calY, calM).map((d, i) => {
           if (!d) return <div key={i} style={{ height: cellH }} />;
           const iso = toISO(d);
-          const disabled = iso < minISO || isSunday(iso);
+          const disabled = isSunday(iso) || isPastOrderDeadline(iso);
           const isSel = selectedDates.has(iso);
           const isToday = iso === todayISO;
           const has = !!ordersByDate[iso];
@@ -527,39 +497,11 @@ const PartnerPortal = () => {
     </>
   );
 
-  const renderPerDayRows = (dark) =>
-    sortedSelected.map((iso) => (
-      <div key={iso} className="flex items-center gap-2">
-        <span className="text-[11px] text-[#a8ccf5] w-[62px] flex-none truncate">{fmtDay(iso)}</span>
-        <div className="flex gap-1 flex-1">
-          {DELIVERY_WINDOWS.map((w) => {
-            const on = windowFor(iso) === w;
-            return (
-              <button key={w} type="button" onClick={() => setWindowForDay(iso, w)}
-                className="flex-1 rounded-full px-2 py-1.5 text-[10.5px] font-bold border-[1.5px] transition-colors"
-                style={{
-                  borderColor: on ? '#bcf679' : '#12275e',
-                  background: on ? '#bcf679' : (dark ? '#051747' : '#0a1230'),
-                  color: on ? '#051747' : '#ede5de',
-                }}>
-                {w}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    ));
-
-  const renderDeliverOn = ({ dark = false, collapsiblePerDay = false } = {}) => (
+  const renderDeliverOn = ({ dark = false } = {}) => (
     <div className={`flex flex-col gap-2.5 rounded-[16px] px-3.5 py-3 ${dark ? 'bg-[#0a1230] border-[1.5px] border-[#12275e]' : card}`}>
       <div>
         <div className="text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5]">Deliver on</div>
-        <div className="text-sm font-bold mt-0.5">
-          {sortedSelected.length <= 1 ? fmtDay(anchorDate) : `${sortedSelected.length} days selected`}
-        </div>
-        {sortedSelected.length > 1 && (
-          <div className="text-[10.5px] text-[#a8ccf5] mt-1 leading-snug">{sortedSelected.map(fmtDay).join(' · ')}</div>
-        )}
+        <div className="text-sm font-bold mt-0.5">{fmtDay(anchorDate)}</div>
       </div>
       <div>
         <div className="text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5] mb-1.5">Window</div>
@@ -580,36 +522,6 @@ const PartnerPortal = () => {
           })}
         </div>
       </div>
-      {sortedSelected.length > 1 && (
-        collapsiblePerDay ? (
-          <div>
-            <button type="button" onClick={() => setPerDayOpen((o) => !o)}
-              className="w-full flex items-center justify-between text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5]">
-              <span>Different window for a day?</span>
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-                strokeLinecap="round" strokeLinejoin="round"
-                style={{ transform: perDayOpen ? 'rotate(180deg)' : 'none', transition: 'transform .15s' }}>
-                <path d="M6 9l6 6 6-6" />
-              </svg>
-            </button>
-            <AnimatePresence initial={false}>
-              {perDayOpen && (
-                <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }}
-                  className="overflow-hidden">
-                  <div className="flex flex-col gap-1.5 mt-2">{renderPerDayRows(dark)}</div>
-                </motion.div>
-              )}
-            </AnimatePresence>
-          </div>
-        ) : (
-          <div>
-            <div className="text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5] mb-1.5">
-              Different window for a day?
-            </div>
-            <div className="flex flex-col gap-1.5">{renderPerDayRows(dark)}</div>
-          </div>
-        )
-      )}
     </div>
   );
 
@@ -641,7 +553,7 @@ const PartnerPortal = () => {
           {abbr(m.name)}
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-[13.5px] font-bold truncate">{sentenceCase(m.name)}</div>
+          <div className="text-[13.5px] font-bold truncate">{titleCase(m.name)}</div>
           {m.mealType && (
             <div className="inline-block mt-1 rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wide"
               style={{ background: '#12275e', color: '#a8ccf5' }}>
@@ -668,12 +580,37 @@ const PartnerPortal = () => {
 
   // Shared by both the desktop and mobile layouts (just a different `cols`),
   // so organizing it by category here covers both at once.
+  // Filter chips above the menu — All plus one per meal type actually
+  // available that day, each with a live count.
+  const renderMenuFilters = () => {
+    if (menuLoading || menu.length === 0) return null;
+    const chips = [['all', 'All', menu.length], ...Object.keys(MEAL_TYPE_LABEL)
+      .map((t) => [t, MEAL_TYPE_LABEL[t], menu.filter((m) => m.mealType === t).length])
+      .filter(([, , n]) => n > 0)];
+    return (
+      <div className="flex flex-wrap gap-1.5 mb-3.5">
+        {chips.map(([t, label, n]) => {
+          const on = menuTypeFilter === t;
+          return (
+            <button key={t} onClick={() => setMenuTypeFilter(t)}
+              className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11.5px] font-bold transition-colors"
+              style={{ background: on ? '#bcf679' : '#0a1230', color: on ? '#051747' : '#a8ccf5', border: '1.5px solid', borderColor: on ? '#bcf679' : '#12275e' }}>
+              {label}
+              <span className="rounded-full px-1.5 text-[10px]" style={{ background: on ? 'rgba(5,23,71,.15)' : 'rgba(255,255,255,.08)' }}>{n}</span>
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+
   const renderMenuGrid = (cols) => {
     if (menuLoading) return <div className="flex justify-center py-16"><Loader2 className="w-7 h-7 animate-spin text-[#bcf679]" /></div>;
     if (menu.length === 0)
       return <div className={`${card} px-4 py-10 text-center text-[13px] text-[#a8ccf5]`}>No menu items available for {fmtDay(anchorDate)}.</div>;
 
     const typeGroups = Object.keys(MEAL_TYPE_LABEL)
+      .filter((t) => menuTypeFilter === 'all' || menuTypeFilter === t)
       .map((t) => ({ type: t, label: MEAL_TYPE_LABEL[t], items: menu.filter((m) => m.mealType === t) }))
       .filter((g) => g.items.length > 0);
 
@@ -731,13 +668,13 @@ const PartnerPortal = () => {
           <div className="flex flex-wrap gap-2 mt-3">
             {o.editable && (
               <button onClick={() => startEdit(o)}
-                className="rounded-full px-3.5 py-2 text-[12px] font-bold border-[1.5px] border-[#bcf679] text-[#bcf679] hover:bg-[#bcf679]/10 transition-colors">
+                className="rounded-full px-3.5 py-2 text-[12px] font-bold uppercase tracking-wide border-[1.5px] border-[#bcf679] text-[#bcf679] hover:bg-[#bcf679]/10 transition-colors">
                 Edit meals
               </button>
             )}
             {o.editable && (
               <button onClick={() => cancelOrder(o)}
-                className="rounded-full px-3.5 py-2 text-[12px] font-bold border-[1.5px] border-[#ff3b00] text-[#ff8a66] hover:bg-[#ff3b00]/10 transition-colors">
+                className="rounded-full px-3.5 py-2 text-[12px] font-bold uppercase tracking-wide border-[1.5px] border-[#ff3b00] text-[#ff8a66] hover:bg-[#ff3b00]/10 transition-colors">
                 Cancel order
               </button>
             )}
@@ -962,7 +899,7 @@ const PartnerPortal = () => {
         {cartLines.map((l) => (
           <div key={l._id} className="flex gap-2.5 text-[13px]">
             <span className="text-[#a8ccf5] font-bold min-w-[26px]">{l.qty}×</span>
-            <span className="flex-1">{l.name}</span>
+            <span className="flex-1">{titleCase(l.name)}</span>
             <span className="font-bold">AED {fmtAED(l.line)}</span>
           </div>
         ))}
@@ -1075,13 +1012,13 @@ const PartnerPortal = () => {
                 </div>
                 <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-[22px] mt-[22px] items-start">
                   <div className="bg-[#051747] border-[1.5px] border-[#12275e] rounded-[22px] p-[18px]">
-                    {renderDayModeSwitch()}
                     {renderCalendar({ cellH: 36, radius: 11 })}
-                    <div className="mt-4">{renderDeliverOn({ dark: true, collapsiblePerDay: true })}</div>
+                    <div className="mt-4">{renderDeliverOn({ dark: true })}</div>
                     {renderExistingBanner()}
                   </div>
                   <div>
                     <div className="text-[12.5px] tracking-[0.12em] uppercase text-[#a8ccf5] mb-2.5">Menu</div>
+                    {renderMenuFilters()}
                     {renderMenuGrid('grid-cols-1 2xl:grid-cols-2')}
                   </div>
                 </div>
@@ -1121,7 +1058,7 @@ const PartnerPortal = () => {
                 <>
                   <div className="text-[19px]" style={AB}>Checkout</div>
                   <div className="text-[12px] text-[#a8ccf5] mt-1">
-                    {sortedSelected.length > 1 ? `${sortedSelected.length} days` : fmtDay(anchorDate)} · {mixedWindows ? 'Mixed windows' : deliveryWindow}
+                    {fmtDay(anchorDate)} · {deliveryWindow}
                   </div>
                   <div className="mt-4">{renderCheckoutBody()}</div>
                 </>
@@ -1193,15 +1130,15 @@ const PartnerPortal = () => {
         {/* ORDER */}
         {tab === 'order' && (
           <div className="flex-1 min-h-0 overflow-y-auto px-[18px] pt-4 pb-[210px]">
-            {renderDayModeSwitch()}
             {renderCalendar({ cellH: 46, radius: 14 })}
-            <div className="mt-3.5">{renderDeliverOn({ collapsiblePerDay: true })}</div>
+            <div className="mt-3.5">{renderDeliverOn()}</div>
             {renderExistingBanner()}
 
             <div className="flex justify-between items-baseline mt-6 mb-2.5">
               <div className="text-[13px] tracking-[0.12em] uppercase text-[#a8ccf5]">Menu</div>
               <div className="text-[12.5px] text-[#a8ccf5]">{count ? `${count} item${count > 1 ? 's' : ''} selected` : 'Tap + to add'}</div>
             </div>
+            {renderMenuFilters()}
             {renderMenuGrid('grid-cols-1')}
 
             {orderErr && <p className="text-[#ff8a66] text-[12.5px] mt-4">{orderErr}</p>}
@@ -1289,7 +1226,7 @@ const PartnerPortal = () => {
                     className="ml-auto w-9 h-9 rounded-full bg-[#0a1230] text-[#a8ccf5] hover:text-[#ff3b00] transition-colors">✕</button>
                 </div>
                 <div className="text-[12.5px] text-[#a8ccf5] mt-1">
-                  {sortedSelected.length > 1 ? `${sortedSelected.length} days` : fmtDay(anchorDate)} · {mixedWindows ? 'Mixed windows' : deliveryWindow}
+                  {fmtDay(anchorDate)} · {deliveryWindow}
                 </div>
                 <div className="mt-3.5">{renderCheckoutBody()}</div>
               </div>
