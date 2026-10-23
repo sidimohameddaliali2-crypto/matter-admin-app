@@ -1,16 +1,18 @@
 import axios from 'axios';
 import dotenv from 'dotenv';
 import { cacheGet, cacheSet } from '../config/cache.js';
+import { createTruckoomLiveCache, normalizeTruckoomLiveData } from './truckoomLiveData.js';
 
 dotenv.config();
 
 // Live vehicle GPS tracking (Truckoom "Trace") — owner, 2026-09-24. Two
-// endpoints are all this integration needs:
+// endpoints originally used by this integration:
 //   - getCompanyWiseVehicleData: which vehicles exist (vehicle_no, imei,
 //     device_name — the device_name happens to carry the driver's name for
 //     most of this fleet, but that's not relied on for matching; a driver
 //     is linked to a vehicle_no explicitly via User.profile.truckoomVehicleNo).
-//   - getVehiclesWithLocationDetails: each vehicle's current lat/lng.
+//   - getVehiclesWithLocationDetails: each vehicle's current lat/lng (replaced
+//     on 2026-10-23 by getTokenBaseLiveData, ProjectId=49, including GPS time).
 //
 // Both were verified live against the real account before building this:
 // getCompanyWiseVehicleData wants a JSON body, getVehiclesWithLocationDetails
@@ -22,8 +24,8 @@ dotenv.config();
 // don't turn into N real Truckoom calls a minute — one real fetch serves
 // all of them.
 
-const FLEET_CACHE_TTL_SECONDS = 20;
-const FLEET_CACHE_KEY = 'truckoom:fleet:vehicles';
+const FLEET_CACHE_TTL_SECONDS = 60;
+const FLEET_CACHE_KEY = 'truckoom:fleet:vehicles:v2';
 
 class TruckoomApiService {
   constructor() {
@@ -31,6 +33,7 @@ class TruckoomApiService {
     this.username = process.env.TRUCKOOM_USERNAME;
     this.password = process.env.TRUCKOOM_PASSWORD;
     this.companyName = process.env.TRUCKOOM_COMPANY_NAME;
+    this.cachedLiveData = createTruckoomLiveCache();
   }
 
   assertConfigured() {
@@ -41,6 +44,66 @@ class TruckoomApiService {
 
   isConfigured() {
     return Boolean(this.username && this.password && this.companyName);
+  }
+
+  async getAccessToken() {
+    this.assertConfigured();
+    if (this.accessToken && Date.now() < this.accessTokenExpiresAt) return this.accessToken;
+    if (this.accessTokenPromise) return this.accessTokenPromise;
+    this.accessTokenPromise = (async () => {
+      const { data } = await axios.post(`${this.baseURL}?token=generateAccessToken`,
+        { username: this.username, password: this.password }, { timeout: 15000 });
+      const token = data?.data?.token || data?.token;
+      if (Number(data?.result) !== 1 || !token) throw new Error('Truckoom token request failed');
+      this.accessToken = token;
+      this.accessTokenExpiresAt = Date.now() + 30 * 60 * 1000;
+      return token;
+    })();
+    try { return await this.accessTokenPromise; } finally { this.accessTokenPromise = null; }
+  }
+
+  async geofenceRequest(method, body, retry = true) {
+    const token = await this.getAccessToken();
+    const { data } = await axios.post(`${this.baseURL}?token=${method}`, body,
+      { headers: { 'auth-code': token }, timeout: 15000 });
+    if (Number(data?.result) !== 1) {
+      if (retry && /token|auth-code/i.test(data?.message || '')) {
+        this.accessToken = null;
+        return this.geofenceRequest(method, body, false);
+      }
+      throw new Error(`Truckoom ${method} failed`);
+    }
+    return data.data;
+  }
+
+  async getGeofences() {
+    const data = await this.geofenceRequest('getGeofenceList', { project_id: '49' });
+    if (!Array.isArray(data)) throw new Error('Unexpected Truckoom geofence list response');
+    return data.filter(f => f['Company Name'] === this.companyName);
+  }
+
+  async createCustomerGeofence(name, pin, radiusMetres = 50) {
+    const data = await this.geofenceRequest('createGeofence', {
+      project_id: '49', geofence_type: 'circle', geo_shape: 'circle',
+      reseller_name: 'Truckoom Technologies', company_name: this.companyName,
+      geofence_name: name, category_name: 'Area',
+      coordinates: [[pin.lat, pin.lng]], radius: String(radiusMetres / 1000),
+    });
+    if (!data?.geofenceId) throw new Error('Truckoom did not return a geofence id');
+    return String(data.geofenceId);
+  }
+
+  async getGeofenceAlerts(date) {
+    this.assertConfigured();
+    const { data } = await axios.get(this.baseURL, { params: {
+      token: 'getGeofenceAlerts', user: this.username, pass: this.password, Date: date,
+    }, timeout: 20000 });
+    if (!Array.isArray(data)) throw new Error('Truckoom geofence alerts request failed');
+    return data;
+  }
+
+  async deleteCustomerGeofence(id) {
+    await this.geofenceRequest('deletGeofence', { project_id: '49', geofence_id: String(id) });
   }
 
   /** Every vehicle registered under the company — vehicle_no, imei, device_name. */
@@ -63,29 +126,16 @@ class TruckoomApiService {
     })));
   }
 
-  /** Current lat/lng for every vehicle under the company. */
+  /** New token-based live data, shared at most once a minute across workers. */
   async getVehicleLocations() {
     this.assertConfigured();
-    const response = await axios.get(this.baseURL, {
-      params: {
-        token: 'getVehiclesWithLocationDetails',
-        username: this.username,
-        password: this.password,
-        company_name: this.companyName,
-      },
-      timeout: 15000,
+    return this.cachedLiveData(async () => {
+      const token = await this.getAccessToken();
+      const { data } = await axios.post(`${this.baseURL}?token=getTokenBaseLiveData&ProjectId=49`,
+        { company_names: '', format: 'json' }, { headers: { 'auth-code': token }, timeout: 20000 });
+      if (/token|auth-code/i.test(data?.root?.error || '')) this.accessToken = null;
+      return normalizeTruckoomLiveData(data, this.companyName);
     });
-    if (response.data?.result !== 1) {
-      throw new Error(response.data?.message || 'Failed to fetch Truckoom vehicle locations');
-    }
-    const details = response.data?.data?.vehicle_details || [];
-    return details.map((d) => ({
-      vehicleNo: String(d.vehicle_number || '').trim(),
-      imei: d.identifier || null,
-      vehicleType: d.vehicle_type || null,
-      latitude: Number.parseFloat(d.latitude),
-      longitude: Number.parseFloat(d.longitude),
-    }));
   }
 
   /**
@@ -114,6 +164,13 @@ class TruckoomApiService {
         vehicleType: loc?.vehicleType || null,
         latitude: Number.isFinite(loc?.latitude) ? loc.latitude : null,
         longitude: Number.isFinite(loc?.longitude) ? loc.longitude : null,
+        gpsTime: loc?.gpsTime || null,
+        trackerServerTime: loc?.trackerServerTime || null,
+        speedKph: loc?.speedKph ?? null,
+        ignition: loc?.ignition || null,
+        trackerStatus: loc?.trackerStatus || null,
+        address: loc?.address || null,
+        locationSource: loc?.locationSource || null,
       };
     });
 

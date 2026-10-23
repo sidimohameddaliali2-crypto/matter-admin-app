@@ -39,6 +39,9 @@ const sentenceCase = (s = '') => {
   return lower ? lower.charAt(0).toUpperCase() + lower.slice(1) : '';
 };
 const MEAL_TYPE_LABEL = { main: 'Main', bowl: 'Bowl', 'wraps-buns': 'Wraps/Buns', oats: 'Oats', snack: 'Snack' };
+// Main meals are further split by protein (the category tag set by the Menu
+// Selection sync) so a partner can jump straight to chicken/beef/fish.
+const MAIN_PROTEIN_ORDER = ['Chicken', 'Beef', 'Fish'];
 const abbr = (s = '') => {
   const parts = s.trim().split(/\s+/).filter(Boolean);
   return ((parts[0]?.[0] || '') + (parts[1]?.[0] || parts[0]?.[1] || '')).toUpperCase() || '·';
@@ -663,11 +666,49 @@ const PartnerPortal = () => {
     );
   };
 
+  // Shared by both the desktop and mobile layouts (just a different `cols`),
+  // so organizing it by category here covers both at once.
   const renderMenuGrid = (cols) => {
     if (menuLoading) return <div className="flex justify-center py-16"><Loader2 className="w-7 h-7 animate-spin text-[#bcf679]" /></div>;
     if (menu.length === 0)
       return <div className={`${card} px-4 py-10 text-center text-[13px] text-[#a8ccf5]`}>No menu items available for {fmtDay(anchorDate)}.</div>;
-    return <div className={`grid ${cols} gap-3`}>{menu.map(renderMenuCard)}</div>;
+
+    const typeGroups = Object.keys(MEAL_TYPE_LABEL)
+      .map((t) => ({ type: t, label: MEAL_TYPE_LABEL[t], items: menu.filter((m) => m.mealType === t) }))
+      .filter((g) => g.items.length > 0);
+
+    return (
+      <div className="flex flex-col gap-5">
+        {typeGroups.map((g) => (
+          <div key={g.type}>
+            <div className="text-[11px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5] mb-2.5">{g.label}</div>
+            {g.type === 'main' ? (
+              <div className="flex flex-col gap-4">
+                {MAIN_PROTEIN_ORDER.map((catName) => {
+                  const items = g.items.filter((m) => m.category === catName);
+                  if (!items.length) return null;
+                  return (
+                    <div key={catName}>
+                      <div className="flex items-center gap-1.5 mb-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-[#bcf679]" />
+                        <div className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#bcf679]">{catName}</div>
+                      </div>
+                      <div className={`grid ${cols} gap-3`}>{items.map(renderMenuCard)}</div>
+                    </div>
+                  );
+                })}
+                {(() => {
+                  const other = g.items.filter((m) => !MAIN_PROTEIN_ORDER.includes(m.category));
+                  return other.length ? <div className={`grid ${cols} gap-3`}>{other.map(renderMenuCard)}</div> : null;
+                })()}
+              </div>
+            ) : (
+              <div className={`grid ${cols} gap-3`}>{g.items.map(renderMenuCard)}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    );
   };
 
   const renderOrderCard = (o) => {

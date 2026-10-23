@@ -6,10 +6,11 @@ import SpaceMenu from '../models/SpaceMenu.js';
 // Owner (2026-10-19): the kitchen's daily chicken/beef/fish main-meal rotation
 // in the customer Menu Selection should also be orderable by partners from the
 // master menu, at these fixed prices per protein type (not per dish).
+// Owner (2026-10-23): selling prices dropped to 28/32/32.
 const PROTEIN_PRICING = {
-  chicken: { price: 7, sellingPrice: 35 },
-  beef: { price: 11, sellingPrice: 40 },
-  fish: { price: 13, sellingPrice: 40 },
+  chicken: { price: 7, sellingPrice: 28 },
+  beef: { price: 11, sellingPrice: 32 },
+  fish: { price: 13, sellingPrice: 32 },
 };
 
 // Makes one master-menu item orderable by every active partner (upsert into
@@ -95,6 +96,10 @@ export const syncMenuSelectionMainMealsToPartnerMenu = async (weeklyMenu) => {
     const from = new Date(Math.min(...dates.map((d) => new Date(d).getTime())));
     const to = new Date(Math.max(...dates.map((d) => new Date(d).getTime())));
 
+    // Shown as the item's category tag in the admin master menu, and doubles
+    // as a category to filter/group by alongside mealType.
+    const category = portionType.charAt(0).toUpperCase() + portionType.slice(1);
+
     const existing = await PartnerMenuItem.findOne({ name, mealType: 'main' });
     let itemId;
     if (existing) {
@@ -104,7 +109,7 @@ export const syncMenuSelectionMainMealsToPartnerMenu = async (weeklyMenu) => {
       const nextTo = existing.availableTo && existing.availableTo > to ? existing.availableTo : to;
       await PartnerMenuItem.updateOne(
         { _id: existing._id },
-        { $set: { availableFrom: nextFrom, availableTo: nextTo, price: pricing.price, sellingPrice: pricing.sellingPrice, isAvailable: true, source: 'menu-selection' } }
+        { $set: { availableFrom: nextFrom, availableTo: nextTo, price: pricing.price, sellingPrice: pricing.sellingPrice, isAvailable: true, source: 'menu-selection', category } }
       );
       itemId = existing._id;
       updated += 1;
@@ -118,6 +123,7 @@ export const syncMenuSelectionMainMealsToPartnerMenu = async (weeklyMenu) => {
         availableTo: to,
         isAvailable: true,
         source: 'menu-selection',
+        category,
       });
       itemId = doc._id;
       created += 1;

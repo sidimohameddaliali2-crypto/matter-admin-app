@@ -741,7 +741,8 @@ const DriverMobile = () => {
       context.drawImage(video, 0, 0, width, height);
 
       const imageData = canvas.toDataURL('image/jpeg', PHOTO_QUALITY);
-      setCameraState(prev => ({ ...prev, capturedPhoto: imageData }));
+      setCameraState(prev => ({ ...prev, capturedPhoto: imageData,
+        photoCapturedAt: new Date().toISOString(), photoSource: 'camera' }));
       setFeedback(prev => ({ ...prev, scanSuccess: 'Photo captured successfully!' }));
       
       // Stop camera after capture
@@ -768,7 +769,8 @@ const DriverMobile = () => {
       context.drawImage(image, 0, 0, width, height);
 
       const compressedDataUrl = canvas.toDataURL('image/jpeg', PHOTO_QUALITY);
-      setCameraState(prev => ({ ...prev, capturedPhoto: compressedDataUrl }));
+      setCameraState(prev => ({ ...prev, capturedPhoto: compressedDataUrl,
+        photoCapturedAt: null, photoSource: 'upload' }));
       setFeedback({ scanError: '', scanSuccess: 'Photo uploaded successfully.', isUploading: false });
       stopCamera();
       setTimeout(() => setFeedback(prev => ({ ...prev, scanSuccess: '' })), 5000);
@@ -1684,6 +1686,8 @@ const DriverMobile = () => {
 
         const proofData = {
           timestamp: new Date().toISOString(),
+          photoCapturedAt: cameraState.photoCapturedAt || undefined,
+          photoSource: cameraState.photoSource || 'unknown',
           type: bagState.qrSkipped ? 'photo_only' : 'qr_and_photo',
           verified: !bagState.qrSkipped,
           bagIds: bagIdsToUse,

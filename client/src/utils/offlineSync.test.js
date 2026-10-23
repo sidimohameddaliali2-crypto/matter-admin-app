@@ -28,3 +28,17 @@ test('proof upload failure cannot mark delivery or photo synchronized',async()=>
   uploadPhoto.mockRejectedValue(new Error('Upload unavailable'));await syncOfflineData();
   expect(api.patch).not.toHaveBeenCalled();expect(storage.markPhotoSynced).not.toHaveBeenCalled();expect(storage.markQueueItemSynced).not.toHaveBeenCalled();
 });
+test('offline delivery keeps shutter time when photo uploads hours later',async()=>{
+  const capturedAt='2026-10-22T04:05:00.000Z';
+  storage.getPendingSyncQueue.mockResolvedValue([{id:4,deliveryId:'d4',status:'delivered',
+    proof:{photoCapturedAt:capturedAt,photoSource:'camera',timestamp:'2026-10-22T04:06:00.000Z'}}]);
+  storage.getPendingPhotos.mockResolvedValue([{id:10,deliveryId:'d4',photoDataUrl:'offline-photo'}]);
+  uploadPhoto.mockResolvedValue('/uploaded-photo.jpg');
+  api.patch.mockResolvedValue({data:{success:true}});
+  await syncOfflineData();
+  expect(api.patch).toHaveBeenCalledWith('/deliveries/d4/status',expect.objectContaining({proof:expect.objectContaining({
+    photoCapturedAt:capturedAt,photoSource:'camera',photoUrl:'/uploaded-photo.jpg'
+  })}));
+  expect(storage.markPhotoSynced).toHaveBeenCalledWith(10);
+  expect(storage.markQueueItemSynced).toHaveBeenCalledWith(4);
+});

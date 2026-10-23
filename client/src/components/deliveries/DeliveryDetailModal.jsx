@@ -2,6 +2,7 @@ import React from 'react';
 import { Link } from 'react-router-dom';
 import { toBusinessComponents } from '../../utils/businessTime';
 import { haversineKm } from '../../utils/deliveryCoords';
+import TrackerVisitCard from './TrackerVisitCard';
 
 // Owner (2026-10-10): "remove the action button, clicking a delivery should
 // open a modal inside the app without navigating to another page, and
@@ -140,6 +141,7 @@ export default function DeliveryDetailModal({ delivery, onClose }) {
             </Field>
           )}
           <Field label="Notes">{delivery.notes}</Field>
+          <TrackerVisitCard delivery={delivery} />
 
           {proofImages.length > 0 && (
             <div>

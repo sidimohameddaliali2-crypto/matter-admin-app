@@ -1,7 +1,8 @@
 import React, { useMemo, useState, useCallback, useEffect, useRef } from 'react';
-import { GoogleMap, InfoWindow, OverlayView, Polyline, useLoadScript } from '@react-google-maps/api';
+import { Circle, GoogleMap, InfoWindow, OverlayView, Polyline, useLoadScript } from '@react-google-maps/api';
 import { RefreshCw, Truck, AlertTriangle } from 'lucide-react';
 import api from '../utils/api';
+import TrackerVisitCard from '../components/deliveries/TrackerVisitCard';
 import { businessComponentsToUtcDate, formatBusinessDateInput, formatBusinessTime } from '../utils/businessTime';
 
 // Live vehicle GPS tracking (owner, 2026-09-24) — real-time positions from
@@ -438,7 +439,8 @@ const LiveTracking = () => {
         position,
         title: v.driver ? v.driver.name : `Vehicle ${v.vehicleNo}`,
         subtitle: v.vehicleNo,
-        tracker: tracker ? { address: v.address } : null,
+        tracker: tracker ? { address: v.address, gpsTime: v.gpsTime,
+          speedKph: v.speedKph, ignition: v.ignition, status: v.trackerStatus } : null,
         phone: phone ? loc : null,
         apart: tracker && phone ? distanceMeters(tracker, phone) : null,
       };
@@ -785,6 +787,12 @@ const LiveTracking = () => {
               {selectedDriver && route.pinned.map((s) => (
                 <StopMarker key={s._id} stop={s} isActive={activeStopId === s._id} onClick={() => focusStop(s)} />
               ))}
+              {selectedDriver && route.pinned.filter(s => s._id === activeStopId && s.type === 'Delivery').map(s => (
+                <Circle key={`fence-${s._id}`}
+                  center={s.trackerVisit?.geofenceId ? { lat: s.trackerVisit.lat, lng: s.trackerVisit.lng } : s.pin}
+                  radius={s.trackerVisit?.radiusMetres || 50}
+                  options={{ fillColor: '#6366f1', fillOpacity: 0.12, strokeColor: '#6366f1', strokeWeight: 2, clickable: false }} />
+              ))}
               {selectedDriver && selectedDriverSpot && (
                 <SelectedDriverPin
                   name={selectedDriver.name}
@@ -801,6 +809,14 @@ const LiveTracking = () => {
                     <p style={{ fontSize: 11, color: '#6B7280' }}>{activeInfo.subtitle}</p>
                     {activeInfo.tracker && (
                       <p style={{ fontSize: 12, marginTop: 4 }}>🚚 <b>Tracker:</b> {activeInfo.tracker.address || 'Address not available'}</p>
+                    )}
+                    {activeInfo.tracker && (
+                      <div className="mt-1 text-xs text-gray-600">
+                        <p>GPS report: {activeInfo.tracker.gpsTime ? `${formatBusinessTime(activeInfo.tracker.gpsTime)} Dubai · ${timeAgo(activeInfo.tracker.gpsTime)}` : 'Time unavailable'}</p>
+                        <p>{activeInfo.tracker.speedKph != null ? `${activeInfo.tracker.speedKph} km/h · ` : ''}
+                          {activeInfo.tracker.status || 'Status unavailable'}
+                          {activeInfo.tracker.ignition ? ` · Ignition ${activeInfo.tracker.ignition}` : ''}</p>
+                      </div>
                     )}
                     {activeInfo.phone && (
                       <p style={{ fontSize: 12, marginTop: 4 }}>
@@ -882,6 +898,7 @@ const LiveTracking = () => {
                         </span>
                       </span>
                     </button>
+                    {activeStopId === s._id && <div className="px-3 pb-2"><TrackerVisitCard delivery={s} /></div>}
                   </li>
                 ))}
               </ol>

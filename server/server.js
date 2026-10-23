@@ -34,6 +34,7 @@ import { startRecalculateDriverKpisJob } from './jobs/recalculateDriverKpis.js';
 import { startImportMatterDeliveriesJob } from './jobs/importMatterDeliveries.js';
 import { startCaptureMatterSalesJob } from './jobs/captureMatterSales.js';
 import { startRecordVehicleLocationsJob } from './jobs/recordVehicleLocations.js';
+import { startCustomerTrackerVisitsJob } from './jobs/syncCustomerTrackerVisits.js';
 import { authenticateSocket, registerStaffSocket } from './middleware/socketAuth.js';
 
 // Initialize Spaces after dotenv loads
@@ -398,6 +399,7 @@ startRecalculateDriverKpisJob();
 startImportMatterDeliveriesJob();
 startCaptureMatterSalesJob();
 startRecordVehicleLocationsJob();
+startCustomerTrackerVisitsJob(io);
 
 // Warm the Supy recipe search cache so the first meal-editor search of the
 // day isn't the one waiting on a ~2500-recipe cold fetch.

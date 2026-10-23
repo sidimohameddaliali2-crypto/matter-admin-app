@@ -74,7 +74,7 @@ router.get('/vehicles', async (req, res) => {
       const hasFix = Number.isFinite(v.latitude) && Number.isFinite(v.longitude);
       return {
         ...v,
-        address: hasFix ? (await addressForDriver(`vehicle:${v.vehicleNo}`, v.latitude, v.longitude)) || null : null,
+        address: hasFix ? v.address || (await addressForDriver(`vehicle:${v.vehicleNo}`, v.latitude, v.longitude)) || null : null,
         driver: driver
           ? {
               id: String(driver._id),

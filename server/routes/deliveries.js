@@ -22,6 +22,7 @@ import { businessRangeBounds, getTimingOverview, getTimingRecords } from '../ser
 import { businessOffsetMs, getBusinessDayBounds, isDateKey, setBusinessTimeOfDay } from '../utils/businessDate.js';
 import { protectMatterRevenueInput } from '../middleware/matterRevenueInput.js';
 import { fillProofAddressInBackground, resolveProofAddressWithin } from '../services/proofLocationAddress.js';
+import { recordProofReceipt } from '../services/truckoomVisitRules.js';
 import {
   optimizeRoutes,
   applyRoutePlan,
@@ -356,6 +357,19 @@ async function checkAndApplyPendingChanges(delivery) {
 // All routes are protected
 router.use(protect);
 router.use(protectMatterRevenueInput);
+// Tracker verdicts and receipt timestamps are exclusively server-owned.
+router.use((req, res, next) => {
+  const clean = value => {
+    if (!value || typeof value !== 'object') return;
+    if (Array.isArray(value)) { value.forEach(clean); return; }
+    for (const key of Object.keys(value)) {
+      if (key === 'trackerVisit' || key.startsWith('trackerVisit.') || key === 'receivedAt' || key === 'proof.receivedAt') delete value[key];
+      else clean(value[key]);
+    }
+  };
+  clean(req.body);
+  next();
+});
 router.use('/delivery-order', deliveryOrderRouter);
 
 // @desc    Depot (kitchen) location used by map views — same env the route optimizer uses.
@@ -2473,6 +2487,7 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
       timestamp: new Date(),
       location: proofLocation
     };
+    recordProofReceipt(delivery, { ...bodyProof, photoUrl: delivery.proof.photoUrl });
 
     await recordDeliveryBagMovements(delivery,{status:'delivered',proof:delivery.proof,bagId:delivery.bagAssignment?.bagId||delivery.bag?.bagId},req.user);
 
@@ -2643,6 +2658,7 @@ router.patch('/:id/bag-assignment', async (req, res) => {
 
     if (proof) {
       delivery.proof = { ...delivery.proof, ...proof };
+      recordProofReceipt(delivery, proof);
     }
 
     // Add to timeline
@@ -2744,6 +2760,7 @@ router.patch('/:id/status', async (req, res) => {
       if (!delivery.proof.timestamp) {
         delivery.proof.timestamp = new Date();
       }
+      recordProofReceipt(delivery, proof);
 
       // Owner (2026-10-10): "make two pins, the actual location and the
       // driver location, do not overwrite" — this used to copy the driver's

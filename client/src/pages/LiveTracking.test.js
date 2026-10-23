@@ -22,12 +22,14 @@ jest.mock('@react-google-maps/api', () => {
       <button onClick={onCloseClick}>Close popup</button>{children}
     </div>,
     Polyline: () => <div data-testid="route-line" />,
+    Circle: ({ radius }) => <div data-testid="customer-radius">{radius}</div>,
   };
 });
 
 global.IS_REACT_ACT_ENVIRONMENT = true;
 const fleet = ['D1', 'D2'].map((id, i) => ({
   vehicleNo: `V${i + 1}`, latitude: 25.2 + i / 10, longitude: 55.3,
+  gpsTime: '2026-10-23T06:58:09.000Z', speedKph: 0, ignition: 'OFF', trackerStatus: 'STOP',
   driver: { id, name: `Driver ${id}` },
 }));
 const stop = (id, lat) => ({ _id: id, customerName: `Customer ${id}`, type: 'Delivery',
@@ -110,6 +112,16 @@ test('closing the location popup preserves the selected driver and route through
   expect(container.querySelector('[data-testid="driver-popup"]')).not.toBeNull();
 });
 
+test('tracker popup shows the new GPS timestamp, speed and ignition', async () => {
+  await mount();
+  await click('Driver D1');
+  const popup = container.querySelector('[data-testid="driver-popup"]');
+  expect(popup.textContent).toContain('GPS report: 10:58 Dubai');
+  expect(popup.textContent).toContain('0 km/h');
+  expect(popup.textContent).toContain('STOP');
+  expect(popup.textContent).toContain('Ignition OFF');
+});
+
 test('switching drivers hides the old route and waits for the new route before framing', async () => {
   await mount();
   await click('Driver D1');
@@ -120,6 +132,19 @@ test('switching drivers hides the old route and waits for the new route before f
   await resolveRoute(requests[1], [stop('S2', 24.6)]);
   expect(mockMap.fitBounds).toHaveBeenCalledTimes(2);
   expect(mockMap.fitBounds.mock.calls[1][0].points).not.toContainEqual({ lat: 24.5, lng: 54.4 });
+});
+
+test('selecting a customer shows the 50 m fence and three-time verification', async () => {
+  await mount();
+  await click('Driver D1');
+  await resolveRoute(requests[0], [{ ...stop('S1', 24.5),
+    proof: { photoCapturedAt: '2026-10-13T02:11:00Z' },
+    trackerVisit: { arrivedAt: '2026-10-13T02:00:00Z', departedAt: '2026-10-13T02:10:00Z',
+      status: 'outside_window', needsReview: true, radiusMetres: 50 } }]);
+  await click('Customer S1');
+  expect(container.querySelector('[data-testid="customer-radius"]').textContent).toBe('50');
+  expect(container.textContent).toContain('Review: photo outside tracker visit');
+  for (const label of ['Tracker arrival:', 'Photo captured:', 'Tracker departure:']) expect(container.textContent).toContain(label);
 });
 
 test('frames a loaded route when the map finishes loading later', async () => {

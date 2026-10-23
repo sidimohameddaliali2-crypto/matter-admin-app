@@ -341,6 +341,7 @@ const AdminPartners = () => {
   const [menuItems, setMenuItems] = useState([]);
   const [menuLoading, setMenuLoading] = useState(false);
   const [menuSearch, setMenuSearch] = useState('');
+  const [menuTypeFilter, setMenuTypeFilter] = useState('all');
   const [showAddItem, setShowAddItem] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
 
@@ -600,11 +601,21 @@ const AdminPartners = () => {
     return spaces.filter((p) => p.businessName?.toLowerCase().includes(q) || p.email?.toLowerCase().includes(q) || p.contactName?.toLowerCase().includes(q));
   }, [spaces, search]);
 
-  const filteredMenuItems = useMemo(() => {
-    if (!menuSearch) return menuItems;
-    const q = menuSearch.toLowerCase();
-    return menuItems.filter((i) => i.name?.toLowerCase().includes(q) || i.category?.toLowerCase().includes(q) || i.mealType?.toLowerCase().includes(q));
-  }, [menuItems, menuSearch]);
+  // Master menu grouped by category (meal type) — mirrors the partner
+  // sub-menu's own category grouping, with a chip above to filter to one.
+  const masterMenuGroups = useMemo(() => {
+    const q = menuSearch.trim().toLowerCase();
+    const matchesSearch = (i) => !q || i.name?.toLowerCase().includes(q) || i.category?.toLowerCase().includes(q) || i.mealType?.toLowerCase().includes(q);
+    return MEAL_TYPES
+      .filter((t) => menuTypeFilter === 'all' || menuTypeFilter === t)
+      .map((t) => ({ type: t, label: MEAL_TYPE_LABEL[t] || t, items: menuItems.filter((it) => it.mealType === t && matchesSearch(it)) }))
+      .filter((g) => g.items.length > 0);
+  }, [menuItems, menuSearch, menuTypeFilter]);
+
+  const menuTypeChips = useMemo(() => {
+    const counts = MEAL_TYPES.map((t) => [t, menuItems.filter((i) => i.mealType === t).length]);
+    return [['all', 'All', menuItems.length], ...counts];
+  }, [menuItems]);
 
   const sel = useMemo(() => spaces.find((p) => p._id === selId) || null, [spaces, selId]);
 
@@ -872,10 +883,23 @@ const AdminPartners = () => {
         {tab === 'menu' && (
           <div className="grid grid-cols-1 xl:grid-cols-[1fr_340px] gap-5 items-start">
             <div>
-              <div className="relative mb-4 max-w-sm">
+              <div className="relative mb-3 max-w-sm">
                 <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-[#c9bfae]" />
                 <input type="text" placeholder="Search menu items…" value={menuSearch} onChange={(e) => setMenuSearch(e.target.value)}
                   className={`${inputCls} pl-10`} />
+              </div>
+              <div className="flex flex-wrap gap-1.5 mb-4">
+                {menuTypeChips.map(([t, label, count]) => {
+                  const on = menuTypeFilter === t;
+                  return (
+                    <button key={t} onClick={() => setMenuTypeFilter(t)}
+                      className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-bold transition-colors"
+                      style={{ background: on ? '#051747' : '#f1ebe2', color: on ? '#ede5de' : '#6b7894' }}>
+                      {label}
+                      <span className="rounded-full px-1.5 text-[10.5px]" style={{ background: on ? 'rgba(255,255,255,.18)' : 'rgba(0,0,0,.06)' }}>{count}</span>
+                    </button>
+                  );
+                })}
               </div>
               <div className={`${card} overflow-hidden`}>
                 <div className="flex items-center justify-between px-5 py-3 border-b-[1.5px] border-[#e3d9ca]">
@@ -887,11 +911,13 @@ const AdminPartners = () => {
                   )}
                 </div>
                 {menuLoading ? <div className="flex justify-center py-16"><Loader className="w-7 h-7 animate-spin text-[#3f8500]" /></div>
-                  : filteredMenuItems.length === 0 ? <Empty icon={UtensilsCrossed} text={menuSearch ? 'No items match your search.' : 'No items yet.'} />
-                  : (
-                    <div>
-                      {filteredMenuItems.map((it) => {
-                      return (
+                  : masterMenuGroups.length === 0 ? <Empty icon={UtensilsCrossed} text={menuSearch ? 'No items match your search.' : 'No items yet.'} />
+                  : masterMenuGroups.map((group) => (
+                    <div key={group.type}>
+                      <div className="px-5 pt-3.5 pb-1.5 text-[10px] font-bold tracking-[0.12em] uppercase text-[#3f8500] bg-[#f7f2eb]">
+                        {group.label} <span className="text-[#6b7894]">· {group.items.length}</span>
+                      </div>
+                      {group.items.map((it) => (
                         <div key={it._id} className="grid grid-cols-[2fr_1fr_1fr_.7fr] gap-3 items-center px-5 py-3 border-b border-[#f1ebe2] text-[13.5px]">
                           <div className="flex items-center gap-2.5 min-w-0">
                             <div className="w-[34px] h-[34px] rounded-[11px] bg-[#f1ebe2] text-[#6b7894] flex items-center justify-center flex-none text-xs" style={AB}>{it.name.slice(0, 2).toUpperCase()}</div>
@@ -924,10 +950,9 @@ const AdminPartners = () => {
                             )}
                           </div>
                         </div>
-                      );
-                    })}
+                      ))}
                     </div>
-                  )}
+                  ))}
               </div>
             </div>
 

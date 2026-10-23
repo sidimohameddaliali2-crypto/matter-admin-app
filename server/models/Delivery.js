@@ -206,8 +206,11 @@ deliveryType: {
     returnedBags: [String],
     bagEventId: String,
     qrSkipped: Boolean,
-    type: String,
+    type: { type: String },
     timestamp: Date,
+    photoCapturedAt: Date,
+    photoSource: { type: String, enum: ['camera', 'upload', 'unknown'] },
+    receivedAt: Date,
     location: {
       lat: Number,
       lng: Number,
@@ -218,6 +221,24 @@ deliveryType: {
     deliveryMethod: String
   },
     
+  // Server-owned tracker evidence, separate from the driver's proof and KPI.
+  trackerVisit: {
+    geofenceId: String,
+    geofenceName: String,
+    businessDate: String,
+    vehicleNo: String,
+    driverId: String,
+    lat: Number,
+    lng: Number,
+    radiusMetres: Number,
+    arrivedAt: Date,
+    departedAt: Date,
+    photoCapturedAt: Date,
+    visitCount: Number,
+    status: String,
+    needsReview: Boolean,
+    checkedAt: Date,
+  },
   timeline: [{
     status: String,
     timestamp: {
@@ -332,10 +353,13 @@ deliverySchema.methods.updateStatus = async function (status, notes, location) {
   });
 
   if (parsedLocation && typeof parsedLocation === 'object') {
-    this.gpsLocation = {
+    // Owner (2026-10-10, enforced on this legacy completion path too):
+    // driver phone coordinates must never move the customer's saved pin.
+    if (!this.proof) this.proof = {};
+    this.proof.location = {
       lat: parsedLocation.latitude ?? parsedLocation.lat ?? null,
       lng: parsedLocation.longitude ?? parsedLocation.lng ?? null,
-      link: parsedLocation.link ?? this.gpsLocation?.link ?? null,
+      address: parsedLocation.address,
     };
   }
 

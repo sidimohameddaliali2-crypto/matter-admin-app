@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { load } from '@2gis/mapgl';
+import TrackerVisitCard from './deliveries/TrackerVisitCard';
 import { X, Route, MapPin, Clock, AlertTriangle, Loader2, Repeat, Pencil, CheckCircle2, FlaskConical, ArrowLeft, ChevronDown, ChevronUp, Search as SearchIcon, UserPlus, ListOrdered } from 'lucide-react';
 import api from '../utils/api';
 import { getDeliveryLatLng, haversineKm, MAX_PLAUSIBLE_DISTANCE_KM } from '../utils/deliveryCoords';
@@ -1015,6 +1016,16 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
     visibleGroups.forEach((g) => {
       g.stops.forEach((stop, idx) => {
         const isActive = activeId === stop._id;
+        // The selected customer's 50 m fence uses metres and [lng, lat] in
+        // MapGL; Truckoom creation uses kilometres and [lat, lng].
+        if (isActive && (!stop.type || stop.type === 'Delivery')) {
+          const visit = stop.trackerVisit;
+          markersRef.current.push(new mapgl.Circle(map, {
+            coordinates: visit?.geofenceId ? [visit.lng, visit.lat] : toLngLat(stop.coords),
+            radius: visit?.radiusMetres || 50, color: '#6366f122',
+            strokeColor: '#6366f1', strokeWidth: 2, interactive: false,
+          }));
+        }
         const marker = new mapgl.HtmlMarker(map, {
           coordinates: toLngLat(stop.coords),
           html: markerHtml(idx + 1, stop.timeColor, isActive, stop.status === 'delivered', stop.approx, editMode),
@@ -1964,6 +1975,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                 {activeStop.status ? (
                   <p className="mt-1 text-xs text-gray-500 capitalize">{String(activeStop.status).replace(/_/g, ' ')}</p>
                 ) : null}
+                <div className="mt-2"><TrackerVisitCard delivery={activeStop} /></div>
                 {activeStop.routeOrder != null ? (
                   <p className="mt-1 text-xs text-gray-400">Stop #{activeStop.routeOrder + 1}</p>
                 ) : null}
