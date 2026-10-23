@@ -39,6 +39,23 @@ const getDateKey = (value) => {
   return `${y}-${m}-${d}`;
 };
 
+// Owner (2026-10-23): a Matter Core customer delivered only Mon/Wed/Fri gets a
+// DOUBLE delivery on Monday (Mon+Tue) and Wednesday (Wed+Thu); Friday stays
+// single. A date is a double day only when the customer's Matter delivery dates
+// for that week are exactly Mon+Wed+Fri with no Tue/Thu (so a daily customer with
+// one paused day is never mistaken for it). Same rule as
+// server/utils/matterCoreDelivery.js (the client can't import from server/).
+const isMatterCoreDoubleDay = (dateKey, deliveryDates) => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || '')) || !Array.isArray(deliveryDates)) return false;
+  const [y, m, d] = dateKey.split('-').map(Number);
+  const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+  if (dow !== 1 && dow !== 3) return false;
+  const dates = new Set(deliveryDates);
+  const monday = Date.UTC(y, m - 1, d - (dow - 1));
+  const at = (offset) => new Date(monday + offset * 86400000).toISOString().slice(0, 10);
+  return dates.has(at(0)) && dates.has(at(2)) && dates.has(at(4)) && !dates.has(at(1)) && !dates.has(at(3));
+};
+
 const getProteinMealWeight = (grams) => {
   const rounded = Math.round(Number(grams) || 0);
   if (rounded < 25) return 100;
@@ -805,8 +822,16 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
       // WEIGHT (grams of food) here, not macro-nutrient grams — split evenly
       // across the day's main meals (breakfast/snacks are separate and
       // additive, never subtracted from this count or this weight).
-      const perMealCarbWeight = normalizedMacros.C / dayMealCount;
-      const perMealProteinWeight = normalizedMacros.P / dayMealCount;
+      // Owner (2026-10-23): on a DOUBLE delivery day (Mon/Wed/Fri customer —
+      // see isMatterCoreDoubleDay) the day carries twice the meals, but each
+      // meal keeps its normal size: divide by the plan's meals per day, not by
+      // the doubled row count.
+      const coreDoubleDay = isMatterCoreDoubleDay(dayKey, customer?.deliveryDates);
+      const coreMealCount = coreDoubleDay
+        ? Math.max(1, Number(customer?.mealsPerDay) || Math.round(dayMealCount / 2))
+        : dayMealCount;
+      const perMealCarbWeight = normalizedMacros.C / coreMealCount;
+      const perMealProteinWeight = normalizedMacros.P / coreMealCount;
       const tableMatch = lookupMatterCoreMacros(perMealCarbWeight, perMealProteinWeight);
 
       const proteinWeight = Math.round(perMealProteinWeight);
@@ -831,6 +856,7 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
         position: index + 1,
         flags: {
           matterCorePlan: true,
+          matterCoreDoubleDelivery: coreDoubleDay,
           matterCoreLookupMissing: !tableMatch,
           matterCorePerMealCarbWeight: Math.round(perMealCarbWeight * 100) / 100,
           matterCorePerMealProteinWeight: Math.round(perMealProteinWeight * 100) / 100

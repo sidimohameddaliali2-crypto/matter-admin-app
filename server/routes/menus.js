@@ -11,6 +11,7 @@ import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import MenuSelectionArchive from '../models/MenuSelectionArchive.js';
 import { excludeRecreatedArchivedAliases } from '../services/archivedMenuAliases.js';
 import { protect } from '../middleware/auth.js';
+import { isMatterCoreDoubleDay } from '../utils/matterCoreDelivery.js';
 import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
 import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
 import athleatService from '../services/athleatService.js';
@@ -1694,6 +1695,9 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
   // directly by subscription id, since these customers were already resolved
   // from a specific Matter subscription by the caller.
   const snacksPerDayBySubscriptionId = new Map();
+  // The same Matter nutrition record carries the customer's delivery dates,
+  // which decide whether this date is a Matter Core DOUBLE delivery day.
+  const deliveryDatesBySubscriptionId = new Map();
   await mapWithConcurrency(
     sortedCustomers.filter((c) => c.subscriptionId),
     8,
@@ -1702,6 +1706,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
         const nutrition = c.nutrition;
         if (!nutrition || nutrition.snacks_per_day == null || !Number.isFinite(Number(nutrition.snacks_per_day))) throw new Error('Unresolved snack entitlement');
         snacksPerDayBySubscriptionId.set(c.subscriptionId, Number(nutrition.snacks_per_day));
+        deliveryDatesBySubscriptionId.set(c.subscriptionId, Array.isArray(nutrition.active_delivery_dates) ? nutrition.active_delivery_dates : null);
       } catch (err) {
         console.error(`Matter Core assignment: nutrition lookup failed for subscription ${c.subscriptionId}:`, err.message);
         throw new Error('Matter Core snack entitlement could not be verified. Retry preparation.');
@@ -1715,6 +1720,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
   let skippedBreakfastNoOption = 0;
   let assignedSnacks = 0;
   let skippedSnackNoOption = 0;
+  let doubleDeliveryCustomers = 0;
 
   for (const customer of sortedCustomers) {
     const email = String(customer.email || '').trim();
@@ -1740,15 +1746,25 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     // never subtracted from the main meal count for Matter Core — it's
     // always an extra on top of the full meal_frequency, per the plan's
     // own rules.
-    const totalNeeded = Math.max(1, Number(customer.mealFrequency) || 1);
+    const mealFrequency = Math.max(1, Number(customer.mealFrequency) || 1);
+    // Owner (2026-10-23): a customer delivered only Mon/Wed/Fri gets a DOUBLE
+    // delivery on Monday (+Tuesday) and Wednesday (+Thursday): twice their
+    // meals that day. 1 meal/day -> the date's first AND second Matter Core
+    // meal (never the same meal twice); 2+ meals/day -> their usual meals
+    // doubled (A, B, A, B). Friday stays single.
+    const isDoubleDay = isMatterCoreDoubleDay(dateKey, deliveryDatesBySubscriptionId.get(customer.subscriptionId));
+    if (isDoubleDay) doubleDeliveryCustomers += 1;
+    const totalNeeded = mealFrequency * (isDoubleDay ? 2 : 1);
     const slotsNeeded = totalNeeded - existingMainMealsCount;
 
     const newMeals = [];
 
-    if (!snackOnly && slotsNeeded > 0) {
+    // snackOnly skips main meals — except on a double day, where the extra
+    // meals are still topped up for a customer who already has the usual set.
+    if ((!snackOnly || isDoubleDay) && slotsNeeded > 0) {
       for (let i = 0; i < slotsNeeded; i += 1) {
         const position = existingMainMealsCount + i;
-        const chosen = mealList[position];
+        const chosen = isDoubleDay && mealFrequency > 1 ? mealList[position % mealFrequency] : mealList[position];
         if (!chosen) {
           skippedNoOption += 1;
           continue;
@@ -1841,6 +1857,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
       skippedBreakfastNoOption,
       assignedSnacks,
       skippedSnackNoOption,
+      doubleDeliveryCustomers,
       customersProcessed: sortedCustomers.length
     }
   };
