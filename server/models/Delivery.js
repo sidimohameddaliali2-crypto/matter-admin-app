@@ -238,6 +238,8 @@ deliveryType: {
     status: String,
     needsReview: Boolean,
     checkedAt: Date,
+    evidenceSource: String,
+    gpsSampleCount: Number,
   },
   timeline: [{
     status: String,

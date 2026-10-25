@@ -36,6 +36,7 @@ async function recordOnce() {
         latitude: v.latitude,
         longitude: v.longitude,
         recordedAt,
+        gpsTime: v.gpsTime || null,
       }));
 
     if (docs.length > 0) {

@@ -68,12 +68,12 @@ test('preparation failure cannot be treated as completed', async () => {
   await expect(prepareKitchenSelections({ post: async () => ({ data: { success: true } }) }, 'menu', date)).rejects.toThrow('did not complete');
 });
 
-test('a changed roster cannot hide missing customers, partial quantities or intentional skips', () => {
+test('a changed roster cannot hide missing customers or partial quantities behind saved skips', () => {
   const roster = [{ email: customer.email, meal_frequency: 3 }];
   expect(() => assertKitchenRosterCovered([], roster, date)).toThrow('incomplete');
   expect(() => assertKitchenRosterCovered([{ ...customer, selectedMeals: [{ ...meal, quantity: 2 }] }], roster, date)).toThrow('incomplete');
   expect(() => assertKitchenRosterCovered([{ ...customer, selectedMeals: [{ ...meal, quantity: 3 }] }], roster, date)).not.toThrow();
-  expect(() => assertKitchenRosterCovered([{ ...customer, skippedDays: [{ date }], selectedMeals: [] }], roster, date)).not.toThrow();
+  expect(() => assertKitchenRosterCovered([{ ...customer, skippedDays: [{ date }], selectedMeals: [] }], roster, date)).toThrow('incomplete');
 });
 
 test('paper snapshot waits for preparation and uses the same calculator as kitchen screens', async () => {
@@ -164,7 +164,7 @@ test('paper and counting exclude customers absent from the active date roster an
   const roster = [{ subscription_id: 'renewed', email: customer.email }];
   expect(hasKitchenDeliveryOnDate(entry, [], '2026-10-22')).toBe(false);
   expect(hasKitchenDeliveryOnDate(entry, roster, '2026-10-23')).toBe(true);
-  expect(hasKitchenDeliveryOnDate({ ...entry, skippedDays: [{ date: '2026-10-23' }] }, roster, '2026-10-23')).toBe(false);
+  expect(hasKitchenDeliveryOnDate({ ...entry, skippedDays: [{ date: '2026-10-23' }] }, roster, '2026-10-23')).toBe(true);
   expect(hasKitchenDeliveryOnDate(entry, [{ subscription_id: 'old', email: customer.email }], date)).toBe(false);
 });
 

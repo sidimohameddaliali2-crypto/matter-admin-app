@@ -2,6 +2,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import Delivery from '../models/Delivery.js';
 import CustomerGeofence from '../models/CustomerGeofence.js';
 import TrackerSyncLease from '../models/TrackerSyncLease.js';
+import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
+import { gpsVisitEvents } from './trackerGpsVisits.js';
 import truckoom from './truckoomApiService.js';
 import { resolveDeliveryCoordinatesCached } from './geocoding.js';
 import { getBusinessDayBounds, toBusinessDateKey } from '../utils/businessDate.js';
@@ -55,6 +57,7 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
     let created = 0;
     let checked = 0;
     const alerts = new Map();
+    const gpsPaths = new Map();
     const getDateAlerts = date => {
       if (!alerts.has(date)) alerts.set(date, (async () => {
         const events = normalizeGeofenceAlerts(await truckoom.getGeofenceAlerts(date));
@@ -119,14 +122,33 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
           const { startOfDay: start, endOfDayExclusive: end } = getBusinessDayBounds(anchor);
           const events = await archivedTrackerEvents(visit.geofenceName, start, end);
           // Fetch the two UTC dates covering the whole Dubai calendar day.
+          let alertsUnavailable = false;
           if (!deletedFence) for (const date of alertDateKeys(start, end)) {
-            events.push(...await getDateAlerts(date));
+            try { events.push(...await getDateAlerts(date)); }
+            catch { alertsUnavailable = true; }
+          }
+          let matched = events.filter(e => e.vehicleNo === String(visit.vehicleNo) && e.name === visit.geofenceName);
+          visit.evidenceSource = 'truckoom_alerts';
+          visit.gpsSampleCount = 0;
+          if (!matched.length && visit.vehicleNo) {
+            const pathKey = `${visit.vehicleNo}:${+start}`;
+            if (!gpsPaths.has(pathKey)) gpsPaths.set(pathKey, VehicleLocationHistory.find({
+              vehicleNo: visit.vehicleNo, recordedAt: { $gte: start, $lt: end },
+            }).select('latitude longitude gpsTime recordedAt driver').lean());
+            const path = (await gpsPaths.get(pathKey)).filter(p => String(p.driver || '') === String(visit.driverId || driverId)
+              && +(new Date(p.gpsTime || p.recordedAt)) >= +start && +(new Date(p.gpsTime || p.recordedAt)) < +end);
+            matched = gpsVisitEvents(path, { lat: visit.lat, lng: visit.lng }, visit.radiusMetres || CUSTOMER_RADIUS_METRES);
+            if (path.length) { visit.evidenceSource = 'truckoom_gps_samples'; visit.gpsSampleCount = path.length; }
           }
           visit = { ...visit, ...evaluateTrackerVisit({
-            events: events.filter(e => e.vehicleNo === String(visit.vehicleNo) && e.name === visit.geofenceName),
+            events: matched,
             photoCapturedAt: delivery.proof?.photoCapturedAt, photoSource: delivery.proof?.photoSource,
             start, end,
           }) };
+          if (visit.evidenceSource === 'truckoom_gps_samples') {
+            if (visit.status === 'inside_window') visit.status = 'gps_visit_observed';
+            if (visit.status === 'outside_window') visit.status = 'gps_window_review';
+          } else if (alertsUnavailable && !matched.length && vehicleNo) visit.status = 'tracker_error';
           if (!vehicleNo) visit.status = 'no_tracker';
         }
       } catch {

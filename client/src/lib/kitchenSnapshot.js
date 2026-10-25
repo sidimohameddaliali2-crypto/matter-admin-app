@@ -10,16 +10,14 @@ export const verifiedKitchenRoster = (response) => {
 };
 
 export const hasKitchenDeliveryOnDate = (entry, roster, date) => {
-  if ((entry.skippedDays || []).some((day) => getDateKey(day.date || day) === date)) return false;
   // Partner members use their assigned meal dates, not Matter subscriptions.
-  if (entry.partner) return true;
+  if (entry.partner) return !(entry.skippedDays || []).some((day) => getDateKey(day.date || day) === date);
   return roster.some((sub) => matchesMatterSubscription(entry, sub));
 };
 
 export const assertKitchenRosterCovered = (selections, roster, date) => {
   for (const sub of roster) {
     const entry = selections.find((candidate) => matchesMatterSubscription(candidate, sub));
-    if (entry?.skippedDays?.some((day) => getDateKey(day.date || day) === date)) continue;
     const meals = (entry?.selectedMeals || []).filter((meal) => getDateKey(meal.date) === date);
     const core = String(sub.plan_name || '').trim().toLowerCase() === 'matter core';
     const portions = meals.filter((meal) => core ? meal.mealType === 'main' : meal.mealType !== 'snack')

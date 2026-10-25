@@ -31,3 +31,8 @@ test('refreshes the verdict from the server and handles missing departure', asyn
   expect(container.textContent).toContain('Tracker departure: Not recorded');
   expect(trackerTime('bad')).toBe('Not recorded');
 });
+test('sampled vehicle visits are explicitly labelled estimated',async()=>{
+ await act(async()=>root.render(<TrackerVisitCard delivery={{_id:'d2',trackerVisit:{evidenceSource:'truckoom_gps_samples',status:'gps_visit_observed'}}}/>));
+ expect(container.textContent).toContain('Photo time matches sampled GPS visit (estimated)');
+ expect(container.textContent).toContain('No Truckoom geofence alert was received');
+});

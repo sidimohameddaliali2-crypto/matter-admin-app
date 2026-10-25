@@ -1,4 +1,5 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
+import { requireDeliveryConfirmation } from '../../utils/deliveryConfirmation';
 import api from '../../utils/api';
 
 const LOCAL_TZ_OFFSET_MINUTES = parseInt(process.env.REACT_APP_LOCAL_TIMEZONE_OFFSET_MINUTES || '240', 10);
@@ -118,14 +119,10 @@ export const updateDeliveryStatus = createAsyncThunk(
       console.log('Update delivery response:', response.data);
       
       // Return the updated delivery data
-      if (response.data.success && response.data.delivery) {
-        return response.data.delivery;
-      } else {
-        return rejectWithValue(response.data || { message: 'Failed to update delivery status' });
-      }
+      return requireDeliveryConfirmation(response.data, deliveryId, status);
     } catch (error) {
       console.error('Error updating delivery status:', error);
-      return rejectWithValue(error.response?.data || { message: 'Failed to update delivery status' });
+      return rejectWithValue(error.response?.data || { message: error.message || 'Failed to update delivery status' });
     }
   }
 );

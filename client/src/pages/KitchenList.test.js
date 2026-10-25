@@ -45,7 +45,7 @@ beforeEach(async () => {
   mockExcelRows.mockImplementation((rows) => rows);
   api.get.mockImplementation(async (path) => {
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', startDate: thursday, endDate: friday }] } };
-    if (path.endsWith('/selections')) return { data: { success: true, data: [{ email, firstName: 'Internal stale name', matterCustomerId: 'permanent', mealPerDay: 9, selectedMeals: [thursday, friday].map((date) => ({ date, mealType: 'main', mealName: 'Fixture dish' })) }] } };
+    if (path.endsWith('/selections')) return { data: { success: true, data: [{ email, firstName: 'Internal stale name', matterCustomerId: 'permanent', mealPerDay: 9, skippedDays: [{ date: thursday, pauseStatus: 'success' }], selectedMeals: [thursday, friday].map((date) => ({ date, mealType: 'main', mealName: 'Fixture dish' })) }] } };
     if (path.includes('/matter/')) throw new Error('Duplicate Matter lookup');
     return { data: { success: true, data: {} } };
   });
@@ -115,6 +115,17 @@ test('PDF and Excel buttons generate files after Matter verification', async () 
   expect(mockPdfSave).toHaveBeenCalledWith(`kitchen-paper-${thursday}.pdf`);
   await act(async () => downloadButton('Download Day Excel').click());
   expect(mockExcelSave.mock.calls[0][1]).toBe(`kitchen-paper-${thursday}.xlsx`);
+});
+
+test('individual PDF includes saved choices when Matter has reactivated a previously skipped day', async () => {
+  const customerSelect = [...container.querySelectorAll('select')].find((element) => [...element.options].some((option) => option.textContent === 'Select a customer...'));
+  await select(customerSelect, email);
+  const endSelect = [...container.querySelectorAll('label')].find((element) => element.textContent === 'To').parentElement.querySelector('select');
+  await select(endSelect, thursday);
+  await act(async () => downloadButton('Customer PDF').click());
+  expect(mockPdfSave).toHaveBeenCalledWith(`kitchen-paper-matter-fixture-${thursday}.pdf`);
+  expect(container.textContent).toContain('Downloaded 1 day(s) for Matter Fixture');
+  expect(container.textContent).not.toContain('No confirmed meals for this customer');
 });
 
 test('an unavailable subscription stays on its customer while the page and verified day exports keep working', async () => {

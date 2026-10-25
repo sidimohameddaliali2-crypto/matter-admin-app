@@ -6,6 +6,7 @@ import Delivery from '../models/Delivery.js';
 import CustomerGeofence from '../models/CustomerGeofence.js';
 import TrackerSyncLease from '../models/TrackerSyncLease.js';
 import TrackerGeofenceEvent from '../models/TrackerGeofenceEvent.js';
+import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
 import { customerFenceIdentity, syncCustomerTrackerVisits } from './truckoomVisitSync.js';
 import { getBusinessDayBounds } from '../utils/businessDate.js';
 
@@ -34,6 +35,7 @@ function setup(t, overrides = {}) {
   t.mock.method(CustomerGeofence, 'find', () => ({ sort: () => ({ limit: () => ({ lean: async () => [] }) }) }));
   t.mock.method(TrackerGeofenceEvent, 'bulkWrite', async () => ({}));
   t.mock.method(TrackerGeofenceEvent, 'find', () => ({ lean: async () => [] }));
+  t.mock.method(VehicleLocationHistory, 'find', () => ({ select: () => ({ lean: async () => [] }) }));
   const stamp = value => value.toISOString().slice(0, 19).replace('T', ' ').replace(/^(\d{4})-(\d{2})-(\d{2})/, '$3-$2-$1');
   t.mock.method(truckoom, 'getGeofenceAlerts', async date => {
     dates.push(date);
@@ -196,6 +198,24 @@ test('a completed proof with no captured vehicle cannot borrow a later tracker m
   const visit = fixture.writes[0].update.$set.trackerVisit;
   assert.equal(visit.status, 'no_tracker');
   assert.equal(visit.vehicleNo, undefined);
+});
+
+test('vehicle GPS supplies labelled visit evidence when the vendor supplies no customer alerts', async t => {
+  const fixture = setup(t);
+  const { startOfDay } = getBusinessDayBounds(fixture.now);
+  const base = +startOfDay + 5*60*60000;
+  const points = [[-60000,25.11],[0,25.1],[60000,25.1],[600000,25.11]].map(([offset,lat]) => ({
+    latitude:lat,longitude:55.2,driver:'driver1',recordedAt:new Date(base+offset),
+  }));
+  t.mock.method(truckoom,'getGeofenceAlerts',async()=>[]);
+  t.mock.method(VehicleLocationHistory,'find',()=>({select:()=>({lean:async()=>points})}));
+  await syncCustomerTrackerVisits({now:fixture.now});
+  const visit=fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.status,'gps_visit_observed');
+  assert.equal(visit.evidenceSource,'truckoom_gps_samples');
+  assert.equal(+visit.arrivedAt,base);
+  assert.equal(+visit.departedAt,base+600000);
+  assert.equal(fixture.row.status,undefined); // geofence evidence never marks delivery complete
 });
 
 test('token authentication, private list filtering and 50 m creation match the supplied API', async t => {

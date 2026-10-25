@@ -13,6 +13,8 @@ const labels = {
   missing_pin: 'Unverified: customer pin missing',
   no_tracker: 'Unverified: driver has no assigned tracker',
   tracker_error: 'Unverified: Truckoom unavailable',
+  gps_visit_observed: 'Photo time matches sampled GPS visit (estimated)',
+  gps_window_review: 'Review: photo outside sampled GPS visit (estimated)',
 };
 
 export function trackerTime(value) {
@@ -55,6 +57,7 @@ export default function TrackerVisitCard({ delivery }) {
         <div><dt className="inline font-medium">Tracker departure: </dt><dd className="inline">{trackerTime(visit.departedAt)}</dd></div>
       </dl>
       <p className="mt-2 opacity-80">Dubai time · Camera time reported by driver device. Tracker times are approximate.</p>
+      {visit.evidenceSource === 'truckoom_gps_samples' && <p className="mt-1 font-medium">Visit times estimated from recorded vehicle GPS. No Truckoom geofence alert was received.</p>}
       {visit.checkedAt && <p className="mt-1 opacity-70">Checked: {trackerTime(visit.checkedAt)}</p>}
     </section>
   );

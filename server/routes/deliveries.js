@@ -2528,9 +2528,14 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
     });
   } catch (error) {
     console.error('Complete delivery error:', error);
-    res.status(500).json({
+    // Preserve actionable bag/validation rejections for the driver's saved sync
+    // queue. Treating every rejection as HTTP 500 causes endless blind retries.
+    const status = Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode < 500
+      ? error.statusCode
+      : 500;
+    res.status(status).json({
       success: false,
-      message: 'Server error'
+      message: status < 500 ? error.message : 'Server error'
     });
   }
 });

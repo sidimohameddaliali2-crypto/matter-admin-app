@@ -33,6 +33,7 @@ const vehicleLocationHistorySchema = new mongoose.Schema({
     required: true,
     default: Date.now,
   },
+  gpsTime: Date,
 });
 
 vehicleLocationHistorySchema.index({ vehicleNo: 1, recordedAt: 1 });

@@ -39,3 +39,20 @@ test('fast downloads still reject missing roster portions', async () => {
   const state = prepared(); state.selections[0].selectedMeals = [];
   await expect(loadKitchenSnapshot({}, 'menu', [day], () => true, (entry) => entry, state)).rejects.toThrow('incomplete');
 });
+
+test('an active Matter delivery keeps customer selections even after an earlier saved pause', async () => {
+  const state = prepared();
+  state.selections[0].skippedDays = [{ date: day, pauseStatus: 'success' }];
+  state.selections[0].selectedMeals[0].isAutoAssigned = false;
+  const snapshot = await loadKitchenSnapshot({}, 'menu', [day], () => true, (entry) => entry, state);
+  expect(snapshot.entries).toHaveLength(1);
+  expect(snapshot.entries[0].deliveryDates).toEqual([day]);
+  expect(snapshot.entries[0].selectedMeals[0]).toMatchObject({ mealName: 'Approved choice', isAutoAssigned: false });
+});
+
+test('a saved selection stays off production papers when Matter has no delivery that date', async () => {
+  const state = prepared();
+  state.roster = [];
+  const snapshot = await loadKitchenSnapshot({}, 'menu', [day], () => true, (entry) => entry, state);
+  expect(snapshot.entries).toEqual([]);
+});

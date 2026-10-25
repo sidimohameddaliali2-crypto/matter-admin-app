@@ -5,6 +5,7 @@
 
 import { uploadPhoto } from './fileUpload';
 import api from '../utils/api';
+import { requireDeliveryConfirmation } from './deliveryConfirmation';
 import {
   getPendingPhotos,
   getPendingSyncQueue,
@@ -22,6 +23,8 @@ let autoSyncTimer = null;
 let autoRetryTimer = null;
 const MAX_RETRIES = 10;
 const RETRY_DELAYS = [1000, 5000, 30000, 5 * 60000, 10 * 60000]; // exponential backoff: 1s, 5s, 30s, 5m, 10m
+const STALE_SYNC_MS = 2 * 60000;
+export const syncAttemptTime = value => typeof value === 'number' ? value : Date.parse(value) || 0;
 
 /**
  * Register callback for sync status updates
@@ -114,6 +117,7 @@ const processDeliveryUpdate = async (queueItem, photoUrl = null) => {
       bagIds,
       bagId: queueItem.proof?.type === 'bag_collection' ? undefined : bagIds[0]
     });
+    requireDeliveryConfirmation(deliveryResponse.data, queueItem.deliveryId, updateData.status);
 
     console.log('✅ Delivery update response:', {
       success: deliveryResponse.data?.success,
@@ -157,6 +161,14 @@ export const syncOfflineData = async () => {
 
   try {
     notifyListeners({ syncing: true, progress: 0 });
+    // Recover work interrupted by a closed tab, crashed browser or expired
+    // session. A persisted 'syncing' flag is not proof of server completion.
+    const interrupted = await getQueueItemsByStatus('syncing');
+    for (const item of interrupted) {
+      if (Date.now() - syncAttemptTime(item.lastSyncAttempt) >= STALE_SYNC_MS) {
+        await updateQueueItemSyncStatus(item.id, 'pending');
+      }
+    }
 
     // Get all pending items
     const [pendingPhotos, pendingQueue] = await Promise.all([
@@ -224,7 +236,8 @@ export const syncOfflineData = async () => {
     }
 
     // Upload any remaining orphaned photos (photos without a matching queue item)
-    const processedDeliveryIds = new Set(pendingQueue.map(q => q.deliveryId));
+    const retained = await Promise.all(['failed', 'syncing'].map(status => getQueueItemsByStatus(status)));
+    const processedDeliveryIds = new Set([...pendingQueue, ...retained.flat()].map(q => q.deliveryId));
     const orphanedPhotos = pendingPhotos.filter(p => !processedDeliveryIds.has(p.deliveryId));
 
     for (const photo of orphanedPhotos) {
@@ -290,8 +303,7 @@ export const setupAutoRetry = () => {
 
         // Calculate delay based on retry count
         const delayIndex = Math.min(item.retries || 0, RETRY_DELAYS.length - 1);
-        const nextRetryTime = (item.lastSyncAttempt || 0) + RETRY_DELAYS[delayIndex];
-        const timeSinceLastAttempt = Date.now() - (item.lastSyncAttempt || 0);
+        const timeSinceLastAttempt = Date.now() - syncAttemptTime(item.lastSyncAttempt);
 
         if (timeSinceLastAttempt < RETRY_DELAYS[delayIndex]) {
           const waitTime = RETRY_DELAYS[delayIndex] - timeSinceLastAttempt;
@@ -376,13 +388,22 @@ export const setupAutoSync = () => {
  */
 export const hasPendingSync = async () => {
   try {
-    const [photos, queue] = await Promise.all([
+    const [photos, queue, interrupted] = await Promise.all([
       getPendingPhotos(),
-      getPendingSyncQueue()
+      getPendingSyncQueue(),
+      getQueueItemsByStatus('syncing')
     ]);
-    return photos.length > 0 || queue.length > 0;
+    return photos.length > 0 || queue.length > 0 || interrupted.length > 0;
   } catch (error) {
     console.error('Failed to check pending sync:', error);
     return false;
   }
+};
+
+export const retryDeliverySync = async (deliveryId) => {
+  const failed = await getQueueItemsByStatus('failed');
+  for (const item of failed) {
+    if (!deliveryId || item.deliveryId === deliveryId) await updateQueueItemSyncStatus(item.id, 'pending');
+  }
+  return syncOfflineData();
 };

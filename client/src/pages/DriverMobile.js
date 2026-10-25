@@ -42,11 +42,12 @@ import {
 import { updateDriverLocation } from '../store/slices/driverSlice';
 import { uploadPhoto } from '../utils/fileUpload';
 import { storePhotoOffline, queueDeliveryUpdate, getPendingCount } from '../utils/offlineStorage';
-import { syncOfflineData, setupAutoSync, setupAutoRetry, onSyncStatusChange } from '../utils/offlineSync';
+import { syncOfflineData, setupAutoSync, setupAutoRetry, onSyncStatusChange, retryDeliverySync } from '../utils/offlineSync';
 import { useSyncStatus, getSyncStatusIndicator } from '../hooks/useSyncStatus';
 import api from '../utils/api';
 import HandoffCard from '../components/driver/HandoffCard';
 import BagHandoverPanel from '../components/driver/BagHandoverPanel';
+import DriverSyncSummary from '../components/driver/DriverSyncSummary';
 import { motion } from 'framer-motion';
 import offlineStorage from '../utils/offlineStorage';
 
@@ -568,11 +569,14 @@ const DriverMobile = () => {
   // Stage 1: Filter today's deliveries (base filter)
   const todayDeliveries = useMemo(() => {
     return deliveries.filter(delivery => {
-      if (!delivery || completedDeliveries.has(delivery._id)) return false;
+      if (!delivery) return false;
+      // Offline stops remain visible until the server acknowledges completion.
+      if (deliverySyncStatus[delivery._id]) return isDeliveryForToday(delivery);
+      if (completedDeliveries.has(delivery._id)) return false;
       const isTerminalStatus = delivery?.status && ['delivered', 'completed'].includes(delivery.status);
       return !isTerminalStatus && isDeliveryForToday(delivery);
     });
-  }, [deliveries, completedDeliveries, isDeliveryForToday]);
+  }, [deliveries, completedDeliveries, isDeliveryForToday, deliverySyncStatus]);
 
   // Stage 2: Apply search filter (if active)
   const searchFilteredDeliveries = useMemo(() => {
@@ -830,13 +834,10 @@ const DriverMobile = () => {
   const handleRetrySync = async (deliveryId) => {
     try {
       console.log('🔄 Retrying sync for delivery:', deliveryId);
-      // Update status to pending to trigger retry
-      const { updateQueueItemSyncStatus } = await import('../utils/offlineStorage');
-      await updateQueueItemSyncStatus(deliveryId, 'pending', null);
-      
-      // Trigger sync
-      await syncOfflineData();
-      setFeedback(prev => ({ ...prev, scanSuccess: 'Retry initiated' }));
+      const result = await retryDeliverySync(deliveryId);
+      dispatch(fetchDriverDeliveries());
+      setFeedback(prev => ({ ...prev, scanSuccess: result.failed ? '' : 'Sync retry finished',
+        scanError: result.failed ? 'Some uploads still need attention. See their sync errors below.' : '' }));
     } catch (error) {
       console.error('Failed to retry sync:', error);
       setFeedback(prev => ({ ...prev, scanError: 'Retry failed: ' + error.message }));
@@ -1925,6 +1926,7 @@ const DriverMobile = () => {
 
   const getDeliveryStatus = (delivery) => {
     if (!delivery) return 'upcoming';
+    if (deliverySyncStatus[delivery._id]) return 'sync_pending';
     if ((delivery.status && ['delivered', 'completed'].includes(delivery.status)) || completedDeliveries.has(delivery._id)) return 'completed';
     return 'current';
   };
@@ -4943,41 +4945,7 @@ const DriverMobile = () => {
           {activeTab === 'deliveries' && (
             <div className="space-y-3">
               {/* Sync Status Summary */}
-              {Object.keys(deliverySyncStatus).length > 0 && (
-                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-3">
-                  <div className="flex items-center space-x-2">
-                    {isSyncing ? (
-                      <RefreshCw className="w-4 h-4 text-blue-600 animate-spin" />
-                    ) : (
-                      <CheckCircle className="w-4 h-4 text-green-600" />
-                    )}
-                    <div className="flex-1">
-                      <p className="text-sm font-medium text-blue-900">
-                        {isSyncing ? 'Syncing offline deliveries...' : 'Sync status: '}
-                        {Object.entries(deliverySyncStatus).reduce((acc, [_, info]) => {
-                          if (info?.status === 'pending') acc.pending++;
-                          if (info?.status === 'syncing') acc.syncing++;
-                          if (info?.status === 'failed') acc.failed++;
-                          return acc;
-                        }, { pending: 0, syncing: 0, failed: 0 })}
-                        {(() => {
-                          const counts = Object.entries(deliverySyncStatus).reduce((acc, [_, info]) => {
-                            if (info?.status === 'pending') acc.pending++;
-                            if (info?.status === 'syncing') acc.syncing++;
-                            if (info?.status === 'failed') acc.failed++;
-                            return acc;
-                          }, { pending: 0, syncing: 0, failed: 0 });
-                          const parts = [];
-                          if (counts.pending > 0) parts.push(`${counts.pending} pending`);
-                          if (counts.syncing > 0) parts.push(`${counts.syncing} syncing`);
-                          if (counts.failed > 0) parts.push(`${counts.failed} failed`);
-                          return parts.join(', ');
-                        })()}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-              )}
+              <DriverSyncSummary syncStatus={deliverySyncStatus} isSyncing={isSyncing} onRetry={() => handleRetrySync()} />
               
               {isLoading && pendingDeliveries.filter(d => d.type !== 'Task').length === 0 ? (
               <div className="text-center py-8">
@@ -4988,7 +4956,7 @@ const DriverMobile = () => {
               <div className="text-center py-8">
                 <Package className="w-12 h-12 mx-auto mb-2 text-gray-300" />
                 <p className="text-gray-500">No pending deliveries</p>
-                <p className="text-gray-400 text-sm mt-1">All deliveries completed for today!</p>
+                <p className="text-gray-400 text-sm mt-1">{Object.keys(deliverySyncStatus).length ? 'Some uploads are still awaiting server confirmation.' : 'All deliveries completed for today!'}</p>
               </div>
             ) : (
               <div className="space-y-3">
