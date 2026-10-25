@@ -3,9 +3,10 @@ import User from '../models/User.js';
 import Delivery from '../models/Delivery.js';
 import mongoose from 'mongoose';
 import { executeBagMovement } from './bagLifecycleService.js';
+import { findRegisteredBag } from './bagRecordLookup.js';
 
 const repository={
-  find:bagId=>Bag.collection.findOne({bagId}),
+  find:bagId=>findRegisteredBag(Bag.collection,bagId),
   commit:async(bag,plan)=>{
     const version=bag.custodyVersion===undefined?{custodyVersion:{$exists:false}}:{custodyVersion:bag.custodyVersion};
     const update={$set:{...plan.set,custodyVersion:(bag.custodyVersion||0)+1},$push:{history:plan.event}};

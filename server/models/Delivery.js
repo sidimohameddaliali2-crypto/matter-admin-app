@@ -240,6 +240,8 @@ deliveryType: {
     checkedAt: Date,
     evidenceSource: String,
     gpsSampleCount: Number,
+    errorStage: String,
+    errorCode: String,
   },
   timeline: [{
     status: String,

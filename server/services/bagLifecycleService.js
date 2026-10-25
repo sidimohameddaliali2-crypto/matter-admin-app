@@ -29,7 +29,7 @@ export function planBagMovement(bag,command,actor,now=new Date()) {
   const ownDriver=id(bag.assignedTo?.driver)===id(actor._id);
   const note=typeof command.note==='string'?command.note.trim():'';
   if(note.length>2000)throw fault('Evidence notes must be at most 2,000 characters.',400);
-  const set={}; const unset={};
+  const set={}; const unset={}; let reassignment;
   const warehouse=()=>{if(!isWarehouse)throw fault('Warehouse receiving permission is required.',403);};
   const requireState=(...allowed)=>{if(!allowed.includes(state))throw fault(`Cannot ${action.replaceAll('_',' ')} a bag in ${state}.`);};
   const clearAssignment=()=>{set.lastCustomer=bag.assignedTo?.customer||bag.lastCustomer||null;unset.assignedTo='';unset.currentDelivery='';unset.pendingHandover='';};
@@ -50,9 +50,18 @@ export function planBagMovement(bag,command,actor,now=new Date()) {
   }else if(action==='deliver'){
     if(!isDriver||!command.customerId||!command.deliveryId)throw fault('An assigned driver, customer and delivery are required.',403);
     if(state==='with_customer'&&id(bag.currentDelivery)===id(command.deliveryId)&&bag.assignedTo?.customer?.customerId===command.customerId&&ownDriver)return {duplicate:true};
-    requireState('outbound','legacy_unverified');
-    if(bag.assignedTo?.driver&&!ownDriver)throw fault('Bag is held by another driver. Confirm a transfer first.');
-    if(bag.assignedTo?.customer?.customerId&&bag.assignedTo.customer.customerId!==command.customerId)throw fault('Bag has an outstanding association to a different customer. Reconcile first.');
+    // Owner (2026-10-26): a physical delivery scan may replace an old customer
+    // association. Preserve the old custody in the same atomic audit receipt.
+    const scanned=command.physicalScan===true;
+    requireState(...(scanned?['outbound','legacy_unverified','ready','with_customer']:['outbound','legacy_unverified']));
+    if(bag.isFlagged||bag.condition==='poor')throw fault('Flagged or damaged bags cannot be delivered.');
+    if(bag.assignedTo?.driver&&!ownDriver&&!(scanned&&bag.location!=='driver'))throw fault('Bag is held by another driver. Confirm a transfer first.');
+    const oldCustomer=bag.assignedTo?.customer;
+    if(oldCustomer?.customerId&&oldCustomer.customerId!==command.customerId){
+      if(!scanned)throw fault('Bag has an outstanding association to a different customer. Scan the physical bag to reassign it.');
+      reassignment={fromCustomer:oldCustomer,toCustomer:{customerId:command.customerId,customerName:command.customerName||''},fromDelivery:bag.currentDelivery||null,reason:'Physical delivery scan',scannedBy:actor._id};
+      set.lastCustomer=oldCustomer;
+    }
     set.lifecycleState='with_customer';set.location='customer';set.status='assigned';set.currentDelivery=command.deliveryId;
     set.assignedTo={driver:actor._id,customer:{customerId:command.customerId,customerName:command.customerName||''},assignmentTime:now,expectedReturn:command.expectedReturn||null};
   }else if(action==='collect'){
@@ -90,7 +99,7 @@ export function planBagMovement(bag,command,actor,now=new Date()) {
     set.assignedTo={...bag.assignedTo,driver:actor._id};unset.pendingHandover='';
   }else throw fault('Unsupported bag movement.',400);
   set.verifiedAt=now;set.updatedAt=now;
-  return {set,unset,event:{eventId:command.eventId,fingerprint,eventType:action,status:set.status||bag.status,location:set.location||bag.location,lifecycleState:set.lifecycleState||state,assignedBy:{user:actor._id,name:actor.name||actor.role},assignedTo:set.assignedTo||bag.assignedTo,notes:note,proofPhotoUrl:command.proofPhotoUrl||null,before:{state,location:bag.location,quantity:bag.quantity??null,assignedTo:bag.assignedTo,currentDelivery:bag.currentDelivery},occurredAt,timestamp:now}};
+  return {set,unset,event:{eventId:command.eventId,fingerprint,eventType:action,status:set.status||bag.status,location:set.location||bag.location,lifecycleState:set.lifecycleState||state,assignedBy:{user:actor._id,name:actor.name||actor.role},assignedTo:set.assignedTo||bag.assignedTo,notes:note,reassignment,proofPhotoUrl:command.proofPhotoUrl||null,before:{state,location:bag.location,quantity:bag.quantity??null,assignedTo:bag.assignedTo,currentDelivery:bag.currentDelivery},occurredAt,timestamp:now}};
 }
 
 export async function executeBagMovement(repository,bagId,command,actor) {

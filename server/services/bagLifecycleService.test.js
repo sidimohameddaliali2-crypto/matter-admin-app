@@ -73,6 +73,30 @@ test('concurrent identical movement retries return one committed receipt',async(
 test('unknown scans do not provision inventory',async()=>{
   let writes=0;await assert.rejects(()=>executeBagMovement({find:async()=>null,commit:async()=>writes++},'BAG-9999',command('collect'),driver),/not registered/);assert.equal(writes,0);
 });
+
+test('physical delivery scan reassigns a previous customer and preserves the custody audit',()=>{
+  const oldCustomer={customerId:'old',customerName:'Previous customer'};
+  const original=bag({lifecycleState:'with_customer',location:'customer',currentDelivery:'old-stop',assignedTo:{driver:'old-driver',customer:oldCustomer}});
+  const c=command('deliver',{customerId:'new',customerName:'New customer',deliveryId:'new-stop',physicalScan:true});
+  const p=planBagMovement(original,c,driver);
+  assert.equal(p.set.assignedTo.customer.customerId,'new');
+  assert.equal(p.event.reassignment.fromCustomer.customerId,'old');
+  assert.equal(p.event.reassignment.fromDelivery,'old-stop');
+  assert.equal(p.event.before.assignedTo.driver,'old-driver');
+  assert.equal(p.event.assignedBy.user,'driver');
+  assert.deepEqual(planBagMovement(apply(original,p),c,driver),{duplicate:true});
+});
+test('driver may deliver physically scanned ready stock but cannot bypass damaged stock or another driver custody',()=>{
+  const c=command('deliver',{customerId:'new',deliveryId:'new-stop',physicalScan:true});
+  assert.equal(planBagMovement(bag({lifecycleState:'ready'}),c,driver).set.lifecycleState,'with_customer');
+  assert.throws(()=>planBagMovement(bag({lifecycleState:'ready',condition:'poor'}),c,driver),/damaged/);
+  assert.throws(()=>planBagMovement(bag({lifecycleState:'outbound',location:'driver',assignedTo:{driver:'other'}}),c,driver),/another driver/);
+  assert.throws(()=>planBagMovement(bag({lifecycleState:'retired'}),c,driver),/retired/);
+});
+test('a stored assignment without a physical scan cannot overwrite a different customer',()=>{
+  const b=bag({assignedTo:{customer:{customerId:'old'}}});
+  assert.throws(()=>planBagMovement(b,command('deliver',{customerId:'new',deliveryId:'new-stop'}),driver),/Scan the physical bag/);
+});
 test('offline evidence cannot overwrite a newer physical handover',()=>{
   const b=bag({lifecycleState:'outbound',location:'driver',assignedTo:{driver:'driver'},verifiedAt:new Date('2026-10-22T10:00:00Z')});
   assert.throws(()=>planBagMovement(b,command('deliver',{customerId:'c1',deliveryId:'d1',occurredAt:'2026-10-21T10:00:00Z'}),driver,new Date('2026-10-22T11:00:00Z')),/predates/);

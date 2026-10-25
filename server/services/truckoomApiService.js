@@ -93,13 +93,19 @@ class TruckoomApiService {
     return String(data.geofenceId);
   }
 
-  async getGeofenceAlerts(date) {
+  async getGeofenceAlerts(date, retry = true) {
     this.assertConfigured();
-    const { data } = await axios.get(this.baseURL, { params: {
-      token: 'getGeofenceAlerts', user: this.username, pass: this.password, Date: date,
-    }, timeout: 20000 });
-    if (!Array.isArray(data)) throw new Error('Truckoom geofence alerts request failed');
-    return data;
+    try {
+      const { data } = await axios.get(this.baseURL, { params: {
+        token: 'getGeofenceAlerts', user: this.username, pass: this.password, Date: date,
+      }, timeout: 20000 });
+      if (!Array.isArray(data)) throw Object.assign(new Error('Truckoom geofence alerts request failed'), { code: 'TRUCKOOM_INVALID_RESPONSE' });
+      return data;
+    } catch (error) {
+      const status=error.response?.status;
+      if (retry && (!status || status === 408 || status >= 500)) return this.getGeofenceAlerts(date, false);
+      throw error;
+    }
   }
 
   async deleteCustomerGeofence(id) {

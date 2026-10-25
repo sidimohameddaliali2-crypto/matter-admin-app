@@ -36,3 +36,14 @@ test('sampled vehicle visits are explicitly labelled estimated',async()=>{
  expect(container.textContent).toContain('Photo time matches sampled GPS visit (estimated)');
  expect(container.textContent).toContain('No Truckoom geofence alert was received');
 });
+
+test('an assigned stop with no photo waits for proof rather than showing an old outage verdict',async()=>{
+ await act(async()=>root.render(<TrackerVisitCard delivery={{_id:'d3',status:'assigned',trackerVisit:{status:'tracker_error',errorCode:'ECONNABORTED'}}}/>));
+ expect(container.textContent).toContain('Waiting for delivery photo');
+ expect(container.textContent).not.toContain('Truckoom unavailable');
+ expect(container.textContent).toContain('ECONNABORTED');
+});
+test('completed delivery with an alert API failure still reports unverified',async()=>{
+ await act(async()=>root.render(<TrackerVisitCard delivery={{_id:'d4',status:'delivered',proof:{photoUrl:'https://example.test/photo.jpg'},trackerVisit:{status:'tracker_error'}}}/>));
+ expect(container.textContent).toContain('Unverified: Truckoom unavailable');
+});

@@ -3,7 +3,7 @@ import Bag from '../models/Bag.js';
 import {effectivePermissions} from '../models/User.js';
 import {moveBag} from '../services/bagMovementStore.js';
 import {legacyBagReturn} from '../services/deliveryBagMovements.js';
-import {normalizeBagId} from '../services/bagInventoryAudit.js';
+import {findRegisteredBag} from '../services/bagRecordLookup.js';
 
 // Old clients are kept compatible, but cannot bypass custody/history or delete
 // physical assets. Reads never provision stock or backfill customer addresses.
@@ -19,7 +19,7 @@ export default async function legacyBagMovements(req,res,next){
   if(!isReturn&&!isAssign&&!isReassign&&!isDamage&&!isBulk)return next();
   if(req.user.role!=='driver'&&!effectivePermissions(req.user).bags)return res.status(403).json({success:false,message:'Bag permission required.'});
   try{
-    const lookup=async identifier=>mongoose.isValidObjectId(identifier)?Bag.findById(identifier).lean():Bag.findOne({bagId:normalizeBagId(identifier)}).lean();
+    const lookup=async identifier=>mongoose.isValidObjectId(identifier)?Bag.findById(identifier).lean():findRegisteredBag(Bag.collection,identifier);
     if(isBulk){
       if(!Array.isArray(req.body.bagIds)||!req.body.bagIds.length||req.body.bagIds.length>500)return res.status(400).json({success:false,message:'Provide 1–500 bag IDs.'});
       const successes=[],failures=[];
@@ -31,7 +31,7 @@ export default async function legacyBagMovements(req,res,next){
     if(!bag)return res.status(404).json({success:false,message:'Unregistered bag. Open an inventory review.'});
     let result;
     if(isReturn)result=await legacyBagReturn(bag.bagId,req.body,req.user);
-    else if(isReassign)result=await moveBag(bag.bagId,{action:'deliver',deliveryId:req.body.deliveryId,customerId:req.body.customerId,eventId:`delivery:${req.body.deliveryId}:deliver:${bag.bagId}`,note:'Physical customer handover'},req.user);
+    else if(isReassign)result=await moveBag(bag.bagId,{action:'deliver',physicalScan:true,deliveryId:req.body.deliveryId,customerId:req.body.customerId,eventId:`delivery:${req.body.deliveryId}:deliver:${bag.bagId}`,note:'Physical customer handover'},req.user);
     else if(isAssign)result=await moveBag(bag.bagId,{action:'pack',driverId:req.body.driverId,note:req.body.notes||'Outbound handover prepared',eventId:req.body.eventId||`pack:${bag._id}:${bag.custodyVersion||0}:${req.body.driverId}`},req.user);
     else result=await moveBag(bag.bagId,{action:'quarantine',proofPhotoUrl:req.body.proofPhotoUrl,note:req.body.description||'Damage recorded at warehouse',eventId:req.body.eventId||`damage:${bag._id}:${bag.custodyVersion||0}`},req.user);
     req.app.get('io')?.emit('bag:updated',{bagId:bag.bagId});

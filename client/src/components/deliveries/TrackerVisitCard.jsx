@@ -13,6 +13,7 @@ const labels = {
   missing_pin: 'Unverified: customer pin missing',
   no_tracker: 'Unverified: driver has no assigned tracker',
   tracker_error: 'Unverified: Truckoom unavailable',
+  verification_error: 'Unverified: tracker check failed',
   gps_visit_observed: 'Photo time matches sampled GPS visit (estimated)',
   gps_window_review: 'Review: photo outside sampled GPS visit (estimated)',
 };
@@ -44,13 +45,18 @@ export default function TrackerVisitCard({ delivery }) {
   if (!current || (current.type && current.type !== 'Delivery')) return null;
   const visit = current.trackerVisit || {};
   const proof = current.proof || {};
+  const hasPhoto = Boolean(proof.photoUrl || proof.images?.length);
+  const pendingPhoto = !hasPhoto && ['pending','assigned','on_route','picked_up'].includes(current.status);
+  const label = pendingPhoto && !['missing_pin','no_tracker'].includes(visit.status)
+    ? 'Waiting for delivery photo' : labels[visit.status] || 'Waiting for tracker verification';
   const style = visit.needsReview ? 'border-red-200 bg-red-50 text-red-900'
     : visit.status === 'inside_window' ? 'border-green-200 bg-green-50 text-green-900'
       : 'border-gray-200 bg-gray-50 text-gray-700';
   return (
     <section aria-label="Tracker visit verification" className={`rounded-lg border p-3 text-xs ${style}`}>
       <p className="font-semibold">Customer radius: {visit.radiusMetres || 50} m</p>
-      <p className="mt-1 font-medium">{labels[visit.status] || 'Waiting for tracker verification'}</p>
+      <p className="mt-1 font-medium">{label}</p>
+      {visit.errorCode && <p className="mt-1 opacity-80">Tracker check will retry automatically ({visit.errorCode}).</p>}
       <dl className="mt-2 space-y-1">
         <div><dt className="inline font-medium">Tracker arrival: </dt><dd className="inline">{trackerTime(visit.arrivedAt)}</dd></div>
         <div><dt className="inline font-medium">Photo captured: </dt><dd className="inline">{trackerTime(proof.photoCapturedAt)}</dd></div>

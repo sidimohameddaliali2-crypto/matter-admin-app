@@ -1,4 +1,5 @@
 import { recordDeliveryBagMovements, legacyBagReturn } from '../services/deliveryBagMovements.js';
+import { findRegisteredBag } from '../services/bagRecordLookup.js';
 import { moveBag } from '../services/bagMovementStore.js';
 import deliveryOrderRouter from './deliveryOrder.js';
 import express from 'express';
@@ -2309,12 +2310,8 @@ router.post('/:id/start', [
     }
 
     // Find and assign bag
-    const bag = await Bag.findOne({
-      $or: [
-        { bagId: normalizedBagId },
-        { qrCode: trimmedCode },
-      ],
-    });
+    const bag = await findRegisteredBag(Bag.collection, normalizedBagId)
+      || await Bag.findOne({ qrCode: trimmedCode });
     if (!bag) {
       return res.status(404).json({
         success: false,
@@ -2489,7 +2486,7 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
     };
     recordProofReceipt(delivery, { ...bodyProof, photoUrl: delivery.proof.photoUrl });
 
-    await recordDeliveryBagMovements(delivery,{status:'delivered',proof:delivery.proof,bagId:delivery.bagAssignment?.bagId||delivery.bag?.bagId},req.user);
+    await recordDeliveryBagMovements(delivery,{status:'delivered',proof:delivery.proof,bagId:req.body.bagId||bodyProof.bagId||delivery.bagAssignment?.bagId||delivery.bag?.bagId},req.user);
 
     // Complete delivery
     await delivery.updateStatus(

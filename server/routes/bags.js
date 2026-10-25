@@ -3,6 +3,7 @@ import Bag from '../models/Bag.js';
 import User,{effectivePermissions} from '../models/User.js';
 import {protect} from '../middleware/auth.js';
 import legacyBagMovements from '../middleware/legacyBagMovements.js';
+import {bagIdAliases} from '../services/bagInventoryAudit.js';
 
 const router=express.Router();
 router.use(protect,legacyBagMovements);
@@ -21,7 +22,7 @@ router.get('/',async(req,res)=>{
     if(req.query.driverId)query['assignedTo.driver']=req.query.driverId;
     if(req.user.role==='driver'){
       if(typeof req.query.search!=='string'||!req.query.search.trim())return res.status(400).json({success:false,message:'Scan an exact bag ID.'});
-      query.bagId=req.query.search.trim().toUpperCase();
+      query.bagId={$in:bagIdAliases(req.query.search)};
     }else if(typeof req.query.search==='string'&&req.query.search.trim()){
       const term=req.query.search.trim().replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
       query.$or=[{bagId:{$regex:term,$options:'i'}},{'assignedTo.customer.customerName':{$regex:term,$options:'i'}}];

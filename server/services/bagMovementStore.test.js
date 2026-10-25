@@ -68,3 +68,22 @@ test('warehouse receipts update only the original linked delivery, with a stable
 test('unknown scan does not cause an insert or a fabricated receipt',async()=>{
   await assert.rejects(()=>moveBag('BAG-9999',{action:'collect',eventId:'unknown',note:'Scanned'},driver),/not registered/);assert.equal(writes.length,0);assert.equal(receipts.length,0);
 });
+
+test('Android underscore proof finds existing stock and records reassignment once',async()=>{
+  add('BAG-00001',{lifecycleState:'with_customer',location:'customer',currentDelivery:'old-stop',assignedTo:{customer:{customerId:'OLD'}}});
+  const delivery={_id:deliveryId,customerId:'C1',driver:driver._id,proof:{}};
+  const payload={status:'delivered',proof:{bagId:'BAG_00001',qrSkipped:false}};
+  await recordDeliveryBagMovements(delivery,payload,driver);
+  await recordDeliveryBagMovements(delivery,payload,driver);
+  const b=inventory.get('BAG-00001');
+  assert.equal(b.assignedTo.customer.customerId,'C1');
+  assert.equal(b.history.length,1);
+  assert.equal(b.history[0].reassignment.fromCustomer.customerId,'OLD');
+  assert.deepEqual(delivery.proof.bagIds,['BAG-00001']);
+});
+test('a skipped QR cannot silently reassign an old bag association',async()=>{
+  add('BAG-00001',{lifecycleState:'with_customer',location:'customer',assignedTo:{customer:{customerId:'OLD'}}});
+  const delivery={_id:deliveryId,customerId:'C1',driver:driver._id};
+  await assert.rejects(()=>recordDeliveryBagMovements(delivery,{status:'delivered',proof:{bagId:'BAG_00001',qrSkipped:true}},driver));
+  assert.equal(writes.length,0);
+});

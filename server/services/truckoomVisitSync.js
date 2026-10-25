@@ -61,7 +61,8 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
     const getDateAlerts = date => {
       if (!alerts.has(date)) alerts.set(date, (async () => {
         const events = normalizeGeofenceAlerts(await truckoom.getGeofenceAlerts(date));
-        await archiveTrackerEvents(events);
+        try { await archiveTrackerEvents(events); }
+        catch { throw Object.assign(new Error('Tracker alert archive write failed'), { code: 'ARCHIVE_WRITE_FAILED' }); }
         return events;
       })());
       return alerts.get(date);
@@ -69,7 +70,8 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
     for (const delivery of deliveries) {
       await renew();
       const previous = delivery.trackerVisit || {};
-      let visit = { ...previous, checkedAt: now, needsReview: false };
+      let visit = { ...previous, checkedAt: now, needsReview: false, errorStage: null, errorCode: null };
+      let stage = 'resolve_pin';
       try {
         const pin = await resolveDeliveryCoordinatesCached(delivery);
         const driverId = String(delivery.driver?._id || '');
@@ -80,6 +82,7 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
           // Freeze the pin and vehicle once proof is received. Before that,
           // reassignment/pin edits must follow the new destination and driver.
           let fenceId = previous.geofenceId;
+          stage = 'geofence_setup';
           let deletedFence = false;
           if (fenceId && delivery.proof?.receivedAt) {
             const savedFence = await CustomerGeofence.findOne({ truckoomId: fenceId }).lean();
@@ -120,17 +123,23 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
           }
           const anchor = visit.businessDate || delivery.scheduledTime;
           const { startOfDay: start, endOfDayExclusive: end } = getBusinessDayBounds(anchor);
+          stage = 'event_archive';
           const events = await archivedTrackerEvents(visit.geofenceName, start, end);
           // Fetch the two UTC dates covering the whole Dubai calendar day.
           let alertsUnavailable = false;
+          let alertErrorCode = null;
           if (!deletedFence) for (const date of alertDateKeys(start, end)) {
             try { events.push(...await getDateAlerts(date)); }
-            catch { alertsUnavailable = true; }
+            catch (error) {
+              alertsUnavailable = true;
+              alertErrorCode = error.response?.status ? `HTTP_${error.response.status}` : (['ECONNABORTED','ETIMEDOUT','ECONNRESET','ENOTFOUND','TRUCKOOM_INVALID_RESPONSE','ARCHIVE_WRITE_FAILED'].includes(error.code) ? error.code : 'ALERT_READ_FAILED');
+            }
           }
           let matched = events.filter(e => e.vehicleNo === String(visit.vehicleNo) && e.name === visit.geofenceName);
           visit.evidenceSource = 'truckoom_alerts';
           visit.gpsSampleCount = 0;
           if (!matched.length && visit.vehicleNo) {
+            stage = 'gps_history';
             const pathKey = `${visit.vehicleNo}:${+start}`;
             if (!gpsPaths.has(pathKey)) gpsPaths.set(pathKey, VehicleLocationHistory.find({
               vehicleNo: visit.vehicleNo, recordedAt: { $gte: start, $lt: end },
@@ -148,13 +157,16 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
           if (visit.evidenceSource === 'truckoom_gps_samples') {
             if (visit.status === 'inside_window') visit.status = 'gps_visit_observed';
             if (visit.status === 'outside_window') visit.status = 'gps_window_review';
-          } else if (alertsUnavailable && !matched.length && vehicleNo) visit.status = 'tracker_error';
+          } else if (alertsUnavailable && !matched.length && vehicleNo && visit.status !== 'missing_photo_time') visit.status = alertErrorCode === 'ARCHIVE_WRITE_FAILED' ? 'verification_error' : 'tracker_error';
+          if (alertsUnavailable) { visit.errorStage = alertErrorCode === 'ARCHIVE_WRITE_FAILED' ? 'event_archive' : 'alerts'; visit.errorCode = alertErrorCode; }
           if (!vehicleNo) visit.status = 'no_tracker';
         }
       } catch {
         // Axios errors may contain credential-bearing query strings. Never log
         // their config/URL or turn an outage into a driver violation.
-        visit.status = 'tracker_error';
+        visit.status = 'verification_error';
+        visit.errorStage = stage;
+        visit.errorCode = 'CHECK_FAILED';
         visit.needsReview = false;
         remoteFences = null; // reconcile an ambiguous remote create before retry
       }

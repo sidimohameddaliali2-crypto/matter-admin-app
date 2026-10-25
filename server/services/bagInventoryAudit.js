@@ -1,6 +1,12 @@
 const text=v=>v==null?'':String(v).trim();
 const ref=v=>text(v?._id??v);
-export const normalizeBagId=v=>text(v).toUpperCase();
+// Printed QR labels use BAG_ while inventory IDs use BAG-. Keep every digit,
+// including leading zeros; the separator is the only interchangeable part.
+export const normalizeBagId=v=>text(v).toUpperCase().replace(/^BAG_/, 'BAG-');
+export const bagIdAliases=v=>{
+  const code=normalizeBagId(v);
+  return code.startsWith('BAG-')?[code,code.replace(/^BAG-/, 'BAG_')]:[code];
+};
 export function auditBagInventory({bags,customers=[],users=[],deliveries=[],scans=[],now=new Date()}) {
   const findings=[];
   const check=(code,detail,action,predicate)=>{

@@ -75,6 +75,43 @@ test('API failure is unverified and the worker lease is released', async t => {
   assert.equal(TrackerSyncLease.deleteOne.mock.callCount(), 1);
 });
 
+test('an assigned delivery without a photo is awaiting capture even when alert reads fail',async t=>{
+  const fixture=setup(t,{status:'assigned',proof:{}});
+  t.mock.method(truckoom,'getGeofenceAlerts',async()=>{throw Object.assign(new Error('timeout'),{code:'ECONNABORTED'});});
+  await syncCustomerTrackerVisits({now:fixture.now});
+  const visit=fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.status,'missing_photo_time');
+  assert.equal(visit.errorCode,'ECONNABORTED');
+  assert.equal(visit.needsReview,false);
+});
+test('an internal GPS query failure is not reported as a Truckoom outage',async t=>{
+  const fixture=setup(t);
+  t.mock.method(truckoom,'getGeofenceAlerts',async()=>[]);
+  t.mock.method(VehicleLocationHistory,'find',()=>({select:()=>({lean:async()=>{throw new Error('database error');}})}));
+  await syncCustomerTrackerVisits({now:fixture.now});
+  const visit=fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.status,'verification_error');
+  assert.equal(visit.errorStage,'gps_history');
+});
+test('a transient alert transport failure is retried once and empty valid responses are accepted',async t=>{
+  const service=new truckoom.constructor();
+  let calls=0;
+  t.mock.method(service,'assertConfigured',()=>{});
+  t.mock.method(axios,'get',async()=>{
+    if(++calls===1)throw Object.assign(new Error('timeout'),{code:'ETIMEDOUT'});
+    return {data:[]};
+  });
+  assert.deepEqual(await service.getGeofenceAlerts('26-10-2026'),[]);
+  assert.equal(calls,2);
+});
+test('unauthorized alert reads are not blindly retried',async t=>{
+  const service=new truckoom.constructor();
+  t.mock.method(service,'assertConfigured',()=>{});
+  t.mock.method(axios,'get',async()=>{throw Object.assign(new Error('unauthorized'),{response:{status:401}});});
+  await assert.rejects(()=>service.getGeofenceAlerts('26-10-2026'));
+  assert.equal(axios.get.mock.callCount(),1);
+});
+
 test('a busy PM2 lease prevents all remote calls and writes', async t => {
   const fixture = setup(t);
   t.mock.method(TrackerSyncLease, 'findOneAndUpdate', async () => { throw Object.assign(new Error('duplicate'), { code: 11000 }); });

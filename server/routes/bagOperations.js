@@ -9,6 +9,7 @@ import BagStockCount from '../models/BagStockCount.js';
 import {loadBagSnapshot,buildBagWorkspace,compareStockCount,staffName} from '../services/bagOperationsService.js';
 import {moveBag} from '../services/bagMovementStore.js';
 import {normalizeBagId} from '../services/bagInventoryAudit.js';
+import {findRegisteredBag} from '../services/bagRecordLookup.js';
 
 const router=express.Router();
 const writers=new Set(['super_admin','admin','manager','store_keeper']);
@@ -42,6 +43,7 @@ router.post('/register',writer,async(req,res)=>{
   const bagId=normalizeBagId(req.body?.bagId);
   if(!/^BAG-\d{4,}$/.test(bagId))return res.status(400).json({success:false,message:'Use an unused ID such as BAG-0001. Preserve existing tag numbering.'});
   try{
+    if(await findRegisteredBag(Bag.collection,bagId))return res.status(409).json({success:false,message:'That bag label is already registered.'});
     const data=new Bag({bagId,status:'maintenance',location:'warehouse',lifecycleState:'received',custodyVersion:1,quantity:1,condition:'good',verifiedAt:new Date()});
     data.$locals.historyEntryOverride={eventId:randomUUID(),eventType:'register',lifecycleState:'received',status:'maintenance',location:'warehouse',assignedBy:{user:req.user._id,name:staffName(req.user)},notes:'Registered physical stock; cleaning and inspection required.',timestamp:new Date()};
     await data.save();
