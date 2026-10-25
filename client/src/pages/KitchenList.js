@@ -2,7 +2,7 @@ import KitchenInputWarnings from '../components/KitchenInputWarnings';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
 import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady } from '../utils/kitchenIntegrity';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, Shuffle, FileText, ChevronDown, ChevronUp, AlertTriangle } from 'lucide-react';
+import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, Shuffle, FileText, ChevronDown, ChevronUp, AlertTriangle, Pencil } from 'lucide-react';
 import api from '../utils/api';
 import { calculateKitchenListEntry, breakfastNameHasMacros, snackNameHasMacros } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
@@ -1089,6 +1089,71 @@ const KitchenList = () => {
   }, [snackOptionsByDate, missingCheckDate, snackPreset]);
   const autoAssignBlockedByMacros = breakfastsMissingMacros.length + snacksMissingMacros.length > 0;
 
+  // Adds / replaces one breakfast preset. The save endpoint replaces the whole
+  // table, so every existing entry is sent along with the changed one.
+  const saveBreakfastPresetEntry = async (mapKey, entry) => {
+    const next = { ...(breakfastPreset?.presetsByName || {}), [mapKey]: entry };
+    const rows = Object.values(next).map((p) => ({
+      breakfastName: p.breakfastName,
+      C: p.C,
+      P: p.P,
+      F: p.F,
+      V: p.V ?? 80,
+      isLargeBreakfast: !!p.isLargeBreakfast
+    }));
+    const defaultRow = {
+      breakfastName: breakfastPreset?.breakfastName || rows[0].breakfastName,
+      C: Number(breakfastPreset?.C) || 0,
+      P: Number(breakfastPreset?.P) || 0,
+      F: Number(breakfastPreset?.F) || 0,
+      V: Number(breakfastPreset?.V) || 80,
+      isLargeBreakfast: !!breakfastPreset?.isLargeBreakfast
+    };
+    await persistBreakfastPresets(rows, defaultRow, next);
+  };
+
+  // Inline editor for the "Breakfast Macros" / "Snack Macros" lists.
+  const [presetEdit, setPresetEdit] = useState(null); // { kind, key, name, C, P, F, V, isLargeBreakfast }
+  const [breakfastMacrosOpen, setBreakfastMacrosOpen] = useState(false);
+  const startPresetEdit = (kind, key, preset) => setPresetEdit({
+    kind,
+    key,
+    name: kind === 'snack' ? preset.snackName : preset.breakfastName,
+    C: String(preset.C ?? 0),
+    P: String(preset.P ?? 0),
+    F: String(preset.F ?? 0),
+    V: String(preset.V ?? 80),
+    isLargeBreakfast: !!preset.isLargeBreakfast
+  });
+  const savePresetEdit = async () => {
+    if (!presetEdit) return;
+    const { kind, key, name } = presetEdit;
+    const C = Math.max(0, Number(presetEdit.C) || 0);
+    const P = Math.max(0, Number(presetEdit.P) || 0);
+    const F = Math.max(0, Number(presetEdit.F) || 0);
+    setError('');
+    setSavingMacroKey(`${kind}:${name}`);
+    try {
+      if (kind === 'snack') {
+        await saveSnackPresets({ ...snackPreset.presetsByName, [key]: { snackName: name, C, P, F } });
+      } else {
+        await saveBreakfastPresetEntry(key, {
+          breakfastName: name,
+          C,
+          P,
+          F,
+          V: Number(presetEdit.V) || 80,
+          isLargeBreakfast: !!presetEdit.isLargeBreakfast
+        });
+      }
+      setPresetEdit(null);
+    } catch (err) {
+      setError(err.response?.data?.message || `Failed to save macros for "${name}"`);
+    } finally {
+      setSavingMacroKey('');
+    }
+  };
+
   const setMacroDraft = (kind, name, field, value) => {
     const key = `${kind}:${name}`;
     setMacroDrafts((drafts) => ({ ...drafts, [key]: { ...(drafts[key] || {}), [field]: value } }));
@@ -1111,29 +1176,7 @@ const KitchenList = () => {
       if (kind === 'snack') {
         await saveSnackPresets({ ...snackPreset.presetsByName, [mapKey]: { snackName: name, C, P, F } });
       } else {
-        const next = {
-          ...(breakfastPreset?.presetsByName || {}),
-          [mapKey]: { breakfastName: name, C, P, F, V: 80, isLargeBreakfast: false }
-        };
-        // The save endpoint replaces the whole table, so send every existing
-        // entry along with the new one.
-        const rows = Object.values(next).map((p) => ({
-          breakfastName: p.breakfastName,
-          C: p.C,
-          P: p.P,
-          F: p.F,
-          V: p.V ?? 80,
-          isLargeBreakfast: !!p.isLargeBreakfast
-        }));
-        const defaultRow = {
-          breakfastName: breakfastPreset?.breakfastName || rows[0].breakfastName,
-          C: Number(breakfastPreset?.C) || 0,
-          P: Number(breakfastPreset?.P) || 0,
-          F: Number(breakfastPreset?.F) || 0,
-          V: Number(breakfastPreset?.V) || 80,
-          isLargeBreakfast: !!breakfastPreset?.isLargeBreakfast
-        };
-        await persistBreakfastPresets(rows, defaultRow, next);
+        await saveBreakfastPresetEntry(mapKey, { breakfastName: name, C, P, F, V: 80, isLargeBreakfast: false });
       }
       setMacroDrafts((drafts) => {
         const rest = { ...drafts };
@@ -1145,6 +1188,89 @@ const KitchenList = () => {
     } finally {
       setSavingMacroKey('');
     }
+  };
+
+  // One row of the Breakfast / Snack Macros lists: shows C / P / F (and weight +
+  // LARGE for breakfasts) with a pencil that swaps the row for inline inputs.
+  const renderPresetRow = (kind, key, preset, onRemove) => {
+    const isSnack = kind === 'snack';
+    const name = isSnack ? preset.snackName : preset.breakfastName;
+    const rowId = `${kind}:${key}`;
+    if (presetEdit && presetEdit.kind === kind && presetEdit.key === key) {
+      const saving = savingMacroKey === `${kind}:${presetEdit.name}`;
+      const inputClass = 'w-16 rounded-lg border border-slate-300 bg-white px-2 py-1 text-xs focus:border-slate-900 focus:outline-none';
+      return (
+        <div key={rowId} className="rounded-xl bg-amber-50 px-3 py-2 text-sm ring-1 ring-amber-200">
+          <span className="font-medium text-slate-800">{name}</span>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            {['C', 'P', 'F', ...(isSnack ? [] : ['V'])].map((field) => (
+              <label key={field} className="flex items-center gap-1 text-xs text-slate-600">
+                {field === 'V' ? 'Weight (g)' : field}
+                <input
+                  type="number"
+                  min="0"
+                  value={presetEdit[field]}
+                  onChange={(e) => setPresetEdit((edit) => ({ ...edit, [field]: e.target.value }))}
+                  disabled={saving}
+                  className={inputClass}
+                />
+              </label>
+            ))}
+            {!isSnack && (
+              <label className="flex items-center gap-1 text-xs text-slate-600">
+                <input
+                  type="checkbox"
+                  checked={presetEdit.isLargeBreakfast}
+                  onChange={(e) => setPresetEdit((edit) => ({ ...edit, isLargeBreakfast: e.target.checked }))}
+                  disabled={saving}
+                />
+                Large
+              </label>
+            )}
+            <button
+              type="button"
+              onClick={savePresetEdit}
+              disabled={saving}
+              className="rounded-lg bg-slate-900 px-3 py-1 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-50"
+            >
+              {saving ? 'Saving...' : 'Save'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setPresetEdit(null)}
+              disabled={saving}
+              className="rounded-lg border border-slate-300 px-3 py-1 text-xs font-medium text-slate-600 hover:bg-white"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div key={rowId} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
+        <span className="font-medium text-slate-800">
+          {name}
+          {!isSnack && preset.isLargeBreakfast && (
+            <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-600 font-semibold">LARGE</span>
+          )}
+        </span>
+        <div className="flex items-center gap-3 text-xs text-slate-500 flex-shrink-0">
+          <span>C {preset.C}</span>
+          <span>P {preset.P}</span>
+          <span>F {preset.F}</span>
+          {!isSnack && <span>{preset.V ?? 80} g</span>}
+          <button type="button" onClick={() => startPresetEdit(kind, key, preset)} title="Edit macros" className="text-slate-500 hover:text-slate-900">
+            <Pencil size={14} />
+          </button>
+          {onRemove && (
+            <button type="button" onClick={onRemove} className="text-red-500 hover:text-red-700">
+              <Trash2 size={14} />
+            </button>
+          )}
+        </div>
+      </div>
+    );
   };
 
   // Inline "no macros yet" box shown under a flagged breakfast / snack option.
@@ -2903,7 +3029,13 @@ ${body}
                     {(breakfastOptionsByDate[missingCheckDate] || []).length === 0 && (
                       <p className="text-sm text-slate-400">No breakfast options uploaded for this date.</p>
                     )}
-                    {(breakfastOptionsByDate[missingCheckDate] || []).map((item, index) => (
+                    {(breakfastOptionsByDate[missingCheckDate] || []).map((item, index) => {
+                      const pKey = normalizeBreakfastKey(item.name);
+                      const saved = breakfastPreset?.presetsByName?.[pKey];
+                      if (presetEdit && presetEdit.kind === 'breakfast' && presetEdit.key === pKey) {
+                        return renderPresetRow('breakfast', pKey, { breakfastName: item.name, ...(saved || {}) });
+                      }
+                      return (
                       <div key={`breakfast-${item.name}-${index}`} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
                         <div className="min-w-0">
                           <span className="font-medium text-slate-800">{item.name}</span>
@@ -2919,11 +3051,25 @@ ${body}
                           )}
                           {breakfastsMissingMacros.includes(String(item.name || '').trim()) && renderMissingMacrosForm('breakfast', String(item.name || '').trim())}
                         </div>
-                        <button type="button" onClick={() => removeBreakfastOption(index)} className="text-red-500 hover:text-red-700 flex-shrink-0 ml-2">
-                          <Trash2 size={14} />
-                        </button>
+                        <div className="flex items-center gap-2 text-xs text-slate-500 flex-shrink-0 ml-2">
+                          <span>C {saved?.C ?? 0}</span>
+                          <span>P {saved?.P ?? 0}</span>
+                          <span>F {saved?.F ?? 0}</span>
+                          <button
+                            type="button"
+                            title="Edit macros"
+                            onClick={() => startPresetEdit('breakfast', pKey, { breakfastName: item.name, C: 0, P: 0, F: 0, V: 80, ...(saved || {}) })}
+                            className="text-slate-500 hover:text-slate-900"
+                          >
+                            <Pencil size={14} />
+                          </button>
+                          <button type="button" onClick={() => removeBreakfastOption(index)} className="text-red-500 hover:text-red-700">
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
 
@@ -2991,7 +3137,14 @@ ${body}
                       {(snackOptionsByDate[missingCheckDate]?.[pool] || []).length === 0 ? (
                         <p className="text-sm text-slate-400">No {pool === 'first' ? 'first' : 'second'} snack options uploaded for this date.</p>
                       ) : (
-                        (snackOptionsByDate[missingCheckDate]?.[pool] || []).map((opt, index) => (
+                        (snackOptionsByDate[missingCheckDate]?.[pool] || []).map((opt, index) => {
+                          const pKey = normalizeBreakfastKey(opt.name);
+                          const saved = snackPreset.presetsByName?.[pKey];
+                          const shown = saved || opt;
+                          if (presetEdit && presetEdit.kind === 'snack' && presetEdit.key === pKey) {
+                            return renderPresetRow('snack', pKey, { snackName: opt.name, C: opt.C, P: opt.P, F: opt.F, ...(saved || {}) });
+                          }
+                          return (
                           <div key={`${pool}-${opt.name}-${index}`} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
                             <div className="min-w-0">
                               <span className="font-medium text-slate-800">{opt.name}</span>
@@ -3008,20 +3161,62 @@ ${body}
                               {snacksMissingMacros.includes(String(opt.name || '').trim()) && renderMissingMacrosForm('snack', String(opt.name || '').trim())}
                             </div>
                             <div className="flex items-center gap-3 text-xs text-slate-500 flex-shrink-0">
-                              <span>C {opt.C}</span>
-                              <span>P {opt.P}</span>
-                              <span>F {opt.F}</span>
+                              <span>C {shown.C ?? 0}</span>
+                              <span>P {shown.P ?? 0}</span>
+                              <span>F {shown.F ?? 0}</span>
+                              <button
+                                type="button"
+                                title="Edit macros"
+                                onClick={() => startPresetEdit('snack', pKey, { snackName: opt.name, C: opt.C, P: opt.P, F: opt.F, ...(saved || {}) })}
+                                className="text-slate-500 hover:text-slate-900"
+                              >
+                                <Pencil size={14} />
+                              </button>
                               <button type="button" onClick={() => removeSnackOption(pool, index)} className="text-red-500 hover:text-red-700">
                                 <Trash2 size={14} />
                               </button>
                             </div>
                           </div>
-                        ))
+                          );
+                        })
                       )}
                     </div>
                   </div>
                 ))}
               </div>
+            </div>
+
+            <div className="mt-6 pt-4 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setBreakfastMacrosOpen((open) => !open)}
+                aria-expanded={breakfastMacrosOpen}
+                className="flex w-full items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-left hover:bg-slate-100"
+              >
+                <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Breakfast Macros (PCF)
+                  <span className="ml-2 font-normal normal-case tracking-normal text-slate-400">
+                    {Object.keys(breakfastPreset?.presetsByName || {}).length} breakfasts
+                  </span>
+                </span>
+                {breakfastMacrosOpen ? <ChevronUp size={16} className="text-slate-500" /> : <ChevronDown size={16} className="text-slate-500" />}
+              </button>
+              {breakfastMacrosOpen && (
+                <div className="mt-3">
+                  <p className="text-[11px] text-slate-400 mb-3">
+                    Global, shared across all menus. Click the pencil to edit a breakfast's C / P / F, its weight (V, grams) and
+                    whether it is a Large breakfast. Changes apply to every customer who gets that breakfast.
+                  </p>
+                  <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+                    {Object.keys(breakfastPreset?.presetsByName || {}).length === 0 && (
+                      <p className="text-sm text-slate-400">No breakfast macros uploaded yet.</p>
+                    )}
+                    {Object.entries(breakfastPreset?.presetsByName || {}).map(([key, preset]) => (
+                      renderPresetRow('breakfast', key, preset)
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="mt-6 pt-4 border-t border-slate-100">
@@ -3089,17 +3284,7 @@ ${body}
                   <p className="text-sm text-slate-400">No snack macros uploaded yet.</p>
                 )}
                 {Object.entries(snackPreset.presetsByName || {}).map(([key, preset]) => (
-                  <div key={key} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
-                    <span className="font-medium text-slate-800">{preset.snackName}</span>
-                    <div className="flex items-center gap-3 text-xs text-slate-500 flex-shrink-0">
-                      <span>C {preset.C}</span>
-                      <span>P {preset.P}</span>
-                      <span>F {preset.F}</span>
-                      <button type="button" onClick={() => removeSnackPreset(key)} className="text-red-500 hover:text-red-700">
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
-                  </div>
+                  renderPresetRow('snack', key, preset, () => removeSnackPreset(key))
                 ))}
               </div>
               </div>
