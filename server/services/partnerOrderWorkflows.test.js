@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import axios from 'axios';
+import SlackLog from '../models/SlackLog.js';
 import Order from '../models/SpaceOrder.js';
 import Line from '../models/OrderLine.js';
 import Menu from '../models/SpaceMenu.js';
@@ -30,9 +32,13 @@ async function call(router, method, path, request = {}) {
   const route = router.stack.find(s => s.route?.path === path && s.route.methods[method]).route;
   const response = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
   await route.stack.at(-1).handle({ query: {}, params: {}, body: {}, partner: { _id: SPACE, minimumOrder: 100 }, ...request }, response);
+  await new Promise(resolve => setImmediate(resolve));
   return response;
 }
 function fixtures(t, status = 'submitted') {
+  // Tests never send real order alerts or touch the Slack audit collection.
+  t.mock.method(axios, 'post', async () => ({ status: 200, data: { ok: true, channel: 'fixture-channel', ts: '1.0' } }));
+  t.mock.method(SlackLog, 'create', async () => ({}));
   const item = doc({ _id: ITEM, name: 'Meal', price: 20, sellingPrice: null, isAvailable: true });
   const order = doc({ _id: ORDER, space: { _id: SPACE }, status, deliveryDate: new Date(DAY), acknowledgedAt: new Date(), async save() { writes++; } });
   let writes = 0;
@@ -168,6 +174,49 @@ test('valid drafts submit using the base price and inclusive menu availability d
   assert.equal(f.order.status, 'submitted');
   assert.equal(f.writes(), 1);
 });
+
+test('successful submission sends one Slack alert and repeat submission sends none', async t => {
+  const f = fixtures(t, 'draft');
+  const before = process.env.SLACK_BOT_TOKEN;
+  const enabled = process.env.ENABLE_SLACK_NOTIFICATIONS;
+  process.env.SLACK_BOT_TOKEN = 'fixture-token';
+  process.env.ENABLE_SLACK_NOTIFICATIONS = '1';
+  t.after(() => {
+    if (before === undefined) delete process.env.SLACK_BOT_TOKEN; else process.env.SLACK_BOT_TOKEN = before;
+    if (enabled === undefined) delete process.env.ENABLE_SLACK_NOTIFICATIONS; else process.env.ENABLE_SLACK_NOTIFICATIONS = enabled;
+  });
+  assert.equal((await call(partnerRouter, 'post', '/orders/:id/submit')).code, 200);
+  assert.equal(axios.post.mock.callCount(), 1);
+  assert.equal(SlackLog.create.mock.calls[0].arguments[0].partnerOrderId, ORDER);
+  assert.equal((await call(partnerRouter, 'post', '/orders/:id/submit')).code, 400);
+  assert.equal(axios.post.mock.callCount(), 1);
+  assert.equal(f.order.status, 'submitted');
+});
+
+test('a Slack failure cannot reject a successfully submitted order', async t => {
+  const f = fixtures(t, 'draft');
+  axios.post.mock.mockImplementation(async () => { throw new Error('Fixture Slack failure'); });
+  const response = await call(partnerRouter, 'post', '/orders/:id/submit');
+  assert.equal(response.code, 200);
+  assert.equal(f.order.status, 'submitted');
+});
+
+for (const [path, body] of [
+  ['/orders', { deliveryDate: '2026-10-26', lines: [{ menuItemId: ITEM, quantity: 5 }] }],
+  ['/orders/:id/submit', {}],
+  ['/orders/:id/cancel', {}],
+]) {
+  for (const closed of [false, true]) {
+    test(`${path}: ${closed ? 'rejects' : 'allows'} changes at Monday's shared selection cutoff`, async t => {
+      const f = fixtures(t, 'draft');
+      f.order.deliveryDate = new Date('2026-10-26T00:00:00Z');
+      t.mock.timers.enable({ apis: ['Date'], now: Date.parse(closed ? '2026-10-23T11:01:00Z' : '2026-10-23T11:00:59.999Z') });
+      const response = await call(partnerRouter, 'post', path, { body });
+      assert.equal(response.code, closed ? 400 : 200);
+      if (closed) assert.equal(f.writes(), 0);
+    });
+  }
+}
 
 test('deadline locking still prevents cancellation when reading orders no longer writes status', async t => {
   const f = fixtures(t);

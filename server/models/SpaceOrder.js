@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
+import { businessOffsetMs } from '../utils/businessDate.js';
 
 const spaceOrderSchema = new mongoose.Schema({
   space: { type: mongoose.Schema.Types.ObjectId, ref: 'Partner', required: true },
@@ -27,20 +28,22 @@ spaceOrderSchema.index({ status: 1, deliveryDate: 1 });
 // DEADLINES), instead of a flat "2 days before" rule. Mirrors the client's
 // isPastSelectionDeadline (client/.../MenuSelectionLink.jsx) — same table,
 // same day-of-week lookup, same deadlineTime, same :59.999 inclusive cutoff.
+// Calendar dates are stored at UTC midnight; the deadline is Dubai wall time,
+// independently of the server's OS timezone.
 const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 // Helpers used in routes — export alongside model
 export const lockCutoff = (deliveryDate) => {
   const d = new Date(deliveryDate);
-  const rule = FIXED_SELECTION_DEADLINES.find((r) => r.deliveryDay === DAY_NAMES[d.getDay()]);
+  const rule = FIXED_SELECTION_DEADLINES.find((r) => r.deliveryDay === DAY_NAMES[d.getUTCDay()]);
   const daysBefore = rule?.daysBefore ?? 2;
   const [hh, mm] = String(rule?.deadlineTime || '00:00').split(':').map(Number);
   const cutoff = new Date(d);
-  cutoff.setDate(cutoff.getDate() - daysBefore);
-  cutoff.setHours(hh, mm, 59, 999);
-  return cutoff;
+  cutoff.setUTCDate(cutoff.getUTCDate() - daysBefore);
+  cutoff.setUTCHours(hh, mm, 59, 999);
+  return new Date(cutoff.getTime() - businessOffsetMs());
 };
 
-export const isInLockWindow = (deliveryDate) => new Date() > lockCutoff(deliveryDate);
+export const isInLockWindow = (deliveryDate, now = new Date()) => new Date(now) > lockCutoff(deliveryDate);
 
 export default mongoose.model('SpaceOrder', spaceOrderSchema);

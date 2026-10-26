@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/api';
+import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
 import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm, allergenMatchesAny } from '../../constants/exclusionList';
 import { toSentenceCase } from '../../utils/textFormat';
 import MatterLogo from './MatterLogo';
@@ -51,37 +52,6 @@ const fmtShort = (value) => {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return '';
   return `${DAYS[d.getDay()]}, ${MONTHS[d.getMonth()]} ${d.getDate()}`;
-};
-
-const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-
-// Whether a delivery day's selection deadline (deliveryDate - daysBefore
-// calendar days, at deadlineTime, local time) has passed. Pure — no React
-// state — so it can be used both from the render-time day-lock check and
-// from signIn, before `model`/`day` state have even been set.
-const isPastSelectionDeadline = (dateKey, selectionDeadlines) => {
-  if (!dateKey) return false;
-  const deliveryDate = dateFromKey(dateKey);
-  if (Number.isNaN(deliveryDate.getTime())) return false;
-
-  const rule = Array.isArray(selectionDeadlines)
-    ? selectionDeadlines.find((d) => d.deliveryDay === DAY_NAMES[deliveryDate.getDay()])
-    : null;
-
-  if (!rule) {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    return deliveryDate < today;
-  }
-
-  const deadlineDateLocal = new Date(
-    deliveryDate.getFullYear(),
-    deliveryDate.getMonth(),
-    deliveryDate.getDate() - (rule.daysBefore || 0)
-  );
-  const [hh, mm] = String(rule.deadlineTime || '23:59').split(':').map(Number);
-  deadlineDateLocal.setHours(hh, mm, 59, 999);
-  return new Date() > deadlineDateLocal;
 };
 
 // Index of the first day whose deadline hasn't passed yet — so a customer

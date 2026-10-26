@@ -7,6 +7,7 @@ import { QRCodeCanvas } from 'qrcode.react';
 import jsPDF from 'jspdf';
 import { partnerLogout } from '../store/slices/partnerAuthSlice';
 import partnerApi from '../utils/partnerApi';
+import { FIXED_SELECTION_DEADLINES, isPastSelectionDeadline } from '../utils/selectionDeadlines';
 import { groupExclusions } from '../constants/exclusionList';
 
 /*  MATTER — Partner portal
@@ -62,36 +63,12 @@ const buildCalendar = (year, month) => {
 // No deliveries on Sunday
 const isSunday = (iso) => new Date(iso + 'T00:00:00').getDay() === 0;
 
-// Same fixed, company-wide ordering-deadline policy as the customer Menu
-// Selection (server/config/selectionDeadlines.js and its client-side mirror
-// in menuSelectionLink/MenuSelectionLink.jsx) — ported here so the calendar
-// greys out exactly the dates the server will reject, instead of a flat
-// "+3 days" guess.
-const FIXED_SELECTION_DEADLINES = [
-  { deliveryDay: 'Monday', daysBefore: 3, deadlineTime: '15:00' },
-  { deliveryDay: 'Tuesday', daysBefore: 2, deadlineTime: '00:00' },
-  { deliveryDay: 'Wednesday', daysBefore: 2, deadlineTime: '00:00' },
-  { deliveryDay: 'Thursday', daysBefore: 2, deadlineTime: '00:00' },
-  { deliveryDay: 'Friday', daysBefore: 2, deadlineTime: '00:00' },
-  { deliveryDay: 'Saturday', daysBefore: 3, deadlineTime: '00:00' },
-  { deliveryDay: 'Sunday', daysBefore: 4, deadlineTime: '00:00' },
-];
-const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-
-// Whether a delivery date's ordering deadline has already passed.
-const isPastOrderDeadline = (iso) => {
-  const deliveryDate = new Date(iso + 'T00:00:00');
-  const rule = FIXED_SELECTION_DEADLINES.find((r) => r.deliveryDay === DAY_NAMES[deliveryDate.getDay()]);
-  const daysBefore = rule?.daysBefore ?? 2;
-  const deadline = new Date(deliveryDate.getFullYear(), deliveryDate.getMonth(), deliveryDate.getDate() - daysBefore);
-  const [hh, mm] = String(rule?.deadlineTime || '00:00').split(':').map(Number);
-  deadline.setHours(hh, mm, 59, 999);
-  return new Date() > deadline;
-};
+// Use the same Dubai-time calculation as customer Menu Selection.
+const isPastOrderDeadline = (iso) => isPastSelectionDeadline(iso, FIXED_SELECTION_DEADLINES);
 
 // earliest orderable date — the first day (not Sunday, not past its own deadline)
 const firstOrderableISO = () => {
-  const d = new Date();
+  const d = new Date(`${new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Dubai' })}T00:00:00`);
   let iso = toISO(d);
   while (isSunday(iso) || isPastOrderDeadline(iso)) { d.setDate(d.getDate() + 1); iso = toISO(d); }
   return iso;

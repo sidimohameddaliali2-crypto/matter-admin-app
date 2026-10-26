@@ -8,7 +8,7 @@ import BagReviewCase from '../models/BagReviewCase.js';
 import BagStockCount from '../models/BagStockCount.js';
 import {loadBagSnapshot,buildBagWorkspace,compareStockCount,staffName} from '../services/bagOperationsService.js';
 import {moveBag} from '../services/bagMovementStore.js';
-import {normalizeBagId} from '../services/bagInventoryAudit.js';
+import {normalizeBagId,isStandardBagId} from '../services/bagInventoryAudit.js';
 import {findRegisteredBag} from '../services/bagRecordLookup.js';
 
 const router=express.Router();
@@ -41,7 +41,7 @@ router.get('/bags/:id',access,async(req,res)=>{
 });
 router.post('/register',writer,async(req,res)=>{
   const bagId=normalizeBagId(req.body?.bagId);
-  if(!/^BAG-\d{4,}$/.test(bagId))return res.status(400).json({success:false,message:'Use an unused ID such as BAG-0001. Preserve existing tag numbering.'});
+  if(!isStandardBagId(bagId))return res.status(400).json({success:false,message:'Use an unused ID such as BAG-0001 or BAG-A0001. Preserve existing tag numbering.'});
   try{
     if(await findRegisteredBag(Bag.collection,bagId))return res.status(409).json({success:false,message:'That bag label is already registered.'});
     const data=new Bag({bagId,status:'maintenance',location:'warehouse',lifecycleState:'received',custodyVersion:1,quantity:1,condition:'good',verifiedAt:new Date()});

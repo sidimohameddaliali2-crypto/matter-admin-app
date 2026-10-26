@@ -13,6 +13,8 @@ const SlackLogSchema = new mongoose.Schema(
     // Associations
     communicationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Communication' },
     deliveryId: { type: mongoose.Schema.Types.ObjectId, ref: 'Delivery' },
+    partnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Partner' },
+    partnerOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'SpaceOrder' },
     customerId: { type: String },
     customerName: { type: String },
     bagIds: [{ type: String }],

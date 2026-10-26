@@ -151,7 +151,7 @@ router.get('/orders/all', async (req, res) => {
     }
     const orders = await SpaceOrder.find(q)
       .populate('space', 'businessName businessType email')
-      .sort({ deliveryDate: 1, createdAt: -1 });
+      .sort({ submittedAt: -1, createdAt: -1, _id: -1 });
     const orderIds = orders.map(o => o._id);
     const invoiced = await invoicedPartnerOrders(orderIds);
     const lines = await OrderLine.find({ order: { $in: orderIds } }).populate('menuItem', 'name mealType');

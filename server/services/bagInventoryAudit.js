@@ -3,6 +3,7 @@ const ref=v=>text(v?._id??v);
 // Printed QR labels use BAG_ while inventory IDs use BAG-. Keep every digit,
 // including leading zeros; the separator is the only interchangeable part.
 export const normalizeBagId=v=>text(v).toUpperCase().replace(/^BAG_/, 'BAG-');
+export const isStandardBagId=v=>/^BAG-(?:[A-Z])?\d{4,}$/.test(normalizeBagId(v));
 export const bagIdAliases=v=>{
   const code=normalizeBagId(v);
   return code.startsWith('BAG-')?[code,code.replace(/^BAG-/, 'BAG_')]:[code];
@@ -19,7 +20,7 @@ export function auditBagInventory({bags,customers=[],users=[],deliveries=[],scan
   const duplicates=new Map();
   for(const b of bags){const code=normalizeBagId(b.bagId);if(!duplicates.has(code))duplicates.set(code,[]);duplicates.get(code).push(ref(b._id));}
   check('identity_collision','A normalized bag ID resolves to multiple records.','Compare physical tags before merging.',b=>duplicates.get(normalizeBagId(b.bagId)).length>1);
-  check('nonstandard_id','Tag differs from BAG-0001 format.','Verify the label; preserve leading zeros.',b=>!/^BAG-\d{4,}$/.test(normalizeBagId(b.bagId)));
+  check('nonstandard_id','Tag differs from BAG-0001 or BAG-A0001 format.','Verify the label; preserve leading zeros.',b=>!isStandardBagId(b.bagId));
   check('quantity_unverified','Legacy quantity is missing or is not one.','Confirm one physical bag per tag.',b=>b.quantity!==1);
   check('custody_ambiguous','Assigned bag is also recorded at the warehouse.','Establish the physical holder before correction.',b=>!b.lifecycleState&&['assigned','in_use'].includes(b.status)&&b.location==='warehouse');
   check('customer_unmatched','Customer ID is absent from the internal customer register.','Review legacy IDs and customer merges.',b=>b.assignedTo?.customer?.customerId&&!customerIds.has(text(b.assignedTo.customer.customerId)));

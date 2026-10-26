@@ -9,9 +9,10 @@ import SlackLog from '../models/SlackLog.js';
  * @param {string} [params.webhookEnvKey] - optional env var key to read webhook from first
  * @param {object} [params.meta] - additional context: deliveryId, customerId, customerName, bagIds, userId
  * @param {object} [params.payload] - full payload sent to Slack
+ * @param {boolean} [params.preferWebhook] - use a configured webhook before the bot API
  * @returns {Promise<{ok:boolean,status?:number,error?:string}>}
  */
-export async function sendAndLogSlack({ type, text, webhookEnvKey, meta = {}, payload, channelId }) {
+export async function sendAndLogSlack({ type, text, webhookEnvKey, meta = {}, payload, channelId, preferWebhook = false }) {
   const notificationsDisabled = process.env.ENABLE_SLACK_NOTIFICATIONS === '0';
 
   // Resolve webhook URL with fallbacks similar to existing code
@@ -44,7 +45,7 @@ export async function sendAndLogSlack({ type, text, webhookEnvKey, meta = {}, pa
   if (notificationsDisabled) {
     responseStatus = 0;
     responseError = 'Slack notifications disabled';
-  } else if (botToken && resolvedChannelId) {
+  } else if (botToken && resolvedChannelId && !(preferWebhook && resolvedWebhook)) {
     // Prefer Slack Web API to enable future edits
     try {
       const resp = await axios.post('https://slack.com/api/chat.postMessage', {
@@ -92,6 +93,8 @@ export async function sendAndLogSlack({ type, text, webhookEnvKey, meta = {}, pa
       responseStatus,
       responseError,
       deliveryId: meta.deliveryId,
+      partnerId: meta.partnerId,
+      partnerOrderId: meta.partnerOrderId,
       communicationId: meta.communicationId,
       customerId: meta.customerId,
       customerName: meta.customerName,

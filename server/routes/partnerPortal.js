@@ -10,6 +10,7 @@ import InvoiceLine from '../models/InvoiceLine.js';
 import WasteLog, { WASTE_REASONS } from '../models/WasteLog.js';
 import { partnerProtect } from '../middleware/partnerAuth.js';
 import { sendNewOrderEmail } from '../services/emailService.js';
+import { sendNewPartnerOrderSlack } from '../services/partnerOrderSlack.js';
 import Partner from '../models/Partner.js';
 import Member from '../models/Member.js';
 import { normalizePartnerLines, validatePartnerOrder, isPartnerItemAvailable, partnerUnitPrice } from '../services/partnerOrderValidation.js';
@@ -42,10 +43,6 @@ const effectiveUnitPrice = async (spaceId, menuItem) => {
   return partnerUnitPrice(menuItem, own);
 };
 
-// Partners can edit or cancel an order until 48 hours before its delivery date.
-const EDIT_WINDOW_MS = 48 * 60 * 60 * 1000;
-const isPastEditWindow = (deliveryDate) => Date.now() >= new Date(deliveryDate).getTime() - EDIT_WINDOW_MS;
-
 // Attach priced lines, total, invoice and edit permission to orders.
 const decorateOrders = async (orders, spaceId) => {
   if (!orders.length) return [];
@@ -68,7 +65,7 @@ const decorateOrders = async (orders, spaceId) => {
       lines: ls,
       total: ls.reduce((s, l) => s + l.unitPrice * l.quantity, 0),
       isLocked: isInLockWindow(o.deliveryDate),
-      editable: ['draft', 'submitted'].includes(o.status) && !isInLockWindow(o.deliveryDate) && !isPastEditWindow(o.deliveryDate),
+      editable: ['draft', 'submitted'].includes(o.status) && !isInLockWindow(o.deliveryDate),
       invoice: inv ? { _id: inv._id, invoiceNumber: inv.invoiceNumber, totalRevenue: inv.totalRevenue } : null
     };
   });
@@ -236,9 +233,6 @@ router.post('/orders', async (req, res) => {
     if (order && !['draft', 'submitted'].includes(order.status)) {
       return res.status(400).json({ success: false, message: 'Order is locked and cannot be edited.' });
     }
-    if (order && isPastEditWindow(order.deliveryDate)) {
-      return res.status(400).json({ success: false, message: 'This order is within 48 hours of delivery and can no longer be edited.' });
-    }
     const existingLines = order ? await OrderLine.find({ order: order._id }) : [];
     const proposed = new Map(existingLines.map(l => [String(l.menuItem), l.quantity]));
     changes.forEach(l => l.quantity > 0 ? proposed.set(l.menuItemId, l.quantity) : proposed.delete(l.menuItemId));
@@ -308,8 +302,9 @@ router.post('/orders/:id/submit', async (req, res) => {
     order.submittedAt = new Date();
     await order.save();
 
-    // Send notification email (non-blocking — failure won't break the response)
-    sendNewOrderEmail({
+    // Alerts run only after submission is saved, never for drafts or rejected
+    // submissions. Notification failures must not fail an accepted order.
+    const notification = {
       partner: req.partner,
       order,
       lines: pricedLines.map(({ menuItem, quantity, unitPrice }) => ({
@@ -319,7 +314,11 @@ router.post('/orders/:id/submit', async (req, res) => {
         lineTotal: unitPrice * quantity,
       })),
       totalAmount,
-    }).catch(err => console.error('[email] Order notification failed:', err?.message || err));
+    };
+    sendNewOrderEmail(notification).catch(err => console.error('[email] Order notification failed:', err?.message || err));
+    sendNewPartnerOrderSlack(notification).then(result => {
+      if (!result.ok && !result.skipped) console.warn('[slack] Partner order alert failed:', result.error);
+    }).catch(() => console.warn('[slack] Partner order alert failed; order remains submitted.'));
 
     res.json({ success: true, data: order });
   } catch (err) {
@@ -350,9 +349,6 @@ router.post('/orders/:id/cancel', async (req, res) => {
     if (order.status === 'cancelled') return res.status(400).json({ success: false, message: 'Order is already cancelled.' });
     if (isInLockWindow(order.deliveryDate)) {
       return res.status(400).json({ success: false, message: 'This order is past its ordering deadline and can no longer be cancelled.' });
-    }
-    if (isPastEditWindow(order.deliveryDate)) {
-      return res.status(400).json({ success: false, message: 'This order is within 48 hours of delivery and can no longer be cancelled.' });
     }
     order.status = 'cancelled';
     order.cancelledAt = new Date();
