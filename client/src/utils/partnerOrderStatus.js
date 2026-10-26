@@ -2,7 +2,7 @@ export const partnerAdminOrderStatus = (order) => {
   if (order.status === 'cancelled') return 'cancelled';
   if (order.invoiced) return 'invoiced';
   if (order.status === 'locked') return 'locked';
-  return order.acknowledgedAt ? 'acked' : 'new';
+  return 'new';
 };
 
 export const canInvoicePartnerOrder = (order) =>

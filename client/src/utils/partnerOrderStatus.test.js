@@ -17,9 +17,9 @@ test('legacy locked orders await invoicing until both invoices are complete', ()
   expect(canInvoicePartnerOrder(order)).toBe(false);
 });
 
-test('submission and acknowledgement remain distinct from invoice completion', () => {
+test('historical acknowledgement does not gate kitchen production', () => {
   expect(partnerAdminOrderStatus({ status: 'submitted' })).toBe('new');
-  expect(partnerAdminOrderStatus({ status: 'submitted', acknowledgedAt: '2026-01-01' })).toBe('acked');
+  expect(partnerAdminOrderStatus({ status: 'submitted', acknowledgedAt: '2026-01-01' })).toBe('new');
   expect(canInvoicePartnerOrder({ status: 'submitted' })).toBe(true);
   expect(canInvoicePartnerOrder({ status: 'draft' })).toBe(false);
 });

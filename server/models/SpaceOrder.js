@@ -8,10 +8,8 @@ const spaceOrderSchema = new mongoose.Schema({
   status: { type: String, enum: ['draft', 'submitted', 'locked', 'cancelled'], default: 'draft' },
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'Partner' },
   submittedAt: Date,
-  // Admin "Acknowledge" step (Partner Admin Orders tab) — a lightweight
-  // confirmation before locking/invoicing, orthogonal to `status` so it
-  // doesn't disturb the draft/submitted/locked/cancelled state machine
-  // every other consumer (partner/member portals) already relies on.
+  // Historical only: acknowledgement was removed on 2026-10-26. Submitted
+  // partner orders go directly to kitchen production.
   acknowledgedAt: Date,
   lockedAt: Date,
   notes: { type: String, default: '' },

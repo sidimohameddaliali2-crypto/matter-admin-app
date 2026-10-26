@@ -2,6 +2,7 @@ import express from 'express';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import Customer from '../models/Customer.js';
+import { effectivePermissions } from '../models/User.js';
 import Partner from '../models/Partner.js';
 import MenuItem from '../models/MenuItem.js';
 import KitchenBreakfastPreset from '../models/KitchenBreakfastPreset.js';
@@ -20,11 +21,24 @@ import supyService from '../services/supyService.js';
 import { withKitchenPreparation, preparationHasFailures, kitchenPreparationFailure } from '../services/kitchenPreparation.js';
 import { matterSelectionIdentity, matterSelectionFilter, normalizeMatterEmail } from '../services/matterKitchenIdentity.js';
 import { resolveMenuAllergyProfile } from '../services/menuAllergyProfileService.js';
+import { getPartnerKitchenOrders } from '../services/partnerKitchenOrders.js';
 import { syncMenuSelectionMainMealsToPartnerMenu } from '../services/menuSelectionPartnerSync.js';
 import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, validateRequiredResumeDates, expandSaturdaySkips } from '../services/matterPauseResumeService.js';
 
 
 const router = express.Router();
+
+// Read-only production feed for both Kitchen List and Kitchen Counting.
+router.get('/kitchen-partner-orders', protect, (req, res, next) => {
+  const permissions = effectivePermissions(req.user);
+  if (!permissions.kitchen_list && !permissions.kitchen_counting) {
+    return res.status(403).json({ success: false, message: 'Kitchen access is required.' });
+  }
+  next();
+}, async (req, res) => {
+  try { res.json({ success: true, data: await getPartnerKitchenOrders(req.query.date) }); }
+  catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Partner kitchen orders could not be loaded.' }); }
+});
 
 const toDayKey = (value) => {
   if (!value) return '';

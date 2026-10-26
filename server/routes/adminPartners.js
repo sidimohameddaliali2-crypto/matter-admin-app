@@ -22,6 +22,7 @@ import { assignItemToAllActivePartners, assignAllMasterItemsToPartner } from '..
 import { invoicedPartnerOrders } from '../services/partnerInvoiceState.js';
 import { partnerReportScope } from '../services/partnerReportScope.js';
 import { partnerUnitPrice } from '../services/partnerOrderValidation.js';
+import { emitPartnerKitchenChange } from '../services/partnerKitchenOrders.js';
 
 const adminOrKitchen = authorize(['admin', 'super_admin', 'kitchen']);
 
@@ -186,23 +187,6 @@ router.get('/orders/:orderId', async (req, res) => {
   }
 });
 
-// Acknowledge a submitted order — a lightweight confirmation step before
-// locking/invoicing. Does not touch `status`.
-router.patch('/orders/:orderId/acknowledge', admin, async (req, res) => {
-  try {
-    const order = await SpaceOrder.findById(req.params.orderId);
-    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
-    if (order.status !== 'submitted') {
-      return res.status(400).json({ success: false, message: 'Only submitted orders can be acknowledged.' });
-    }
-    order.acknowledgedAt = new Date();
-    await order.save();
-    res.json({ success: true, data: order });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
 router.patch('/orders/:orderId/status', admin, async (req, res) => {
   try {
     const { status } = req.body;
@@ -213,6 +197,7 @@ router.patch('/orders/:orderId/status', admin, async (req, res) => {
     const order = await SpaceOrder.findByIdAndUpdate(req.params.orderId, { status }, { new: true })
       .populate('space', 'businessName');
     if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+    emitPartnerKitchenChange(req, order);
     res.json({ success: true, data: order });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });

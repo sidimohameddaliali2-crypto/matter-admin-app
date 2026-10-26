@@ -108,13 +108,25 @@ test('submitted order edits enforce minimum spend before changing lines or ackno
   assert.equal(f.writes(), 0);
 });
 
-test('valid submitted edits stay submitted and return to the kitchen unacknowledged', async t => {
+test('valid submitted edits stay submitted without requiring a kitchen acknowledgement', async t => {
   const f = fixtures(t);
+  const previousAcknowledgement = f.order.acknowledgedAt;
   const response = await call(partnerRouter, 'post', '/orders', { body: { deliveryDate: DAY, lines: [{ menuItemId: ITEM, quantity: 5 }] } });
   assert.equal(response.code, 200);
   assert.equal(f.lines()[0].quantity, 5);
   assert.equal(f.order.status, 'submitted');
-  assert.equal(f.order.acknowledgedAt, null);
+  assert.equal(f.order.acknowledgedAt, previousAcknowledgement);
+});
+
+test('submission and cancellation notify open kitchen pages for the order date', async t => {
+  const f = fixtures(t, 'draft');
+  const events = [];
+  const app = { get: () => ({ emit: (...args) => events.push(args) }) };
+  assert.equal((await call(partnerRouter, 'post', '/orders/:id/submit', { app })).code, 200);
+  assert.deepEqual(events[0], ['partner:ordersChanged', { date: DAY }]);
+  assert.equal((await call(partnerRouter, 'post', '/orders/:id/cancel', { app })).code, 200);
+  assert.equal(f.order.status, 'cancelled');
+  assert.deepEqual(events[1], ['partner:ordersChanged', { date: DAY }]);
 });
 
 test('submitted edits cannot remove the final item even with no minimum', async t => {

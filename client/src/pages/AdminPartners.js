@@ -7,7 +7,7 @@ import {
   Plus, X, Edit, Trash2, ChevronDown, ChevronUp, Building2, Search,
   Loader, CheckCircle, XCircle, ClipboardList, Calendar, UtensilsCrossed,
   ToggleLeft, ToggleRight, Lock, FileText, BarChart2, Leaf, Download,
-  DollarSign, AlertCircle, RefreshCw, Users, CheckCheck
+  DollarSign, AlertCircle, RefreshCw, Users
 } from 'lucide-react';
 import api from '../utils/api';
 import { partnerAdminOrderStatus, canInvoicePartnerOrder } from '../utils/partnerOrderStatus';
@@ -22,8 +22,7 @@ import { groupExclusions } from '../constants/exclusionList';
  *  chat response for the full list): no referral "code"/"uses" columns, no
  *  WhatsApp "Numbers" tab (folded into the existing Members panel, which is
  *  the real equivalent — partner self-service join links), no per-row order
- *  total (accurate pricing needs a SpacePrice join the list route doesn't do),
- *  acknowledging an order doesn't gate locking it.
+ *  total (accurate pricing needs a SpacePrice join the list route doesn't do).
  */
 
 const fmt = (n) => Number(n || 0).toFixed(2);
@@ -530,15 +529,6 @@ const AdminPartners = () => {
   };
 
   // ── Order actions ──────────────────────────────────────────────────────────
-  const acknowledgeOrder = async (order) => {
-    setWorkingOrder(order._id);
-    try {
-      const r = await api.patch(`/admin/partners/orders/${order._id}/acknowledge`);
-      setAllOrders((prev) => prev.map((o) => (o._id === order._id ? { ...o, acknowledgedAt: r.data.data.acknowledgedAt } : o)));
-    } catch (err) { alert(err.response?.data?.message || 'Failed to acknowledge order'); }
-    finally { setWorkingOrder(null); }
-  };
-
   const lockOrder = async (orderId) => {
     if (!window.confirm('Lock this order and generate invoices? This cannot be undone.')) return;
     setWorkingOrder(orderId);
@@ -626,8 +616,7 @@ const AdminPartners = () => {
     const statusOf = partnerAdminOrderStatus;
     return [
       ['all', 'All', allOrders.length],
-      ['new', 'New', allOrders.filter((o) => statusOf(o) === 'new').length],
-      ['acked', 'Acknowledged', allOrders.filter((o) => statusOf(o) === 'acked').length],
+      ['new', 'In kitchen', allOrders.filter((o) => statusOf(o) === 'new').length],
       ['invoiced', 'Invoiced', allOrders.filter((o) => statusOf(o) === 'invoiced').length],
       ['locked', 'Awaiting invoice', allOrders.filter((o) => statusOf(o) === 'locked').length],
       ['cancelled', 'Cancelled', allOrders.filter((o) => statusOf(o) === 'cancelled').length],
@@ -1020,8 +1009,7 @@ const AdminPartners = () => {
                       cancelled: { label: 'Cancelled', bg: '#f1ebe2', color: '#6b7894' },
                       invoiced: { label: 'Invoiced', bg: '#bcf679', color: '#051747' },
                       locked: { label: 'Awaiting invoice', bg: '#fff2d9', color: '#7b5210' },
-                      acked: { label: 'Acknowledged', bg: '#051747', color: '#ede5de' },
-                      new: { label: 'New', bg: '#ff3b00', color: '#ede5de' },
+                      new: { label: 'In kitchen', bg: '#051747', color: '#ede5de' },
                     }[partnerAdminOrderStatus(order)];
                     return (
                       <div key={order._id} className={`${card} overflow-hidden`}>
@@ -1035,12 +1023,6 @@ const AdminPartners = () => {
                             <div className="text-xs text-[#6b7894] mt-1">Delivery {fmtDate(order.deliveryDate)} · {order.lines?.length || 0} items</div>
                           </div>
                           <div className="flex items-center gap-2 flex-none">
-                            {order.status === 'submitted' && !order.acknowledgedAt && (
-                              <button onClick={() => acknowledgeOrder(order)} disabled={workingOrder === order._id}
-                                className={`${pillBtn} flex items-center gap-1.5 bg-[#051747] text-[#ede5de] hover:opacity-90 disabled:opacity-40 text-xs py-2`}>
-                                {workingOrder === order._id ? <Loader className="w-3.5 h-3.5 animate-spin" /> : <CheckCheck className="w-3.5 h-3.5" />}Acknowledge
-                              </button>
-                            )}
                             {canInvoicePartnerOrder(order) && (
                               <button onClick={() => lockOrder(order._id)} disabled={workingOrder === order._id}
                                 className={`${pillBtn} flex items-center gap-1.5 bg-[#bcf679] text-[#051747] hover:opacity-90 disabled:opacity-40 text-xs py-2`}>

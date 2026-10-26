@@ -11,6 +11,7 @@ const loadXLSX = () => {
   return xlsxModulePromise;
 };
 import api from '../utils/api';
+import PartnerKitchenOrders from '../components/PartnerKitchenOrders';
 import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
 import {
@@ -327,6 +328,7 @@ const KitchenCounting = () => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-amber-50 p-4 md:p-6">
       <div className="mx-auto max-w-5xl space-y-6">
+        <PartnerKitchenOrders date={selectedDate} counting />
         <div className="rounded-3xl bg-slate-900 p-6 text-white shadow-xl">
           <div className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-sm text-amber-200">
             <ChefHat size={16} /> Kitchen & Menus

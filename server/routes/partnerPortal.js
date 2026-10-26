@@ -11,6 +11,7 @@ import WasteLog, { WASTE_REASONS } from '../models/WasteLog.js';
 import { partnerProtect } from '../middleware/partnerAuth.js';
 import { sendNewOrderEmail } from '../services/emailService.js';
 import { sendNewPartnerOrderSlack } from '../services/partnerOrderSlack.js';
+import { emitPartnerKitchenChange } from '../services/partnerKitchenOrders.js';
 import Partner from '../models/Partner.js';
 import Member from '../models/Member.js';
 import { normalizePartnerLines, validatePartnerOrder, isPartnerItemAvailable, partnerUnitPrice } from '../services/partnerOrderValidation.js';
@@ -253,8 +254,6 @@ router.post('/orders', async (req, res) => {
     } else {
       if (notes !== undefined) order.notes = notes;
       if (deliveryTime !== undefined) order.deliveryTime = deliveryTime;
-      // A partner edit goes back to the kitchen as unacknowledged
-      if (order.status === 'submitted') order.acknowledgedAt = null;
       await order.save();
     }
 
@@ -274,6 +273,7 @@ router.post('/orders', async (req, res) => {
     }
 
     const updatedLines = await OrderLine.find({ order: order._id }).populate('menuItem', 'name mealType');
+    if (order.status === 'submitted') emitPartnerKitchenChange(req, order);
     res.json({ success: true, data: { ...order.toObject(), lines: updatedLines } });
   } catch (err) {
     console.error(err);
@@ -301,6 +301,7 @@ router.post('/orders/:id/submit', async (req, res) => {
     order.status = 'submitted';
     order.submittedAt = new Date();
     await order.save();
+    emitPartnerKitchenChange(req, order);
 
     // Alerts run only after submission is saved, never for drafts or rejected
     // submissions. Notification failures must not fail an accepted order.
@@ -353,6 +354,7 @@ router.post('/orders/:id/cancel', async (req, res) => {
     order.status = 'cancelled';
     order.cancelledAt = new Date();
     await order.save();
+    emitPartnerKitchenChange(req, order);
     res.json({ success: true, data: order });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });

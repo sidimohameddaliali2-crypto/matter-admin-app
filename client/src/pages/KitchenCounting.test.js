@@ -4,6 +4,7 @@ import api from '../utils/api';
 import KitchenCounting from './KitchenCounting';
 
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn() } }));
+jest.mock('../components/PartnerKitchenOrders', () => () => null);
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
 const A = '2026-10-20', B = '2026-10-21';

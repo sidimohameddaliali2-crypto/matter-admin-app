@@ -4,6 +4,7 @@ import api from '../utils/api';
 import KitchenList from './KitchenList';
 
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn() } }));
+jest.mock('../components/PartnerKitchenOrders', () => () => null);
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
 const mockPdfSave = jest.fn();

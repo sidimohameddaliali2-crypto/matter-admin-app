@@ -1,5 +1,6 @@
 import KitchenInputWarnings from '../components/KitchenInputWarnings';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
+import PartnerKitchenOrders from '../components/PartnerKitchenOrders';
 import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady } from '../utils/kitchenIntegrity';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, Shuffle, FileText, ChevronDown, ChevronUp, AlertTriangle, Pencil } from 'lucide-react';
@@ -2625,6 +2626,7 @@ ${body}
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-amber-50 p-4 md:p-6">
       <div className="mx-auto max-w-7xl space-y-6">
+        <PartnerKitchenOrders date={missingCheckDate} />
         <div className="rounded-3xl bg-slate-900 p-6 text-white shadow-xl">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div>
