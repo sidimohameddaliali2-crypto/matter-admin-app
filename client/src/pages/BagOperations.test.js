@@ -16,7 +16,7 @@ const click=async text=>{expect(button(text)).toBeDefined();await act(async()=>b
 const fill=async(element,value)=>{await act(async()=>{const proto=element.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(element,value);element.dispatchEvent(new Event('input',{bubbles:true}));});};
 beforeEach(async()=>{
   data=fixture();api.get.mockReset();api.post.mockReset();api.put.mockReset();
-  api.get.mockImplementation(async url=>({data:{success:true,data:url==='/bag-operations'?data:{bagId:'BAG-00001',status:'assigned',location:'warehouse',condition:'good',history:[]}}}));
+  api.get.mockImplementation(async url=>({data:{success:true,data:url==='/bag-operations'?data:{...data.bags[0],history:[]}}}));
   api.put.mockResolvedValue({data:{success:true}});api.post.mockResolvedValue({data:{success:true}});
   container=document.createElement('div');document.body.appendChild(container);root=createRoot(container);
   await act(async()=>root.render(<BagOperations/>));
@@ -74,4 +74,48 @@ test('failed reconciliation submissions stay open with an error',async()=>{
   expect(container.querySelector('[role="dialog"]')).not.toBeNull();
   expect(container.querySelector('[role="alert"]').textContent).toContain('Count could not be saved.');
   expect(api.post).toHaveBeenCalledWith('/bag-operations/stock-counts',expect.objectContaining({scannedCodes:['BAG-00001'],confirmed:true}));
+});
+
+test('warehouse mode limits navigation and ignores a management view selection',async()=>{
+  await click('Audit reviews');
+  await act(async()=>root.render(<BagOperations warehouse/>));
+  const nav=container.querySelector('[aria-label="Warehouse tasks"]');
+  expect([...nav.querySelectorAll('button')].map(b=>b.textContent)).toEqual(['Home','Returns','Clean','Handover','Stock']);
+  expect(container.textContent).toContain('Ready for the next shift.');
+  expect(container.textContent).not.toContain('Deposit refunds');
+  expect(container.textContent).not.toContain('Customer balances');
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+test('warehouse home lookup reports unknown labels without creating stock',async()=>{
+  await act(async()=>root.render(<BagOperations warehouse/>));
+  await fill(container.querySelector('#warehouse-label'),'BAG-0001');
+  await act(async()=>container.querySelector('.wk-scan form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+  expect(container.querySelector('[role="dialog"]')).not.toBeNull();
+  expect(container.querySelector('[role="alert"]').textContent).toContain('Unregistered ID');
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+test('warehouse queues show physical stages and preserve driver acceptance',async()=>{
+  data.bags[0]={...data.bags[0],lifecycleState:'ready',custodyVersion:7,verifiedAt:'2026-10-26T06:00:00Z'};
+  data.drivers=[{_id:'driver-1',name:'Receiving driver'}];
+  await act(async()=>root.render(<BagOperations warehouse/>));
+  await click('Clean');expect(container.querySelectorAll('.wk-bagcard')).toHaveLength(0);
+  await click('Handover');expect(container.querySelectorAll('.wk-bagcard')).toHaveLength(1);
+  await act(async()=>container.querySelector('.wk-bagcard').click());
+  expect(button('Retire bag')).toBeUndefined();
+  await click('Prepare handover');
+  const select=container.querySelector('.bo-field select');
+  await act(async()=>{Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(select,'driver-1');select.dispatchEvent(new Event('change',{bubbles:true}));});
+  await fill(container.querySelector('textarea'),'Physically packed for the receiving driver.');
+  await click('Confirm physical action');
+  expect(api.post).toHaveBeenCalledWith('/bag-operations/movements',expect.objectContaining({bagId:'BAG-00001',action:'pack',expectedVersion:7,driverId:'driver-1'}));
+  expect(api.post.mock.calls.some(([,body])=>body.action==='accept')).toBe(false);
+});
+
+test('read-only warehouse staff cannot register bags or submit counts',async()=>{
+  data.canOperate=false;
+  await act(async()=>root.render(<BagOperations warehouse/>));
+  await click('Stock');expect(button('Add bag').disabled).toBe(true);
+  await click('Physical counts');expect(button('Start count').disabled).toBe(true);
 });

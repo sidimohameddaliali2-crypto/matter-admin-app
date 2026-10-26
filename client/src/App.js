@@ -3,7 +3,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate, useLocat
 import { Provider, useDispatch, useSelector } from 'react-redux';
 import { store } from './store/store';
 import { Toaster } from './components/ui/toaster';
-import { refreshCurrentUser } from './store/slices/authSlice';
+import { refreshCurrentUser, logout } from './store/slices/authSlice';
 
 // Pages
 import Login from './pages/Login';
@@ -166,6 +166,15 @@ const AuthBootstrap = () => {
   }, [authToken, dispatch]);
 
   return null;
+};
+
+const BagOperationsRoute = ({warehouse=false}) => {
+  const user = useSelector(state => state.auth.user) || safeGetUser();
+  const dispatch = useDispatch();
+  const navigate = useNavigate();
+  return warehouse || user?.role === 'store_keeper'
+    ? <BagTracking warehouse onLogout={() => {dispatch(logout());navigate('/login');}} />
+    : <Layout><BagTracking /></Layout>;
 };
 
 const ProtectedRoute = ({ children, allowDrivers = false, allowDispatchers = false, allowStoreKeepers = false, allowYellowblock = false, allowKitchen = false }) => {
@@ -359,9 +368,9 @@ function App() {
             <Route path="/store-keeper" element={
               <ProtectedRoute allowStoreKeepers>
                 <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'store_keeper']}>
-                  <Layout>
-                    <Navigate to="/bags" replace />
-                  </Layout>
+                  <PermissionBasedRoute permission="bags">
+                    <BagOperationsRoute warehouse />
+                  </PermissionBasedRoute>
                 </RoleBasedRoute>
               </ProtectedRoute>
             } />
@@ -467,9 +476,7 @@ function App() {
             <Route path="/bags" element={
               <ProtectedRoute allowStoreKeepers>
                 <PermissionBasedRoute permission="bags">
-                  <Layout>
-                    <BagTracking />
-                  </Layout>
+                  <BagOperationsRoute />
                 </PermissionBasedRoute>
               </ProtectedRoute>
             } />

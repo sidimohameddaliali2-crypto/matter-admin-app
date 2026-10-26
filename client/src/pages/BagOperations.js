@@ -10,6 +10,8 @@ import BagRefundTracker from '../components/bags/BagRefundTracker';
 import BagFollowups from '../components/bags/BagFollowups';
 import {normalizeBagLabel as normalize,matchingBagLabels} from '../utils/bagLabelLookup';
 import '../styles/bagOperations.css';
+import WarehouseBagWorkspace,{warehouseViews} from '../components/bags/WarehouseBagWorkspace';
+import '../styles/warehouseBagWorkspace.css';
 
 const states={legacy_unverified:'Recorded — unverified',ready:'Clean & ready',packed:'Awaiting acceptance',outbound:'Driver · outbound',with_customer:'With customer',collected:'Driver · collected',received:'Received · needs cleaning',cleaning:'Cleaning',quarantined:'Quarantined',retired:'Retired'};
 const reviewStates={open:'Open',in_review:'In review',awaiting_evidence:'Awaiting evidence',ready_for_correction:'Ready for correction'};
@@ -25,10 +27,11 @@ function Dialog({title,children,onClose}){
   useEffect(()=>{const previous=document.activeElement;const overflow=document.body.style.overflow;document.body.style.overflow='hidden';ref.current?.querySelector('button,input,select,textarea')?.focus();const key=e=>{if(e.key==='Escape')onClose();if(e.key==='Tab'){const nodes=[...ref.current.querySelectorAll('button,input,select,textarea')].filter(n=>!n.disabled);if(e.shiftKey&&document.activeElement===nodes[0]){e.preventDefault();nodes.at(-1)?.focus();}else if(!e.shiftKey&&document.activeElement===nodes.at(-1)){e.preventDefault();nodes[0]?.focus();}}};document.addEventListener('keydown',key);return()=>{document.body.style.overflow=overflow;document.removeEventListener('keydown',key);previous?.focus();};},[onClose]);
   return <div className="bo-scrim" onMouseDown={e=>{if(e.target===e.currentTarget)onClose();}}><section ref={ref} className="bo-dialog" role="dialog" aria-modal="true" aria-label={title}><header><h2>{title}</h2><button type="button" onClick={onClose} aria-label="Close dialog"><X size={20}/></button></header><div className="bo-dialog-body">{children}</div></section></div>;
 }
-export default function BagOperations(){
+export default function BagOperations({warehouse=false,onLogout}){
   const {user}=useSelector(state=>state.auth);
+  const warehouseMode=warehouse||user?.role==='store_keeper';
   const [params,setParams]=useSearchParams();
-  const active=tabs.some(([key])=>key===params.get('view'))?params.get('view'):'overview';
+  const active=(warehouseMode?warehouseViews:tabs).some(([key])=>key===params.get('view'))?params.get('view'):'overview';
   const [data,setData]=useState(null),[loading,setLoading]=useState(true),[error,setError]=useState('');
   const [query,setQuery]=useState(''),[filter,setFilter]=useState('all'),[page,setPage]=useState(0);
   const [modal,setModal]=useState(null),[detail,setDetail]=useState(null),[detailLoading,setDetailLoading]=useState(false),[busy,setBusy]=useState(false),[formError,setFormError]=useState(''),[notice,setNotice]=useState('');
@@ -56,7 +59,7 @@ export default function BagOperations(){
   const openScannedBag=()=>{
     const matches=matchingBagLabels(bags,scanText);
     if(matches.length===1)openBag(matches[0]);
-    else setFormError(matches.length>1?'Multiple stock records match this label. Review duplicate records before assigning a bag.':`Unregistered ID: ${normalize(scanText)}. Check the full printed label, including leading zeros.`);
+    else {if(warehouseMode&&!modal)open('lookup');setFormError(matches.length>1?'Multiple stock records match this label. Review duplicate records before assigning a bag.':`Unregistered ID: ${normalize(scanText)}. Check the full printed label, including leading zeros.`);}
   };
   const filtered=useMemo(()=>bags.filter(b=>{
     const matches=normalize(b.bagId).includes(normalize(query))||[b.customerName,b.customerId,b.driverName].some(value=>String(value||'').toLowerCase().includes(query.toLowerCase()));
@@ -70,7 +73,8 @@ export default function BagOperations(){
   const visible=filtered.slice(page*30,page*30+30);
   const table=items=><div className="bo-table-scroll"><table><thead><tr><th>Bag ID</th><th>Recorded state</th><th>Holder / association</th><th>Verification</th><th>Review</th></tr></thead><tbody>{items.map(b=><tr key={b._id}><td><button className="bo-text" onClick={()=>openBag(b)}>{b.bagId}<ArrowRight size={14}/></button><small>{b.quantity===null?'Quantity not recorded':`Quantity ${b.quantity}`}</small></td><td><Badge tone={b.lifecycleState==='quarantined'?'critical':''}>{states[b.lifecycleState]}</Badge><small>Location: {b.location||'unknown'} · condition: {b.condition||'unknown'}</small></td><td>{b.customerName||b.driverName||'Warehouse record'}<small>{b.customerId||b.currentDelivery||'No customer linked'}</small></td><td>{b.verifiedAt?<><Badge>Observed</Badge><small>{date(b.verifiedAt)}</small></>:<Badge tone="muted">Unverified legacy</Badge>}</td><td><button className="bo-text" onClick={()=>openReview(b)}>{reviewStates[b.review?.status||'open']}</button><small>{b.reasons.length} audit checks</small></td></tr>)}</tbody></table>{!items.length&&<p className="bo-empty">No records match this view.</p>}</div>;
   const counts=state=>bags.filter(b=>b.lifecycleState===state).length;
-  return <div className="bo-workspace">
+  return <div className={`bo-workspace${warehouseMode?' bo-warehouse':''}`}>
+    {warehouseMode?<WarehouseBagWorkspace {...{data,loading,error,notice,active,query,filter,page,states,date,scanText,setScanText,openScannedBag,openBag,beginCount,onLogout}} onNavigate={navigate} onQuery={value=>{setQuery(value);setPage(0);}} onFilter={value=>{setFilter(value);setPage(0);}} onPage={setPage} onRefresh={load} onRegister={()=>{setNewId('');open('register');}} onLookup={()=>{setScanText('');open('lookup');}} onDismissNotice={()=>setNotice('')}/>:<>
     <header className="bo-heading"><div><p className="bo-eyebrow">MATTER / ADMIN & WAREHOUSE</p><h1>Every bag. Accounted for.</h1><p>One inventory. Physical handovers. Evidence at every step.</p></div><div className="bo-actions"><button onClick={()=>load()} disabled={loading}><RefreshCw size={16}/>Refresh</button><button className="primary" onClick={()=>{open('lookup');setScanText('');}}><QrCode size={16}/>Find a bag</button></div></header>
     <nav className="bo-tabs" aria-label="Bag operations views">{tabs.map(([key,label,Icon])=><button key={key} aria-current={active===key?'page':undefined} className={active===key?'active':''} onClick={()=>navigate(key)}><Icon size={15}/>{label}</button>)}</nav>
     {notice&&<div className="bo-notice" role="status">{notice}<button onClick={()=>setNotice('')} aria-label="Dismiss notification"><X size={15}/></button></div>}
@@ -89,6 +93,7 @@ export default function BagOperations(){
         {active==='receiving'&&<section className="bo-panel bo-inset"><h2>Submitted counts</h2>{data.stockCounts.length?data.stockCounts.map(c=><div className="bo-count-row" key={c._id}><strong>{date(c.submittedAt)}</strong><span>{c.missingCodes.length} missing from count · {c.unexpectedCodes.length} unexpected IDs</span><details><summary>Count differences</summary><p>Missing: {c.missingCodes.join(', ')||'None'}</p><p>Unexpected: {c.unexpectedCodes.join(', ')||'None'}</p><p>{c.note}</p></details></div>):<p>No counts submitted. A count records evidence without overwriting inventory.</p>}</section>}
       </>}
     </>}
+    </>}
     {modal&&<Dialog title={modal.type==='detail'?modal.bag.bagId:modal.type==='movement'?modal.action.replaceAll('_',' '):modal.type==='review'?'Audit review':modal.type==='count'?'Physical warehouse count':modal.type==='register'?'Register physical bag':'Find a bag'} onClose={busy?()=>{}:close}>
       {formError&&<p className="bo-error" role="alert">{formError}</p>}
       {modal.type==='lookup'&&<><label className="bo-field">Exact QR / bag ID<input autoComplete="off" value={scanText} onChange={e=>setScanText(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')openScannedBag();}}/></label><button onClick={()=>setCamera(c=>!c)}><QrCode size={15}/>{camera?'Close camera':'Use camera'}</button><button className="primary" onClick={openScannedBag}>Open bag</button></>}
@@ -96,7 +101,7 @@ export default function BagOperations(){
       {modal.type==='detail'&&(detailLoading?<p role="status">Loading bag history…</p>:detail&&<>
         <QRCodeCanvas value={detail.bagId} size={100}/><button disabled={busy} onClick={async()=>{setBusy(true);try{await downloadBulkQrPdf([detail.bagId]);}catch(e){setFormError(message(e));}finally{setBusy(false);}}}>Print existing QR label</button><div className="bo-detail-grid"><div><span>State</span><strong>{states[detail.lifecycleState||'legacy_unverified']}</strong></div><div><span>Recorded location</span><strong>{detail.location}</strong></div><div><span>Condition</span><strong>{detail.condition}</strong></div><div><span>Customer association</span><strong>{detail.assignedTo?.customer?.customerName||detail.lastCustomer?.customerName||'Not recorded'}</strong></div></div>
         <p className="bo-inset">{detail.verifiedAt?`Latest physical observation: ${date(detail.verifiedAt)}`:'Legacy record — not physically verified.'}</p>
-        {data.canOperate&&<div className="bo-actions bo-movement-actions">{[['observe_warehouse','Verify opening stock',['legacy_unverified']],['pack','Prepare handover',['ready']],['cancel_handover','Cancel prepared handover',['packed']],['receive','Receive at warehouse',['collected','outbound','legacy_unverified']],['start_cleaning','Start cleaning',['received']],['release','Clean & release',['received','cleaning']],['quarantine','Report damage',['ready','received','cleaning','legacy_unverified']],['repair','Record repair',['quarantined']]].filter(([, ,allowed])=>allowed.includes(detail.lifecycleState||'legacy_unverified')).map(([action,label])=><button key={action} onClick={()=>open('movement',modal.bag,action)}>{label}</button>)}{data.canRetire&&detail.location==='warehouse'&&detail.status!=='retired'&&<button onClick={()=>open('movement',modal.bag,'retire')}>Retire bag</button>}</div>}
+        {data.canOperate&&<div className="bo-actions bo-movement-actions">{[['observe_warehouse','Verify opening stock',['legacy_unverified']],['pack','Prepare handover',['ready']],['cancel_handover','Cancel prepared handover',['packed']],['receive','Receive at warehouse',['collected','outbound','legacy_unverified']],['start_cleaning','Start cleaning',['received']],['release','Clean & release',['received','cleaning']],['quarantine','Report damage',['ready','received','cleaning','legacy_unverified']],['repair','Record repair',['quarantined']]].filter(([, ,allowed])=>allowed.includes(detail.lifecycleState||'legacy_unverified')).map(([action,label])=><button key={action} onClick={()=>open('movement',modal.bag,action)}>{label}</button>)}{!warehouseMode&&data.canRetire&&detail.location==='warehouse'&&detail.status!=='retired'&&<button onClick={()=>open('movement',modal.bag,'retire')}>Retire bag</button>}</div>}
         {detail.damageEvidence?.proofPhotoUrl&&<a href={detail.damageEvidence.proofPhotoUrl} target="_blank" rel="noreferrer">View damage evidence</a>}
         <h3>Recorded history · latest 100 events</h3><ol className="bo-timeline">{[...(detail.history||[])].reverse().slice(0,100).map((event,i)=><li key={event.eventId||i}><strong>{event.eventType||event.lifecycleState||event.status||'Legacy update'}</strong><p>{event.notes}</p><small>{event.assignedBy?.name||'Actor not recorded'} · {date(event.timestamp)}</small>{event.before&&<small>Previous: {event.before.state} · {event.before.location}</small>}</li>)}</ol>{!detail.history?.length&&<p>No embedded history. Establish an opening observation.</p>}
       </>)}
