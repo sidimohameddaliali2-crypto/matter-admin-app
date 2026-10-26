@@ -107,6 +107,7 @@ const bagSchema = new mongoose.Schema({
   history: [{
     eventId:String,
     fingerprint:String,
+    scanCode:String,
     occurredAt:Date,
     lifecycleState:String,
     proofPhotoUrl:String,

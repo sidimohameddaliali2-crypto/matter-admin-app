@@ -1,4 +1,5 @@
 import { recordDeliveryBagMovements, legacyBagReturn } from '../services/deliveryBagMovements.js';
+import { recordCompletionFailure } from '../services/deliveryCompletionFailure.js';
 import { findRegisteredBag } from '../services/bagRecordLookup.js';
 import { moveBag } from '../services/bagMovementStore.js';
 import deliveryOrderRouter from './deliveryOrder.js';
@@ -2426,6 +2427,7 @@ router.post('/:id/collect', upload.single('proofImage'), handleUploadError, auth
 // @route   POST /api/deliveries/:id/complete
 // @access  Private/Driver
 router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, async (req, res) => {
+  let authorizedDeliveryId;
   try {
     const { location, notes } = req.body;
     const deliveryId = req.params.id;
@@ -2456,6 +2458,7 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
       });
     }
 
+    authorizedDeliveryId=delivery._id;
     // Handle proof images (multipart file uploads — legacy web flow)
     const proofImages = req.files ? req.files.map(file => file.filename) : [];
 
@@ -2489,6 +2492,7 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
     await recordDeliveryBagMovements(delivery,{status:'delivered',proof:delivery.proof,bagId:req.body.bagId||bodyProof.bagId||delivery.bagAssignment?.bagId||delivery.bag?.bagId},req.user);
 
     // Complete delivery
+    delivery.completionFailure=undefined;
     await delivery.updateStatus(
       'delivered',
       notes || 'Delivery completed',
@@ -2525,6 +2529,8 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
     });
   } catch (error) {
     console.error('Complete delivery error:', error);
+    try{await recordCompletionFailure(authorizedDeliveryId,req.user?._id,req.body,error);}
+    catch{console.warn('Unable to record failed completion bag details');}
     // Preserve actionable bag/validation rejections for the driver's saved sync
     // queue. Treating every rejection as HTTP 500 causes endless blind retries.
     const status = Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode < 500
@@ -2656,6 +2662,7 @@ router.patch('/:id/bag-assignment', async (req, res) => {
     delivery.deliveryType = isEarly ? 'early' : diffMinutes > 0 ? 'late' : 'on-time';
 
     // Add bag assignment and proof
+    delivery.completionFailure=undefined;
     await recordDeliveryBagMovements(delivery,{...req.body,status:delivery.status},req.user);
 
     if (proof) {
@@ -2675,6 +2682,8 @@ router.patch('/:id/bag-assignment', async (req, res) => {
     res.json(delivery);
   } catch (error) {
     console.error('Error updating delivery with bag assignment:', error);
+    try{await recordCompletionFailure(req.params.id,req.user?._id,req.body,error);}
+    catch{console.warn('Unable to record failed completion bag details');}
     res.status(error.statusCode || 500).json({ message: error.statusCode ? error.message : 'Server error', error: error.message });
   }
 });
@@ -2776,6 +2785,7 @@ router.patch('/:id/status', async (req, res) => {
     }
 
     // Add bag assignment if provided
+    delivery.completionFailure=undefined;
     await recordDeliveryBagMovements(delivery,{...req.body,status:delivery.status},req.user);
 
     // Add to timeline
@@ -2807,6 +2817,10 @@ router.patch('/:id/status', async (req, res) => {
     });
   } catch (error) {
     console.error('Error updating delivery status:', error);
+    if(['delivered','completed','collected'].includes(req.body?.status)){
+      try{await recordCompletionFailure(req.params.id,req.user?._id,req.body,error);}
+      catch{console.warn('Unable to record failed completion bag details');}
+    }
     res.status(error.statusCode || 500).json({ 
       success: false,
       message: error.statusCode ? error.message : 'Server error', 

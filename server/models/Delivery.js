@@ -202,6 +202,7 @@ deliveryType: {
     signature: String,
     bagId: String,
     bagIds: [String],
+    bagScanCodes: [String],
     scannedBags: [String],
     returnedBags: [String],
     bagEventId: String,
@@ -221,6 +222,16 @@ deliveryType: {
     deliveryMethod: String
   },
     
+  // Failed driver completion: retain only the bag references needed to trace
+  // a rejected scan, without treating it as a completed delivery or proof.
+  completionFailure: {
+    at:Date,
+    driver:{type:mongoose.Schema.Types.ObjectId,ref:'User'},
+    statusCode:Number,
+    bagId:String,
+    message:String,
+    codes:[{_id:false,source:String,code:String}],
+  },
   // Server-owned tracker evidence, separate from the driver's proof and KPI.
   trackerVisit: {
     geofenceId: String,

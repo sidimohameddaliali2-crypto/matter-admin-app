@@ -71,7 +71,7 @@ test('concurrent identical movement retries return one committed receipt',async(
   assert.equal(current.history.length,1);assert.equal(results.filter(r=>r.duplicate).length,1);
 });
 test('unknown scans do not provision inventory',async()=>{
-  let writes=0;await assert.rejects(()=>executeBagMovement({find:async()=>null,commit:async()=>writes++},'BAG-9999',command('collect'),driver),/not registered/);assert.equal(writes,0);
+  let writes=0;await assert.rejects(()=>executeBagMovement({find:async()=>null,commit:async()=>writes++},'BAG_9999',command('collect'),driver),/Bag BAG-9999 is not registered/);assert.equal(writes,0);
 });
 
 test('physical delivery scan reassigns a previous customer and preserves the custody audit',()=>{

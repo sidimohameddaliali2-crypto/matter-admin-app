@@ -28,6 +28,11 @@ beforeEach(()=>{
 });
 afterEach(()=>{Bag.collection.findOne=saved.find;Bag.collection.findOneAndUpdate=saved.commit;User.findById=saved.user;Delivery.findById=saved.delivery;Delivery.updateOne=saved.update;});
 const add=(code,extra={})=>inventory.set(code,{_id:code,bagId:code,lifecycleState:'outbound',location:'driver',status:'assigned',condition:'good',quantity:1,custodyVersion:4,assignedTo:{driver:driver._id},history:[],...extra});
+
+test('delivery schema preserves the original printed label beside registered stock IDs',()=>{
+  const document=new Delivery({proof:{bagId:'BAG-00523',bagIds:['BAG-00523'],bagScanCodes:['BAG-000523']}});
+  assert.deepEqual(document.toObject().proof.bagScanCodes,['BAG-000523']);
+});
 test('raw storage persists state, version and event together and retains BSON driver IDs',async()=>{
   add('BAG-0001',{lifecycleState:'ready',location:'warehouse'});
   await moveBag('BAG-0001',{action:'pack',eventId:'pack',driverId:String(driver._id),expectedVersion:4,note:'Physical packed bag'},staff);
@@ -85,5 +90,26 @@ test('a skipped QR cannot silently reassign an old bag association',async()=>{
   add('BAG-00001',{lifecycleState:'with_customer',location:'customer',assignedTo:{customer:{customerId:'OLD'}}});
   const delivery={_id:deliveryId,customerId:'C1',driver:driver._id};
   await assert.rejects(()=>recordDeliveryBagMovements(delivery,{status:'delivered',proof:{bagId:'BAG_00001',qrSkipped:true}},driver));
+  assert.equal(writes.length,0);
+});
+
+test('BAG-00523 completes against existing stock and keeps scan and customer history',async()=>{
+  add('BAG-00523',{lifecycleState:undefined,location:'warehouse',assignedTo:{customer:{customerId:'PREVIOUS',customerName:'Previous customer'}}});
+  const delivery={_id:deliveryId,customerId:'C1',driver:driver._id};
+  await recordDeliveryBagMovements(delivery,{status:'delivered',proof:{bagId:'BAG_00523',qrSkipped:false}},driver);
+  assert.equal(delivery.bagAssignment.bagId,'BAG-00523');
+  assert.equal(delivery.proof.bagId,'BAG-00523');
+  assert.deepEqual(delivery.proof.bagIds,['BAG-00523']);
+  assert.deepEqual(delivery.proof.bagScanCodes,['BAG-00523']);
+  const history=inventory.get('BAG-00523').history;
+  assert.equal(history[0].scanCode,'BAG-00523');
+  assert.equal(history[0].reassignment.fromCustomer.customerId,'PREVIOUS');
+  await recordDeliveryBagMovements(delivery,{status:'delivered',proof:{bagId:'BAG-00523'}},driver);
+  assert.equal(inventory.get('BAG-00523').history.length,1);
+  assert.equal(inventory.size,1);
+});
+test('scan separator aliases cannot deliver and collect the same bag in one stop',async()=>{
+  add('BAG-00523');
+  await assert.rejects(()=>recordDeliveryBagMovements({_id:deliveryId,customerId:'C1',driver:driver._id},{status:'delivered',proof:{bagId:'BAG_00523',returnedBags:['BAG-00523']}},driver),/same stop/);
   assert.equal(writes.length,0);
 });

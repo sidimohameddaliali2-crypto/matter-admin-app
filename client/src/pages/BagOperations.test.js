@@ -6,7 +6,7 @@ jest.mock('../utils/api',()=>({__esModule:true,default:{get:jest.fn(),post:jest.
 jest.mock('react-redux',()=>({useSelector:fn=>fn({auth:{user:{_id:'staff',role:'admin'}}})}));
 jest.mock('react-router-dom',()=>{const React=require('react');return {useSearchParams:()=>{const [params,setParams]=React.useState(new URLSearchParams());return [params,next=>setParams(new URLSearchParams(next))];}};},{virtual:true});
 jest.mock('qrcode.react',()=>({QRCodeCanvas:()=> <div>Existing QR</div>}));
-jest.mock('../components/SimpleQrScanner',()=>()=> <div>Camera scanner</div>);
+jest.mock('../components/SimpleQrScanner',()=>({onScan})=> <div>Camera scanner<button onClick={()=>onScan([{rawValue:'BAG_00001'}])}>Scan test label</button></div>);
 jest.mock('../components/bags/bagQrLabels',()=>({downloadBulkQrPdf:jest.fn()}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
 const fixture=()=>({generatedAt:'2026-10-22T09:00:00Z',summary:{bagRecords:1},canOperate:true,canRetire:true,checks:[{code:'custody_ambiguous',count:1}],unknownCodes:['BAG-9999'],reviewers:[{_id:'staff',name:'Reviewer'}],drivers:[],customers:[],stockCounts:[],bags:[{_id:'b1',bagId:'BAG-00001',status:'assigned',location:'warehouse',condition:'good',lifecycleState:'legacy_unverified',custodyVersion:0,verifiedAt:null,reasons:['custody_ambiguous'],review:null,historyCount:0}]});
@@ -31,6 +31,25 @@ test('workspace loads the side-effect-free endpoint and labels the opening balan
 test('bag lookup preserves leading zeros and never picks a similar tag',async()=>{
   await click('Find a bag');await fill(container.querySelector('.bo-field input'),'BAG-0001');await click('Open bag');
   expect(container.querySelector('[role="alert"]').textContent).toContain('Unregistered ID');
+  expect(api.get.mock.calls.filter(([url])=>url.includes('/bags/'))).toHaveLength(0);
+});
+
+test('camera scan with underscore opens the registered hyphen stock record',async()=>{
+  await click('Find a bag');await click('Use camera');await click('Scan test label');await click('Open bag');
+  expect(api.get).toHaveBeenCalledWith('/bag-operations/bags/b1');
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+});
+
+test('the reported BAG-00523 label opens existing stock',async()=>{
+  data.bags[0].bagId='BAG-00523';
+  await click('Refresh');await click('Find a bag');await fill(container.querySelector('.bo-field input'),'BAG-00523');await click('Open bag');
+  expect(api.get).toHaveBeenCalledWith('/bag-operations/bags/b1');
+  expect(container.querySelector('[role="alert"]')).toBeNull();
+});
+test('equivalent duplicate labels do not silently open an arbitrary customer association',async()=>{
+  data.bags.push({...data.bags[0],_id:'b2',bagId:'BAG_00001'});
+  await click('Refresh');await click('Find a bag');await fill(container.querySelector('.bo-field input'),'BAG_00001');await click('Open bag');
+  expect(container.querySelector('[role="alert"]').textContent).toContain('Multiple stock records');
   expect(api.get.mock.calls.filter(([url])=>url.includes('/bags/'))).toHaveLength(0);
 });
 test('audit review saves evidence without invoking a stock movement',async()=>{

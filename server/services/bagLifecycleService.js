@@ -104,9 +104,10 @@ export function planBagMovement(bag,command,actor,now=new Date()) {
 
 export async function executeBagMovement(repository,bagId,command,actor) {
   const bag=await repository.find(normalizeBagId(bagId));
-  if(!bag)throw fault('Bag is not registered. Open an inventory exception instead of creating stock from a scan.',404);
+  if(!bag)throw Object.assign(fault(`Bag ${normalizeBagId(bagId)} is not registered. Check the full printed label, including leading zeros. Open an inventory exception if it is missing from stock.`,404),{bagId:normalizeBagId(bagId)});
   const plan=planBagMovement(bag,command,actor);
   if(plan.duplicate)return {bag,duplicate:true};
+  if(typeof command.scanCode==='string')plan.event.scanCode=command.scanCode;
   const updated=await repository.commit(bag,plan);
   if(updated)return {bag:updated,duplicate:false};
   // Concurrent identical retries may have committed while we were reading.

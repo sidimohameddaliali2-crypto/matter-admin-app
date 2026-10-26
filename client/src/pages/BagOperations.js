@@ -8,6 +8,7 @@ import SimpleQrScanner from '../components/SimpleQrScanner';
 import {downloadBulkQrPdf} from '../components/bags/bagQrLabels';
 import BagRefundTracker from '../components/bags/BagRefundTracker';
 import BagFollowups from '../components/bags/BagFollowups';
+import {normalizeBagLabel as normalize,matchingBagLabels} from '../utils/bagLabelLookup';
 import '../styles/bagOperations.css';
 
 const states={legacy_unverified:'Recorded — unverified',ready:'Clean & ready',packed:'Awaiting acceptance',outbound:'Driver · outbound',with_customer:'With customer',collected:'Driver · collected',received:'Received · needs cleaning',cleaning:'Cleaning',quarantined:'Quarantined',retired:'Retired'};
@@ -15,7 +16,6 @@ const reviewStates={open:'Open',in_review:'In review',awaiting_evidence:'Awaitin
 const reasonLabels={identity_collision:'Identity collision',nonstandard_id:'Legacy tag format',quantity_unverified:'Quantity unverified',custody_ambiguous:'Custody ambiguous',customer_unmatched:'Customer unmatched',holder_unmatched:'Holder unmatched',delivery_unmatched:'Delivery unmatched',return_date_missing:'Return date missing',history_missing:'History missing',driver_recorded_return:'Driver recorded return',damaged_available:'Damaged stock available'};
 const tabs=[['overview','Overview',Package],['register','Bag register',Archive],['receiving','Receive & clean',QrCode],['reviews','Audit reviews',ClipboardList],['manifests','Manifests',Truck],['customers','Customer balances',Users],['followups','Reminders & reports',ClipboardList],['refunds','Deposit refunds',ClipboardList],['damage','Damage reviews',ShieldAlert],['history','History',History]];
 const uid=()=>window.crypto?.randomUUID?.()||`bag-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-const normalize=value=>String(value||'').trim().toUpperCase();
 const date=value=>value?new Intl.DateTimeFormat('en-GB',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Dubai'}).format(new Date(value)):'Not recorded';
 const message=error=>error.response?.data?.message||error.message||'Please retry.';
 const Badge=({children,tone=''})=><span className={`bo-badge ${tone}`}>{children}</span>;
@@ -53,8 +53,13 @@ export default function BagOperations(){
   const movement=()=>save(()=>api.post('/bag-operations/movements',{bagId:modal.bag.bagId,action:modal.action,eventId:requestId.current,expectedVersion:modal.bag.custodyVersion,note,driverId:selectedDriver||undefined,inspected,proofPhotoUrl:proof||undefined}), 'Bag movement recorded.');
   const uploadPhoto=async e=>{const file=e.target.files?.[0];if(!file)return;setBusy(true);try{const body=new FormData();body.append('image',file);const r=await api.post('/upload/delivery-photo',body);if(!r.data.url)throw new Error('Photo upload did not return a URL.');setProof(r.data.url);}catch(e2){setFormError(message(e2));}finally{setBusy(false);}};
   const scan=useCallback(codes=>{const code=normalize(codes?.[0]?.rawValue);if(!code)return;if(modal?.type==='count')setCountText(current=>{const items=current.split(/[\s,]+/).filter(Boolean);return items.includes(code)?current:[...items,code].join('\n');});else setScanText(code);},[modal?.type]);
+  const openScannedBag=()=>{
+    const matches=matchingBagLabels(bags,scanText);
+    if(matches.length===1)openBag(matches[0]);
+    else setFormError(matches.length>1?'Multiple stock records match this label. Review duplicate records before assigning a bag.':`Unregistered ID: ${normalize(scanText)}. Check the full printed label, including leading zeros.`);
+  };
   const filtered=useMemo(()=>bags.filter(b=>{
-    const matches=[b.bagId,b.customerName,b.customerId,b.driverName].some(value=>String(value||'').toLowerCase().includes(query.toLowerCase()));
+    const matches=normalize(b.bagId).includes(normalize(query))||[b.customerName,b.customerId,b.driverName].some(value=>String(value||'').toLowerCase().includes(query.toLowerCase()));
     if(!matches)return false;
     if(active==='reviews')return b.reasons.length&&(filter==='all'||(b.review?.status||'open')===filter);
     if(active==='damage')return b.lifecycleState==='quarantined'||b.condition==='poor'||b.isFlagged;
@@ -86,7 +91,7 @@ export default function BagOperations(){
     </>}
     {modal&&<Dialog title={modal.type==='detail'?modal.bag.bagId:modal.type==='movement'?modal.action.replaceAll('_',' '):modal.type==='review'?'Audit review':modal.type==='count'?'Physical warehouse count':modal.type==='register'?'Register physical bag':'Find a bag'} onClose={busy?()=>{}:close}>
       {formError&&<p className="bo-error" role="alert">{formError}</p>}
-      {modal.type==='lookup'&&<><label className="bo-field">Exact QR / bag ID<input autoComplete="off" value={scanText} onChange={e=>setScanText(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'){const b=bags.find(b=>normalize(b.bagId)===normalize(scanText));if(b)openBag(b);else setFormError('Unregistered ID. Review the physical label; do not guess a matching bag.');}}}/></label><button onClick={()=>setCamera(c=>!c)}><QrCode size={15}/>{camera?'Close camera':'Use camera'}</button><button className="primary" onClick={()=>{const b=bags.find(b=>normalize(b.bagId)===normalize(scanText));if(b)openBag(b);else setFormError('Unregistered ID. Review the physical label; do not guess a matching bag.');}}>Open bag</button></>}
+      {modal.type==='lookup'&&<><label className="bo-field">Exact QR / bag ID<input autoComplete="off" value={scanText} onChange={e=>setScanText(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')openScannedBag();}}/></label><button onClick={()=>setCamera(c=>!c)}><QrCode size={15}/>{camera?'Close camera':'Use camera'}</button><button className="primary" onClick={openScannedBag}>Open bag</button></>}
       {modal.type==='register'&&<><p>Register one physical bag per tag. New stock enters the cleaning queue.</p><label className="bo-field">Unused bag ID<input value={newId} onChange={e=>setNewId(e.target.value)} placeholder="BAG-0001"/></label><button className="primary" disabled={busy} onClick={()=>save(()=>api.post('/bag-operations/register',{bagId:newId}),'Physical bag registered; cleaning required.')}>Register physical bag</button></>}
       {modal.type==='detail'&&(detailLoading?<p role="status">Loading bag history…</p>:detail&&<>
         <QRCodeCanvas value={detail.bagId} size={100}/><button disabled={busy} onClick={async()=>{setBusy(true);try{await downloadBulkQrPdf([detail.bagId]);}catch(e){setFormError(message(e));}finally{setBusy(false);}}}>Print existing QR label</button><div className="bo-detail-grid"><div><span>State</span><strong>{states[detail.lifecycleState||'legacy_unverified']}</strong></div><div><span>Recorded location</span><strong>{detail.location}</strong></div><div><span>Condition</span><strong>{detail.condition}</strong></div><div><span>Customer association</span><strong>{detail.assignedTo?.customer?.customerName||detail.lastCustomer?.customerName||'Not recorded'}</strong></div></div>

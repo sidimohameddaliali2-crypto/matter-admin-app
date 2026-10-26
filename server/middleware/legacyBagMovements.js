@@ -4,6 +4,7 @@ import {effectivePermissions} from '../models/User.js';
 import {moveBag} from '../services/bagMovementStore.js';
 import {legacyBagReturn} from '../services/deliveryBagMovements.js';
 import {findRegisteredBag} from '../services/bagRecordLookup.js';
+import {normalizeBagId} from '../services/bagInventoryAudit.js';
 
 // Old clients are kept compatible, but cannot bypass custody/history or delete
 // physical assets. Reads never provision stock or backfill customer addresses.
@@ -28,7 +29,7 @@ export default async function legacyBagMovements(req,res,next){
     }
     let identifier=isReturn&&req.method==='POST'?(req.body.bagId||req.body.bagQRCode):isReassign?req.body.bagId:decodeURIComponent(path.split('/')[1]);
     const bag=await lookup(identifier);
-    if(!bag)return res.status(404).json({success:false,message:'Unregistered bag. Open an inventory review.'});
+    if(!bag)return res.status(404).json({success:false,message:`Bag ${normalizeBagId(identifier)} is not registered. Check the full printed label, including leading zeros.`});
     let result;
     if(isReturn)result=await legacyBagReturn(bag.bagId,req.body,req.user);
     else if(isReassign)result=await moveBag(bag.bagId,{action:'deliver',physicalScan:true,deliveryId:req.body.deliveryId,customerId:req.body.customerId,eventId:`delivery:${req.body.deliveryId}:deliver:${bag.bagId}`,note:'Physical customer handover'},req.user);
