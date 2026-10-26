@@ -141,9 +141,11 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
           if (!matched.length && visit.vehicleNo) {
             stage = 'gps_history';
             const pathKey = `${visit.vehicleNo}:${+start}`;
-            if (!gpsPaths.has(pathKey)) gpsPaths.set(pathKey, VehicleLocationHistory.find({
+            // Mongoose queries execute once. Cache their promise, not the query
+            // itself, because many customer stops share a vehicle/day.
+            if (!gpsPaths.has(pathKey)) gpsPaths.set(pathKey, Promise.resolve(VehicleLocationHistory.find({
               vehicleNo: visit.vehicleNo, recordedAt: { $gte: start, $lt: end },
-            }).select('latitude longitude gpsTime recordedAt driver').lean());
+            }).select('latitude longitude gpsTime recordedAt driver').lean()));
             const path = (await gpsPaths.get(pathKey)).filter(p => String(p.driver || '') === String(visit.driverId || driverId)
               && +(new Date(p.gpsTime || p.recordedAt)) >= +start && +(new Date(p.gpsTime || p.recordedAt)) < +end);
             matched = gpsVisitEvents(path, { lat: visit.lat, lng: visit.lng }, visit.radiusMetres || CUSTOMER_RADIUS_METRES);

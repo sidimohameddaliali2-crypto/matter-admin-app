@@ -93,6 +93,22 @@ test('an internal GPS query failure is not reported as a Truckoom outage',async 
   assert.equal(visit.status,'verification_error');
   assert.equal(visit.errorStage,'gps_history');
 });
+
+test('customer stops sharing a vehicle reuse resolved GPS data, not an already executed Mongoose query',async t=>{
+  const fixture=setup(t);
+  const second={...fixture.row,_id:'delivery2'};
+  t.mock.method(Delivery,'find',()=>({populate:()=>({lean:async()=>[fixture.row,second]})}));
+  t.mock.method(truckoom,'getGeofenceAlerts',async()=>[]);
+  let executions=0;
+  t.mock.method(VehicleLocationHistory,'find',()=>({select:()=>({lean:()=>({then(resolve,reject){
+    if(++executions>1)reject(new Error('Query was already executed'));
+    else resolve([]);
+  }})})}));
+  await syncCustomerTrackerVisits({now:fixture.now});
+  assert.equal(executions,1);
+  assert.equal(fixture.writes.length,2);
+  assert.ok(fixture.writes.every(w=>w.update.$set.trackerVisit.status==='awaiting_events'));
+});
 test('a transient alert transport failure is retried once and empty valid responses are accepted',async t=>{
   const service=new truckoom.constructor();
   let calls=0;
