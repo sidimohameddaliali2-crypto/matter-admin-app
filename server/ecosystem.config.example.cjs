@@ -23,6 +23,10 @@ module.exports = {
     },
     env_production: {
       NODE_ENV: 'production',
+      // Raise only after this Android versionCode is available to all drivers.
+      // 0 disables required updates. Restart PM2 with --update-env after edits.
+      MOBILE_ANDROID_MIN_BUILD: '0',
+      MOBILE_UPDATE_MESSAGE: 'Update Delivery Driver to continue.',
       PORT: 5000,
       MONGODB_URI: 'your-mongodb-uri',
       JWT_SECRET: 'your-jwt-secret',

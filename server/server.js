@@ -190,12 +190,14 @@ import vehicleRoutes from './routes/vehicles.js';
 import yellowblockRoutes from './routes/yellowblock.js';
 import externalDeliveryApiRoutes from './routes/externalDeliveryApi.js';
 import externalDriverLocationApiRoutes from './routes/externalDriverLocationApi.js';
+import mobileUpdatesRoutes from './routes/mobileUpdates.js';
 
 // Import cache initialization
 import { initRedis, getRedisClient } from './config/cache.js';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { setupMongooseSlowQueryMonitoring } from './middleware/slowQueryLogger.js';
 // Routes middleware
+app.use('/api/mobile', mobileUpdatesRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users/drivers', driverRoutes); // Allow driver routes under /api/users/drivers
 app.use('/api/users', userRoutes);
