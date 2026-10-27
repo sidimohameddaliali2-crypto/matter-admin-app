@@ -46,9 +46,13 @@ export default function TrackerVisitCard({ delivery }) {
   const visit = current.trackerVisit || {};
   const proof = current.proof || {};
   const hasPhoto = Boolean(proof.photoUrl || proof.images?.length);
+  const hasCaptureTime = Boolean(proof.photoCapturedAt && Number.isFinite(Date.parse(proof.photoCapturedAt)));
   const pendingPhoto = !hasPhoto && ['pending','assigned','on_route','picked_up'].includes(current.status);
   const label = pendingPhoto && !['missing_pin','no_tracker'].includes(visit.status)
-    ? 'Waiting for delivery photo' : labels[visit.status] || 'Waiting for tracker verification';
+    ? 'Waiting for delivery photo'
+    : visit.status === 'missing_photo_time' && hasPhoto
+      ? hasCaptureTime ? 'Photo saved · camera capture source not verified' : 'Photo saved · capture time not sent by driver app'
+      : labels[visit.status] || 'Waiting for tracker verification';
   const style = visit.needsReview ? 'border-red-200 bg-red-50 text-red-900'
     : visit.status === 'inside_window' ? 'border-green-200 bg-green-50 text-green-900'
       : 'border-gray-200 bg-gray-50 text-gray-700';
@@ -59,11 +63,13 @@ export default function TrackerVisitCard({ delivery }) {
       {visit.errorCode && <p className="mt-1 opacity-80">Tracker check will retry automatically ({visit.errorCode}).</p>}
       <dl className="mt-2 space-y-1">
         <div><dt className="inline font-medium">Tracker arrival: </dt><dd className="inline">{trackerTime(visit.arrivedAt)}</dd></div>
-        <div><dt className="inline font-medium">Photo captured: </dt><dd className="inline">{trackerTime(proof.photoCapturedAt)}</dd></div>
+        <div><dt className="inline font-medium">Camera capture time: </dt><dd className="inline">{hasPhoto && !hasCaptureTime ? 'Not sent by driver app' : trackerTime(proof.photoCapturedAt)}</dd></div>
+        {hasPhoto && proof.receivedAt && <div><dt className="inline font-medium">Photo received by server: </dt><dd className="inline">{trackerTime(proof.receivedAt)}</dd></div>}
         <div><dt className="inline font-medium">Tracker departure: </dt><dd className="inline">{trackerTime(visit.departedAt)}</dd></div>
       </dl>
       <p className="mt-2 opacity-80">Dubai time · Camera time reported by driver device. Tracker times are approximate.</p>
-      {visit.evidenceSource === 'truckoom_gps_samples' && <p className="mt-1 font-medium">Visit times estimated from recorded vehicle GPS. No Truckoom geofence alert was received.</p>}
+      {hasPhoto && !hasCaptureTime && <p className="mt-1 opacity-80">The photo is saved. Server receipt time cannot establish when the camera took it.</p>}
+      {visit.evidenceSource === 'truckoom_gps_samples' && <p className="mt-1 font-medium">Visit times estimated from recorded vehicle GPS. {visit.errorCode ? 'Truckoom alert verification could not be completed.' : 'Truckoom returned no matching alert for this customer and vehicle.'}</p>}
       {visit.checkedAt && <p className="mt-1 opacity-70">Checked: {trackerTime(visit.checkedAt)}</p>}
     </section>
   );

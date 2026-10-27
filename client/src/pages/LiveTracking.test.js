@@ -144,7 +144,7 @@ test('selecting a customer shows the 50 m fence and three-time verification', as
   await click('Customer S1');
   expect(container.querySelector('[data-testid="customer-radius"]').textContent).toBe('50');
   expect(container.textContent).toContain('Review: photo outside tracker visit');
-  for (const label of ['Tracker arrival:', 'Photo captured:', 'Tracker departure:']) expect(container.textContent).toContain(label);
+  for (const label of ['Tracker arrival:', 'Camera capture time:', 'Tracker departure:']) expect(container.textContent).toContain(label);
 });
 
 test('frames a loaded route when the map finishes loading later', async () => {

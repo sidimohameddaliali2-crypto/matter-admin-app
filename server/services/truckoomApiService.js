@@ -33,6 +33,9 @@ class TruckoomApiService {
     this.username = process.env.TRUCKOOM_USERNAME;
     this.password = process.env.TRUCKOOM_PASSWORD;
     this.companyName = process.env.TRUCKOOM_COMPANY_NAME;
+    // Owner (2026-10-27): use the selected permanent group so customer
+    // entry/exit rules can cover the new fences created each Dubai day.
+    this.customerGeofenceGroup = process.env.TRUCKOOM_CUSTOMER_GEOFENCE_GROUP?.trim() || 'Truckoom Office';
     this.cachedLiveData = createTruckoomLiveCache();
   }
 
@@ -87,6 +90,7 @@ class TruckoomApiService {
       project_id: '49', geofence_type: 'circle', geo_shape: 'circle',
       reseller_name: 'Truckoom Technologies', company_name: this.companyName,
       geofence_name: name, category_name: 'Area',
+      geofence_group: this.customerGeofenceGroup,
       coordinates: [[pin.lat, pin.lng]], radius: String(radiusMetres / 1000),
     });
     if (!data?.geofenceId) throw new Error('Truckoom did not return a geofence id');
