@@ -113,6 +113,8 @@ const bagSchema = new mongoose.Schema({
     proofPhotoUrl:String,
     before:mongoose.Schema.Types.Mixed,
     reassignment:mongoose.Schema.Types.Mixed,
+    physicalScan:Boolean,
+    registeredFromScan:Boolean,
     eventType: String,
     status: String,
     location: String,

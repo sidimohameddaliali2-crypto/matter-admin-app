@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { normalizeBagId } from './bagInventoryAudit.js';
+import { normalizeBagId,isStandardBagId } from './bagInventoryAudit.js';
 export const BAG_STATES=['ready','packed','outbound','with_customer','collected','received','cleaning','quarantined','retired'];
 const id=v=>String(v?._id??v??'');
 const fault=(message,statusCode=409)=>Object.assign(new Error(message),{statusCode});
@@ -10,6 +10,7 @@ export const bagCommandFingerprint=(command,actor)=>createHash('sha256').update(
 // atomic bag-document update; no transaction-capable Mongo deployment is required.
 export function planBagMovement(bag,command,actor,now=new Date()) {
   const {action}=command;
+  const scannedDelivery=action==='deliver'&&actor.role==='driver'&&command.physicalScan===true;
   if(!command.eventId||typeof command.eventId!=='string'||command.eventId.length>200)throw fault('A stable movement event ID is required.',400);
   const fingerprint=bagCommandFingerprint(command,actor);
   const prior=(bag.history||[]).find(h=>h.eventId===command.eventId);
@@ -21,7 +22,7 @@ export function planBagMovement(bag,command,actor,now=new Date()) {
     if(bag.lifecycleState&&bag.verifiedAt&&occurredAt.getTime()<new Date(bag.verifiedAt).getTime()-60000)throw fault('Offline movement predates a newer physical handover. Review custody before retrying.');
   }
   if(bag.custodyVersion!=null&&(!Number.isInteger(bag.custodyVersion)||bag.custodyVersion<0))throw fault('Invalid custody version. Reconcile this record before movement.');
-  if(bag.isActive===false||bag.status==='retired')throw fault('Retired or inactive bags cannot re-enter circulation.');
+  if(!scannedDelivery&&(bag.isActive===false||bag.status==='retired'))throw fault('Retired or inactive bags cannot re-enter circulation.');
   if(command.expectedVersion!=null&&command.expectedVersion!==(bag.custodyVersion||0))throw fault('Bag changed since it was opened. Refresh before confirming.');
   const state=bag.lifecycleState||'legacy_unverified';
   const isWarehouse=warehouseRoles.has(actor.role);
@@ -50,19 +51,21 @@ export function planBagMovement(bag,command,actor,now=new Date()) {
   }else if(action==='deliver'){
     if(!isDriver||!command.customerId||!command.deliveryId)throw fault('An assigned driver, customer and delivery are required.',403);
     if(state==='with_customer'&&id(bag.currentDelivery)===id(command.deliveryId)&&bag.assignedTo?.customer?.customerId===command.customerId&&ownDriver)return {duplicate:true};
-    // Owner (2026-10-26): a physical delivery scan may replace an old customer
-    // association. Preserve the old custody in the same atomic audit receipt.
-    const scanned=command.physicalScan===true;
-    requireState(...(scanned?['outbound','legacy_unverified','ready','with_customer']:['outbound','legacy_unverified']));
-    if(bag.isFlagged||bag.condition==='poor')throw fault('Flagged or damaged bags cannot be delivered.');
-    if(bag.assignedTo?.driver&&!ownDriver&&!(scanned&&bag.location!=='driver'))throw fault('Bag is held by another driver. Confirm a transfer first.');
+    // Owner (2026-10-27): the driver's physical delivery scan is authoritative
+    // from every prior state, including collected/retired or another holder.
+    // Keep damage evidence and old custody in history rather than blocking save.
+    const scanned=scannedDelivery;
+    if(!scanned)requireState('outbound','legacy_unverified');
+    if(!scanned&&(bag.isFlagged||bag.condition==='poor'))throw fault('Flagged or damaged bags cannot be delivered.');
+    if(!scanned&&bag.assignedTo?.driver&&!ownDriver)throw fault('Bag is held by another driver. Confirm a transfer first.');
     const oldCustomer=bag.assignedTo?.customer;
     if(oldCustomer?.customerId&&oldCustomer.customerId!==command.customerId){
       if(!scanned)throw fault('Bag has an outstanding association to a different customer. Scan the physical bag to reassign it.');
       reassignment={fromCustomer:oldCustomer,toCustomer:{customerId:command.customerId,customerName:command.customerName||''},fromDelivery:bag.currentDelivery||null,reason:'Physical delivery scan',scannedBy:actor._id};
       set.lastCustomer=oldCustomer;
     }
-    set.lifecycleState='with_customer';set.location='customer';set.status='assigned';set.currentDelivery=command.deliveryId;
+    set.lifecycleState='with_customer';set.location='customer';set.status=scanned?'in_use':'assigned';set.currentDelivery=command.deliveryId;
+    if(scanned){set.isActive=true;set.quantity=1;unset.pendingHandover='';unset.returnedAt='';unset.returnedBy='';unset.returnedByName='';}
     set.assignedTo={driver:actor._id,customer:{customerId:command.customerId,customerName:command.customerName||''},assignmentTime:now,expectedReturn:command.expectedReturn||null};
   }else if(action==='collect'){
     if(!isDriver)throw fault('Only the collecting driver can record pickup.',403);
@@ -99,16 +102,19 @@ export function planBagMovement(bag,command,actor,now=new Date()) {
     set.assignedTo={...bag.assignedTo,driver:actor._id};unset.pendingHandover='';
   }else throw fault('Unsupported bag movement.',400);
   set.verifiedAt=now;set.updatedAt=now;
-  return {set,unset,event:{eventId:command.eventId,fingerprint,eventType:action,status:set.status||bag.status,location:set.location||bag.location,lifecycleState:set.lifecycleState||state,assignedBy:{user:actor._id,name:actor.name||actor.role},assignedTo:set.assignedTo||bag.assignedTo,notes:note,reassignment,proofPhotoUrl:command.proofPhotoUrl||null,before:{state,location:bag.location,quantity:bag.quantity??null,assignedTo:bag.assignedTo,currentDelivery:bag.currentDelivery},occurredAt,timestamp:now}};
+  return {set,unset,event:{eventId:command.eventId,fingerprint,eventType:action,status:set.status||bag.status,location:set.location||bag.location,lifecycleState:set.lifecycleState||state,assignedBy:{user:actor._id,name:actor.name||actor.role},assignedTo:set.assignedTo||bag.assignedTo,notes:note,reassignment,physicalScan:scannedDelivery,registeredFromScan:bag.unregistered===true,proofPhotoUrl:command.proofPhotoUrl||null,before:{state:bag.unregistered?'unregistered':state,status:bag.status,location:bag.location,isActive:bag.isActive,condition:bag.condition,isFlagged:bag.isFlagged,pendingHandover:bag.pendingHandover,quantity:bag.quantity??null,assignedTo:bag.assignedTo,currentDelivery:bag.currentDelivery},occurredAt,timestamp:now}};
 }
 
 export async function executeBagMovement(repository,bagId,command,actor) {
-  const bag=await repository.find(normalizeBagId(bagId));
-  if(!bag)throw Object.assign(fault(`Bag ${normalizeBagId(bagId)} is not registered. Check the full printed label, including leading zeros. Open an inventory exception if it is missing from stock.`,404),{bagId:normalizeBagId(bagId)});
+  const code=normalizeBagId(bagId);
+  let bag=await repository.find(code);
+  const createFromScan=!bag&&actor.role==='driver'&&command.action==='deliver'&&command.physicalScan===true&&command.customerId&&command.deliveryId&&repository.create;
+  if(!bag&&!createFromScan)throw Object.assign(fault(`Bag ${code} is not registered. Check the full printed label, including leading zeros. Open an inventory exception if it is missing from stock.`,404),{bagId:code});
+  if(createFromScan){if(!isStandardBagId(code))throw fault('Scan a valid bag tag, such as BAG-00077 or BAG-A0001.',400);bag={bagId:code,history:[],unregistered:true};}
   const plan=planBagMovement(bag,command,actor);
   if(plan.duplicate)return {bag,duplicate:true};
   if(typeof command.scanCode==='string')plan.event.scanCode=command.scanCode;
-  const updated=await repository.commit(bag,plan);
+  const updated=createFromScan?await repository.create(bag,plan):await repository.commit(bag,plan);
   if(updated)return {bag:updated,duplicate:false};
   // Concurrent identical retries may have committed while we were reading.
   const current=await repository.find(normalizeBagId(bagId));

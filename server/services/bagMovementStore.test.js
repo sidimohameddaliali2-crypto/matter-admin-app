@@ -10,13 +10,15 @@ import {recordDeliveryBagMovements} from './deliveryBagMovements.js';
 const staff={_id:new mongoose.Types.ObjectId('111111111111111111111111'),role:'store_keeper'};
 const driver={_id:new mongoose.Types.ObjectId('222222222222222222222222'),role:'driver'};
 const deliveryId=new mongoose.Types.ObjectId('333333333333333333333333');
-const saved={find:Bag.collection.findOne,commit:Bag.collection.findOneAndUpdate,user:User.findById,delivery:Delivery.findById,update:Delivery.updateOne};
-let inventory,receipts,writes;
+const saved={find:Bag.collection.findOne,insert:Bag.collection.insertOne,commit:Bag.collection.findOneAndUpdate,user:User.findById,delivery:Delivery.findById,update:Delivery.updateOne};
+let inventory,receipts,writes,failCommitFor;
 beforeEach(()=>{
-  inventory=new Map();receipts=[];writes=[];
+  inventory=new Map();receipts=[];writes=[];failCommitFor=null;
+  Bag.collection.insertOne=async document=>{if(inventory.has(document.bagId))throw Object.assign(new Error('Duplicate tag'),{code:11000});inventory.set(document.bagId,document);writes.push({insert:document});return {insertedId:document._id};};
   Bag.collection.findOne=async({bagId})=>{const b=inventory.get(bagId);return b?{...b,history:[...b.history]}:null;};
   Bag.collection.findOneAndUpdate=async(filter,update)=>{
     const b=[...inventory.values()].find(b=>String(b._id)===String(filter._id));
+    if(b?.bagId===failCommitFor)throw new Error('Storage unavailable');
     const versionMatches=typeof filter.custodyVersion==='object'?b.custodyVersion===undefined:b.custodyVersion===filter.custodyVersion;
     if(!b||!versionMatches||b.history.some(h=>h.eventId===filter['history.eventId'].$ne))return {value:null};
     const next={...b,...update.$set,history:[...b.history,update.$push.history]};
@@ -26,7 +28,7 @@ beforeEach(()=>{
   Delivery.findById=()=>({select:async()=>({_id:deliveryId,driver:driver._id,customerId:'C1',customerName:'Customer'})});
   Delivery.updateOne=async(filter,update)=>{receipts.push({filter,update});return {modifiedCount:1};};
 });
-afterEach(()=>{Bag.collection.findOne=saved.find;Bag.collection.findOneAndUpdate=saved.commit;User.findById=saved.user;Delivery.findById=saved.delivery;Delivery.updateOne=saved.update;});
+afterEach(()=>{Bag.collection.findOne=saved.find;Bag.collection.insertOne=saved.insert;Bag.collection.findOneAndUpdate=saved.commit;User.findById=saved.user;Delivery.findById=saved.delivery;Delivery.updateOne=saved.update;});
 const add=(code,extra={})=>inventory.set(code,{_id:code,bagId:code,lifecycleState:'outbound',location:'driver',status:'assigned',condition:'good',quantity:1,custodyVersion:4,assignedTo:{driver:driver._id},history:[],...extra});
 
 test('delivery schema preserves the original printed label beside registered stock IDs',()=>{
@@ -49,12 +51,12 @@ test('all outgoing bags and incoming bags are processed with distinct stable mov
   assert.deepEqual(delivery.proof.bagIds,['BAG-0001','BAG-0002']);
 });
 test('partial batch failure remains retryable without replaying successful movements',async()=>{
-  add('BAG-0001');add('BAG-0002',{assignedTo:{driver:'another'}});
+  add('BAG-0001');add('BAG-0002');failCommitFor='BAG-0002';
   const delivery={_id:deliveryId,customerId:'C1',driver:driver._id,proof:{}};
   const payload={status:'delivered',bagIds:['BAG-0001','BAG-0002'],proof:{}};
-  await assert.rejects(()=>recordDeliveryBagMovements(delivery,payload,driver),/another driver/);
+  await assert.rejects(()=>recordDeliveryBagMovements(delivery,payload,driver),/Storage unavailable/);
   assert.equal(inventory.get('BAG-0001').history.length,1);assert.equal(inventory.get('BAG-0002').history.length,0);
-  inventory.get('BAG-0002').assignedTo={driver:driver._id};
+  failCommitFor=null;
   await recordDeliveryBagMovements(delivery,payload,driver);assert.equal(inventory.get('BAG-0001').history.length,1);assert.equal(inventory.get('BAG-0002').history.length,1);
 });
 test('collection tasks never deliver collected bags back to the customer',async()=>{
@@ -112,4 +114,26 @@ test('scan separator aliases cannot deliver and collect the same bag in one stop
   add('BAG-00523');
   await assert.rejects(()=>recordDeliveryBagMovements({_id:deliveryId,customerId:'C1',driver:driver._id},{status:'delivered',proof:{bagId:'BAG_00523',returnedBags:['BAG-00523']}},driver),/same stop/);
   assert.equal(writes.length,0);
+});
+test('reported BAG-00077 completes a delivery by creating exact scanned stock once',async()=>{
+  const delivery={_id:deliveryId,customerId:'C1',driver:driver._id};const payload={status:'delivered',proof:{bagId:'BAG_00077',qrSkipped:false}};
+  await recordDeliveryBagMovements(delivery,payload,driver);await recordDeliveryBagMovements(delivery,payload,driver);
+  const b=inventory.get('BAG-00077');assert.equal(inventory.size,1);assert.equal(b.status,'in_use');assert.equal(b.lifecycleState,'with_customer');assert.equal(b.location,'customer');assert.equal(b.assignedTo.customer.customerId,'C1');assert.ok(b.assignedTo.driver instanceof mongoose.Types.ObjectId);assert.equal(b.custodyVersion,1);assert.equal(b.history.length,1);assert.equal(b.history[0].registeredFromScan,true);assert.equal(b.history[0].before.state,'unregistered');assert.deepEqual(delivery.proof.bagIds,['BAG-00077']);assert.equal(receipts.length,0);
+});
+test('reported collected bag moves directly into use for the delivery customer',async()=>{
+  add('BAG-A0400',{lifecycleState:'collected',location:'driver',assignedTo:{driver:'previous-driver',customer:{customerId:'PREVIOUS'}},pendingHandover:{driver:'previous-driver'}});
+  await recordDeliveryBagMovements({_id:deliveryId,customerId:'C1',driver:driver._id},{status:'delivered',proof:{bagId:'BAG-A0400'}},driver);
+  const b=inventory.get('BAG-A0400');assert.equal(b.status,'in_use');assert.equal(b.assignedTo.customer.customerId,'C1');assert.equal(b.pendingHandover,undefined);assert.equal(b.history[0].before.state,'collected');assert.equal(b.history[0].reassignment.fromCustomer.customerId,'PREVIOUS');
+});
+test('unregistered stock requires a delivery scan and a delivery assigned to the acting driver',async()=>{
+  await assert.rejects(()=>recordDeliveryBagMovements({_id:deliveryId,customerId:'C1',driver:driver._id},{status:'delivered',proof:{bagId:'BAG-00077',qrSkipped:true}},driver),/not registered/);assert.equal(writes.length,0);
+  Delivery.findById=()=>({select:async()=>({_id:deliveryId,driver:'other-driver',customerId:'C1'})});
+  await assert.rejects(()=>recordDeliveryBagMovements({_id:deliveryId,customerId:'C1',driver:driver._id},{status:'delivered',proof:{bagId:'BAG-00077'}},driver),/not assigned/);assert.equal(writes.length,0);
+});
+test('server-owned customer identity and valid tag format are required before inserting scan stock',async()=>{
+  await assert.rejects(()=>moveBag('BAG-00077',{action:'deliver',physicalScan:true,customerId:'SPOOFED',deliveryId:String(deliveryId),eventId:'spoofed',note:'Scan'},driver),/Customer does not match/);
+  await assert.rejects(()=>moveBag('https://unrelated.example',{action:'deliver',physicalScan:true,deliveryId:String(deliveryId),eventId:'invalid-scan',note:'Scan'},driver),/valid bag tag/);assert.equal(writes.length,0);
+});
+test('BAG-00077 and BAG-0077 remain separate physical labels',async()=>{
+  add('BAG-0077');await recordDeliveryBagMovements({_id:deliveryId,customerId:'C1',driver:driver._id},{status:'delivered',proof:{bagId:'BAG-00077'}},driver);assert.equal(inventory.size,2);assert.equal(inventory.get('BAG-0077').history.length,0);assert.equal(inventory.get('BAG-00077').history.length,1);
 });

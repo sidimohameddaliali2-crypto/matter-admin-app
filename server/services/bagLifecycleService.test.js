@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {planBagMovement,executeBagMovement} from './bagLifecycleService.js';
+import {planBagMovement,executeBagMovement,BAG_STATES} from './bagLifecycleService.js';
 import {auditBagInventory} from './bagInventoryAudit.js';
 import {buildBagWorkspace,compareStockCount} from './bagOperationsService.js';
 const operator={_id:'warehouse',role:'store_keeper',name:'Warehouse'};
@@ -86,12 +86,33 @@ test('physical delivery scan reassigns a previous customer and preserves the cus
   assert.equal(p.event.assignedBy.user,'driver');
   assert.deepEqual(planBagMovement(apply(original,p),c,driver),{duplicate:true});
 });
-test('driver may deliver physically scanned ready stock but cannot bypass damaged stock or another driver custody',()=>{
+test('physical delivery scan is authoritative from every lifecycle state and keeps prior evidence',()=>{
   const c=command('deliver',{customerId:'new',deliveryId:'new-stop',physicalScan:true});
-  assert.equal(planBagMovement(bag({lifecycleState:'ready'}),c,driver).set.lifecycleState,'with_customer');
-  assert.throws(()=>planBagMovement(bag({lifecycleState:'ready',condition:'poor'}),c,driver),/damaged/);
+  for(const state of [...BAG_STATES,undefined]){
+    const original=bag({lifecycleState:state,status:'retired',isActive:false,condition:'poor',isFlagged:true,location:'driver',quantity:5,assignedTo:{driver:'other',customer:{customerId:'old'}},pendingHandover:{driver:'other'}});
+    const p=planBagMovement(original,c,driver);const next=apply(original,p);
+    assert.equal(next.lifecycleState,'with_customer');assert.equal(next.status,'in_use');assert.equal(next.assignedTo.customer.customerId,'new');assert.equal(next.assignedTo.driver,'driver');assert.equal(next.location,'customer');assert.equal(next.isActive,true);assert.equal(next.quantity,1);assert.equal(next.pendingHandover,undefined);
+    assert.equal(next.condition,'poor');assert.equal(next.isFlagged,true);assert.equal(p.event.before.isActive,false);assert.equal(p.event.before.quantity,5);assert.equal(p.event.before.assignedTo.driver,'other');assert.equal(p.event.physicalScan,true);
+  }
+});
+test('non-scan requests still cannot revive retired stock, override driver custody or deliver damage',()=>{
+  const c=command('deliver',{customerId:'new',deliveryId:'new-stop'});
+  assert.throws(()=>planBagMovement(bag({lifecycleState:'retired',isActive:false}),c,driver),/inactive/);
   assert.throws(()=>planBagMovement(bag({lifecycleState:'outbound',location:'driver',assignedTo:{driver:'other'}}),c,driver),/another driver/);
-  assert.throws(()=>planBagMovement(bag({lifecycleState:'retired'}),c,driver),/retired/);
+  assert.throws(()=>planBagMovement(bag({lifecycleState:'outbound',condition:'poor'}),c,driver),/damaged/);
+});
+test('unknown physical delivery creates its initial customer custody and audit together',async()=>{
+  let created=null;
+  const repo={find:async()=>created,create:async(b,p)=>{created=apply(b,p);return created;},commit:async()=>assert.fail('unknown bag must be one insert')};
+  const c=command('deliver',{customerId:'new',deliveryId:'new-stop',physicalScan:true});
+  const result=await executeBagMovement(repo,'bag_00077',c,driver);
+  assert.equal(result.bag.bagId,'BAG-00077');assert.equal(result.bag.status,'in_use');assert.equal(result.bag.history[0].before.state,'unregistered');assert.equal(result.bag.history[0].registeredFromScan,true);
+  assert.equal((await executeBagMovement(repo,'BAG-00077',c,driver)).duplicate,true);assert.equal(created.history.length,1);
+});
+test('concurrent identical first scans create only one bag and one custody event',async()=>{
+  let current=null,creates=0;const repo={find:async()=>current,create:async(b,p)=>{if(current)return null;creates++;current=apply(b,p);return current;}};
+  const c=command('deliver',{customerId:'new',deliveryId:'stop',physicalScan:true});
+  const outcomes=await Promise.all([executeBagMovement(repo,'BAG-00077',c,driver),executeBagMovement(repo,'BAG-00077',c,driver)]);assert.equal(creates,1);assert.equal(current.history.length,1);assert.equal(outcomes.filter(o=>o.duplicate).length,1);
 });
 test('a stored assignment without a physical scan cannot overwrite a different customer',()=>{
   const b=bag({assignedTo:{customer:{customerId:'old'}}});

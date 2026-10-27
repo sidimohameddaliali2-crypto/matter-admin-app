@@ -19,6 +19,21 @@ stock, not ready stock. Non-unit quantities require reconciliation first.
 
 ## Physical journey
 
+Owner update (2026-10-27): a driver's physical **delivery** scan is authoritative.
+For a delivery assigned to that driver, the backend uses the delivery's stored
+customer identity. An unknown valid bag label is created directly in customer
+custody in one insert. An existing bag moves from any previous lifecycle state
+to `with_customer`, legacy status `in_use`, location `customer`, quantity one,
+and active inventory. Stale pending handovers are cleared. Previous customer,
+driver, state, flags and quantity are retained in the custody audit. Damage
+flags and evidence remain visible; they do not block a physical delivery scan.
+
+Leading zeros are preserved: BAG-00077 is distinct from BAG-0077. BAG_ and BAG-
+are separator aliases. No automatic stock is created for unrelated QR content,
+skipped scans, collection tasks or unassigned drivers. Replayed scans are
+idempotent; offline evidence older than a newer verified handover still requires
+review. A delivery scan is not a warehouse receipt or a refund event.
+
 `received → cleaning → ready → packed → outbound → with_customer → collected → received`
 
 An operator can release received stock after confirming cleaning and inspection,
@@ -170,7 +185,8 @@ deduplicated by submission ID. Submitting a count never overwrites stock.
 - `POST /api/bag-operations/stock-counts`: idempotent evidence-only count submission.
 
 Legacy bag return/reassignment/assignment routes call the same movement service.
-They cannot create inventory from an unknown scan. Drivers cannot claim warehouse
+Physical delivery reassignment can register an unknown scanned label; ordinary
+returns and warehouse assignments still require existing stock. Drivers cannot claim warehouse
 receipt or provide another driver's identity. GET `/api/bags` is side-effect free;
 drivers must search an exact ID.
 

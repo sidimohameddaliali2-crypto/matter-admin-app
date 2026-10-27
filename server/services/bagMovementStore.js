@@ -7,6 +7,13 @@ import { findRegisteredBag } from './bagRecordLookup.js';
 
 const repository={
   find:bagId=>findRegisteredBag(Bag.collection,bagId),
+  create:async(bag,plan)=>{
+    // The new record and its first customer handover are one insert. There is
+    // no intermediate available/warehouse record and no fabricated receipt.
+    const document={_id:new mongoose.Types.ObjectId(),bagId:bag.bagId,bagType:'standard',...plan.set,custodyVersion:1,createdAt:plan.set.updatedAt,history:[plan.event]};
+    try{await Bag.collection.insertOne(document);return document;}
+    catch(e){if(e.code===11000)return null;throw e;}
+  },
   commit:async(bag,plan)=>{
     const version=bag.custodyVersion===undefined?{custodyVersion:{$exists:false}}:{custodyVersion:bag.custodyVersion};
     const update={$set:{...plan.set,custodyVersion:(bag.custodyVersion||0)+1},$push:{history:plan.event}};

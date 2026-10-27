@@ -14,9 +14,11 @@ export async function recordDeliveryBagMovements(delivery,payload,user) {
   const registered=new Map();const scanCodes=new Map();
   for(const code of [...new Set([...outgoingCodes,...incomingCodes])]){
     const bag=await findRegisteredBag(Bag.collection,code);
-    if(!bag)throw Object.assign(new Error(`Bag ${code} is not registered. Check the full printed label, including leading zeros.`),{statusCode:404,bagId:code});
-    registered.set(code,normalizeBagId(bag.bagId));
-    scanCodes.set(normalizeBagId(bag.bagId),code);
+    const newDeliveryScan=!collection&&user.role==='driver'&&outgoingCodes.includes(code)&&scanned.includes(code);
+    if(!bag&&!newDeliveryScan)throw Object.assign(new Error(`Bag ${code} is not registered. Check the full printed label, including leading zeros.`),{statusCode:404,bagId:code});
+    const stockId=bag?normalizeBagId(bag.bagId):code;
+    registered.set(code,stockId);
+    scanCodes.set(stockId,code);
   }
   const outgoing=[...new Set(outgoingCodes.map(code=>registered.get(code)))];
   const incoming=[...new Set(incomingCodes.map(code=>registered.get(code)))];

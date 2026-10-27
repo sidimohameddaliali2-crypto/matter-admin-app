@@ -29,13 +29,13 @@ export default async function legacyBagMovements(req,res,next){
     }
     let identifier=isReturn&&req.method==='POST'?(req.body.bagId||req.body.bagQRCode):isReassign?req.body.bagId:decodeURIComponent(path.split('/')[1]);
     const bag=await lookup(identifier);
-    if(!bag)return res.status(404).json({success:false,message:`Bag ${normalizeBagId(identifier)} is not registered. Check the full printed label, including leading zeros.`});
+    if(!bag&&!isReassign)return res.status(404).json({success:false,message:`Bag ${normalizeBagId(identifier)} is not registered. Check the full printed label, including leading zeros.`});
     let result;
     if(isReturn)result=await legacyBagReturn(bag.bagId,req.body,req.user);
-    else if(isReassign)result=await moveBag(bag.bagId,{action:'deliver',physicalScan:true,deliveryId:req.body.deliveryId,customerId:req.body.customerId,eventId:`delivery:${req.body.deliveryId}:deliver:${bag.bagId}`,note:'Physical customer handover'},req.user);
+    else if(isReassign){const bagId=normalizeBagId(bag?.bagId||identifier);result=await moveBag(bagId,{action:'deliver',physicalScan:true,scanCode:identifier,deliveryId:req.body.deliveryId,customerId:req.body.customerId,eventId:`delivery:${req.body.deliveryId}:deliver:${bagId}`,note:'Physical customer handover'},req.user);}
     else if(isAssign)result=await moveBag(bag.bagId,{action:'pack',driverId:req.body.driverId,note:req.body.notes||'Outbound handover prepared',eventId:req.body.eventId||`pack:${bag._id}:${bag.custodyVersion||0}:${req.body.driverId}`},req.user);
     else result=await moveBag(bag.bagId,{action:'quarantine',proofPhotoUrl:req.body.proofPhotoUrl,note:req.body.description||'Damage recorded at warehouse',eventId:req.body.eventId||`damage:${bag._id}:${bag.custodyVersion||0}`},req.user);
-    req.app.get('io')?.emit('bag:updated',{bagId:bag.bagId});
-    return res.json({success:true,data:result.bag,message:req.user.role==='driver'?'Bag recorded in driver custody. Warehouse receipt is still required.':'Physical movement recorded.'});
+    req.app.get('io')?.emit('bag:updated',{bagId:result.bag.bagId});
+    return res.json({success:true,data:result.bag,message:isReassign?'Scanned bag is in use with the delivery customer.':req.user.role==='driver'?'Bag recorded in driver custody. Warehouse receipt is still required.':'Physical movement recorded.'});
   }catch(e){return res.status(e.statusCode||400).json({success:false,message:e.message||'Bag movement failed.'});}
 }
