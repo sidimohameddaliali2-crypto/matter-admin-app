@@ -7,6 +7,7 @@ import { QRCodeCanvas } from 'qrcode.react';
 import jsPDF from 'jspdf';
 import { partnerLogout } from '../store/slices/partnerAuthSlice';
 import partnerApi from '../utils/partnerApi';
+import PartnerDailyOrderPlanner from '../components/PartnerDailyOrderPlanner';
 import { FIXED_SELECTION_DEADLINES, isPastSelectionDeadline } from '../utils/selectionDeadlines';
 import { groupExclusions } from '../constants/exclusionList';
 
@@ -210,7 +211,7 @@ const PartnerPortal = () => {
   const anchorDate = sortedSelected[0] || firstOrderableISO();
 
   useEffect(() => { loadOrders(); }, [loadOrders]);
-  useEffect(() => { if (tab === 'order') loadMenu(anchorDate); }, [tab, anchorDate, loadMenu]);
+  useEffect(() => { if (tab === 'order' && editing) loadMenu(anchorDate); }, [tab, anchorDate, loadMenu, editing]);
   useEffect(() => { if (tab === 'profile' && !reports) loadReports(); }, [tab, reports, loadReports]);
   useEffect(() => { if (tab === 'members') loadMembers(); }, [tab, loadMembers]);
 
@@ -979,7 +980,8 @@ const PartnerPortal = () => {
         <div className="flex flex-1 min-w-0 max-[1100px]:flex-col max-[1100px]:overflow-y-auto">
           {/* main */}
           <main className="flex-1 min-w-0 overflow-y-auto px-[34px] py-[30px] max-[1100px]:overflow-visible">
-            {tab === 'order' && (
+            {tab === 'order' && !editing && (<PartnerDailyOrderPlanner partner={partner} earliestDate={firstOrderableISO()} orders={orders} onPlaced={() => { loadOrders(); setReports(null); }} onViewOrders={() => setTab('orders')} />)}
+            {tab === 'order' && editing && (
               <div>
                 <div className="flex items-baseline gap-3">
                   <div className="text-[24px]" style={AB}>Plan your delivery</div>
@@ -1029,7 +1031,7 @@ const PartnerPortal = () => {
           </main>
 
           {/* right rail */}
-          <aside className="flex-none w-[340px] bg-[#051747] border-l border-[#12275e] overflow-y-auto px-6 py-[26px] max-[1100px]:w-full max-[1100px]:border-l-0 max-[1100px]:border-t max-[1100px]:overflow-visible">
+          {(tab !== 'order' || editing) && <aside className="flex-none w-[340px] bg-[#051747] border-l border-[#12275e] overflow-y-auto px-6 py-[26px] max-[1100px]:w-full max-[1100px]:border-l-0 max-[1100px]:border-t max-[1100px]:overflow-visible">
             {tab === 'order' ? (
               count > 0 ? (
                 <>
@@ -1074,7 +1076,7 @@ const PartnerPortal = () => {
                 </button>
               </>
             )}
-          </aside>
+          </aside>}
         </div>
 
         {doneOverlay}
@@ -1105,7 +1107,8 @@ const PartnerPortal = () => {
         </header>
 
         {/* ORDER */}
-        {tab === 'order' && (
+        {tab === 'order' && !editing && <div className="flex-1 min-h-0 overflow-y-auto px-[18px] pt-4 pb-[110px]"><PartnerDailyOrderPlanner partner={partner} earliestDate={firstOrderableISO()} orders={orders} onPlaced={() => { loadOrders(); setReports(null); }} onViewOrders={() => setTab('orders')} /></div>}
+        {tab === 'order' && editing && (
           <div className="flex-1 min-h-0 overflow-y-auto px-[18px] pt-4 pb-[210px]">
             {renderCalendar({ cellH: 46, radius: 14 })}
             <div className="mt-3.5">{renderDeliverOn()}</div>
@@ -1123,7 +1126,7 @@ const PartnerPortal = () => {
         )}
 
         {/* cart bar */}
-        {tab === 'order' && count > 0 && !sheet && !done && (
+        {tab === 'order' && editing && count > 0 && !sheet && !done && (
           <div className="fixed left-0 right-0 mx-auto max-w-[430px] px-3.5 z-30" style={{ bottom: 92 }}>
             <div className="bg-[#bcf679] text-[#051747] rounded-[24px] pl-[18px] pr-3 py-3 flex items-center gap-3 shadow-[0_18px_40px_rgba(0,0,0,.5)]">
               <div className="min-w-0 flex-1">
@@ -1188,7 +1191,7 @@ const PartnerPortal = () => {
 
       {/* checkout sheet */}
       <AnimatePresence>
-        {sheet === 'checkout' && (
+        {editing && sheet === 'checkout' && (
           <>
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
               onClick={() => setSheet(null)} className="fixed inset-0 bg-[rgba(4,16,43,.7)] z-40" />
