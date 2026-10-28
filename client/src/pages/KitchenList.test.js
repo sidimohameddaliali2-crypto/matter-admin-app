@@ -85,6 +85,38 @@ test('changing either date control keeps both synchronized and prepares the new 
 
 const downloadButton = (text) => [...container.querySelectorAll('button')].find((button) => button.textContent.includes(text));
 
+test('a failed preparation is an error, not an empty selection, and refresh recovers', async () => {
+  const successful = api.post.getMockImplementation();
+  api.post.mockRejectedValueOnce(new Error('Preparation unavailable'));
+  await select(paperSelect(), friday);
+  expect(container.textContent).toContain('Preparation unavailable');
+  expect(container.textContent).not.toContain('No customer selections found for this menu.');
+  expect(downloadButton('Download Day Excel').disabled).toBe(true);
+  api.post.mockImplementation(successful);
+  await act(async () => container.querySelector('button[title="Reload selections and re-fetch nutrition data from the website"]').click());
+  expect(container.textContent).toContain('Matter Fixture');
+  expect(container.textContent).not.toContain('Preparation unavailable');
+});
+
+test('late menu options cannot overwrite the currently selected date', async () => {
+  const originalGet = api.get.getMockImplementation();
+  let finishOld;
+  let optionCalls = 0;
+  api.get.mockImplementation(async (path, options) => {
+    if (path.endsWith('/main-meal-options')) {
+      optionCalls += 1;
+      if (optionCalls === 1) return new Promise((resolve) => { finishOld = resolve; });
+      return { data: { success: true, data: { [thursday]: { mainMeals: [{ name: 'Current rotation', type: 'chicken' }], subMeals: [] } } } };
+    }
+    return originalGet(path, options);
+  });
+  await select(paperSelect(), friday);
+  await select(paperSelect(), thursday);
+  await act(async () => finishOld({ data: { success: true, data: { [thursday]: { mainMeals: [{ name: 'Stale rotation', type: 'chicken' }], subMeals: [] } } } }));
+  expect(container.textContent).toContain('Current rotation');
+  expect(container.textContent).not.toContain('Stale rotation');
+});
+
 test('a failed download shows its error near the controls and can be retried to generate Word', async () => {
   const originalBlob = global.Blob, originalCreate = URL.createObjectURL, originalRevoke = URL.revokeObjectURL;
   let html, filename;

@@ -142,11 +142,14 @@ const KitchenCounting = () => {
       // Explicit preparation must finish before the selections snapshot is read.
       const preparation = await prepareKitchenSelections(api, selectedMenuId, selectedDate, current);
       if (!current()) return;
-      const response = await api.get(`/menus/${selectedMenuId}/selections`);
+      const response = preparation.data?.kitchenSelections ? { data: { success: true, data: preparation.data.kitchenSelections } } : await api.get(`/menus/${selectedMenuId}/selections`, { timeout: 30000 });
+      if (!response.data?.success) throw new Error(response.data?.message || 'Selections could not be verified.');
       const rawSelections = response.data?.success ? (response.data.data || []) : [];
 
-      const breakfastState = await fetchBreakfastPresets(api, selectedMenuId);
-      const snackState = await fetchSnackPresets(api);
+      const [breakfastState, snackState] = await Promise.all([
+        preparation.data?.kitchenBreakfastPreset || fetchBreakfastPresets(api, selectedMenuId),
+        preparation.data?.kitchenSnackPreset || fetchSnackPresets(api),
+      ]);
 
       // Use the same fresh, email-first nutrition resolution as Kitchen List.
       // A menu with hundreds of customers means hundreds of individual Matter
@@ -417,7 +420,7 @@ const KitchenCounting = () => {
             </div>
 
             {countRows.length === 0 ? (
-              <p className="text-sm text-slate-400">No meals assigned for this date yet.</p>
+              <p className="text-sm text-slate-400">{loading ? 'Preparing kitchen counts...' : error ? 'Counts are unavailable until preparation succeeds.' : 'No meals assigned for this date yet.'}</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">

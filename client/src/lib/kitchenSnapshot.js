@@ -1,5 +1,5 @@
 import { matchesMatterSubscription, enrichSelectionsWithNutrition, fetchBreakfastPresets, fetchSnackPresets, getCustomerName, getDateKey } from './kitchenData';
-import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
+import { calculateKitchenListEntry, isMatterCoreDoubleDay } from '../utils/kitchenListCalculations';
 import { assertKitchenExportReady, prepareKitchenSelections } from '../utils/kitchenIntegrity';
 
 export const verifiedKitchenRoster = (response) => {
@@ -15,6 +15,11 @@ export const hasKitchenDeliveryOnDate = (entry, roster, date) => {
   return roster.some((sub) => matchesMatterSubscription(entry, sub));
 };
 
+export const requiredKitchenMeals = (sub, entry, date) => {
+  const core = String(sub.plan_name || '').trim().toLowerCase() === 'matter core';
+  return Math.max(1, Number(sub.meal_frequency) || 1) * (core && isMatterCoreDoubleDay(date, entry?.deliveryDates || sub.active_delivery_dates) ? 2 : 1);
+};
+
 export const assertKitchenRosterCovered = (selections, roster, date) => {
   for (const sub of roster) {
     const entry = selections.find((candidate) => matchesMatterSubscription(candidate, sub));
@@ -22,8 +27,12 @@ export const assertKitchenRosterCovered = (selections, roster, date) => {
     const core = String(sub.plan_name || '').trim().toLowerCase() === 'matter core';
     const portions = meals.filter((meal) => core ? meal.mealType === 'main' : meal.mealType !== 'snack')
       .reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
-    if (!entry || portions < Math.max(1, Number(sub.meal_frequency) || 1)) {
-      throw new Error(`Kitchen roster changed or assignments are incomplete for ${date}. Refresh preparation before exporting.`);
+    const required = requiredKitchenMeals(sub, entry, date);
+    const snackPortions = meals.filter(meal => meal.mealType === 'snack').reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
+    if (sub.snacks_per_day != null && snackPortions < Number(sub.snacks_per_day)) throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || sub.email || sub.customer_id} needs ${sub.snacks_per_day} snack(s), but has ${snackPortions}.`);
+    if (core && sub.breakfast_included === true && !meals.some(meal => meal.mealType === 'breakfast')) throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || sub.email || sub.customer_id} is missing the included breakfast.`);
+    if (!entry || portions < required) {
+      throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || entry?.customerName || sub.email || sub.customer_id} needs ${required} meal(s), but has ${portions}. Refresh preparation before exporting.`);
     }
   }
 };
@@ -32,6 +41,10 @@ export const assertKitchenRosterCovered = (selections, roster, date) => {
 export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => true, transformSelection = (entry) => entry, prepared = null) => {
   const dayKeys = [...new Set(dates)].sort();
   if (!menuId || !dayKeys.length) throw new Error('Select a menu and delivery date first.');
+  if (prepared?.snapshotId && dayKeys.length === 1 && prepared.menuId === menuId && prepared.date === dayKeys[0]) {
+    const verified = (await api.get(`/menus/${menuId}/kitchen-state`, { params: { date: prepared.date, job: prepared.snapshotId }, timeout: 30000 })).data;
+    if (verified?.state !== 'ready') throw new Error('The prepared kitchen version changed or expired. Reload the selected date before exporting.');
+  }
   // Export the exact verified load version for up to 60 seconds. This is
   // request-local memory, never a persistent/offline cache. Failed refreshes
   // clear it; older or different-date versions still require a fresh read.
@@ -52,7 +65,10 @@ export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => 
   for (const date of dayKeys) preparations.set(date, await prepareKitchenSelections(api, menuId, date, isCurrent));
   if (!isCurrent()) throw new Error('Selection changed during preparation.');
   const [response, breakfastPreset, snackPreset] = await Promise.all([
-    api.get(`/menus/${menuId}/selections`), fetchBreakfastPresets(api, menuId), fetchSnackPresets(api),
+    dayKeys.length === 1 && preparations.get(dayKeys[0]).data?.kitchenSelections
+      ? { data: { success: true, data: preparations.get(dayKeys[0]).data.kitchenSelections } } : api.get(`/menus/${menuId}/selections`, { timeout: 30000 }),
+    preparations.get(dayKeys[0]).data?.kitchenBreakfastPreset || fetchBreakfastPresets(api, menuId),
+    preparations.get(dayKeys[0]).data?.kitchenSnackPreset || fetchSnackPresets(api),
   ]);
   if (!response.data?.success) throw new Error('Selections could not be verified.');
   const single = dayKeys.length === 1 ? preparations.get(dayKeys[0]) : null;

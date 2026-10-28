@@ -40,6 +40,13 @@ test('fast downloads still reject missing roster portions', async () => {
   await expect(loadKitchenSnapshot({}, 'menu', [day], () => true, (entry) => entry, state)).rejects.toThrow('incomplete');
 });
 
+test('a pinned production version cannot silently export newer or expired data', async () => {
+  const state = prepared(); state.snapshotId = 'version';
+  const api = { get: jest.fn().mockResolvedValue({ data: { state: 'stale' } }), post: jest.fn() };
+  await expect(loadKitchenSnapshot(api, 'menu', [day], () => true, entry => entry, state)).rejects.toThrow('changed or expired');
+  expect(api.post).not.toHaveBeenCalled();
+});
+
 test('an active Matter delivery keeps customer selections even after an earlier saved pause', async () => {
   const state = prepared();
   state.selections[0].skippedDays = [{ date: day, pauseStatus: 'success' }];

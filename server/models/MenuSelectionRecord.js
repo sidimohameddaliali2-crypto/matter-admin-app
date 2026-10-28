@@ -142,6 +142,7 @@ const menuSelectionRecordSchema = new mongoose.Schema({
   // that day (paused day + the customer's chosen resume day). Surfaced
   // in the admin selections view only — never sent to the customer.
   skippedDays: [{
+    resumedAt: Date,
     date: { type: String },              // "YYYY-MM-DD"
     pauseStatus: {
       type: String,
@@ -157,6 +158,7 @@ const menuSelectionRecordSchema = new mongoose.Schema({
     processedAt: { type: Date }
   }],
 
+  kitchenAudit: [{ date: String, action: String, at: Date, subscriptionId: String, reason: String }],
   submittedAt: {
     type: Date,
     default: Date.now

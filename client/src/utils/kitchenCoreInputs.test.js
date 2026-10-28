@@ -1,6 +1,20 @@
 import { calculateKitchenListEntry } from './kitchenListCalculations';
 import { assertKitchenExportReady } from './kitchenIntegrity';
 import { enrichSelectionsWithNutrition } from '../lib/kitchenData';
+import { assertKitchenRosterCovered } from '../lib/kitchenSnapshot';
+
+test('Core Monday and Wednesday require doubled mains with normal portions; Friday remains single', () => {
+  const deliveryDates = ['2026-10-26', '2026-10-28', '2026-10-30'];
+  const customer = { matterCustomerId: 'person', planName: 'Matter Core', mealsPerDay: 2, deliveryDates, targetMacros: { C: 300, P: 300, F: null } };
+  const roster = [{ customer_id: 'person', name: 'Core fixture', plan_name: 'Matter Core', meal_frequency: 2 }];
+  for (const [date, count] of [[deliveryDates[0], 4], [deliveryDates[1], 4], [deliveryDates[2], 2]]) {
+    const meals = Array.from({ length: count }, () => ({ date, mealType: 'main', quantity: 1 }));
+    const calculated = calculateKitchenListEntry({ customer, selectedMeals: meals });
+    expect(calculated.selectedMeals.every(meal => meal.proteinWeight === 150 && meal.carbWeight === 150)).toBe(true);
+    expect(() => assertKitchenRosterCovered([{ ...customer, selectedMeals: meals }], roster, date)).not.toThrow();
+    expect(() => assertKitchenRosterCovered([{ ...customer, selectedMeals: meals.slice(1) }], roster, date)).toThrow(`needs ${count} meal(s)`);
+  }
+});
 
 // Anonymous fixtures reproduce the actual Matter Core API shapes: upstream
 // fat is null because carbohydrate/protein values are daily food weights.

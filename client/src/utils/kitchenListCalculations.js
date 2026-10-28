@@ -45,7 +45,7 @@ const getDateKey = (value) => {
 // for that week are exactly Mon+Wed+Fri with no Tue/Thu (so a daily customer with
 // one paused day is never mistaken for it). Same rule as
 // server/utils/matterCoreDelivery.js (the client can't import from server/).
-const isMatterCoreDoubleDay = (dateKey, deliveryDates) => {
+export const isMatterCoreDoubleDay = (dateKey, deliveryDates) => {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || '')) || !Array.isArray(deliveryDates)) return false;
   const [y, m, d] = dateKey.split('-').map(Number);
   const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();

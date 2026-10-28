@@ -13,6 +13,13 @@ import MenuSelectionArchive from '../models/MenuSelectionArchive.js';
 import { excludeRecreatedArchivedAliases } from '../services/archivedMenuAliases.js';
 import { protect } from '../middleware/auth.js';
 import { isMatterCoreDoubleDay } from '../utils/matterCoreDelivery.js';
+import { appendKitchenMeals } from '../services/kitchenSelectionWrite.js';
+import { kitchenDateUnavailable } from '../services/kitchenDeliveryEligibility.js';
+import { toKitchenOption, kitchenConflictList, kitchenConflictFields, mergeKitchenMetadata } from '../services/kitchenExclusions.js';
+import { kitchenUpload } from '../services/kitchenUpload.js';
+import { saveManagedMenu } from '../services/managedMenuSave.js';
+import { assertAssignmentMacros } from '../services/kitchenMacroValidation.js';
+import { readKitchenState, beginKitchenState } from '../services/kitchenProductionSnapshot.js';
 import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
 import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
 import athleatService from '../services/athleatService.js';
@@ -430,7 +437,7 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
     const allergyProfile = await resolveMenuAllergyProfile(nutrition);
     const record = menuId ? await MenuSelectionRecord.findOne(matterSelectionFilter(menuId, nutrition)).lean() : null;
     const consolidatedMeals = record?.selectedMeals || [];
-    const savedSkippedDays = record?.skippedDays || [];
+    const savedSkippedDays = (record?.skippedDays || []).filter(day => !day.resumedAt);
     const foundMenuSelectionRecord = !!record;
     const matterMacros = nutrition.macros
       ? { C: nutrition.macros.carbohydrates || 0, P: nutrition.macros.protein || 0, F: nutrition.macros.fat || 0 }
@@ -1423,8 +1430,7 @@ router.put('/:id/breakfast-options', protect, async (req, res) => {
 });
 
 const optionExcludedByCustomer = (option, customerExclusions) => {
-  const optExclusions = (option.exclusions || []).map((e) => String(e).toLowerCase().trim());
-  return customerExclusions.some((ex) => optExclusions.some((tag) => tag.includes(ex) || ex.includes(tag)));
+  return kitchenConflictList(option, customerExclusions).length > 0;
 };
 
 /**
@@ -1453,7 +1459,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
       ? new Set(customers.map((c) => String(c.email || '').trim().toLowerCase()).filter(Boolean))
       : null;
 
-    const menu = await WeeklyMenu.findById(menuId).select('snackOptionsByDate').lean();
+    const menu = await WeeklyMenu.findById(menuId).select('snackOptionsByDate meals').lean();
     if (!menu) {
       return { error: 'Menu not found', status: 404 };
     }
@@ -1466,7 +1472,8 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
 
     // Nutrition lookups (2 Matter API calls each) dominate runtime — run every
     // customer concurrently instead of one at a time.
-    const results = await Promise.all(records.map(async (record) => {
+    const ingredientReads = new Map();
+    const results = await mapWithConcurrency(records, 8, async (record) => {
       const stats = { assigned: 0, skippedNoSnacksNeeded: 0, skippedNoOptions: 0, datesWithNoOptions: [] };
 
       let nutrition = matterInputs.find((input) => record.matterCustomerId
@@ -1488,7 +1495,6 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
       // Scoped runs only ever touch the one requested date — even if the
       // customer has meals on other dates already, this call has no business
       // touching those.
-      const skippedDates = new Set((record.skippedDays || []).map((day) => toDateKey(day.date || day)));
       const dateKeys = scopedDateKey
         ? [scopedDateKey]
         : Array.from(new Set(
@@ -1499,7 +1505,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
           ));
 
       for (const dateKey of dateKeys) {
-        if (skippedDates.has(dateKey)) continue;
+        if (await kitchenDateUnavailable(record, dateKey, nutrition)) continue;
         const newSnacks = [];
         const existingSnackCount = (record.selectedMeals || []).filter(
           (m) => m.mealType === 'snack' && toDateKey(m.date) === dateKey
@@ -1512,8 +1518,12 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
         const dayPools = Array.isArray(rawPools)
           ? { first: rawPools, second: [] }
           : { first: rawPools?.first || [], second: rawPools?.second || [] };
-        const eligibleFirst = dayPools.first.filter((opt) => !optionExcludedByCustomer(opt, exclusions));
-        const eligibleSecond = dayPools.second.filter((opt) => !optionExcludedByCustomer(opt, exclusions));
+        if (!ingredientReads.has(dateKey)) ingredientReads.set(dateKey, MenuItem.find({
+          _id: { $in: (menu.meals || []).flatMap(day => day.items || []) }, itemDate: new Date(dateKey), mealType: 'snack',
+        }).lean());
+        const ingredients = await ingredientReads.get(dateKey);
+        const eligibleFirst = mergeKitchenMetadata(dayPools.first, ingredients).filter((opt) => !optionExcludedByCustomer(opt, exclusions));
+        const eligibleSecond = mergeKitchenMetadata(dayPools.second, ingredients).filter((opt) => !optionExcludedByCustomer(opt, exclusions));
 
         if (eligibleFirst.length === 0 && eligibleSecond.length === 0) {
           stats.skippedNoOptions += 1;
@@ -1554,11 +1564,13 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
         // or two staff tabs) — both used to read "0 snacks" and both push,
         // doubling the customer's snacks. The loser of the race now matches
         // nothing and simply skips.
+        await assertAssignmentMacros(newSnacks);
         const dayStart = new Date(dateKey);
         const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
         const writeResult = await MenuSelectionRecord.updateOne(
           {
             _id: record._id,
+            skippedDays: record.skippedDays || [],
             $expr: {
               $eq: [
                 {
@@ -1586,7 +1598,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
       }
 
       return stats;
-    }));
+    });
 
     const assigned = results.reduce((sum, r) => sum + r.assigned, 0);
     const skippedNoSnacksNeeded = results.reduce((sum, r) => sum + r.skippedNoSnacksNeeded, 0);
@@ -1681,7 +1693,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     mealType: 'main',
     usedForCorePlan: true
   }).lean();
-  let mealList = corePlanMenuItems.map((item) => ({ _id: item._id, name: item.mealName }));
+  let mealList = corePlanMenuItems.map(toKitchenOption);
   // Fallback for dates that haven't been tagged in the new meal editor yet.
   if (mealList.length === 0) {
     mealList = (menu.matterCoreMealOptionsByDate || {})[dateKey] || [];
@@ -1691,7 +1703,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     // No hand-built breakfast list for the date — use that day's breakfast
     // dishes from the menu file, in file order (the FIRST one is always used).
     const dayBreakfastItems = await MenuItem.find({ _id: { $in: (menu.meals || []).flatMap((day) => (day.items || []).map((item) => item._id || item)) }, itemDate: new Date(dateKey), mealType: 'breakfast' }).sort({ _id: 1 }).lean();
-    breakfastOptions = dayBreakfastItems.map((item) => ({ name: item.mealName }));
+    breakfastOptions = dayBreakfastItems.map(toKitchenOption);
   }
   const rawSnackPools = (menu.snackOptionsByDate || {})[dateKey];
   const snackPools = Array.isArray(rawSnackPools)
@@ -1741,7 +1753,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     if (!email) continue;
 
     const existingRecord = await MenuSelectionRecord.findOne({ weeklyMenuId: menuId, email }).lean();
-    if ((existingRecord?.skippedDays || []).some((day) => toDateKey(day.date || day) === dateKey)) continue;
+    if (await kitchenDateUnavailable(existingRecord, dateKey, customer.nutrition)) continue;
     const existingMainMealsCount = (existingRecord?.selectedMeals || []).filter(
       (m) => toDateKey(m.date) === dateKey && m.mealType === 'main'
     ).reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
@@ -1773,12 +1785,17 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
 
     const newMeals = [];
 
+    const exclusions = customer.exclusions || [];
+    const eligibleCoreMeals = mealList.filter(option => !optionExcludedByCustomer(option, exclusions));
+    const coreChoices = eligibleCoreMeals.length ? eligibleCoreMeals : mealList;
+
     // snackOnly skips main meals — except on a double day, where the extra
     // meals are still topped up for a customer who already has the usual set.
     if ((!snackOnly || isDoubleDay) && slotsNeeded > 0) {
       for (let i = 0; i < slotsNeeded; i += 1) {
         const position = existingMainMealsCount + i;
-        const chosen = isDoubleDay && mealFrequency > 1 ? mealList[position % mealFrequency] : mealList[position];
+        const chosen = (isDoubleDay && mealFrequency > 1 ? coreChoices[position % mealFrequency] : coreChoices[position])
+          || coreChoices[position % coreChoices.length];
         if (!chosen) {
           skippedNoOption += 1;
           continue;
@@ -1792,6 +1809,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
           mealName: chosen.name,
           quantity: 1,
           slotNumber: position,
+          ...kitchenConflictFields(chosen, exclusions),
           isAutoAssigned: true
         });
         assignedMainMeals += 1;
@@ -1799,7 +1817,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     }
 
     if ((!snackOnly || includeBreakfast) && breakfastInclude && !hasBreakfastAlready) {
-      const choice = breakfastOptions[0];
+      const choice = breakfastOptions.find(option => !optionExcludedByCustomer(option, exclusions));
       if (choice) {
         newMeals.push({
           date: new Date(dateKey),
@@ -1821,7 +1839,8 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     if (snackSlotsNeeded > 0) {
       for (let i = 0; i < snackSlotsNeeded; i += 1) {
         const overallSlotIndex = existingSnackCount + i;
-        const pool = overallSlotIndex % 2 === 0 ? snackPools.first : snackPools.second;
+        const pool = (overallSlotIndex % 2 === 0 ? snackPools.first : snackPools.second)
+          .filter(option => !optionExcludedByCustomer(option, exclusions));
         const choice = pool[0];
         if (!choice) {
           skippedSnackNoOption += 1;
@@ -1845,8 +1864,8 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
 
     if (newMeals.length === 0) continue;
 
-    await MenuSelectionRecord.findOneAndUpdate(
-      { weeklyMenuId: menuId, email },
+    await assertAssignmentMacros(newMeals);
+    await appendKitchenMeals(menuId, email, existingRecord,
       {
         $setOnInsert: {
           weeklyMenuId: menuId,
@@ -1858,8 +1877,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
           firstName: customer.name || email
         },
         $push: { selectedMeals: { $each: newMeals } }
-      },
-      { upsert: true }
+      }
     );
   }
 
@@ -1972,7 +1990,7 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
       await MenuSelectionRecord.updateOne({ _id: record._id }, { $set: resolved });
       Object.assign(record, resolved);
     }
-    if ((record?.skippedDays || []).some((day) => toDateKey(day.date || day) === dateKey)) continue;
+    if (await kitchenDateUnavailable(record, dateKey, nutrition)) continue;
     const core = String(nutrition.plan_name || '').trim().toLowerCase() === 'matter core';
     const portions = (record?.selectedMeals || []).filter((meal) => toDateKey(meal.date) === dateKey && (core ? meal.mealType === 'main' : meal.mealType !== 'snack'))
       .reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
@@ -1981,7 +1999,8 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
       mealFrequency: nutrition.meal_frequency, breakfastIncluded: nutrition.breakfast_included,
       exclusions: nutrition.exclusions || [], nutrition,
     };
-    if (portions >= Math.max(1, Number(nutrition.meal_frequency) || 1)) {
+    const required = Math.max(1, Number(nutrition.meal_frequency) || 1) * (core && isMatterCoreDoubleDay(dateKey, nutrition.active_delivery_dates) ? 2 : 1);
+    if (portions >= required) {
       alreadyCovered++;
       (core ? needsMatterCoreSnackOnly : needsSnackOnly).push(item);
     } else (core ? needsMatterCoreAssignment : needsAssignment).push(item);
@@ -2063,6 +2082,27 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
   await cacheSet(cacheKey, cachedSummary, 60);
   return { data: summary };
 }
+
+router.get('/:id/kitchen-state', protect, async (req, res) => {
+  try {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') || toDateKey(req.query.date) !== req.query.date) return res.status(400).json({ success: false, message: 'Select a valid date.' });
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, ...await readKitchenState(req.params.id, req.query.date, req.query.job) });
+  } catch (error) { return res.status(error.statusCode || 503).json({ success: false, message: error.message }); }
+});
+
+router.post('/:id/kitchen-state', protect, async (req, res) => {
+  try {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(req.body.date || '') || toDateKey(req.body.date) !== req.body.date) return res.status(400).json({ success: false, message: 'Select a valid date.' });
+    const state = await beginKitchenState(req.params.id, req.body.date, () => runAutoPopulateMissing(req.params.id, req.body.date, { freshInputs: true }));
+    return res.status(state.state === 'running' ? 202 : 200).json({ success: true, ...state });
+  } catch (error) { return res.status(error.statusCode || 503).json({ success: false, message: error.message }); }
+});
+
+router.post('/:id/kitchen-upload', protect, async (req, res) => {
+  try { return res.json({ success: true, data: await kitchenUpload(req.params.id, req.body) }); }
+  catch (error) { return res.status(error.statusCode || 503).json({ success: false, message: error.message }); }
+});
 
 router.post('/:id/auto-populate-missing', protect, async (req, res) => {
   try {
@@ -2302,12 +2342,7 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
     // rotation no longer needs a duplicate, hand-typed pool to stay in sync
     // with. `intolerances` (already a comma/semicolon/pipe list on MenuItem)
     // fills the same role mainMealOptionSchema.exclusions used to.
-    const toOption = (item) => ({
-      _id: item._id,
-      name: item.mealName,
-      type: item.portionType,
-      exclusions: String(item.intolerances || '').split(/[,;|\n\r]/).map((s) => s.trim()).filter(Boolean)
-    });
+    const toOption = toKitchenOption;
     const allowedItemIds = (menu.meals || []).flatMap((day) => (day.items || []).map((item) => item._id || item));
     const dayMenuItems = await MenuItem.find({
       _id: { $in: allowedItemIds },
@@ -2332,7 +2367,7 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
       // No hand-built breakfast rotation for this date — use that day's
       // breakfast dishes from the menu file itself.
       const dayBreakfastItems = await MenuItem.find({ _id: { $in: (menu.meals || []).flatMap((day) => (day.items || []).map((item) => item._id || item)) }, itemDate: new Date(dateKey), mealType: 'breakfast' }).lean();
-      breakfastOptions = dayBreakfastItems.map((item) => ({ name: item.mealName, exclusions: splitIntolerances(item.intolerances) }));
+      breakfastOptions = dayBreakfastItems.map(toKitchenOption);
     }
 
     if (mainMeals.length === 0) {
@@ -2366,7 +2401,7 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
       if (!email) continue;
 
       const existingRecord = await MenuSelectionRecord.findOne({ weeklyMenuId: menuId, email }).lean();
-      if ((existingRecord?.skippedDays || []).some((day) => toDateKey(day.date || day) === dateKey)) continue;
+      if (await kitchenDateUnavailable(existingRecord, dateKey, customer.nutrition)) continue;
       const existingMainMealsCount = (existingRecord?.selectedMeals || []).filter(
         (m) => toDateKey(m.date) === dateKey && m.mealType === 'main'
       ).reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
@@ -2454,8 +2489,7 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
           // Kitchen List and kitchen paper so it's swapped before it goes out.
           if (!chosen) {
             const conflictsFor = (opt) => {
-              const tags = (opt.exclusions || []).map((e) => String(e).toLowerCase().trim());
-              return customerExclusions.filter((ex) => tags.some((tag) => tag.includes(ex) || ex.includes(tag)));
+              return kitchenConflictList(opt, customerExclusions);
             };
             let best = null;
             for (let offset = 0; offset < MAIN_MEAL_TYPE_ORDER.length; offset += 1) {
@@ -2501,6 +2535,7 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
         // GET /:id/selections.
         slotNumber: existingMainMealsCount + index,
         exclusionConflict: meal._exclusionConflict || [],
+        ...kitchenConflictFields(meal, customerExclusions),
         isAutoAssigned: true
       }));
 
@@ -2525,8 +2560,8 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
 
       if (newMeals.length === 0) continue;
 
-      await MenuSelectionRecord.findOneAndUpdate(
-        { weeklyMenuId: menuId, email },
+      await assertAssignmentMacros(newMeals);
+      await appendKitchenMeals(menuId, email, existingRecord,
         {
           $setOnInsert: {
             weeklyMenuId: menuId,
@@ -2541,8 +2576,7 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
             firstName: customer.name || email
           },
           $push: { selectedMeals: { $each: newMeals } }
-        },
-        { upsert: true }
+        }
       );
     }
 
@@ -2784,370 +2818,43 @@ router.get('/:id', protect, async (req, res) => {
  * POST /api/menus
  * Create a new weekly menu (admin only)
  */
-router.post('/', protect, async (req, res) => {
+const saveMenuResponse = async (req, res, creating) => {
   try {
-    const {
-      title,
-      description,
-      startDate,
-      endDate,
-      mealPlans,
-      meals,
-      days,
-      enableCompletionMessage,
-      completionMessage,
-      bodybuilderMode
-    } = req.body;
-
-    console.log('=== POST /menus - Creating new menu ===');
-    console.log('enableCompletionMessage:', enableCompletionMessage);
-    console.log('completionMessage:', completionMessage);
-
-    const menu = new WeeklyMenu({
-      title,
-      description,
-      startDate: new Date(startDate),
-      endDate: new Date(endDate),
-      mealPlans: mealPlans || ['Standard'],
-      meals: meals || [],
-      enableCompletionMessage: enableCompletionMessage || false,
-      completionMessage: completionMessage || 'Your meal selections have been saved successfully.',
-      // Fixed company-wide deadline policy — not configurable per menu.
-      selectionDeadlines: FIXED_SELECTION_DEADLINES,
-      createdBy: req.user._id,
-      shareLink: {
-        token: crypto.randomBytes(32).toString('hex'),
-        createdAt: new Date(),
-        expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 30 days
-      }
+    if (!creating && !isValidObjectId(req.params.id)) return res.status(404).json({ success: false, message: 'Menu not found' });
+    const menu = await saveManagedMenu({
+      menuId: creating ? null : req.params.id, body: req.body, userId: req.user._id,
+      buildMealName, mergeUploadedSnackPools,
     });
-
-    await menu.save();
-
-    console.log('Menu saved successfully:');
-    console.log('enableCompletionMessage:', menu.enableCompletionMessage);
-    console.log('completionMessage:', menu.completionMessage);
-
-    if (Array.isArray(days) && days.length > 0) {
-      const mealMap = new Map();
-
-      for (const day of days) {
-        if (!day?.date || !Array.isArray(day.items)) {
-          continue;
-        }
-
-        const dayDate = new Date(day.date);
-
-        for (const item of day.items) {
-          if (!item?.mealName) {
-            const generatedMealName = buildMealName(item);
-            if (!generatedMealName) {
-              continue;
-            }
-          }
-
-          const mealType = item.mealType || 'main';
-          const mealName = buildMealName(item);
-          const isBodybuilderItem = bodybuilderMode === true || (Array.isArray(mealPlans) && mealPlans.includes('Bodybuilder'));
-
-          const combinedIngredients = isBodybuilderItem
-            ? [
-                `Protein: ${String(item.proteinSource || '').trim()}`,
-                `Vegetables: ${String(item.veg || '').trim()}`,
-                `Carbs: ${String(item.carbs || '').trim()}`,
-                `Sauces: ${String(item.sauce || '').trim()}`
-              ].filter((value) => value.split(': ')[1]).join('; ')
-            : (item.ingredients || '');
-
-          const menuItem = new MenuItem({
-            itemDate: dayDate,
-            mealType,
-            mealName,
-            mealPlan: isBodybuilderItem ? 'Bodybuilder' : 'Standard',
-            ingredients: combinedIngredients,
-            proteinSource: item.proteinSource || '',
-            category: item.category || '',
-            intolerances: item.intolerances || '',
-            allergens: String(item.allergens || '').split(',').map(s => s.trim()).filter(Boolean),
-            garnish: item.garnish || '',
-            carbs: item.carbs || '',
-            veg: item.veg || '',
-            sauce: item.sauce || '',
-            portionIngredients: Array.isArray(item.portionIngredients) ? item.portionIngredients : [],
-            carbIngredients: Array.isArray(item.carbIngredients) ? item.carbIngredients : [],
-            vegIngredients: Array.isArray(item.vegIngredients) ? item.vegIngredients : [],
-            sauceIngredients: Array.isArray(item.sauceIngredients) ? item.sauceIngredients : [],
-            portionType: item.portionType || '',
-            rotationCategory: item.rotationCategory || '',
-            usedForCorePlan: !!item.usedForCorePlan
-          });
-
-          await menuItem.save();
-
-          const key = `${dayDate.toISOString().split('T')[0]}|${mealType}`;
-          if (!mealMap.has(key)) {
-            mealMap.set(key, {
-              date: dayDate,
-              mealType,
-              items: []
-            });
-          }
-          mealMap.get(key).items.push(menuItem._id);
-        }
-      }
-
-      menu.meals = Array.from(mealMap.values());
-      mergeUploadedSnackPools(menu, days);
-      await menu.save();
+    const warnings = [];
+    if (menu.shareLink?.token) {
+      try { await cacheDelete(`menu:share:${menu.shareLink.token}`); }
+      catch { warnings.push('Menu saved, but its public cache could not be refreshed. Retry the public menu shortly.'); }
     }
-
-    res.status(201).json({
-      success: true,
-      message: 'Menu created successfully',
-      data: menu
+    if (menu.isPublished) {
+      try { await syncMenuSelectionMainMealsToPartnerMenu(menu); }
+      catch (error) {
+        console.error('Partner menu sync failed after menu commit:', error.message);
+        warnings.push('Menu saved. Partner synchronization failed; retry publishing to synchronize partner dishes.');
+      }
+    }
+    return res.status(creating ? 201 : 200).json({
+      success: true, message: creating ? 'Menu created successfully' : 'Menu updated successfully', data: menu, warnings,
     });
   } catch (error) {
-    console.error('Error creating menu:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message
+    console.error('Menu save failed:', error.message);
+    return res.status(error.statusCode || (error.name === 'ValidationError' ? 400 : 503)).json({
+      success: false, message: error.message, ...(error.conflicts ? { conflicts: error.conflicts } : {}),
     });
   }
-});
+};
+
+router.post('/', protect, (req, res) => saveMenuResponse(req, res, true));
 
 /**
  * PUT /api/menus/:id
  * Update weekly menu (admin only)
  */
-router.put('/:id', protect, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    if (!isValidObjectId(id)) {
-      return res.status(404).json({
-        success: false,
-        message: 'Menu not found'
-      });
-    }
-
-    const {
-      title,
-      description,
-      meals,
-      isPublished,
-      days,
-      startDate,
-      endDate,
-      mealPlans,
-      enableCompletionMessage,
-      completionMessage,
-      shareLinkActive,
-      bodybuilderMode,
-      breakfastPreset,
-      breakfastPresetsByName
-    } = req.body;
-
-    console.log('=== PUT /menus/:id - Updating menu ===');
-    console.log('Menu ID:', id);
-    console.log('enableCompletionMessage:', enableCompletionMessage);
-    console.log('completionMessage:', completionMessage);
-
-    const menu = await WeeklyMenu.findById(id);
-
-    if (!menu) {
-      return res.status(404).json({
-        success: false,
-        message: 'Menu not found'
-      });
-    }
-
-    if (title) menu.title = title;
-    if (description) menu.description = description;
-    if (startDate) menu.startDate = new Date(startDate);
-    if (endDate) menu.endDate = new Date(endDate);
-    if (Array.isArray(mealPlans) && mealPlans.length > 0) menu.mealPlans = mealPlans;
-    if (meals) menu.meals = meals;
-    if (isPublished !== undefined) menu.isPublished = isPublished;
-    if (enableCompletionMessage !== undefined) menu.enableCompletionMessage = enableCompletionMessage;
-    if (completionMessage !== undefined) menu.completionMessage = completionMessage;
-    // Fixed company-wide deadline policy — reasserted on every update so it
-    // can never drift (and any older menu with a different/missing table
-    // gets migrated onto the fixed one the next time it's saved).
-    menu.selectionDeadlines = FIXED_SELECTION_DEADLINES;
-    if (breakfastPreset !== undefined) menu.breakfastPreset = breakfastPreset;
-    if (breakfastPresetsByName !== undefined) menu.breakfastPresetsByName = breakfastPresetsByName;
-    if (typeof shareLinkActive === 'boolean') {
-      if (!menu.shareLink) {
-        menu.shareLink = {
-          token: crypto.randomBytes(32).toString('hex'),
-          createdAt: new Date(),
-          expiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-          isActive: shareLinkActive
-        };
-      } else {
-        menu.shareLink.isActive = shareLinkActive;
-      }
-    }
-
-    console.log('Before save - menu.enableCompletionMessage:', menu.enableCompletionMessage);
-    console.log('Before save - menu.completionMessage:', menu.completionMessage);
-
-    if (Array.isArray(days) && days.length > 0) {
-      const existingItemIds = (menu.meals || [])
-        .flatMap((meal) => meal.items || [])
-        .map((id) => String(id))
-        .filter(Boolean);
-
-      // Build a lookup of existing MenuItems so we can REUSE their _id when the
-      // same (date + mealType + mealName) is re-submitted.  Reusing _id keeps
-      // customer selectedMeals.menuItemId references valid after an edit.
-      const existingItems = existingItemIds.length > 0
-        ? await MenuItem.find({ _id: { $in: existingItemIds } }).lean()
-        : [];
-
-      const existingItemMap = new Map(); // key: "YYYY-MM-DD|mealType|mealName" → MenuItem doc
-      for (const item of existingItems) {
-        const dateKey = item.itemDate
-          ? new Date(item.itemDate).toISOString().split('T')[0]
-          : '';
-        const key = `${dateKey}|${item.mealType || ''}|${(item.mealName || '').trim().toLowerCase()}`;
-        if (!existingItemMap.has(key)) existingItemMap.set(key, item);
-      }
-
-      const mealMap = new Map();
-      const usedExistingIds = new Set(); // track which old _ids we reused
-
-      for (const day of days) {
-        if (!day?.date || !Array.isArray(day.items)) {
-          continue;
-        }
-
-        const dayDate = new Date(day.date);
-
-        for (const item of day.items) {
-          if (!item?.mealName) {
-            const generatedMealName = buildMealName(item);
-            if (!generatedMealName) {
-              continue;
-            }
-          }
-
-          const mealType = item.mealType || 'main';
-          const mealName = buildMealName(item);
-          const isBodybuilderItem = bodybuilderMode === true || (Array.isArray(menu.mealPlans) && menu.mealPlans.includes('Bodybuilder'));
-
-          const combinedIngredients = isBodybuilderItem
-            ? [
-                `Protein: ${String(item.proteinSource || '').trim()}`,
-                `Vegetables: ${String(item.veg || '').trim()}`,
-                `Carbs: ${String(item.carbs || '').trim()}`,
-                `Sauces: ${String(item.sauce || '').trim()}`
-              ].filter((value) => value.split(': ')[1]).join('; ')
-            : (item.ingredients || '');
-
-          const updatedFields = {
-            itemDate: dayDate,
-            mealType,
-            mealName,
-            mealPlan: isBodybuilderItem ? 'Bodybuilder' : 'Standard',
-            ingredients: combinedIngredients,
-            proteinSource: item.proteinSource || '',
-            category: item.category || '',
-            intolerances: item.intolerances || '',
-            allergens: String(item.allergens || '').split(',').map(s => s.trim()).filter(Boolean),
-            garnish: item.garnish || '',
-            carbs: item.carbs || '',
-            veg: item.veg || '',
-            sauce: item.sauce || '',
-            portionIngredients: Array.isArray(item.portionIngredients) ? item.portionIngredients : [],
-            carbIngredients: Array.isArray(item.carbIngredients) ? item.carbIngredients : [],
-            vegIngredients: Array.isArray(item.vegIngredients) ? item.vegIngredients : [],
-            sauceIngredients: Array.isArray(item.sauceIngredients) ? item.sauceIngredients : [],
-            portionType: item.portionType || '',
-            rotationCategory: item.rotationCategory || '',
-            usedForCorePlan: !!item.usedForCorePlan
-          };
-
-          // Try to match an existing MenuItem by date + mealType + mealName
-          // so we can UPDATE it in-place rather than delete+recreate.
-          // This preserves customer selectedMeals.menuItemId references.
-          const matchKey = `${dayDate.toISOString().split('T')[0]}|${mealType}|${(mealName || '').trim().toLowerCase()}`;
-          const existingMatch = existingItemMap.get(matchKey);
-
-          let menuItemId;
-          if (existingMatch && !usedExistingIds.has(String(existingMatch._id))) {
-            // Reuse existing MenuItem — update its fields in-place
-            await MenuItem.findByIdAndUpdate(existingMatch._id, { $set: updatedFields });
-            menuItemId = existingMatch._id;
-            usedExistingIds.add(String(existingMatch._id));
-          } else {
-            // No match — create a new MenuItem
-            const menuItem = new MenuItem(updatedFields);
-            await menuItem.save();
-            menuItemId = menuItem._id;
-          }
-
-          const key = `${dayDate.toISOString().split('T')[0]}|${mealType}`;
-          if (!mealMap.has(key)) {
-            mealMap.set(key, {
-              date: dayDate,
-              mealType,
-              items: []
-            });
-          }
-          mealMap.get(key).items.push(menuItemId);
-        }
-      }
-
-      // Delete only old MenuItems that were NOT reused in the new menu
-      const unusedIds = existingItemIds.filter((id) => !usedExistingIds.has(id));
-      if (unusedIds.length > 0) {
-        await MenuItem.deleteMany({ _id: { $in: unusedIds } });
-      }
-
-      menu.meals = Array.from(mealMap.values());
-      mergeUploadedSnackPools(menu, days);
-    }
-
-    await menu.save();
-
-    console.log('After save - menu.enableCompletionMessage:', menu.enableCompletionMessage);
-    console.log('After save - menu.completionMessage:', menu.completionMessage);
-
-    // Owner (2026-10-19): a published menu's chicken/beef/fish main meals are
-    // also mirrored into the partner master menu, available on the exact
-    // day(s) the kitchen is serving them — fire-and-forget so a sync hiccup
-    // never blocks saving the menu itself.
-    if (menu.isPublished) {
-      syncMenuSelectionMainMealsToPartnerMenu(menu)
-        .then(({ created, updated }) => {
-          if (created || updated) {
-            console.log(`[menu-selection->partner-menu sync] +${created} new, ${updated} widened`);
-          }
-        })
-        .catch((err) => console.error('[menu-selection->partner-menu sync] failed:', err.message));
-    }
-
-    // Clear the cache for this menu's share link
-    if (menu.shareLink?.token) {
-      const cacheKey = `menu:share:${menu.shareLink.token}`;
-      await cacheDelete(cacheKey);
-      console.log(`Cleared cache for menu share link: ${cacheKey}`);
-    }
-
-    res.json({
-      success: true,
-      message: 'Menu updated successfully',
-      data: menu
-    });
-  } catch (error) {
-    console.error('Error updating menu:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
-  }
-});
+router.put('/:id', protect, (req, res) => saveMenuResponse(req, res, false));
 
 /**
  * GET /api/menus/:id/share-link
@@ -3202,15 +2909,11 @@ router.delete('/:id', protect, async (req, res) => {
       });
     }
 
-    const itemIds = (menu.meals || [])
-      .flatMap((meal) => meal.items || [])
-      .filter(Boolean);
+    if (menu.isPublished || await MenuSelectionRecord.exists({ weeklyMenuId: id })) {
+      return res.status(409).json({ success: false, message: 'This menu is published or has customer selection history. Unpublish or archive it instead of deleting selected dishes.' });
+    }
 
     await WeeklyMenu.findByIdAndDelete(id);
-
-    if (itemIds.length > 0) {
-      await MenuItem.deleteMany({ _id: { $in: itemIds } });
-    }
 
     return res.json({
       success: true,
@@ -3499,7 +3202,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     // Require an explicit date for every new pause before saving anything.
     const prior = weeklyMenuId ? await MenuSelectionRecord.findOne(selectionFilter)
       .select('skippedDays').lean() : null;
-    const priorByDate = new Map((prior?.skippedDays || []).map((s) => [toDayKey(s.date), s]));
+    const priorByDate = new Map((prior?.skippedDays || []).filter(day => !day.resumedAt).map((s) => [toDayKey(s.date), s]));
     skippedDateKeys = [...new Set([...priorByDate.keys(), ...skippedDateKeys])].sort();
     const alreadyPaused = new Set([...priorByDate].filter(([, p]) => ['success', 'already_paused'].includes(p.pauseStatus)).map(([date]) => date));
     const claimedExisting = [...pauseDecisionByDate.values()].filter((d) => d.alreadyPaused && !alreadyPaused.has(toDayKey(d.date)));

@@ -1,4 +1,4 @@
-import { assertKitchenExportReady } from './kitchenIntegrity';
+import { assertKitchenExportReady, kitchenMealChanges } from './kitchenIntegrity';
 // Kitchen paper for ONE customer over a custom date range (PDF and Word).
 //
 // One page per delivery date, each laid out like the customer's block on the
@@ -136,7 +136,8 @@ export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers 
       head: [['Type', 'Meal', 'P', 'C', 'V']],
       body: day.meals.map((meal, i) => {
         const label = getMealLabel(meal);
-        return [label.mealType, large[i] ? `${label.mealName}   [LARGE]` : label.mealName, `${meal.proteinWeight || 0}g`, `${meal.carbWeight || 0}g`, `${meal.vegWeight || 0}g`];
+        const changes = kitchenMealChanges(meal);
+        return [label.mealType, `${label.mealName}${large[i] ? '   [LARGE]' : ''}${changes ? `\n${changes}` : ''}`, `${meal.proteinWeight || 0}g`, `${meal.carbWeight || 0}g`, `${meal.vegWeight || 0}g`];
       }),
       theme: 'grid',
       styles: { fontSize: 11, cellPadding: 2.4 },
@@ -187,7 +188,7 @@ export const downloadCustomerPaperWord = ({ entry, fromKey, toKey, helpers }) =>
       const largeTag = isLargeBreakfast(meal)
         ? ' <span style="background:#6d28d9;color:#ffffff;font-size:9pt;font-weight:bold">&nbsp;LARGE&nbsp;</span>'
         : '';
-      return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}${largeTag}</td>`
+      return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}${largeTag}${kitchenMealChanges(meal) ? `<br/><b>${esc(kitchenMealChanges(meal))}</b>` : ''}</td>`
         + `<td>${esc(meal.proteinWeight || 0)}g</td><td>${esc(meal.carbWeight || 0)}g</td><td>${esc(meal.vegWeight || 0)}g</td></tr>`;
     }).join('');
     const dayNote = (entry.dayNotes || []).find((note) => note.date === day.dateKey)?.note;

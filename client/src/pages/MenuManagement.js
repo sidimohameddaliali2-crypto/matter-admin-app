@@ -43,6 +43,7 @@ const FIXED_SELECTION_DEADLINES = [
 import api from '../utils/api';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
 import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
+import { copyManagedMenuItem, managedMenuPayload } from '../utils/managedMenuItems';
 import SupyRecipeSearch from '../components/SupyRecipeSearch';
 import IngredientTagEditor from '../components/IngredientTagEditor';
 import { toSentenceCase } from '../utils/textFormat';
@@ -374,7 +375,7 @@ const MenuManagement = () => {
       const source = updated[dayIndex].items[itemIndex];
       updated[dayIndex].items = [
         ...updated[dayIndex].items,
-        { ...source, mealName: source.mealName ? `${source.mealName} (copy)` : '' }
+        { ...copyManagedMenuItem(source), mealName: source.mealName ? `${source.mealName} (copy)` : '' }
       ];
       return updated;
     });
@@ -393,7 +394,7 @@ const MenuManagement = () => {
       const updated = [...prev];
       updated[targetDayIndex] = {
         ...updated[targetDayIndex],
-        items: [...updated[targetDayIndex].items, ...source.items.map((item) => ({ ...item }))]
+        items: [...updated[targetDayIndex].items, ...source.items.map(copyManagedMenuItem)]
       };
       return updated;
     });
@@ -671,21 +672,16 @@ const MenuManagement = () => {
   // as one action ("Publish & copy link"), same as the design's button.
   const handleSaveMenu = async ({ publish }) => {
     try {
-      const payload = { ...formData };
+      const payload = managedMenuPayload(formData, weeklyItems, publish);
       let response = editingMenuId
-        ? await api.put(`/menus/${editingMenuId}`, { ...payload, days: weeklyItems })
-        : await api.post('/menus', { ...payload, meals: [], days: weeklyItems });
+        ? await api.put(`/menus/${editingMenuId}`, payload)
+        : await api.post('/menus', payload);
 
       if (!response.data?.success) {
         setError(response.data?.message || 'Failed to save menu');
         return;
       }
       let savedMenu = response.data.data;
-
-      if (publish && !savedMenu.isPublished) {
-        const pubRes = await api.put(`/menus/${savedMenu._id}`, { isPublished: true });
-        if (pubRes.data?.success) savedMenu = pubRes.data.data;
-      }
 
       setMenus((prev) => {
         const exists = prev.some((m) => m._id === savedMenu._id);
@@ -698,6 +694,7 @@ const MenuManagement = () => {
       }
 
       closeCreateForm();
+      if (response.data.warnings?.length) setError(response.data.warnings.join(' '));
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to save menu');
     }
@@ -719,6 +716,7 @@ const MenuManagement = () => {
       items.forEach((item) => {
         if (!item) return;
         dayMap.get(dateKey).items.push({
+          menuItemId: item._id || '',
           mealType: normalizeMealType(meal.mealType || item.mealType),
           mealName: item.mealName || '',
           ingredients: item.ingredients || '',
@@ -755,6 +753,7 @@ const MenuManagement = () => {
       setUploadError(null);
       setFormData({
         title: menu.title || '',
+        expectedUpdatedAt: menu.updatedAt,
         description: menu.description || '',
         startDate: menu.startDate ? getDateKey(menu.startDate) : '',
         endDate: menu.endDate ? getDateKey(menu.endDate) : '',

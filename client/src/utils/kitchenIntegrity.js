@@ -1,4 +1,15 @@
+import { loadPreparedKitchenState } from '../lib/kitchenPreparationState';
+
 export const KITCHEN_FORMULA_VERSION = 'main-kitchen-2026-10-20';
+
+export const kitchenMealChanges = meal => [
+  meal?.remark ? `Change ${meal.remark}` : '',
+  meal?.carbConflict?.length && !/carb/i.test(meal?.remark || '') ? 'Change carb' : '',
+  meal?.vegConflict?.length && !/veg/i.test(meal?.remark || '') ? 'Change veg' : '',
+  meal?.needsSauceChange ? 'Change sauce' : '',
+  meal?.needsGarnishChange ? 'Change garnish' : '',
+  meal?.exclusionConflict?.length ? `Excluded: ${meal.exclusionConflict.join(', ')}; replace before preparation` : '',
+].filter(Boolean).join(' | ');
 
 const validNumber = (value) => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
   && Number.isFinite(Number(value)) && Number(value) >= 0;
@@ -51,6 +62,10 @@ export const assertKitchenExportReady = (entries) => {
 
 // Loading is explicit: GET /selections never launches unobservable writes.
 export const prepareKitchenSelections = async (api, menuId, dateKey, isCurrent = () => true) => {
+  if (api.get) {
+    const prepared = await loadPreparedKitchenState(api, menuId, dateKey, isCurrent);
+    if (prepared) return prepared;
+  }
   const deadline = Date.now() + 180000;
   while (isCurrent()) {
     try {

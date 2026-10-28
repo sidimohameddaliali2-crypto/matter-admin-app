@@ -1,7 +1,7 @@
 import KitchenInputWarnings from '../components/KitchenInputWarnings';
-import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
+import { loadKitchenSnapshot, requiredKitchenMeals } from '../lib/kitchenSnapshot';
 import PartnerKitchenOrders from '../components/PartnerKitchenOrders';
-import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady } from '../utils/kitchenIntegrity';
+import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealChanges } from '../utils/kitchenIntegrity';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, Shuffle, FileText, ChevronDown, ChevronUp, AlertTriangle, Pencil } from 'lucide-react';
 import api from '../utils/api';
@@ -287,6 +287,7 @@ const KitchenList = () => {
   // keystroke — a major source of the page freezing up while typing.
   const [searchInput, setSearchInput] = useState('');
   const [search, setSearch] = useState('');
+  const [visibleCustomers, setVisibleCustomers] = useState(50);
   useEffect(() => {
     const timeout = setTimeout(() => setSearch(searchInput), 250);
     return () => clearTimeout(timeout);
@@ -350,6 +351,7 @@ const KitchenList = () => {
   const nutritionCacheRef = useRef(new Map());
   const selectionRequests = useRef(createKitchenRequestGuard());
   const preparedSnapshot = useRef(null);
+  const optionRequests = useRef({});
   const activeSelectionScope = useRef('');
   activeSelectionScope.current = `${selectedMenuId}:${missingCheckDate}`;
   const [loadedSelectionScope, setLoadedSelectionScope] = useState('');
@@ -443,9 +445,9 @@ const KitchenList = () => {
         const preparation = await prepareKitchenSelections(api, selectedMenuId, missingCheckDate, current);
         if (!current()) return [];
         const [response, breakfastState, snackState] = await Promise.all([
-          api.get(`/menus/${selectedMenuId}/selections`),
-          fetchBreakfastPresets(api, selectedMenuId),
-          fetchSnackPresets(api)
+          preparation.data?.kitchenSelections ? Promise.resolve({ data: { success: true, data: preparation.data.kitchenSelections } }) : api.get(`/menus/${selectedMenuId}/selections`, { timeout: 30000 }),
+          preparation.data?.kitchenBreakfastPreset || fetchBreakfastPresets(api, selectedMenuId),
+          preparation.data?.kitchenSnackPreset || fetchSnackPresets(api)
         ]);
 
         if (!current()) return [];
@@ -470,13 +472,14 @@ const KitchenList = () => {
           const keyedSelections = enrichedSelections.map((entry) => attachStableMealKeys(entry));
           if (!current()) return [];
           preparedSnapshot.current = { menuId: selectedMenuId, date: missingCheckDate, receivedAt: Date.now(), checkedAt: preparation.preparedAt,
+            snapshotId: preparation.snapshotId,
             complete: !preparation.cached && preparation.data?.rosterComplete === true, roster: preparation.data?.kitchenRoster,
             selections: keyedSelections, breakfastPreset: breakfastState, snackPreset: snackState };
           setMenuSelections(keyedSelections);
           setLoadedSelectionScope(scope);
           return keyedSelections;
         }
-        return [];
+        throw new Error(response.data?.message || 'Selections could not be verified. Please retry.');
     } catch (err) {
       if (current()) { setMenuSelections([]); setError(err.response?.data?.message || err.message || 'Failed to load menu selections'); }
       return [];
@@ -492,63 +495,37 @@ const KitchenList = () => {
   // must not trigger any fetch. menuDateKeys populates the Date dropdown
   // itself from the menu's own start/end range without needing any of this
   // data first, so there's no chicken-and-egg problem in gating it this way.
-  const loadSnackOptions = useCallback(async () => {
+  const loadKitchenOptions = useCallback(async (kind, setter) => {
+    const scope = `${selectedMenuId}:${missingCheckDate}`;
+    const request = (optionRequests.current[kind] || 0) + 1;
+    optionRequests.current[kind] = request;
+    const current = () => activeSelectionScope.current === scope && optionRequests.current[kind] === request;
     if (!selectedMenuId || !missingCheckDate) {
-      setSnackOptionsByDate({});
+      setter({});
       return;
     }
     try {
-      const res = await api.get(`/menus/${selectedMenuId}/snack-options`);
-      setSnackOptionsByDate(res.data?.data || {});
+      const res = await api.get(`/menus/${selectedMenuId}/${kind}`, { timeout: 30000 });
+      if (res.data?.success === false) throw new Error(res.data.message || 'Menu options could not be loaded.');
+      if (current()) setter(res.data?.data || {});
     } catch (err) {
-      setSnackOptionsByDate({});
+      if (current()) setError(err.response?.data?.message || err.message || 'Menu options could not be loaded.');
     }
   }, [selectedMenuId, missingCheckDate]);
+
+  const loadSnackOptions = useCallback(() => loadKitchenOptions('snack-options', setSnackOptionsByDate), [loadKitchenOptions]);
 
   useEffect(() => { loadSnackOptions(); }, [loadSnackOptions]);
 
-  const loadMainMealOptions = useCallback(async () => {
-    if (!selectedMenuId || !missingCheckDate) {
-      setMainMealOptionsByDate({});
-      return;
-    }
-    try {
-      const res = await api.get(`/menus/${selectedMenuId}/main-meal-options`);
-      setMainMealOptionsByDate(res.data?.data || {});
-    } catch (err) {
-      setMainMealOptionsByDate({});
-    }
-  }, [selectedMenuId, missingCheckDate]);
+  const loadMainMealOptions = useCallback(() => loadKitchenOptions('main-meal-options', setMainMealOptionsByDate), [loadKitchenOptions]);
 
   useEffect(() => { loadMainMealOptions(); }, [loadMainMealOptions]);
 
-  const loadBreakfastOptions = useCallback(async () => {
-    if (!selectedMenuId || !missingCheckDate) {
-      setBreakfastOptionsByDate({});
-      return;
-    }
-    try {
-      const res = await api.get(`/menus/${selectedMenuId}/breakfast-options`);
-      setBreakfastOptionsByDate(res.data?.data || {});
-    } catch (err) {
-      setBreakfastOptionsByDate({});
-    }
-  }, [selectedMenuId, missingCheckDate]);
+  const loadBreakfastOptions = useCallback(() => loadKitchenOptions('breakfast-options', setBreakfastOptionsByDate), [loadKitchenOptions]);
 
   useEffect(() => { loadBreakfastOptions(); }, [loadBreakfastOptions]);
 
-  const loadMatterCoreMealOptions = useCallback(async () => {
-    if (!selectedMenuId || !missingCheckDate) {
-      setMatterCoreMealOptionsByDate({});
-      return;
-    }
-    try {
-      const res = await api.get(`/menus/${selectedMenuId}/matter-core-meal-options`);
-      setMatterCoreMealOptionsByDate(res.data?.data || {});
-    } catch (err) {
-      setMatterCoreMealOptionsByDate({});
-    }
-  }, [selectedMenuId, missingCheckDate]);
+  const loadMatterCoreMealOptions = useCallback(() => loadKitchenOptions('matter-core-meal-options', setMatterCoreMealOptionsByDate), [loadKitchenOptions]);
 
   useEffect(() => { loadMatterCoreMealOptions(); }, [loadMatterCoreMealOptions]);
 
@@ -617,15 +594,20 @@ const KitchenList = () => {
 
       const missing = subs
         .map((sub) => {
-          const matched = internalBySubscriptionId.get(String(sub.subscription_id || '').trim());
+        const matched = activeSelections.find(entry => String(entry.matterCustomerId || '') === String(sub.customer_id))
+          || internalBySubscriptionId.get(String(sub.subscription_id || '').trim());
+        const core = String(sub.plan_name || '').trim().toLowerCase() === 'matter core';
+        const portions = (matched?.selectedMeals || []).filter(meal => getDateKey(meal.date) === dateKey && (core ? meal.mealType === 'main' : meal.mealType !== 'snack'))
+          .reduce((sum, meal) => sum + Math.max(1, Number(meal.quantity) || 1), 0);
+        const covered = portions >= requiredKitchenMeals(sub, matched, dateKey);
           return {
-            sub,
+            sub, covered,
             resolvedEmail: matched?.email || sub.email || '',
             resolvedCustomerId: matched?.customerId || String(sub.customer_id ?? sub.subscription_id),
             resolvedName: getCustomerName({ matterName: sub.name })
           };
         })
-        .filter(({ resolvedEmail }) => !coveredEmails.has(String(resolvedEmail).trim().toLowerCase()))
+        .filter(({ covered }) => !covered)
         .map(({ sub, resolvedEmail, resolvedCustomerId, resolvedName }) => ({
           customerId: resolvedCustomerId,
           customerName: resolvedName,
@@ -886,52 +868,18 @@ const KitchenList = () => {
         return;
       }
 
-      // One bulk PUT per type (main/sub, snack, breakfast) instead of one PUT
-      // per date — a full week used to mean 7+ sequential round trips per
-      // type (20+ total), each followed by a state update and a full page
-      // re-render, which is what made large uploads feel like the page had
-      // frozen. The server applies every date's entry in one document save.
-      if (mainDateKeys.length > 0) {
-        const res = await api.put(`/menus/${selectedMenuId}/main-meal-options`, {
-          entries: mainDateKeys.map((dateKey) => ({
-            date: dateKey,
-            mainMeals: mainByDate[dateKey].mainMeals,
-            subMeals: mainByDate[dateKey].subMeals
-          }))
-        });
-        setMainMealOptionsByDate(res.data?.data || {});
-      }
-      if (snackDateKeys.length > 0) {
-        const res = await api.put(`/menus/${selectedMenuId}/snack-options`, {
-          entries: snackDateKeys.map((dateKey) => ({
-            date: dateKey,
-            first: snackByDate[dateKey].first,
-            second: snackByDate[dateKey].second
-          }))
-        });
-        setSnackOptionsByDate(res.data?.data || {});
-      }
-      if (breakfastDateKeys.length > 0) {
-        const res = await api.put(`/menus/${selectedMenuId}/breakfast-options`, {
-          entries: breakfastDateKeys.map((dateKey) => ({
-            date: dateKey,
-            options: breakfastByDate[dateKey]
-          }))
-        });
-        setBreakfastOptionsByDate(res.data?.data || {});
-      }
-
-      if (breakfastPresetRows.length > 0) {
-        const firstRow = breakfastPresetRows[0];
-        const presetsByName = breakfastPresetRows.reduce((acc, row) => {
-          const key = normalizeBreakfastKey(row.breakfastName);
-          if (!key) return acc;
-          acc[key] = { C: row.C, P: row.P, F: row.F, V: row.V, isLargeBreakfast: !!row.isLargeBreakfast };
-          return acc;
-        }, {});
-        await persistBreakfastPresets(breakfastPresetRows, firstRow, presetsByName);
-        setImportName(file.name);
-      }
+      if (skipped > 0) throw new Error(`Upload contains ${skipped} invalid row(s). Correct them before saving.`);
+      const payload = { mainByDate, snackByDate, breakfastByDate, breakfastPresetRows };
+      const preview = await api.post(`/menus/${selectedMenuId}/kitchen-upload`, { ...payload, dryRun: true });
+      if (!preview.data?.success) throw new Error(preview.data?.message || 'Upload preview failed.');
+      const summary = preview.data.data;
+      if (!window.confirm(`Upload ${summary.count} meal option(s) across ${summary.dates.length} date(s)?${summary.missingMacros.length ? ' Missing macros: ' + summary.missingMacros.join(', ') + '. Auto-assign will remain blocked until these are supplied.' : ''}`)) return;
+      const committed = await api.post(`/menus/${selectedMenuId}/kitchen-upload`, { ...payload, expectedRevision: summary.revision });
+      if (!committed.data?.success) throw new Error(committed.data?.message || 'Upload failed.');
+      await Promise.all([loadMainMealOptions(), loadSnackOptions(), loadBreakfastOptions()]);
+      setBreakfastPreset(await fetchBreakfastPresets(api, selectedMenuId));
+      setSnackPreset(await fetchSnackPresets(api));
+      setImportName(file.name);
 
       // Jump the "Date" selector to whatever was just uploaded so the new
       // main/sub/breakfast/snack items are immediately visible instead of
@@ -950,7 +898,7 @@ const KitchenList = () => {
         skipped
       });
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to upload weekly menu');
+      setError(err.response?.data?.message || err.message || 'Failed to upload weekly menu');
     } finally {
       setUploadingWeeklyMenu(false);
       event.target.value = '';
@@ -2074,6 +2022,7 @@ const KitchenList = () => {
           Address: entry.partner ? '' : formatAddress(entry.deliveryAddress),
           Type: label.mealType,
           Meal: label.mealName,
+          Changes: kitchenMealChanges(meal),
           'P (g)': Number(meal.proteinWeight) || 0,
           'C (g)': Number(meal.carbWeight) || 0,
           'V (g)': Number(meal.vegWeight) || 0,
@@ -2192,7 +2141,7 @@ const KitchenList = () => {
         const largeTag = isLarge
           ? ' <span style="background:#6d28d9;color:#ffffff;font-size:10.5pt;font-weight:bold">&nbsp;LARGE&nbsp;</span>'
           : '';
-        return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}${largeTag}</td>`
+        return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}${largeTag}${kitchenMealChanges(meal) ? `<br/><b>${esc(kitchenMealChanges(meal))}</b>` : ''}</td>`
           + `<td>${esc(meal.proteinWeight || 0)}g</td><td>${esc(meal.carbWeight || 0)}g</td><td>${esc(meal.vegWeight || 0)}g</td></tr>`;
       }).join('');
       // The whole customer block sits in ONE table row that Word may not split
@@ -2436,7 +2385,7 @@ ${body}
           const label = getMealLabel(meal);
           return [
             label.mealType,
-            isLargeRow[mealIndex] ? `${label.mealName}   [LARGE]` : label.mealName,
+            `${label.mealName}${isLargeRow[mealIndex] ? '   [LARGE]' : ''}${kitchenMealChanges(meal) ? `\n${kitchenMealChanges(meal)}` : ''}`,
             `${meal.proteinWeight || 0}g`,
             `${meal.carbWeight || 0}g`,
             `${meal.vegWeight || 0}g`
@@ -3373,7 +3322,7 @@ ${body}
             setShowOnlyMissing(false);
             setShowOnlyAttention(false);
           }} />
-        {customerRows.map((entry) => (
+        {customerRows.slice(0, visibleCustomers).map((entry) => (
             <CustomerCard
               key={`${entry.email || entry.customerId}`}
               entry={entry}
@@ -3386,9 +3335,15 @@ ${body}
           ))}
         </div>
 
-        {!loadingMenus && !loadingSelections && customerRows.length === 0 && (
+        {customerRows.length > visibleCustomers && (
+          <button type="button" onClick={() => setVisibleCustomers(count => count + 50)} className="rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm">
+            Show 50 more customers ({visibleCustomers} of {customerRows.length} shown)
+          </button>
+        )}
+
+        {!error && !loadingMenus && !loadingSelections && missingCheckDate && loadedSelectionScope === `${selectedMenuId}:${missingCheckDate}` && customerRows.length === 0 && (
           <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center text-slate-500 shadow-sm">
-            No customer selections found for this menu.
+            {allComputedRows.length ? 'No customers match the current filters.' : 'No customer selections found for this menu.'}
           </div>
         )}
       </div>

@@ -1,5 +1,5 @@
 import { calculateKitchenListEntry } from './kitchenListCalculations';
-import { assertKitchenExportReady, createKitchenRequestGuard, kitchenMealWarnings, prepareKitchenSelections } from './kitchenIntegrity';
+import { assertKitchenExportReady, createKitchenRequestGuard, kitchenMealWarnings, prepareKitchenSelections, kitchenMealChanges } from './kitchenIntegrity';
 import { enrichSelectionsWithNutrition } from '../lib/kitchenData';
 import { loadKitchenSnapshot, assertKitchenRosterCovered, verifiedKitchenRoster, hasKitchenDeliveryOnDate } from '../lib/kitchenSnapshot';
 import { downloadCustomerPaperPdf, downloadCustomerPaperWord } from './kitchenPaperCustomer';
@@ -8,6 +8,14 @@ const date = '2026-10-20';
 const meal = { date, mealType: 'main', mealName: 'Fixture', quantity: 1 };
 const customer = { email: 'fixture@example.invalid', planName: 'Custom', targetMacros: { C: 38, P: 32, F: 10 } };
 const calculate = (overrides = {}, meals = [meal]) => calculateKitchenListEntry({ customer: { ...customer, ...overrides }, selectedMeals: meals });
+
+test('component conflicts produce readable preparation changes without changing weights', () => {
+  const entry = calculate();
+  const originalWeight = entry.selectedMeals[0].weight;
+  const flagged = { ...entry.selectedMeals[0], carbConflict: ['Rice'], vegConflict: ['Broccoli'], needsSauceChange: true, needsGarnishChange: true };
+  expect(kitchenMealChanges(flagged)).toBe('Change carb | Change veg | Change sauce | Change garnish');
+  expect(flagged.weight).toBe(originalWeight);
+});
 
 test.each([{}, { targetMacros: { C: null, P: 32, F: 10 } }, { targetMacros: { C: 0, P: 0, F: 0 } }, { targetMacros: { C: 10, P: Infinity, F: 1 } }, { planName: '' }, { nutritionStatus: 'failed' }, { nutritionUnits: 'food-weight-grams' }])('unresolved inputs never synthesize a valid production portion: %p', (input) => {
   const result = calculateKitchenListEntry({ customer: input, selectedMeals: [meal] });
@@ -90,7 +98,8 @@ test('paper snapshot waits for preparation and uses the same calculator as kitch
     },
   };
   const snapshot = await loadKitchenSnapshot(api, 'menu', [date]);
-  expect(calls[0]).toBe('prepared');
+  expect(calls[0]).toBe('/menus/menu/kitchen-state');
+  expect(calls.indexOf('prepared')).toBeLessThan(calls.indexOf('/menus/menu/selections'));
   expect(snapshot.entries[0].selectedMeals[0]).toMatchObject({ proteinWeight: 120, carbWeight: 135, vegWeight: 80 });
   expect(snapshot.entries[0].selectedMeals[0].weight).toBe(calculate().selectedMeals[0].weight);
   expect(snapshot.entries[0].formulaVersion).toBeTruthy();

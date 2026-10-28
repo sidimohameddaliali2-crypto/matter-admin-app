@@ -6,7 +6,7 @@ export default function KitchenInputWarnings({ entries, selectedDate, onShowCust
     if (entry.calculationStatus !== 'incomplete' || entry.kitchenProductionExcluded) return false;
     if (!selectedDate) return true;
     if (entry.noDeliveryDate === selectedDate) return false;
-    if ((entry.skippedDays || []).some(day => getDateKey(day.date || day) === selectedDate)) return false;
+    if ((entry.skippedDays || []).some(day => !day.resumedAt && getDateKey(day.date || day) === selectedDate)) return false;
     return (entry.selectedMeals || []).some(meal => getDateKey(meal.date) === selectedDate)
       || (entry.missingSelection && entry.missingSelectionDate === selectedDate);
   });
