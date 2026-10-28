@@ -47,7 +47,7 @@ beforeEach(() => {
     data: {
       success: true,
       data: path === '/partner/orders' ? [] : path.startsWith('/partner/orders/') ? {
-        status: 'draft'
+        status: 'draft', lines: []
       } : menu(path.split('=')[1])
     }
   }));

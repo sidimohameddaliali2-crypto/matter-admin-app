@@ -43,6 +43,7 @@ export function quotePlanDay(day, menu) {
 
 // A retry never rewrites an order that was accepted when its response was lost.
 export async function submitPlanDay(api, day, onDraftSaved) {
+  const lines = Object.values(day.items).map(item => ({ menuItemId: item.id, quantity: item.quantity }));
   if (day.orderId) {
     const existing = (await api.get('/partner/orders/' + day.orderId)).data;
     if (!existing?.success) throw new Error('Could not verify the saved order for ' + day.date + '.');
@@ -55,10 +56,24 @@ export async function submitPlanDay(api, day, onDraftSaved) {
       return day.orderId;
     }
     if (existing.data.status !== 'draft') throw new Error('The saved order for ' + day.date + ' can no longer be submitted.');
+    if (!Array.isArray(existing.data.lines)) throw new Error('Could not verify the saved draft items for ' + day.date + '. Please retry.');
+    // The server merges draft lines. Omission does not remove an old meal:
+    // explicitly delete every stored item that is absent from the latest cart.
+    const reconciledIds = new Set(lines.map(line => line.menuItemId));
+    for (const stored of existing.data.lines) {
+      const id = stored?.menuItem?._id || stored?.menuItem;
+      if (typeof id !== 'string' || !id.trim()) {
+        throw new Error('Could not identify a saved draft item for ' + day.date + '. Review this order in My Orders.');
+      }
+      if (!reconciledIds.has(id)) {
+        lines.push({ menuItemId: id, quantity: 0 });
+        reconciledIds.add(id);
+      }
+    }
   }
   const result = (await api.post('/partner/orders', {
     deliveryDate: day.date,
-    lines: Object.values(day.items).map(item => ({ menuItemId: item.id, quantity: item.quantity })),
+    lines,
     deliveryTime: day.window, notes: '',
   })).data;
   if (!result?.success || !result.data?._id) throw new Error('Could not save the order for ' + day.date + '.');
