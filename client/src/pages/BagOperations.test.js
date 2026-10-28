@@ -185,3 +185,34 @@ test('warehouse camera failure keeps handheld scanning available',async()=>{
   await warehouse();await click('Scan a bag');await click('Start camera');await click('Camera fails');
   expect(container.querySelector('[role="alert"]').textContent).toContain('handheld scanner');expect(button('Start camera')).toBeDefined();noTyping();
 });
+
+
+test('warehouse rejects scans above 160 characters without losing valid counted tags',async()=>{
+  api.post.mockResolvedValue({data:{data:{scannedCodes:['BAG-00001','A'.repeat(160)],missingCodes:[],unexpectedCodes:[]}}});
+  await warehouse();await click('Count the bags on the shelfStart a physical stock check');await click('Start camera');
+  await cameraScan('BAG-00001');await cameraScan('A'.repeat(160));
+  expect(container.textContent).toContain('2 unique bags scanned');
+  for(const length of [161,200]){
+    await cameraScan('B'.repeat(length));
+    expect(container.querySelector('[role="alert"]').textContent).toContain('160 characters or fewer');
+    expect(container.querySelectorAll('.wk-scantags>span')).toHaveLength(2);
+  }
+  await act(async()=>container.querySelector('input[type="checkbox"]').click());await click('Submit count for review');
+  expect(api.post).toHaveBeenCalledWith('/bag-operations/stock-counts',expect.objectContaining({scannedCodes:['BAG-00001','A'.repeat(160)]}));
+});
+
+test('warehouse can remove an accidental count scan, preserve other tags, and rescan it',async()=>{
+  api.post.mockResolvedValue({data:{data:{scannedCodes:['BAG-00001','BAG-00002'],missingCodes:[],unexpectedCodes:[]}}});
+  await warehouse();await click('Count the bags on the shelfStart a physical stock check');await click('Start camera');
+  await cameraScan('BAG-00001');await cameraScan('BAG-00002');await cameraScan('ACCIDENTAL-QR');
+  await act(async()=>container.querySelector('input[type="checkbox"]').click());
+  const remove=code=>container.querySelector('[aria-label="Remove '+code+' from count"]');
+  await act(async()=>remove('ACCIDENTAL-QR').click());
+  expect(container.textContent).toContain('2 unique bags scanned');expect(button('Submit count for review').disabled).toBe(true);
+  expect(remove('BAG-00001')).not.toBeNull();expect(remove('BAG-00002')).not.toBeNull();
+  await act(async()=>remove('BAG-00002').click());await cameraScan('BAG_00002');
+  expect(container.textContent).toContain('2 unique bags scanned');expect(api.post).not.toHaveBeenCalled();
+  await act(async()=>container.querySelector('input[type="checkbox"]').click());await click('Submit count for review');
+  expect(api.post).toHaveBeenCalledWith('/bag-operations/stock-counts',expect.objectContaining({scannedCodes:['BAG-00001','BAG-00002']}));
+  expect(container.querySelector('.wk-scantags button')).toBeNull();
+});
