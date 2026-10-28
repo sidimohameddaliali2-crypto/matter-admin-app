@@ -107,6 +107,7 @@ const SimpleQrScanner = ({
       <Webcam
         ref={webcamRef}
         videoConstraints={videoConstraints}
+        onUserMediaError={onError}
         style={mergedVideoStyle}
         muted
         playsInline

@@ -6,7 +6,8 @@ jest.mock('../utils/api',()=>({__esModule:true,default:{get:jest.fn(),post:jest.
 jest.mock('react-redux',()=>({useSelector:fn=>fn({auth:{user:{_id:'staff',role:'admin'}}})}));
 jest.mock('react-router-dom',()=>{const React=require('react');return {useSearchParams:()=>{const [params,setParams]=React.useState(new URLSearchParams());return [params,next=>setParams(new URLSearchParams(next))];}};},{virtual:true});
 jest.mock('qrcode.react',()=>({QRCodeCanvas:()=> <div>Existing QR</div>}));
-jest.mock('../components/SimpleQrScanner',()=>({onScan})=> <div>Camera scanner<button onClick={()=>onScan([{rawValue:'BAG_00001'}])}>Scan test label</button></div>);
+let mockScanLabel='BAG_00001';
+jest.mock('../components/SimpleQrScanner',()=>({onScan,onError})=> <div>Camera scanner<button onClick={()=>onScan([{rawValue:mockScanLabel}])}>Scan test label</button><button onClick={onError}>Camera fails</button></div>);
 jest.mock('../components/bags/bagQrLabels',()=>({downloadBulkQrPdf:jest.fn()}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
 const fixture=()=>({generatedAt:'2026-10-22T09:00:00Z',summary:{bagRecords:1},canOperate:true,canRetire:true,checks:[{code:'custody_ambiguous',count:1}],unknownCodes:['BAG-9999'],reviewers:[{_id:'staff',name:'Reviewer'}],drivers:[],customers:[],stockCounts:[],bags:[{_id:'b1',bagId:'BAG-00001',status:'assigned',location:'warehouse',condition:'good',lifecycleState:'legacy_unverified',custodyVersion:0,verifiedAt:null,reasons:['custody_ambiguous'],review:null,historyCount:0}]});
@@ -15,7 +16,7 @@ const button=(text)=>[...container.querySelectorAll('button')].find(b=>b.textCon
 const click=async text=>{expect(button(text)).toBeDefined();await act(async()=>button(text).click());};
 const fill=async(element,value)=>{await act(async()=>{const proto=element.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(element,value);element.dispatchEvent(new Event('input',{bubbles:true}));});};
 beforeEach(async()=>{
-  data=fixture();api.get.mockReset();api.post.mockReset();api.put.mockReset();
+  mockScanLabel='BAG_00001';data=fixture();api.get.mockReset();api.post.mockReset();api.put.mockReset();
   api.get.mockImplementation(async url=>({data:{success:true,data:url==='/bag-operations'?data:{...data.bags[0],history:[]}}}));
   api.put.mockResolvedValue({data:{success:true}});api.post.mockResolvedValue({data:{success:true}});
   container=document.createElement('div');document.body.appendChild(container);root=createRoot(container);
@@ -89,8 +90,7 @@ test('warehouse mode limits navigation and ignores a management view selection',
 
 test('warehouse home lookup reports unknown labels without creating stock',async()=>{
   await act(async()=>root.render(<BagOperations warehouse/>));
-  await fill(container.querySelector('#warehouse-label'),'BAG-0001');
-  await act(async()=>container.querySelector('.wk-scan form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+  await click('Scan a bag');await click('Start camera');mockScanLabel='BAG-0001';await click('Scan test label');
   expect(container.querySelector('[role="dialog"]')).not.toBeNull();
   expect(container.querySelector('[role="alert"]').textContent).toContain('Unregistered ID');
   expect(api.post).not.toHaveBeenCalled();
@@ -107,7 +107,7 @@ test('warehouse queues show physical stages and preserve driver acceptance',asyn
   await click('Prepare handover');
   const select=container.querySelector('.bo-field select');
   await act(async()=>{Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(select,'driver-1');select.dispatchEvent(new Event('change',{bubbles:true}));});
-  await fill(container.querySelector('textarea'),'Physically packed for the receiving driver.');
+  expect(container.querySelector('textarea')).toBeNull();
   await click('Confirm physical action');
   expect(api.post).toHaveBeenCalledWith('/bag-operations/movements',expect.objectContaining({bagId:'BAG-00001',action:'pack',expectedVersion:7,driverId:'driver-1'}));
   expect(api.post.mock.calls.some(([,body])=>body.action==='accept')).toBe(false);
@@ -118,4 +118,70 @@ test('read-only warehouse staff cannot register bags or submit counts',async()=>
   await act(async()=>root.render(<BagOperations warehouse/>));
   await click('Stock');expect(button('Add bag').disabled).toBe(true);
   await click('Physical counts');expect(button('Start count').disabled).toBe(true);
+});
+
+const warehouse=async()=>act(async()=>root.render(<BagOperations warehouse/>));
+const noTyping=()=>expect(container.querySelector('input:not([type="checkbox"]):not([type="file"]),textarea')).toBeNull();
+const cameraScan=async code=>{mockScanLabel=code;await click('Scan test label');};
+
+test('warehouse camera opens exact stock without writing and has no typing fields',async()=>{
+  await warehouse();noTyping();await click('Scan a bag');noTyping();await click('Start camera');await cameraScan('BAG_00001');
+  expect(api.get).toHaveBeenCalledWith('/bag-operations/bags/b1');expect(api.post).not.toHaveBeenCalled();
+});
+
+test('warehouse blocks duplicate scan identities',async()=>{
+  data.bags.push({...data.bags[0],_id:'b2',bagId:'BAG_00001'});await warehouse();
+  await click('Scan a bag');await click('Start camera');await cameraScan('BAG-00001');
+  expect(container.querySelector('[role="alert"]').textContent).toContain('Multiple stock records');
+  expect(api.get.mock.calls.filter(([url])=>url.includes('/bags/'))).toHaveLength(0);
+});
+
+test('handheld scan opens a bag without typing into a form',async()=>{
+  await warehouse();await click('Scan a bag');
+  await act(async()=>{for(const key of [...'BAG_00001','Enter'])document.dispatchEvent(new KeyboardEvent('keydown',{key,bubbles:true}));});
+  expect(api.get).toHaveBeenCalledWith('/bag-operations/bags/b1');expect(api.post).not.toHaveBeenCalled();
+});
+
+test('warehouse registration accepts an unused scanned tag only after confirmation',async()=>{
+  await warehouse();await click('Stock');await click('Add bag');noTyping();
+  expect(button('Register physical bag').disabled).toBe(true);await click('Start camera');
+  await cameraScan('BAG_00001');expect(button('Register physical bag').disabled).toBe(true);
+  await cameraScan('BAG_00002');expect(api.post).not.toHaveBeenCalled();expect(button('Register physical bag').disabled).toBe(false);
+  await cameraScan('invalid');expect(button('Register physical bag').disabled).toBe(true);
+  await cameraScan('BAG_00003');await click('Register physical bag');
+  expect(api.post).toHaveBeenCalledWith('/bag-operations/register',{bagId:'BAG-00003'});
+});
+
+test('warehouse count deduplicates tag aliases and requires a physical-count confirmation',async()=>{
+  api.post.mockResolvedValue({data:{data:{scannedCodes:['BAG-00001','BAG-00002'],missingCodes:[],unexpectedCodes:[]}}});
+  await warehouse();await click('Count the bags on the shelfStart a physical stock check');noTyping();
+  await click('Start camera');await cameraScan('BAG_00001');await cameraScan('BAG-00001');await cameraScan('BAG-00002');
+  expect(container.textContent).toContain('2 unique bags scanned');expect(api.post).not.toHaveBeenCalled();
+  expect(button('Submit count for review').disabled).toBe(true);
+  await act(async()=>container.querySelector('input[type="checkbox"]').click());await click('Submit count for review');
+  expect(api.post).toHaveBeenCalledWith('/bag-operations/stock-counts',expect.objectContaining({scannedCodes:['BAG-00001','BAG-00002'],confirmed:true,note:'Physical stock count recorded by scanning bag tags.'}));
+  expect(container.textContent).toContain('Inventory remains unchanged');
+});
+
+test('warehouse damage needs a tapped reason and uploaded photo',async()=>{
+  data.bags[0].lifecycleState='ready';await warehouse();await click('Scan a bag');await click('Start camera');await cameraScan('BAG-00001');
+  await click('Report damage');noTyping();expect(button('Confirm physical action').disabled).toBe(true);
+  await click('Zip damaged');expect(button('Confirm physical action').disabled).toBe(true);
+  api.post.mockResolvedValueOnce({data:{url:'https://example.com/damage.jpg'}});
+  const file=container.querySelector('input[type="file"]');expect(file.getAttribute('capture')).toBe('environment');
+  Object.defineProperty(file,'files',{value:[new File(['photo'],'damage.jpg',{type:'image/jpeg'})]});
+  await act(async()=>file.dispatchEvent(new Event('change',{bubbles:true})));await click('Confirm physical action');
+  expect(api.post).toHaveBeenCalledWith('/bag-operations/movements',expect.objectContaining({action:'quarantine',note:'Zip damaged',proofPhotoUrl:'https://example.com/damage.jpg'}));
+});
+
+test('warehouse repair requires an inspection before saving the selected finding',async()=>{
+  data.bags[0].lifecycleState='quarantined';await warehouse();await click('Clean');await act(async()=>container.querySelector('.wk-bagcard').click());
+  await click('Record repair');await click('Zip repaired');noTyping();expect(button('Confirm physical action').disabled).toBe(true);
+  await act(async()=>container.querySelector('input[type="checkbox"]').click());await click('Confirm physical action');
+  expect(api.post).toHaveBeenCalledWith('/bag-operations/movements',expect.objectContaining({action:'repair',note:'Zip repaired',inspected:true}));
+});
+
+test('warehouse camera failure keeps handheld scanning available',async()=>{
+  await warehouse();await click('Scan a bag');await click('Start camera');await click('Camera fails');
+  expect(container.querySelector('[role="alert"]').textContent).toContain('handheld scanner');expect(button('Start camera')).toBeDefined();noTyping();
 });
