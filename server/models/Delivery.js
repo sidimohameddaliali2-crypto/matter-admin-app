@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { sanitizeDeliveryAddressEdit } from '../services/deliveryAddressEdit.js';
 import { applyZoneRules, isAbuDhabiEmirate, ABU_DHABI_ZONE } from '../config/zoneRules.js';
 
 const deliverySchema = new mongoose.Schema({
@@ -292,22 +293,37 @@ deliverySchema.index({ customerId: 1, addressId: 1, scheduledTime: 1 }); // Pin-
 
 // Editing a delivery's address text makes its addressId stale — it would still
 // point at the old saved address. Drop the id unless the same write sets one.
-deliverySchema.pre('save', function clearStaleAddressIdOnSave(next) {
-  if (!this.isNew && this.isModified('address') && !this.isModified('addressId')) {
-    this.addressId = null;
+deliverySchema.pre('validate', async function clearStaleAddressOnSave() {
+  if (this.isNew || !this.isModified('address')) return;
+  const original = await this.constructor.findById(this._id)
+    .select('address addressId addressDetails gpsLocation').lean();
+  if (!original) return;
+  const fields = { address: this.address };
+  for (const key of ['addressId', 'addressDetails', 'gpsLocation']) {
+    if (this.isModified(key)) fields[key] = this.get(key);
   }
-  next();
+  sanitizeDeliveryAddressEdit(original, fields);
+  for (const [key, value] of Object.entries(fields)) this.set(key, value);
 });
 
-deliverySchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], function clearStaleAddressIdOnUpdate(next) {
-  // Only the `{ $set: {...} }` form — every address write in this codebase
-  // (applyChangesToDelivery etc.) uses it.
+deliverySchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], async function clearStaleAddressOnUpdate() {
   const update = this.getUpdate();
-  const set = update && update.$set;
-  if (set && Object.prototype.hasOwnProperty.call(set, 'address') && !Object.prototype.hasOwnProperty.call(set, 'addressId')) {
-    set.addressId = null;
+  if (!update || Array.isArray(update)) return;
+  // Mongoose casts plain dispatcher updates to $set only AFTER middleware.
+  for (const key of Object.keys(update)) {
+    if (!key.startsWith('$')) {
+      update.$set ||= {};
+      update.$set[key] = update[key];
+      delete update[key];
+    }
   }
-  next();
+  const set = update.$set;
+  if (!set || !Object.prototype.hasOwnProperty.call(set, 'address')) return;
+  // Bulk edits cannot share one old address; invalidate dependent fields
+  // conservatively unless the caller supplies replacements.
+  const original = this.op === 'updateMany' ? null : await this.model.findOne(this.getQuery())
+    .select('address addressId addressDetails gpsLocation').lean();
+  sanitizeDeliveryAddressEdit(original, set);
 });
 
 // Automatic zone rules (config/zoneRules.js): emirate Abu Dhabi, or zone
@@ -331,7 +347,7 @@ deliverySchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], async functi
 
   // The emirate being set now, else (single-document edits only) the one on file.
   let city = cityInUpdate;
-  if (city === undefined && this.op !== 'updateMany') {
+  if (city === undefined && !Object.prototype.hasOwnProperty.call(set, 'addressDetails') && this.op !== 'updateMany') {
     const existing = await this.model.findOne(this.getQuery()).select('addressDetails.city').lean();
     city = existing?.addressDetails?.city;
   }

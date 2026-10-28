@@ -2212,7 +2212,7 @@ router.put('/:id', authorize(['admin', 'super_admin', 'dispatcher', 'manager']),
 
     // Surface a "changed since assignment" banner to the driver app when a
     // driver-relevant field changed on a delivery that already has a driver.
-    await flagDeliveryChangeIfNeeded(originalDelivery, updateData);
+    await flagDeliveryChangeIfNeeded(originalDelivery, delivery.toObject());
 
     // Emit real-time update
     const io = req.app.get('io');
