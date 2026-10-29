@@ -30,7 +30,7 @@ export const normalizeBreakfastMap = (rawMap) => {
 };
 
 export const toBreakfastPresetState = (payload = {}) => {
-  const preset = normalizeBreakfastPresetEntry(payload?.breakfastPreset || payload?.breakfastMacros || {});
+  const preset = normalizeBreakfastPresetEntry(payload?.breakfastPreset || payload?.breakfastMacros || payload);
   const presetsByName = normalizeBreakfastMap(payload?.presetsByName || payload?.breakfastPresetsByName);
   return {
     breakfastName: preset.breakfastName || '',
@@ -99,10 +99,12 @@ export const normalizeSnackPresetMap = (rawMap) => {
   }, {});
 };
 
+export const toSnackPresetState = (payload = {}) => ({ presetsByName: normalizeSnackPresetMap(payload.presetsByName) });
+
 export const fetchSnackPresets = async (api) => {
   const response = await api.get('/menus/kitchen-snack-presets');
   if (!response.data?.success) throw new Error('Snack presets could not be verified.');
-  return { presetsByName: normalizeSnackPresetMap(response.data?.data?.presetsByName) };
+  return toSnackPresetState(response.data?.data);
 };
 
 export const isRouteNotFound = (err) => {

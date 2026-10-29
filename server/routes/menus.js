@@ -7,6 +7,7 @@ import Partner from '../models/Partner.js';
 import MenuItem from '../models/MenuItem.js';
 import KitchenBreakfastPreset from '../models/KitchenBreakfastPreset.js';
 import KitchenSnackPreset from '../models/KitchenSnackPreset.js';
+import { snackPresetUpdate } from '../services/kitchenSnackPresets.js';
 import WeeklyMenu from '../models/WeeklyMenu.js';
 import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import MenuSelectionArchive from '../models/MenuSelectionArchive.js';
@@ -20,6 +21,7 @@ import { kitchenUpload } from '../services/kitchenUpload.js';
 import { saveManagedMenu } from '../services/managedMenuSave.js';
 import { assertAssignmentMacros } from '../services/kitchenMacroValidation.js';
 import { readKitchenState, beginKitchenState } from '../services/kitchenProductionSnapshot.js';
+import { assertKitchenSelectionClosed, readKitchenSelectionWindow } from '../services/kitchenSelectionDeadline.js';
 import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
 import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
 import athleatService from '../services/athleatService.js';
@@ -1006,28 +1008,17 @@ router.get('/kitchen-snack-presets', protect, async (req, res) => {
 
 /**
  * PUT /api/menus/kitchen-snack-presets
- * Saves the global snack macro table.
- * Body: { presets: [{ snackName, C, P, F }, ...] }
+ * Saves individual global snack entries without replacing unrelated presets.
+ * Body: { presets: [{ snackName, C, P, F }, ...], removeKeys?: [name, ...] }
  */
-router.put('/kitchen-snack-presets', protect, async (req, res) => {
+const saveKitchenSnackPresets = async (req, res) => {
   try {
-    const { presets = [] } = req.body || {};
-    if (!Array.isArray(presets)) {
-      return res.status(400).json({ success: false, message: 'presets must be an array' });
-    }
-
-    const normalizedMap = presets.reduce((acc, row) => {
-      const normalized = normalizeSnackPresetEntry(row || {});
-      const key = normalizeSnackKey(normalized.snackName);
-      if (!key) return acc;
-      acc[key] = normalized;
-      return acc;
-    }, {});
+    const update = snackPresetUpdate(req.body || {});
 
     const doc = await KitchenSnackPreset.findOneAndUpdate(
       { key: 'global' },
-      { $set: { presetsByName: normalizedMap } },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
+      update,
+      { new: true, upsert: true, setDefaultsOnInsert: false }
     ).lean();
 
     return res.json({
@@ -1036,12 +1027,14 @@ router.put('/kitchen-snack-presets', protect, async (req, res) => {
     });
   } catch (error) {
     console.error('Error saving global snack presets:', error);
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       success: false,
       message: error.message
     });
   }
-});
+};
+router.put('/kitchen-snack-presets', protect, saveKitchenSnackPresets);
+router.patch('/kitchen-snack-presets', protect, saveKitchenSnackPresets);
 
 /**
  * GET /api/menus/:id/breakfast-presets
@@ -1459,16 +1452,20 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
       ? new Set(customers.map((c) => String(c.email || '').trim().toLowerCase()).filter(Boolean))
       : null;
 
-    const menu = await WeeklyMenu.findById(menuId).select('snackOptionsByDate meals').lean();
+    const menu = await WeeklyMenu.findById(menuId).select('snackOptionsByDate meals selectionDeadlines').lean();
     if (!menu) {
       return { error: 'Menu not found', status: 404 };
     }
+    if (scopedDateKey) assertKitchenSelectionClosed(menu, scopedDateKey);
     const snackOptionsByDate = menu.snackOptionsByDate || {};
 
     const allRecords = await MenuSelectionRecord.find({ weeklyMenuId: menuId });
     const records = scopedEmails
       ? allRecords.filter((r) => scopedEmails.has(String(r.email || '').trim().toLowerCase()))
       : allRecords;
+
+    // Preflight every unscoped date before any customer or meal write.
+    if (!scopedDateKey) for (const day of new Set(records.flatMap(record => (record.selectedMeals || []).filter(meal => meal.mealType !== 'snack').map(meal => toDateKey(meal.date))).filter(Boolean))) assertKitchenSelectionClosed(menu, day);
 
     // Nutrition lookups (2 Matter API calls each) dominate runtime — run every
     // customer concurrently instead of one at a time.
@@ -1620,7 +1617,7 @@ router.post('/:id/assign-snacks', protect, async (req, res) => {
     return res.json({ success: true, data: result.data });
   } catch (error) {
     console.error('Error assigning snacks:', error);
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message, code: error.code, selectionWindow: error.selectionWindow });
   }
 });
 
@@ -1674,13 +1671,15 @@ const mapWithConcurrency = async (items, limit, mapper) => {
  * meals.
  */
 async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly = false, includeBreakfast = false, matterInputs = [] } = {}) {
-  customers = await canonicalizeAssignCustomers(menuId, customers, matterInputs);
+
   const menu = await WeeklyMenu.findById(menuId)
-    .select('matterCoreMealOptionsByDate breakfastOptionsByDate snackOptionsByDate meals')
+    .select('matterCoreMealOptionsByDate breakfastOptionsByDate snackOptionsByDate meals selectionDeadlines')
     .lean();
   if (!menu) {
     return { error: 'Menu not found', status: 404 };
   }
+  assertKitchenSelectionClosed(menu, dateKey);
+  customers = await canonicalizeAssignCustomers(menuId, customers, matterInputs);
 
   // Candidates come from that day's MenuItem records tagged usedForCorePlan
   // (set in the meal editor) rather than the older matterCoreMealOptionsByDate
@@ -1913,7 +1912,7 @@ router.post('/:id/assign-matter-core-meals', protect, async (req, res) => {
     return res.json({ success: true, data: result.data });
   } catch (error) {
     console.error('Error assigning Matter Core meals:', error);
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message, code: error.code, selectionWindow: error.selectionWindow });
   }
 });
 
@@ -1939,6 +1938,8 @@ router.post('/:id/assign-matter-core-meals', protect, async (req, res) => {
  * request.
  */
 async function runAutoPopulateMissing(menuId, dateKey, options) {
+  const window = await readKitchenSelectionWindow(menuId, dateKey);
+  if (!window.canAutoAssign) throw Object.assign(new Error(window.message), { statusCode: 409, code: 'KITCHEN_SELECTION_OPEN', selectionWindow: window });
   return withKitchenPreparation(`menu:${menuId}:${dateKey}`, () => populateMissingKitchenSelections(menuId, dateKey, options));
 }
 
@@ -2088,7 +2089,7 @@ router.get('/:id/kitchen-state', protect, async (req, res) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(req.query.date || '') || toDateKey(req.query.date) !== req.query.date) return res.status(400).json({ success: false, message: 'Select a valid date.' });
     res.set('Cache-Control', 'no-store');
     return res.json({ success: true, ...await readKitchenState(req.params.id, req.query.date, req.query.job) });
-  } catch (error) { return res.status(error.statusCode || 503).json({ success: false, message: error.message }); }
+  } catch (error) { return res.status(error.statusCode || 503).json({ success: false, message: error.message, code: error.code, selectionWindow: error.selectionWindow }); }
 });
 
 router.post('/:id/kitchen-state', protect, async (req, res) => {
@@ -2096,7 +2097,7 @@ router.post('/:id/kitchen-state', protect, async (req, res) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(req.body.date || '') || toDateKey(req.body.date) !== req.body.date) return res.status(400).json({ success: false, message: 'Select a valid date.' });
     const state = await beginKitchenState(req.params.id, req.body.date, () => runAutoPopulateMissing(req.params.id, req.body.date, { freshInputs: true }));
     return res.status(state.state === 'running' ? 202 : 200).json({ success: true, ...state });
-  } catch (error) { return res.status(error.statusCode || 503).json({ success: false, message: error.message }); }
+  } catch (error) { return res.status(error.statusCode || 503).json({ success: false, message: error.message, code: error.code, selectionWindow: error.selectionWindow }); }
 });
 
 router.post('/:id/kitchen-upload', protect, async (req, res) => {
@@ -2118,7 +2119,7 @@ router.post('/:id/auto-populate-missing', protect, async (req, res) => {
     return res.json({ success: true, preparation: 'completed', preparedAt: new Date().toISOString(), data: result.data, cached: !!result.cached });
   } catch (error) {
     console.error('Error auto-populating missing selections:', error);
-    return res.status(error.statusCode || 500).json({ success: false, code: error.code, preparation: 'failed', message: error.message,
+    return res.status(error.statusCode || 500).json({ success: false, code: error.code, preparation: 'failed', message: error.message, selectionWindow: error.selectionWindow,
       ...(error.code === 'KITCHEN_ASSIGNMENT_INCOMPLETE' ? { failures: error.failures } : {}) });
   }
 });
@@ -2327,13 +2328,15 @@ router.put('/:id/matter-core-meal-options', protect, async (req, res) => {
  * callers already use: [{ email, name, customerId, mealFrequency, exclusions }].
  */
 async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [] } = {}) {
-    customers = await canonicalizeAssignCustomers(menuId, customers, matterInputs);
+
     const menu = await WeeklyMenu.findById(menuId)
-      .select('mainMealOptionsByDate breakfastOptionsByDate meals')
+      .select('mainMealOptionsByDate breakfastOptionsByDate meals selectionDeadlines')
       .lean();
     if (!menu) {
       return { error: 'Menu not found', status: 404 };
     }
+    assertKitchenSelectionClosed(menu, dateKey);
+    customers = await canonicalizeAssignCustomers(menuId, customers, matterInputs);
 
     // Rotation candidates come from that day's MenuItem records (tagged
     // portionType + rotationCategory in the meal editor) rather than the
@@ -2699,7 +2702,7 @@ router.post('/:id/assign-main-meals', protect, async (req, res) => {
     return res.json({ success: true, data: result.data });
   } catch (error) {
     console.error('Error assigning main meals:', error);
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message, code: error.code, selectionWindow: error.selectionWindow });
   }
 });
 

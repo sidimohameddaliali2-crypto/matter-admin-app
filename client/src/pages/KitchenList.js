@@ -1,11 +1,17 @@
 import KitchenInputWarnings from '../components/KitchenInputWarnings';
-import { loadKitchenSnapshot, requiredKitchenMeals } from '../lib/kitchenSnapshot';
+import useKitchenSelectionWindow from '../lib/useKitchenSelectionWindow';
+import { KitchenWorkspaceHeader, KitchenEmptyState, KitchenAutoScopeControl } from '../components/KitchenWorkspace';
+import KitchenCustomerBrowser from '../components/KitchenCustomerBrowser';
+import { snackPresetChanges } from '../lib/kitchenSnackPresetChanges';
+import useKitchenCurrentScope from '../lib/useKitchenCurrentScope';
+import { formatKitchenDay, visibleKitchenCustomer, kitchenCustomerDay } from '../lib/kitchenDayScope';
+import { loadKitchenSnapshot, requiredKitchenMeals, verifiedKitchenRoster } from '../lib/kitchenSnapshot';
 import PartnerKitchenOrders from '../components/PartnerKitchenOrders';
 import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealChanges } from '../utils/kitchenIntegrity';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, Shuffle, FileText, ChevronDown, ChevronUp, AlertTriangle, Pencil } from 'lucide-react';
+import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, FileText, ChevronDown, ChevronUp, AlertTriangle, Pencil } from 'lucide-react';
 import api from '../utils/api';
-import { calculateKitchenListEntry, breakfastNameHasMacros, snackNameHasMacros } from '../utils/kitchenListCalculations';
+import { calculateKitchenListEntry, breakfastNameHasMacros, snackNameHasMacros, resolveSnackPresetForMeal } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
 import { downloadCustomerPaperPdf, downloadCustomerPaperWord } from '../utils/kitchenPaperCustomer';
 import {
@@ -14,6 +20,8 @@ import {
   saveBreakfastPresetToStorage,
   fetchBreakfastPresets,
   fetchSnackPresets,
+  toSnackPresetState,
+  toBreakfastPresetState,
   isRouteNotFound,
   getCustomerName,
   getDateKey,
@@ -276,6 +284,8 @@ const normalizeSelectionForSave = (meal) => ({
 });
 
 const KitchenList = () => {
+  const [downloadsOpen, setDownloadsOpen] = useState(false);
+  const [setupOpen, setSetupOpen] = useState(true);
   const [menus, setMenus] = useState([]);
   const [selectedMenuId, setSelectedMenuId] = useState('');
   const [menuSelections, setMenuSelections] = useState([]);
@@ -339,9 +349,6 @@ const KitchenList = () => {
   const [matterCoreMealOptionsByDate, setMatterCoreMealOptionsByDate] = useState({});
   const [savingMatterCoreMealOptions, setSavingMatterCoreMealOptions] = useState(false);
   const [matterCoreMealInput, setMatterCoreMealInput] = useState('');
-  const [uploadingWeeklyMenu, setUploadingWeeklyMenu] = useState(false);
-  const [weeklyMenuUploadName, setWeeklyMenuUploadName] = useState('');
-  const [weeklyMenuUploadResult, setWeeklyMenuUploadResult] = useState(null);
   const [uploadingMealRemarks, setUploadingMealRemarks] = useState(false);
   const [mealRemarksUploadResult, setMealRemarksUploadResult] = useState(null);
   // Caches each customer's Matter website nutrition lookup for the life of
@@ -355,6 +362,7 @@ const KitchenList = () => {
   const activeSelectionScope = useRef('');
   activeSelectionScope.current = `${selectedMenuId}:${missingCheckDate}`;
   const [loadedSelectionScope, setLoadedSelectionScope] = useState('');
+  const [dayRoster, setDayRoster] = useState(null);
   const [savingSnackOptions, setSavingSnackOptions] = useState(false);
   const [assigningAll, setAssigningAll] = useState(false);
   const [autoAssignResult, setAutoAssignResult] = useState(null);
@@ -411,6 +419,11 @@ const KitchenList = () => {
     setMissingCheckDate(date);
   };
 
+  const automaticScope = useKitchenCurrentScope({ menus, menuId: selectedMenuId, date: missingCheckDate,
+    onMenu: id => { selectionRequests.current.cancel(); setLoadedSelectionScope(''); setMissingCheckDate(''); setPdfDate(''); setSelectedMenuId(id); },
+    onDate: changeKitchenDate,
+  });
+
   const loadSelections = useCallback(async () => {
     // Selecting a menu alone must not trigger the nutrition-lookup-per-customer
     // fetch below — that only happens once a date is picked too.
@@ -420,6 +433,7 @@ const KitchenList = () => {
     const current = () => selectionRequests.current.isCurrent(request) && activeSelectionScope.current === scope;
     setMenuSelections([]);
     setLoadedSelectionScope('');
+    setDayRoster(null);
     setExportError('');
     if (!selectedMenuId || !missingCheckDate) { setLoadingSelections(false); return []; }
     nutritionCacheRef.current.clear();
@@ -444,13 +458,19 @@ const KitchenList = () => {
         // still throws to the outer catch below.
         const preparation = await prepareKitchenSelections(api, selectedMenuId, missingCheckDate, current);
         if (!current()) return [];
-        const [response, breakfastState, snackState] = await Promise.all([
+        const roster = preparation.data?.rosterComplete === true && Array.isArray(preparation.data.kitchenRoster)
+          ? preparation.data.kitchenRoster
+          : verifiedKitchenRoster((await api.get('/matter/subscriptions/delivery-on-date', { params: { date: missingCheckDate }, timeout: 180000 })).data);
+        if (!current()) return [];
+        const [response, rawBreakfastState, rawSnackState] = await Promise.all([
           preparation.data?.kitchenSelections ? Promise.resolve({ data: { success: true, data: preparation.data.kitchenSelections } }) : api.get(`/menus/${selectedMenuId}/selections`, { timeout: 30000 }),
           preparation.data?.kitchenBreakfastPreset || fetchBreakfastPresets(api, selectedMenuId),
           preparation.data?.kitchenSnackPreset || fetchSnackPresets(api)
         ]);
 
         if (!current()) return [];
+        const breakfastState = toBreakfastPresetState(rawBreakfastState);
+        const snackState = toSnackPresetState(rawSnackState);
         setBreakfastPreset(breakfastState);
         if (Object.keys(breakfastState.presetsByName || {}).length > 0) {
           saveBreakfastPresetToStorage(breakfastState);
@@ -466,16 +486,16 @@ const KitchenList = () => {
           // used only when no email is available; customer identity conflicts
           // and ambiguous matches remain unresolved rather than guessed.
           const enrichedSelections = await enrichSelectionsWithNutrition(api, rawSelections, nutritionCacheRef, { extended: true, matterInputs: preparation.cached ? [] : preparation.data?.kitchenInputs,
-            productionScope: !preparation.cached && preparation.data?.rosterComplete === true
-              ? { complete: true, date: missingCheckDate, roster: preparation.data.kitchenRoster } : null });
+            productionScope: { complete: true, date: missingCheckDate, roster } });
 
           const keyedSelections = enrichedSelections.map((entry) => attachStableMealKeys(entry));
           if (!current()) return [];
           preparedSnapshot.current = { menuId: selectedMenuId, date: missingCheckDate, receivedAt: Date.now(), checkedAt: preparation.preparedAt,
             snapshotId: preparation.snapshotId,
-            complete: !preparation.cached && preparation.data?.rosterComplete === true, roster: preparation.data?.kitchenRoster,
+            complete: preparation.preparation !== 'selection-open' && !preparation.cached && preparation.data?.rosterComplete === true, roster: preparation.data?.kitchenRoster,
             selections: keyedSelections, breakfastPreset: breakfastState, snackPreset: snackState };
           setMenuSelections(keyedSelections);
+          setDayRoster({ scope, rows: roster });
           setLoadedSelectionScope(scope);
           return keyedSelections;
         }
@@ -533,14 +553,14 @@ const KitchenList = () => {
     () => menus.find((m) => m._id === selectedMenuId) || null,
     [menus, selectedMenuId]
   );
+  const selectionWindow = useKitchenSelectionWindow(selectedMenu, missingCheckDate);
 
   // Includes dates from customer selections, from whatever the kitchen has
   // already uploaded (main/sub/breakfast/snack options), and — when neither
   // of those exist yet — every day in the menu's own date range. Without that
   // last fallback, a brand-new menu with zero customer selections and zero
-  // uploads would hide the entire rotation-setup card (Upload Weekly Menu
-  // included), so kitchen could never get a date to upload against in the
-  // first place.
+  // uploads would hide the rotation setup. Menus are now uploaded in Menu
+  // Management, while Kitchen List still needs a date before any preparation.
   const menuDateKeys = useMemo(
     () => deriveDateKeys({ menuSelections, mainMealOptionsByDate, breakfastOptionsByDate, snackOptionsByDate, selectedMenu }),
     [menuSelections, mainMealOptionsByDate, breakfastOptionsByDate, snackOptionsByDate, selectedMenu]
@@ -753,158 +773,6 @@ const KitchenList = () => {
   // also updates the shared global breakfast preset used for weight calc).
   // Reuses the existing single-date PUT endpoints, one date at a time
   // (sequential, so concurrent saves to the same menu document's Map fields never race).
-  const downloadWeeklyMenuTemplate = async () => {
-    const XLSX = await loadXLSX();
-    const sampleDate = menuDateKeys[0] || getDateKey(new Date());
-    const rows = [
-      { Date: sampleDate, Slot: 'main', MealName: 'Grilled Chicken Breast', Type: 'chicken', Exclusions: '', C: '', P: '', F: '', V: '', LargeBreakfast: '' },
-      { Date: sampleDate, Slot: 'main', MealName: 'Beef Stir Fry', Type: 'beef', Exclusions: 'Dairy', C: '', P: '', F: '', V: '', LargeBreakfast: '' },
-      { Date: sampleDate, Slot: 'main', MealName: 'Baked Salmon', Type: 'fish', Exclusions: 'Shellfish', C: '', P: '', F: '', V: '', LargeBreakfast: '' },
-      { Date: sampleDate, Slot: 'sub', MealName: 'Chicken Fallback', Type: 'chicken', Exclusions: '', C: '', P: '', F: '', V: '', LargeBreakfast: '' },
-      { Date: sampleDate, Slot: 'snack1', MealName: 'Greek Yogurt', Type: '', Exclusions: 'Dairy', C: 15, P: 10, F: 3, V: '', LargeBreakfast: '' },
-      { Date: sampleDate, Slot: 'snack2', MealName: 'Almonds', Type: '', Exclusions: 'Nuts', C: 6, P: 6, F: 14, V: '', LargeBreakfast: '' },
-      { Date: sampleDate, Slot: 'breakfast', MealName: 'Egg White Wrap', Type: '', Exclusions: 'Eggs', C: 30, P: 30, F: 10, V: 80, LargeBreakfast: false }
-    ];
-    const worksheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Weekly Menu');
-    XLSX.writeFile(workbook, 'weekly-menu-upload-template.xlsx');
-  };
-
-  const handleWeeklyMenuUpload = async (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    if (!selectedMenuId) {
-      setError('Select a menu first');
-      event.target.value = '';
-      return;
-    }
-
-    try {
-      setUploadingWeeklyMenu(true);
-      setError('');
-      setWeeklyMenuUploadResult(null);
-
-      const XLSX = await loadXLSX();
-      const buffer = await file.arrayBuffer();
-      // Deliberately NOT using cellDates: true. It sounds like the right fix
-      // (real Date objects instead of raw serial numbers) but SheetJS builds
-      // those Date objects using the LOCAL machine's timezone constructor —
-      // so they only round-trip correctly when read back with local getters,
-      // on a UTC machine. getDateKey reads Date objects with UTC getters
-      // (correct for ISO date strings, which really are UTC-based per spec),
-      // so combining the two silently shifted every uploaded date back a day
-      // on any server/browser not running in UTC. Leaving cellDates off keeps
-      // date cells as plain Excel serial numbers, which getDateKey converts
-      // with its own pure UTC arithmetic below — no timezone involved at all,
-      // verified correct regardless of the machine's local timezone.
-      const workbook = XLSX.read(buffer, { type: 'array' });
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const rows = readSheetRowsSafely(XLSX, sheet);
-
-      const mainByDate = {};
-      const snackByDate = {};
-      const breakfastByDate = {};
-      const breakfastPresetRows = [];
-      let skipped = 0;
-
-      rows.forEach((row) => {
-        const slot = String(row.Slot ?? row.slot ?? 'main').trim().toLowerCase();
-        const dateKey = getDateKey(row.Date ?? row.date);
-        const name = String(
-          row.MealName ?? row.Name ?? row.mealName ?? row.name ?? row.BreakfastName ?? row.breakfastName ?? ''
-        ).trim();
-        const exclusions = String(row.Exclusions ?? row.exclusions ?? '')
-          .split(',').map((e) => e.trim()).filter(Boolean);
-
-        if (!dateKey || dateKey === 'unknown-date' || !name) {
-          skipped += 1;
-          return;
-        }
-
-        if (slot === 'breakfast') {
-          const parsed = parseBreakfastRow(row);
-          if (!parsed.breakfastName) {
-            skipped += 1;
-            return;
-          }
-          if (!breakfastByDate[dateKey]) breakfastByDate[dateKey] = [];
-          breakfastByDate[dateKey].push({ name: parsed.breakfastName, exclusions });
-          breakfastPresetRows.push(parsed);
-          return;
-        }
-
-        if (slot === 'snack1' || slot === 'snack2' || slot === 'snack') {
-          const C = Number(row.C ?? row.Carbs ?? row.carbs ?? 0) || 0;
-          const P = Number(row.P ?? row.Protein ?? row.protein ?? 0) || 0;
-          const F = Number(row.F ?? row.Fats ?? row.fats ?? 0) || 0;
-          if (!snackByDate[dateKey]) snackByDate[dateKey] = { first: [], second: [] };
-          const pool = slot === 'snack2' ? 'second' : 'first';
-          snackByDate[dateKey][pool].push({ name, exclusions, C, P, F });
-          return;
-        }
-
-        const type = String(row.Type ?? row.type ?? '').trim().toLowerCase();
-        if (!['chicken', 'beef', 'fish'].includes(type)) {
-          skipped += 1;
-          return;
-        }
-
-        if (!mainByDate[dateKey]) mainByDate[dateKey] = { mainMeals: [], subMeals: [] };
-        if (slot === 'sub' || mainByDate[dateKey].mainMeals.length >= 3) {
-          mainByDate[dateKey].subMeals.push({ name, type, exclusions });
-        } else {
-          mainByDate[dateKey].mainMeals.push({ name, type, exclusions });
-        }
-      });
-
-      const mainDateKeys = Object.keys(mainByDate).sort();
-      const snackDateKeys = Object.keys(snackByDate).sort();
-      const breakfastDateKeys = Object.keys(breakfastByDate).sort();
-
-      if (mainDateKeys.length === 0 && snackDateKeys.length === 0 && breakfastDateKeys.length === 0) {
-        setError('No valid rows found. Expected columns: Date, Slot (main/sub/snack1/snack2/breakfast), MealName, Type (chicken/beef/fish for main/sub), Exclusions, C, P, F.');
-        return;
-      }
-
-      if (skipped > 0) throw new Error(`Upload contains ${skipped} invalid row(s). Correct them before saving.`);
-      const payload = { mainByDate, snackByDate, breakfastByDate, breakfastPresetRows };
-      const preview = await api.post(`/menus/${selectedMenuId}/kitchen-upload`, { ...payload, dryRun: true });
-      if (!preview.data?.success) throw new Error(preview.data?.message || 'Upload preview failed.');
-      const summary = preview.data.data;
-      if (!window.confirm(`Upload ${summary.count} meal option(s) across ${summary.dates.length} date(s)?${summary.missingMacros.length ? ' Missing macros: ' + summary.missingMacros.join(', ') + '. Auto-assign will remain blocked until these are supplied.' : ''}`)) return;
-      const committed = await api.post(`/menus/${selectedMenuId}/kitchen-upload`, { ...payload, expectedRevision: summary.revision });
-      if (!committed.data?.success) throw new Error(committed.data?.message || 'Upload failed.');
-      await Promise.all([loadMainMealOptions(), loadSnackOptions(), loadBreakfastOptions()]);
-      setBreakfastPreset(await fetchBreakfastPresets(api, selectedMenuId));
-      setSnackPreset(await fetchSnackPresets(api));
-      setImportName(file.name);
-
-      // Jump the "Date" selector to whatever was just uploaded so the new
-      // main/sub/breakfast/snack items are immediately visible instead of
-      // silently landing on a date the kitchen isn't currently looking at.
-      const uploadedDateKeys = Array.from(new Set([...mainDateKeys, ...snackDateKeys, ...breakfastDateKeys])).sort();
-      if (uploadedDateKeys.length > 0) {
-        setMissingCheckDate(uploadedDateKeys[0]);
-      }
-
-      setWeeklyMenuUploadName(file.name);
-      setWeeklyMenuUploadResult({
-        mainDays: mainDateKeys.length,
-        snackDays: snackDateKeys.length,
-        breakfastDays: breakfastDateKeys.length,
-        uploadedDates: uploadedDateKeys,
-        skipped
-      });
-    } catch (err) {
-      setError(err.response?.data?.message || err.message || 'Failed to upload weekly menu');
-    } finally {
-      setUploadingWeeklyMenu(false);
-      event.target.value = '';
-    }
-  };
-
   const removeMainMeal = (index) => {
     const current = mainMealOptionsByDate[missingCheckDate] || { mainMeals: [], subMeals: [] };
     const updatedMainMeals = (current.mainMeals || []).filter((_, i) => i !== index);
@@ -977,24 +845,19 @@ const KitchenList = () => {
   const saveSnackPresets = async (presetsByName) => {
     setSavingSnackPreset(true);
     try {
-      const presets = Object.values(presetsByName).map((p) => ({
-        snackName: p.snackName,
-        C: p.C,
-        P: p.P,
-        F: p.F
-      }));
-      const res = await api.put('/menus/kitchen-snack-presets', { presets });
-      if (res.data?.success) {
-        setSnackPreset({ presetsByName: res.data.data?.presetsByName || {} });
-      }
+      const changes = snackPresetChanges(snackPreset.presetsByName || {}, presetsByName);
+      const res = await api.patch('/menus/kitchen-snack-presets', changes);
+      if (!res.data?.success) throw new Error(res.data?.message || 'Snack macros were not saved.');
+      setSnackPreset({ presetsByName: res.data.data?.presetsByName || {} });
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to save snack macros');
+      throw err;
     } finally {
       setSavingSnackPreset(false);
     }
   };
 
-  const addSnackPreset = () => {
+  const addSnackPreset = async () => {
     const name = snackPresetForm.name.trim();
     if (!name) return;
     const key = normalizeBreakfastKey(name);
@@ -1007,14 +870,16 @@ const KitchenList = () => {
         F: Number(snackPresetForm.F) || 0
       }
     };
-    saveSnackPresets(updated);
-    setSnackPresetForm({ name: '', C: '', P: '', F: '' });
+    try {
+      await saveSnackPresets(updated);
+      setSnackPresetForm({ name: '', C: '', P: '', F: '' });
+    } catch { /* Keep the entered values so the user can retry. */ }
   };
 
-  const removeSnackPreset = (key) => {
+  const removeSnackPreset = async (key) => {
     const updated = { ...snackPreset.presetsByName };
     delete updated[key];
-    saveSnackPresets(updated);
+    try { await saveSnackPresets(updated); } catch { /* Preserve the saved row on failure. */ }
   };
 
   // Breakfast / snack options for the checked date whose name has no macros in
@@ -1268,6 +1133,7 @@ const KitchenList = () => {
   // it just means one click covers everything a missing customer needs.
   const runAutoAssign = async () => {
     if (!selectedMenuId || !missingCheckDate) return;
+    if (!selectionWindow.canAutoAssign) { setError(selectionWindow.message); return; }
     if (deliveryCheck?.dateKey !== missingCheckDate) {
       setError('Run "Check Missing Selections" for this date first.');
       return;
@@ -1365,10 +1231,7 @@ const KitchenList = () => {
     }
   };
 
-  // No auto-select for the date pickers either — the kitchen chooses a date
-  // explicitly (upload still jumps the "Date" selector to whatever was just
-  // uploaded, via setMissingCheckDate in handleWeeklyMenuUpload — that's an
-  // explicit result of the kitchen's own action, not a silent default).
+  // No auto-select for the date pickers: the kitchen chooses a date explicitly.
 
   const saveSnackOptionsForDate = async (date, first, second) => {
     if (!selectedMenuId || !date) return;
@@ -1496,17 +1359,20 @@ const KitchenList = () => {
 
   // Cheap: just filters the already-computed rows above. This is the only
   // part that re-runs while typing in the search box.
+  const scheduledCustomerRows = useMemo(() => dayRoster?.scope === `${selectedMenuId}:${missingCheckDate}`
+    ? allComputedRows.filter(entry => visibleKitchenCustomer(entry, dayRoster.rows, missingCheckDate)).map(entry => kitchenCustomerDay(entry, missingCheckDate)) : [],
+  [allComputedRows, dayRoster, selectedMenuId, missingCheckDate]);
   const planOptions = useMemo(
-    () => Array.from(new Set(allComputedRows.map((entry) => entry.planName).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
-    [allComputedRows]
+    () => Array.from(new Set(scheduledCustomerRows.map((entry) => entry.planName).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [scheduledCustomerRows]
   );
 
-  const customerRows = useMemo(() => allComputedRows
+  const customerRows = useMemo(() => scheduledCustomerRows
     .filter((entry) => `${entry.customerName || ''} ${entry.email || ''}`.toLowerCase().includes(search.toLowerCase()))
     .filter((entry) => !showOnlyMissing || entry.missingSelection)
     .filter((entry) => !planFilter || entry.planName === planFilter)
     .filter((entry) => !showOnlyAttention || entry.needsAttention),
-  [allComputedRows, search, showOnlyMissing, planFilter, showOnlyAttention]);
+  [scheduledCustomerRows, search, showOnlyMissing, planFilter, showOnlyAttention]);
 
   // useCallback here (and on saveDayNote below) isn't optional — CustomerCard
   // is React.memo'd specifically so typing in one customer's search match or
@@ -2573,21 +2439,29 @@ ${body}
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-amber-50 p-4 md:p-6">
-      <div className="mx-auto max-w-7xl space-y-6">
-        <PartnerKitchenOrders date={missingCheckDate} />
-        <div className="rounded-3xl bg-slate-900 p-6 text-white shadow-xl">
-          <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-            <div>
-              <div className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-sm text-amber-200">
-                <ChefHat size={16} /> Kitchen List
-              </div>
-              <h1 className="mt-3 text-3xl font-bold tracking-tight">Breakfast and meal weights</h1>
-              <p className="mt-2 max-w-2xl text-sm text-slate-300">
-                Select a menu below, then a date, to manage that day's meal rotation and calculate weights for each customer. Breakfast, main/sub meals, and snacks are all set up via the weekly menu upload.
-              </p>
-            </div>
+    <div className="kitchen-workspace">
+      <div className="kitchen-workspace-inner">
+        <KitchenWorkspaceHeader dateLabel={formatKitchenDay(missingCheckDate)}>
+          <div className="kitchen-stepbar">
+            <div className="kitchen-step"><span className="kitchen-step-number">01</span><div>
+              <label htmlFor="kitchen-list-menu">Menu</label>
+              <select id="kitchen-list-menu" value={selectedMenuId} onChange={(e) => { selectionRequests.current.cancel(); setLoadedSelectionScope(''); setMissingCheckDate(''); setPdfDate(''); setSelectedMenuId(e.target.value); }} className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm focus:border-slate-900 focus:outline-none">
+                <option value="">Select a menu...</option>
+                {menus.map((menu) => (
+                  <option key={menu._id} value={menu._id}>{toSentenceCase(menu.title || menu.name) || 'Untitled menu'}</option>
+                ))}
+              </select></div></div>
+            <div className="kitchen-step"><span className="kitchen-step-number">02</span><div><label htmlFor="kitchen-header-date">Date</label>
+              <select id="kitchen-header-date" aria-label="Delivery date" value={missingCheckDate} disabled={!selectedMenuId} onChange={e => changeKitchenDate(e.target.value)}><option value="">Choose a date</option>{menuDateKeys.map(date => <option key={date} value={date}>{formatKitchenDay(date)}</option>)}</select>
+            </div></div>
           </div>
+          <button type="button" title="Reload selections and re-fetch nutrition data from the website" className="kitchen-reload" disabled={!selectedMenuId || !missingCheckDate || loadingSelections} onClick={() => { nutritionCacheRef.current.clear(); setDeliveryCheck(null); loadSelections(); }}><RefreshCw size={16} className={loadingSelections ? 'animate-spin' : ''} /></button>
+          <button type="button" className="kitchen-download-trigger" aria-expanded={downloadsOpen} aria-controls="kitchen-downloads" disabled={!menuDateKeys.length} onClick={() => setDownloadsOpen(open => !open)}><Download size={16} /> Kitchen Paper <ChevronDown size={14} /></button>
+        </KitchenWorkspaceHeader>
+        <KitchenAutoScopeControl enabled={automaticScope.enabled} onChange={automaticScope.setEnabled} message={automaticScope.message} />
+        {menuDateKeys.length > 0 && <details id="kitchen-downloads" className="kitchen-export-panel kitchen-paper-section" open={downloadsOpen}>
+          <summary onClick={event => { event.preventDefault(); setDownloadsOpen(open => !open); }}><FileText size={18} /> Kitchen Paper <span className="kitchen-export-formats">PDF · Word · Excel</span></summary>
+          <button type="button" className="kitchen-download-close" onClick={() => setDownloadsOpen(false)}>Close downloads</button>
 
           {menuDateKeys.length > 0 && (
             <div className="mt-4 flex flex-wrap items-end gap-3 border-t border-white/10 pt-4">
@@ -2600,7 +2474,7 @@ ${body}
                 >
                   <option value="">Select a date...</option>
                   {menuDateKeys.map((key) => (
-                    <option key={key} value={key}>{formatDateLabel(key)}</option>
+                  <option key={key} value={key}>{formatKitchenDay(key)}</option>
                   ))}
                 </select>
               </div>
@@ -2766,79 +2640,23 @@ ${body}
               {mealRemarksUploadResult.failedCustomers > 0 && ` ${mealRemarksUploadResult.failedCustomers} customer(s) failed to save — try again.`}
             </p>
           )}
-        </div>
+          {downloadsOpen && <PartnerKitchenOrders date={missingCheckDate} />}
+        </details>}
 
-        <div className="grid gap-4 lg:grid-cols-3">
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200 lg:col-span-2">
-            <label className="mb-2 block text-sm font-semibold text-slate-700">Menu</label>
-            <div className="flex gap-3">
-              <select value={selectedMenuId} onChange={(e) => { selectionRequests.current.cancel(); setLoadedSelectionScope(''); setMissingCheckDate(''); setPdfDate(''); setSelectedMenuId(e.target.value); }} className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm focus:border-slate-900 focus:outline-none">
-                <option value="">Select a menu...</option>
-                {menus.map((menu) => (
-                  <option key={menu._id} value={menu._id}>{toSentenceCase(menu.title || menu.name) || 'Untitled menu'}</option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => {
-                  nutritionCacheRef.current.clear();
-                  setDeliveryCheck(null);
-                  loadSelections();
-                }}
-                title="Reload selections and re-fetch nutrition data from the website"
-                className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
-              >
-                <RefreshCw size={16} className={loadingSelections ? 'animate-spin' : ''} />
-              </button>
-            </div>
-            <p className="mt-2 text-xs text-slate-500">{importName ? `Breakfast import: ${importName}` : 'No breakfast import loaded yet'}</p>
-            <p className="mt-1 text-xs text-slate-500">
-              Breakfast presets are saved once and shared across all menus. You do not need to reupload for each menu.
-            </p>
-            {Object.keys(breakfastPreset?.presetsByName || {}).length > 0 && (
-              <p className="mt-1 text-xs text-emerald-700">
-                Loaded breakfast names: {Object.keys(breakfastPreset.presetsByName).length}
-              </p>
-            )}
-          </div>
 
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <label className="mb-2 block text-sm font-semibold text-slate-700">Search</label>
-            <div className="relative">
-              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Customer or email" className="w-full rounded-xl border border-slate-300 py-3 pl-9 pr-3 text-sm" />
-            </div>
-            <div className="mt-3 flex flex-wrap items-center gap-3">
-              <select
-                value={planFilter}
-                onChange={(e) => setPlanFilter(e.target.value)}
-                className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
-              >
-                <option value="">All plans</option>
-                {planOptions.map((plan) => (
-                  <option key={plan} value={plan}>{plan}</option>
-                ))}
-              </select>
-              <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={showOnlyAttention}
-                  onChange={(e) => setShowOnlyAttention(e.target.checked)}
-                  className="rounded border-slate-300 text-orange-600 focus:ring-orange-500"
-                />
-                Needs attention only
-              </label>
-            </div>
-          </div>
-        </div>
+
+        {!missingCheckDate && !loadingMenus && <KitchenEmptyState hasMenu={!!selectedMenuId} />}
+        {selectedMenu && missingCheckDate && !selectionWindow.canAutoAssign && <p role="status" className="rounded-xl bg-amber-50 p-4 text-sm text-amber-900">{selectionWindow.message}</p>}
+
 
         {menuDateKeys.length > 0 && (
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <h3 className="text-sm font-semibold text-slate-700 mb-3">Missing Meal Selections</h3>
-            <p className="text-xs text-slate-400 mb-3">
-              Checks every active, non-cycle-ended website subscription's delivery schedule for the chosen date —
-              this fetches full subscription details for hundreds of customers, so it can take 10–30 seconds.
-            </p>
+          <div className="kitchen-panel kitchen-setup-panel">
+            <div className="kitchen-setup-heading"><span>Auto-assign menu {missingCheckDate ? '· ' + formatDateLabel(missingCheckDate) : ''}</span>
+              <button type="button" aria-expanded={setupOpen} aria-controls="kitchen-setup-content" onClick={() => setSetupOpen(open => !open)}>{setupOpen ? 'Hide setup' : 'Show setup'} {setupOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
+              <button type="button" className="kitchen-button-primary" onClick={runAutoAssign} disabled={!selectionWindow.canAutoAssign || assigningAll || deliveryCheck?.dateKey !== missingCheckDate || autoAssignBlockedByMacros}>{assigningAll ? 'Assigning...' : 'Auto-Assign'}</button>
+            </div>
+            <div id="kitchen-setup-content" hidden={!setupOpen}>
+            <h3 className="sr-only"><ChefHat size={19} />Missing Meal Selections</h3>
             <div className="flex flex-wrap items-end gap-3">
               <div>
                 <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-500">Date</label>
@@ -2857,20 +2675,12 @@ ${body}
                 type="button"
                 onClick={() => checkMissingSelections(missingCheckDate)}
                 disabled={checkingMissing || !missingCheckDate}
-                className="inline-flex items-center gap-2 rounded-xl bg-amber-500 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-600 disabled:opacity-50"
+                className="kitchen-button-blue inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold disabled:opacity-50"
               >
                 <Search size={14} className={checkingMissing ? 'animate-pulse' : ''} />
                 {checkingMissing ? 'Checking...' : 'Check Missing Selections'}
               </button>
-              <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={showOnlyMissing}
-                  onChange={(e) => setShowOnlyMissing(e.target.checked)}
-                  className="rounded border-slate-300 text-amber-600 focus:ring-amber-500"
-                />
-                Show only missing
-              </label>
+
             </div>
             {missingSelectionEntries.length > 0 && (
               <p className="mt-2 text-xs text-amber-600">
@@ -2883,42 +2693,9 @@ ${body}
                 <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
                   Main Meal Rotation — {formatDateLabel(missingCheckDate)}
                 </h4>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={downloadWeeklyMenuTemplate}
-                    className="inline-flex items-center gap-1 rounded-xl border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
-                  >
-                    <Download size={12} /> Template
-                  </button>
-                  <label className="inline-flex cursor-pointer items-center gap-1 rounded-xl bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-700">
-                    <Upload size={12} className={uploadingWeeklyMenu ? 'animate-pulse' : ''} />
-                    {uploadingWeeklyMenu ? 'Uploading...' : 'Upload Weekly Menu'}
-                    <input
-                      type="file"
-                      accept=".csv,.xlsx,.xls"
-                      onChange={handleWeeklyMenuUpload}
-                      disabled={uploadingWeeklyMenu}
-                      className="hidden"
-                    />
-                  </label>
-                </div>
               </div>
-              <p className="text-[11px] text-slate-400 mb-1">
-                Up to 3 main meals per date, cycled in order (not random) as customers are assigned. If a customer's exclusions rule out all 3, a sub meal is used instead.
-              </p>
-              <p className="text-[11px] text-slate-400 mb-3">
-                Upload sets the whole week at once from a spreadsheet with columns: Date, Slot (main/sub/snack/breakfast), MealName, Type (chicken/beef/fish — main/sub only), Exclusions, C, P, F (snack/breakfast macros) — download the template for the exact format. This replaces each uploaded date's existing main/sub and snack options, and updates the shared breakfast presets by name.
-              </p>
-              {weeklyMenuUploadName && weeklyMenuUploadResult && (
-                <p className="text-[11px] text-emerald-700 mb-3">
-                  Loaded {weeklyMenuUploadResult.mainDays} main/sub day(s), {weeklyMenuUploadResult.snackDays} snack day(s), and {weeklyMenuUploadResult.breakfastDays} breakfast day(s) from {weeklyMenuUploadName}
-                  {weeklyMenuUploadResult.uploadedDates?.length > 0 && ` — showing ${formatDateLabel(weeklyMenuUploadResult.uploadedDates[0])} below (switch the Date above to see the other uploaded day(s): ${weeklyMenuUploadResult.uploadedDates.map(formatDateLabel).join(', ')})`}.
-                  {weeklyMenuUploadResult.skipped > 0 && ` ${weeklyMenuUploadResult.skipped} row(s) skipped — missing date/name, or an invalid type (chicken/beef/fish) for a main/sub row.`}
-                </p>
-              )}
 
-              <div className="grid gap-4 md:grid-cols-4">
+              <div className="kitchen-rotation-board">
                 <div>
                   <p className="text-xs font-semibold text-slate-600 mb-2">
                     Main Meals ({(mainMealOptionsByDate[missingCheckDate]?.mainMeals || []).length}/3)
@@ -3024,61 +2801,7 @@ ${body}
                   </div>
                 </div>
 
-                <div>
-                  <p className="text-xs font-semibold text-slate-600 mb-2">
-                    Matter Core Meals — {formatDateLabel(missingCheckDate)}
-                  </p>
-                  <p className="text-[10px] text-slate-400 mb-2">
-                    For customers on the "Matter Core" plan only. No type or exclusion filtering — a customer needing
-                    2 meals gets the 1st and 2nd meal below, in order. Their breakfast/snacks still use the 1st
-                    breakfast option and 1st snack in each pool (never random) instead of these.
-                  </p>
-                  <div className="flex gap-2 mb-2">
-                    <input
-                      type="text"
-                      value={matterCoreMealInput}
-                      onChange={(e) => setMatterCoreMealInput(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addMatterCoreMeal(); } }}
-                      placeholder="Meal name"
-                      disabled={!missingCheckDate || savingMatterCoreMealOptions}
-                      className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-slate-900 focus:outline-none disabled:opacity-50"
-                    />
-                    <button
-                      type="button"
-                      onClick={addMatterCoreMeal}
-                      disabled={!missingCheckDate || !matterCoreMealInput.trim() || savingMatterCoreMealOptions}
-                      className="flex-shrink-0 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-50"
-                    >
-                      Add
-                    </button>
-                  </div>
-                  <div className="space-y-2 mb-2">
-                    {(matterCoreMealOptionsByDate[missingCheckDate] || []).length === 0 && (
-                      <p className="text-sm text-slate-400">No Matter Core meals added for this date.</p>
-                    )}
-                    {(matterCoreMealOptionsByDate[missingCheckDate] || []).map((meal, index) => (
-                      <div key={`matter-core-${meal.name}-${index}`} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
-                        <span className="font-medium text-slate-800">{index + 1}. {meal.name}</span>
-                        <button type="button" onClick={() => removeMatterCoreMeal(index)} className="text-red-500 hover:text-red-700 flex-shrink-0 ml-2">
-                          <Trash2 size={14} />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
 
-            </div>
-
-            <div className="mt-6 pt-4 border-t border-slate-100">
-              <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1">
-                Snack Rotation — {formatDateLabel(missingCheckDate)}
-              </h4>
-              <p className="text-[11px] text-slate-400 mb-3">
-                The lists below are for the date selected above — add snack ingredients for any date via the weekly menu upload (Slot = snack1/snack2).
-              </p>
-
-              <div className="grid gap-4 md:grid-cols-2">
                 {['first', 'second'].map((pool) => (
                   <div key={pool}>
                     <p className="text-xs font-semibold text-slate-600 mb-2">
@@ -3135,8 +2858,53 @@ ${body}
                   </div>
                 ))}
               </div>
+
             </div>
 
+<details className="kitchen-advanced"><summary>Matter Core setup</summary>                <div>
+                  <p className="text-xs font-semibold text-slate-600 mb-2">
+                    Matter Core Meals — {formatDateLabel(missingCheckDate)}
+                  </p>
+                  <p className="text-[10px] text-slate-400 mb-2">
+                    For customers on the "Matter Core" plan only. No type or exclusion filtering — a customer needing
+                    2 meals gets the 1st and 2nd meal below, in order. Their breakfast/snacks still use the 1st
+                    breakfast option and 1st snack in each pool (never random) instead of these.
+                  </p>
+                  <div className="flex gap-2 mb-2">
+                    <input
+                      type="text"
+                      value={matterCoreMealInput}
+                      onChange={(e) => setMatterCoreMealInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addMatterCoreMeal(); } }}
+                      placeholder="Meal name"
+                      disabled={!missingCheckDate || savingMatterCoreMealOptions}
+                      className="w-full rounded-xl border border-slate-300 px-3 py-2 text-sm focus:border-slate-900 focus:outline-none disabled:opacity-50"
+                    />
+                    <button
+                      type="button"
+                      onClick={addMatterCoreMeal}
+                      disabled={!missingCheckDate || !matterCoreMealInput.trim() || savingMatterCoreMealOptions}
+                      className="flex-shrink-0 rounded-xl bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-700 disabled:opacity-50"
+                    >
+                      Add
+                    </button>
+                  </div>
+                  <div className="space-y-2 mb-2">
+                    {(matterCoreMealOptionsByDate[missingCheckDate] || []).length === 0 && (
+                      <p className="text-sm text-slate-400">No Matter Core meals added for this date.</p>
+                    )}
+                    {(matterCoreMealOptionsByDate[missingCheckDate] || []).map((meal, index) => (
+                      <div key={`matter-core-${meal.name}-${index}`} className="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2 text-sm">
+                        <span className="font-medium text-slate-800">{index + 1}. {meal.name}</span>
+                        <button type="button" onClick={() => removeMatterCoreMeal(index)} className="text-red-500 hover:text-red-700 flex-shrink-0 ml-2">
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div></details>
+
+<details className="kitchen-advanced"><summary>Breakfast & snack macro presets</summary>
             <div className="mt-6 pt-4 border-t border-slate-100">
               <button
                 type="button"
@@ -3242,16 +3010,10 @@ ${body}
               )}
             </div>
 
+
+</details>
             <div className="mt-6 pt-4 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={runAutoAssign}
-                disabled={assigningAll || deliveryCheck?.dateKey !== missingCheckDate || autoAssignBlockedByMacros}
-                className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white hover:bg-slate-700 disabled:opacity-50"
-              >
-                <Shuffle size={14} className={assigningAll ? 'animate-spin' : ''} />
-                {assigningAll ? 'Assigning...' : 'Auto-Assign'}
-              </button>
+
               {autoAssignBlockedByMacros && (
                 <div className="mt-2 rounded-lg bg-amber-50 p-2 text-[11px] text-amber-900 ring-1 ring-amber-300">
                   <p className="flex items-center gap-1 font-semibold"><AlertTriangle size={12} /> Auto-Assign is blocked — these have no macros yet:</p>
@@ -3302,6 +3064,7 @@ ${body}
                 </div>
               )}
             </div>
+            </div>
           </div>
         )}
 
@@ -3315,35 +3078,49 @@ ${body}
 
 
         <div className="space-y-4">
-          <KitchenInputWarnings entries={allComputedRows} selectedDate={missingCheckDate} onShowCustomer={(entry) => {
+          {missingCheckDate && <div className="kitchen-section-heading"><UtensilsCrossed size={19} /> Customer preparation <small>{customerRows.length} matching records</small></div>}
+          <KitchenInputWarnings entries={scheduledCustomerRows} selectedDate={missingCheckDate} onShowCustomer={(entry) => {
             setSearchInput(entry.email || entry.customerName || '');
             setSearch(entry.email || entry.customerName || '');
             setPlanFilter('');
             setShowOnlyMissing(false);
             setShowOnlyAttention(false);
           }} />
-        {customerRows.slice(0, visibleCustomers).map((entry) => (
-            <CustomerCard
-              key={`${entry.email || entry.customerId}`}
-              entry={entry}
-              persistMealTypeOverride={persistMealTypeOverride}
-              saveMealRemark={saveMealRemark}
-              savingOverrideKey={savingOverrideKey}
-              saveDayNote={saveDayNote}
-              savingDayNoteKey={savingDayNoteKey}
-            />
-          ))}
+          <KitchenCustomerBrowser entries={customerRows} visibleCount={visibleCustomers} scope={selectedMenuId + ':' + missingCheckDate}
+          controls={<div className="kitchen-search-controls">
+            <label htmlFor="kitchen-customer-search" className="mb-2 block text-sm font-semibold text-slate-700">Search</label>
+            <div className="relative">
+              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input id="kitchen-customer-search" value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Customer or email" className="w-full rounded-xl border border-slate-300 py-3 pl-9 pr-3 text-sm" />
+            </div>
+            <div className="kitchen-filter-tabs" role="group" aria-label="Customer status filter">
+              <button type="button" aria-pressed={!showOnlyMissing && !showOnlyAttention} onClick={() => { setShowOnlyMissing(false); setShowOnlyAttention(false); }}>All</button>
+              <button type="button" aria-pressed={showOnlyMissing && !showOnlyAttention} onClick={() => { setShowOnlyMissing(true); setShowOnlyAttention(false); }}>Missing</button>
+              <button type="button" aria-pressed={showOnlyAttention} onClick={() => { setShowOnlyMissing(false); setShowOnlyAttention(true); }}>Needs attention</button>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <select
+                value={planFilter}
+                aria-label="Filter customers by meal plan"
+                onChange={(e) => setPlanFilter(e.target.value)}
+                className="rounded-xl border border-slate-300 px-3 py-2 text-sm"
+              >
+                <option value="">All plans</option>
+                {planOptions.map((plan) => (
+                  <option key={plan} value={plan}>{plan}</option>
+                ))}
+              </select>
+            </div>
+          </div>}
+          onShowMore={() => setVisibleCustomers(count => count + 50)}
+          renderCustomer={entry => <CustomerCard key={entry.email || entry.customerId} entry={entry} persistMealTypeOverride={persistMealTypeOverride}
+            saveMealRemark={saveMealRemark} savingOverrideKey={savingOverrideKey} saveDayNote={saveDayNote} savingDayNoteKey={savingDayNoteKey} snackPreset={snackPreset} />}
+        />
         </div>
-
-        {customerRows.length > visibleCustomers && (
-          <button type="button" onClick={() => setVisibleCustomers(count => count + 50)} className="rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm">
-            Show 50 more customers ({visibleCustomers} of {customerRows.length} shown)
-          </button>
-        )}
 
         {!error && !loadingMenus && !loadingSelections && missingCheckDate && loadedSelectionScope === `${selectedMenuId}:${missingCheckDate}` && customerRows.length === 0 && (
           <div className="rounded-3xl border border-dashed border-slate-300 bg-white p-10 text-center text-slate-500 shadow-sm">
-            {allComputedRows.length ? 'No customers match the current filters.' : 'No customer selections found for this menu.'}
+            {scheduledCustomerRows.length ? 'No customers match the current filters.' : `No active customer deliveries or partner assignments for ${formatKitchenDay(missingCheckDate)}.`}
           </div>
         )}
       </div>
@@ -3358,7 +3135,7 @@ ${body}
 // here (keyed by date only, since email is fixed per card instance) instead
 // of a shared object in the parent, which is what made every card re-render
 // together before.
-const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemark, savingOverrideKey, saveDayNote, savingDayNoteKey }) => {
+const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemark, savingOverrideKey, saveDayNote, savingDayNoteKey, snackPreset }) => {
   const [localDayNoteDrafts, setLocalDayNoteDrafts] = useState({});
   // Each day's full meal grid starts collapsed — with a realistic customer
   // count (hundreds), rendering every day's meal detail for every customer
@@ -3369,13 +3146,13 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
   // it was just reconciling a huge tree on every keystroke. Collapsing to a
   // one-line summary per day (expand on demand) cuts the always-rendered
   // DOM by roughly the number of days on the menu.
-  const [expandedDays, setExpandedDays] = useState({});
+  const [expandedDays, setExpandedDays] = useState(() => Object.fromEntries((entry.mealsByDay || []).map(day => [day.dateKey, true])));
 
   return (
     <div
-      className={`overflow-hidden rounded-3xl bg-white shadow-sm ring-1 ${entry.missingSelection ? 'ring-amber-300' : 'ring-slate-200'}`}
+      className={`kitchen-customer overflow-hidden bg-white ${entry.missingSelection ? 'ring-1 ring-amber-300' : ''}`}
     >
-      <div className="flex flex-col gap-3 border-b border-slate-100 p-5 md:flex-row md:items-center md:justify-between">
+      <div className="kitchen-customer-header flex flex-col gap-4 border-b border-slate-100 p-5">
         <div>
           <div className="flex items-center gap-2 flex-wrap">
             <h2 className="text-lg font-bold text-slate-900">{entry.customerName || entry.email || 'Unknown customer'}</h2>
@@ -3428,16 +3205,19 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
           )}
         </div>
         {!entry.showMissingPlaceholder && (
-          <div className="grid grid-cols-2 gap-2 text-sm md:grid-cols-6">
+          <div className="kitchen-customer-metrics grid grid-cols-2 gap-2 text-sm md:grid-cols-3 xl:grid-cols-6">
             <Stat label="Meals/Day" value={entry.mealsPerDay ?? '—'} />
-            <Stat label="Total weight" value={entry.calculationStatus === 'incomplete' ? 'Unavailable' : `${entry.totalWeight || 0} g`} />
+            <Stat label="Total weight" value={entry.kitchenProductionExcluded ? 'Not scheduled' : entry.calculationStatus === 'incomplete' ? 'Unavailable' : `${entry.totalWeight || 0} g`} />
             <Stat label="Breakfast" value={`${entry.breakfastPreset?.V || 0} g`} />
-            <Stat label="Macros" value={`C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}`} />
-            <Stat label="Calories" value={`${entry.totalCalories || 0}`} />
+            <Stat label="Macros" value={entry.calculationStatus === 'incomplete' ? 'Not calculated' : `C ${entry.macros?.C || 0} / P ${entry.macros?.P || 0} / F ${entry.macros?.F || 0}`} />
+            <Stat label="Calories" value={entry.calculationStatus === 'incomplete' ? 'Not calculated' : `${entry.totalCalories || 0}`} />
             <Stat label="Snacks/Day" value={entry.snacksPerDay ?? '—'} />
           </div>
         )}
       </div>
+      {entry.calculationStatus === 'incomplete' && <div className="kitchen-customer-unavailable" role="note">
+        {entry.kitchenProductionExcluded ? <><strong>No active delivery for {formatDateLabel(entry.kitchenExclusionDate)}.</strong><p>Saved choices are shown for reference. This customer is excluded from the kitchen paper and counting for this date.</p></> : <><strong>Weights cannot be calculated until these inputs are resolved:</strong><ul>{(entry.inputErrors || []).map(reason => <li key={reason}>{reason}</li>)}</ul></>}
+      </div>}
       {entry.showMissingPlaceholder ? (
         <div className="p-5">
           <p className="text-sm text-amber-700">
@@ -3500,9 +3280,12 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
               </ul>
             )}
             {isExpanded && (
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {dayGroup.meals.map((meal, index) => (
-                <div key={`${entry.email}-${dayGroup.dateKey}-${index}`} className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="kitchen-meal-list">
+              {dayGroup.meals.map((meal, index) => {
+                const savedSnackMacros = meal.flags?.invalidInput && String(meal.mealType).toLowerCase() === 'snack'
+                  ? resolveSnackPresetForMeal(meal, snackPreset?.presetsByName || {}) : null;
+                return (
+                <div key={`${entry.email}-${dayGroup.dateKey}-${index}`} className="kitchen-meal p-4">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2">
                       <UtensilsCrossed size={16} className="text-amber-600" />
@@ -3570,7 +3353,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
                     )}
                   </div>
                   {String(meal?.mealType || '').toLowerCase() !== 'breakfast' && (
-                    <div className="mt-2">
+                    <div className="kitchen-meal-protein mt-2">
                       <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Protein Type</label>
                       <select
                         value={meal.manualProteinType || ''}
@@ -3596,7 +3379,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
                     </div>
                   )}
                   {String(meal?.mealType || '').toLowerCase() !== 'snack' && (
-                    <div className="mt-2">
+                    <div className="kitchen-meal-changes mt-2">
                       <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Change (shows on kitchen paper)</label>
                       <div className="flex flex-wrap gap-x-4 gap-y-1">
                         {REMARK_CHANGE_OPTIONS.map((option) => {
@@ -3623,26 +3406,27 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
                       )}
                     </div>
                   )}
-                  <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
-                    <Tiny label="C" value={meal.flags?.invalidInput ? 'Unavailable' : (meal.macros?.C ?? 0)} />
-                    <Tiny label="P" value={meal.flags?.invalidInput ? 'Unavailable' : (meal.macros?.P ?? 0)} />
-                    <Tiny label="F" value={meal.flags?.invalidInput ? 'Unavailable' : (meal.macros?.F ?? 0)} />
+                  <div className="kitchen-meal-macros mt-3 grid grid-cols-3 gap-2 text-xs">
+                    {savedSnackMacros && <p className="col-span-3 text-xs text-slate-500">Saved snack preset · not a delivery calculation</p>}
+                    <Tiny label="C" value={savedSnackMacros?.C ?? (meal.flags?.invalidInput ? 'Unavailable' : (meal.macros?.C ?? 0))} />
+                    <Tiny label="P" value={savedSnackMacros?.P ?? (meal.flags?.invalidInput ? 'Unavailable' : (meal.macros?.P ?? 0))} />
+                    <Tiny label="F" value={savedSnackMacros?.F ?? (meal.flags?.invalidInput ? 'Unavailable' : (meal.macros?.F ?? 0))} />
                   </div>
-                  <div className="mt-3 flex items-center justify-between text-sm text-slate-600">
+                  <div className="kitchen-meal-total mt-3 flex items-center justify-between text-sm text-slate-600">
                     <span>Weight</span>
                     <span className="font-semibold text-slate-900">{meal.flags?.invalidInput ? 'Unavailable' : `${meal.weight || 0} g`}</span>
                   </div>
-                  <div className="mt-2 grid grid-cols-3 gap-2 text-xs">
+                  <div className="kitchen-meal-weights mt-2 grid grid-cols-3 gap-2 text-xs">
                     <Tiny label="P" value={meal.flags?.invalidInput ? 'Unavailable' : `${meal.proteinWeight || 0}g`} />
                     <Tiny label="C" value={meal.flags?.invalidInput ? 'Unavailable' : `${meal.carbWeight || 0}g`} />
                     <Tiny label="V" value={meal.flags?.invalidInput ? 'Unavailable' : `${meal.vegWeight || 0}g`} />
                   </div>
-                  <div className="mt-1 flex items-center justify-between text-sm text-slate-600">
+                  <div className="kitchen-meal-calories mt-1 flex items-center justify-between text-sm text-slate-600">
                     <span>Calories</span>
                     <span className="font-semibold text-slate-900">{meal.flags?.invalidInput ? 'Unavailable' : (meal.macros?.calories || 0)}</span>
                   </div>
                 </div>
-              ))}
+              ); })}
             </div>
             )}
           </div>
@@ -3659,7 +3443,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
 // members get fixed Lean macros (C35 P30 F15 per main meal) in the
 // calculation, and print under the kitchen paper's "Partners" section.
 const Stat = ({ label, value }) => (
-  <div className="rounded-2xl bg-slate-50 px-3 py-2">
+  <div className="kitchen-stat px-3 py-2">
     <div className="text-[11px] uppercase tracking-wide text-slate-400">{label}</div>
     <div className="mt-1 text-sm font-semibold text-slate-800">{value}</div>
   </div>

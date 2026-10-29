@@ -247,7 +247,7 @@ const getSnackPresetIndex = (map) => {
   return index;
 };
 
-const resolveSnackPresetForMeal = (meal, snackPresetsByName = {}) => {
+export const resolveSnackPresetForMeal = (meal, snackPresetsByName = {}) => {
   const mealSnackName = String(meal?.mealName || meal?.menuItemName || meal?.menuItemId?.mealName || '').trim();
   if (!mealSnackName) return null;
 

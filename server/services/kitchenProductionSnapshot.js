@@ -9,6 +9,8 @@ import Breakfast from '../models/KitchenBreakfastPreset.js';
 import Snack from '../models/KitchenSnackPreset.js';
 import { excludeRecreatedArchivedAliases } from './archivedMenuAliases.js';
 import { assertPreparedCoverage } from './kitchenCoverage.js';
+import { readKitchenSelectionWindow } from './kitchenSelectionDeadline.js';
+import matterApiService from './matterApiService.js';
 
 export const snapshotIsFresh = (snapshot, sourceVersion, now = Date.now()) => snapshot?.status === 'ready'
   && snapshot.sourceVersion === sourceVersion && now >= new Date(snapshot.updatedAt).getTime()
@@ -41,6 +43,26 @@ const capture = async menuId => {
 };
 
 export const readKitchenState = async (menuId, date, jobId) => {
+  const selectionWindow = await readKitchenSelectionWindow(menuId, date);
+  if (!selectionWindow.canAutoAssign) {
+    // Reading an open day must never run the assignment or pause-reconciliation
+    // paths. Missing records are transient preview rows, never database inserts.
+    const [roster, inputs] = await Promise.all([
+      matterApiService.findSubscriptionsWithDeliveryOnDate(date, { includeKitchenInputs: true }), capture(menuId),
+    ]);
+    for (const sub of roster) {
+      const exists = inputs.kitchenSelections.some(row => row.matterCustomerId
+        ? String(row.matterCustomerId) === String(sub.customer_id)
+        : (sub.subscription_id != null && String(row.matterSubscriptionId || '') === String(sub.subscription_id))
+          || (!!sub.email && String(row.matterEmail || row.email || '').toLowerCase() === String(sub.email).toLowerCase()));
+      if (!exists) inputs.kitchenSelections.push({ email: sub.email, matterEmail: sub.email,
+        matterCustomerId: sub.customer_id == null ? null : String(sub.customer_id), matterSubscriptionId: sub.subscription_id == null ? null : String(sub.subscription_id),
+        firstName: sub.name || '', selectedMeals: [], _missingSelection: true, _missingSelectionDate: date });
+    }
+    return { state: 'selection-open', data: { success: true, preparation: 'selection-open', selectionWindow,
+      preparedAt: new Date().toISOString(), data: { ...inputs, kitchenRoster: roster, rosterComplete: true,
+        kitchenInputs: roster.map(row => row.kitchen_inputs).filter(Boolean) } } };
+  }
   if (jobId) {
     if (!mongoose.isValidObjectId(jobId)) throw Object.assign(new Error('Invalid preparation ID'), { statusCode: 400 });
     const job = await Snapshot.findOne({ _id: jobId, menuId, date }).lean();

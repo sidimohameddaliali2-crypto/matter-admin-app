@@ -1,4 +1,4 @@
-import { matchesMatterSubscription, enrichSelectionsWithNutrition, fetchBreakfastPresets, fetchSnackPresets, getCustomerName, getDateKey } from './kitchenData';
+import { matchesMatterSubscription, enrichSelectionsWithNutrition, fetchBreakfastPresets, fetchSnackPresets, toBreakfastPresetState, toSnackPresetState, getCustomerName, getDateKey } from './kitchenData';
 import { calculateKitchenListEntry, isMatterCoreDoubleDay } from '../utils/kitchenListCalculations';
 import { assertKitchenExportReady, prepareKitchenSelections } from '../utils/kitchenIntegrity';
 
@@ -64,13 +64,15 @@ export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => 
   const preparations = new Map();
   for (const date of dayKeys) preparations.set(date, await prepareKitchenSelections(api, menuId, date, isCurrent));
   if (!isCurrent()) throw new Error('Selection changed during preparation.');
-  const [response, breakfastPreset, snackPreset] = await Promise.all([
+  const [response, rawBreakfastPreset, rawSnackPreset] = await Promise.all([
     dayKeys.length === 1 && preparations.get(dayKeys[0]).data?.kitchenSelections
       ? { data: { success: true, data: preparations.get(dayKeys[0]).data.kitchenSelections } } : api.get(`/menus/${menuId}/selections`, { timeout: 30000 }),
     preparations.get(dayKeys[0]).data?.kitchenBreakfastPreset || fetchBreakfastPresets(api, menuId),
     preparations.get(dayKeys[0]).data?.kitchenSnackPreset || fetchSnackPresets(api),
   ]);
   if (!response.data?.success) throw new Error('Selections could not be verified.');
+  const breakfastPreset = toBreakfastPresetState(rawBreakfastPreset);
+  const snackPreset = toSnackPresetState(rawSnackPreset);
   const single = dayKeys.length === 1 ? preparations.get(dayKeys[0]) : null;
   const selections = await enrichSelectionsWithNutrition(api, response.data.data || [], { current: new Map() }, { extended: true, matterInputs: [...preparations.values()].flatMap((result) => result.cached ? [] : result.data?.kitchenInputs || []),
     productionScope: single && !single.cached && single.data?.rosterComplete === true
