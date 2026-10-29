@@ -5,6 +5,7 @@ import KitchenList from './KitchenList';
 
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn(), patch: jest.fn() } }));
 jest.mock('../components/PartnerKitchenOrders', () => () => null);
+jest.mock('../lib/kitchenDayScope', () => ({ ...jest.requireActual('../lib/kitchenDayScope'), kitchenToday: () => '2026-10-22' }));
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
 const mockPdfSave = jest.fn();
@@ -65,7 +66,7 @@ beforeEach(async () => {
   localStorage.clear();
   mockExcelRows.mockImplementation((rows) => rows);
   api.get.mockImplementation(async (path) => {
-    if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', startDate: thursday, endDate: friday }] } };
+    if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', isActive: true, isPublished: true, startDate: thursday, endDate: friday }, { _id: 'old-menu', title: 'Old menu', isActive: false, isPublished: true, startDate: thursday, endDate: friday }] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [{ email, firstName: 'Internal stale name', matterCustomerId: 'permanent', mealPerDay: 9, skippedDays: [{ date: thursday, pauseStatus: 'success' }], selectedMeals: [thursday, friday].map((date) => ({ date, mealType: 'main', mealName: 'Fixture dish' })) }] } };
     if (path.includes('/matter/')) throw new Error('Duplicate Matter lookup');
     return { data: { success: true, data: {} } };
@@ -80,6 +81,16 @@ beforeEach(async () => {
 });
 
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); jest.clearAllMocks(); });
+
+test('Kitchen List automatically uses only the active menu and locks the selector', () => {
+  const menu = container.querySelector('#kitchen-list-menu');
+  expect(menu.value).toBe('menu');
+  expect(menu.disabled).toBe(true);
+  expect([...menu.options].map(option => option.value)).toEqual(['', 'menu']);
+  expect(container.textContent).toContain('active menu is selected automatically and locked');
+  expect(container.textContent).not.toContain('Use active menu & today automatically');
+  expect(container.querySelector('#kitchen-header-date').disabled).toBe(false);
+});
 
 test('selecting the prepared Thursday in the paper control preserves selections without reloading', async () => {
   expect(container.textContent).toContain('Matter Fixture');

@@ -1,6 +1,6 @@
 import KitchenInputWarnings from '../components/KitchenInputWarnings';
 import useKitchenSelectionWindow from '../lib/useKitchenSelectionWindow';
-import { KitchenWorkspaceHeader, KitchenEmptyState, KitchenAutoScopeControl } from '../components/KitchenWorkspace';
+import { KitchenWorkspaceHeader, KitchenEmptyState } from '../components/KitchenWorkspace';
 import KitchenCustomerBrowser from '../components/KitchenCustomerBrowser';
 import { snackPresetChanges } from '../lib/kitchenSnackPresetChanges';
 import useKitchenCurrentScope from '../lib/useKitchenCurrentScope';
@@ -419,7 +419,7 @@ const KitchenList = () => {
     setMissingCheckDate(date);
   };
 
-  const automaticScope = useKitchenCurrentScope({ menus, menuId: selectedMenuId, date: missingCheckDate,
+  const automaticScope = useKitchenCurrentScope({ menus, menuId: selectedMenuId, date: missingCheckDate, lockMenu: true,
     onMenu: id => { selectionRequests.current.cancel(); setLoadedSelectionScope(''); setMissingCheckDate(''); setPdfDate(''); setSelectedMenuId(id); },
     onDate: changeKitchenDate,
   });
@@ -2444,10 +2444,10 @@ ${body}
         <KitchenWorkspaceHeader dateLabel={formatKitchenDay(missingCheckDate)}>
           <div className="kitchen-stepbar">
             <div className="kitchen-step"><span className="kitchen-step-number">01</span><div>
-              <label htmlFor="kitchen-list-menu">Menu</label>
-              <select id="kitchen-list-menu" value={selectedMenuId} onChange={(e) => { selectionRequests.current.cancel(); setLoadedSelectionScope(''); setMissingCheckDate(''); setPdfDate(''); setSelectedMenuId(e.target.value); }} className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm focus:border-slate-900 focus:outline-none">
-                <option value="">Select a menu...</option>
-                {menus.map((menu) => (
+              <label htmlFor="kitchen-list-menu">Active menu</label>
+              <select id="kitchen-list-menu" value={selectedMenuId} disabled title="Kitchen List always uses the current published active menu" className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm disabled:opacity-75">
+                <option value="">{loadingMenus ? 'Loading active menu...' : 'No current active menu'}</option>
+                {menus.filter(menu => menu._id === selectedMenuId).map((menu) => (
                   <option key={menu._id} value={menu._id}>{toSentenceCase(menu.title || menu.name) || 'Untitled menu'}</option>
                 ))}
               </select></div></div>
@@ -2458,7 +2458,7 @@ ${body}
           <button type="button" title="Reload selections and re-fetch nutrition data from the website" className="kitchen-reload" disabled={!selectedMenuId || !missingCheckDate || loadingSelections} onClick={() => { nutritionCacheRef.current.clear(); setDeliveryCheck(null); loadSelections(); }}><RefreshCw size={16} className={loadingSelections ? 'animate-spin' : ''} /></button>
           <button type="button" className="kitchen-download-trigger" aria-expanded={downloadsOpen} aria-controls="kitchen-downloads" disabled={!menuDateKeys.length} onClick={() => setDownloadsOpen(open => !open)}><Download size={16} /> Kitchen Paper <ChevronDown size={14} /></button>
         </KitchenWorkspaceHeader>
-        <KitchenAutoScopeControl enabled={automaticScope.enabled} onChange={automaticScope.setEnabled} message={automaticScope.message} />
+        <p className="text-sm text-slate-600">{loadingMenus ? 'Loading active menu...' : automaticScope.message || 'The active menu is selected automatically and locked. Choose any delivery date within this menu.'}</p>
         {menuDateKeys.length > 0 && <details id="kitchen-downloads" className="kitchen-export-panel kitchen-paper-section" open={downloadsOpen}>
           <summary onClick={event => { event.preventDefault(); setDownloadsOpen(open => !open); }}><FileText size={18} /> Kitchen Paper <span className="kitchen-export-formats">PDF · Word · Excel</span></summary>
           <button type="button" className="kitchen-download-close" onClick={() => setDownloadsOpen(false)}>Close downloads</button>

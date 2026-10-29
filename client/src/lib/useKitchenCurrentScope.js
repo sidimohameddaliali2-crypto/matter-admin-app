@@ -4,20 +4,29 @@ import { currentKitchenMenu, kitchenToday } from './kitchenDayScope';
 export const KITCHEN_AUTO_SCOPE_KEY = 'matter:kitchen:auto-current';
 const readPreference = () => { try { return localStorage.getItem(KITCHEN_AUTO_SCOPE_KEY) === 'true'; } catch { return false; } };
 
-export default function useKitchenCurrentScope({ menus, menuId, date, onMenu, onDate }) {
-  const [enabled, setEnabled] = useState(readPreference);
+export default function useKitchenCurrentScope({ menus, menuId, date, onMenu, onDate, lockMenu = false }) {
+  const [preference, setEnabled] = useState(readPreference);
+  const enabled = lockMenu || preference;
   const [today] = useState(kitchenToday);
   const applied = useRef(null), pending = useRef(null);
   const callbacks = useRef({ onMenu, onDate });
   callbacks.current = { onMenu, onDate };
   const choice = currentKitchenMenu(menus, today);
   useEffect(() => {
-    try { localStorage.setItem(KITCHEN_AUTO_SCOPE_KEY, String(enabled)); } catch { /* Manual selection still works. */ }
+    if (!lockMenu) try { localStorage.setItem(KITCHEN_AUTO_SCOPE_KEY, String(enabled)); } catch { /* Manual selection still works. */ }
     if (!enabled) { applied.current = null; pending.current = null; return; }
-    if (!choice.menu) return;
+    if (!choice.menu) {
+      if (lockMenu) {
+        applied.current = null;
+        pending.current = null;
+        if (menuId) callbacks.current.onMenu('');
+      }
+      return;
+    }
     const id = String(choice.menu._id);
-    if (applied.current === id) return; // Allow browsing a different date manually.
+    if (applied.current === id && (!lockMenu || menuId === id)) return; // Allow browsing a different date manually.
     if (menuId !== id) {
+      applied.current = null;
       pending.current = id;
       callbacks.current.onMenu(id);
       return;
@@ -27,8 +36,8 @@ export default function useKitchenCurrentScope({ menus, menuId, date, onMenu, on
     if (pending.current === id || date !== today) callbacks.current.onDate(today);
     pending.current = null;
     applied.current = id;
-  }, [enabled, choice.menu?._id, menuId, date, today]);
-  return { enabled, setEnabled, message: enabled && menus.length && !choice.menu
-    ? choice.ambiguous ? 'More than one published active menu covers today. Choose the menu and date manually.'
-      : 'No published active menu covers today. Choose a menu and date manually.' : '' };
+  }, [enabled, lockMenu, choice.menu?._id, menuId, date, today]);
+  return { enabled, setEnabled: lockMenu ? () => {} : setEnabled, message: enabled && (lockMenu || menus.length) && !choice.menu
+    ? choice.ambiguous ? `More than one published active menu covers today. ${lockMenu ? 'Resolve the overlap in Menu Management to open Kitchen List.' : 'Choose the menu and date manually.'}`
+      : `No published active menu covers today. ${lockMenu ? 'Activate the current menu in Menu Management to open Kitchen List.' : 'Choose a menu and date manually.'}` : '' };
 }
