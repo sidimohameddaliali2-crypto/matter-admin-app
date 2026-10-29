@@ -112,6 +112,12 @@ class TruckoomApiService {
     }
   }
 
+  async getVehicleTrackLogs(vehicleNo, startDate, endDate) {
+    return this.geofenceRequest('getVehicleTrackLogs', {
+      vehicle_no: String(vehicleNo), start_date: startDate, end_date: endDate,
+    }, false); // Historical calls must never retry inside the three-minute limit.
+  }
+
   async deleteCustomerGeofence(id) {
     await this.geofenceRequest('deletGeofence', { project_id: '49', geofence_id: String(id) });
   }
