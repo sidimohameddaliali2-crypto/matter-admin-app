@@ -39,25 +39,27 @@ export async function getHistoryPoints(vehicleNo, start, end, now = new Date()) 
   if (+start >= +now) return [];
   const key = `${vehicleNo}:${new Date(start).toISOString().slice(0, 10)}`;
   const cached = await TruckoomTrackHistory.findById(key).lean();
-  // One hour for the open day; revisit closed days for delayed tracker packets.
-  const ttl = +end <= +now ? 24 * 60 * 60000 : 60 * 60000;
+  // A partial snapshot must keep its short lifetime across midnight. Only a
+  // request made after the day closed can qualify for the longer lifetime.
+  const ttl = cached?.fetchedAt && +cached.fetchedAt >= +end ? 24 * 60 * 60000 : 60 * 60000;
   if (cached?.fetchedAt && +now - +cached.fetchedAt < ttl) return cached.points;
   const owner = randomUUID();
   // Retain this reservation even after failure. All PM2 workers share the
   // documented one track-log request per three minutes; never sleep in the job.
+  const reservedAt = new Date(Date.now());
   try {
     const lease = await TrackerSyncLease.findOneAndUpdate({ _id: 'truckoom-track-logs',
-      $or: [{ expiresAt: { $lte: now } }, { expiresAt: { $exists: false } }] },
-    { $set: { owner, expiresAt: new Date(+now + REQUEST_INTERVAL) } }, { upsert: true, new: true });
+      $or: [{ expiresAt: { $lte: reservedAt } }, { expiresAt: { $exists: false } }] },
+    { $set: { owner, expiresAt: new Date(+reservedAt + REQUEST_INTERVAL) } }, { upsert: true, new: true });
     if (lease.owner !== owner) return cached?.points || [];
   } catch (error) {
     if (error.code === 11000) return cached?.points || [];
     throw error;
   }
   try {
-    const rows = await truckoom.getVehicleTrackLogs(vehicleNo, uaeDate(start), uaeDate(new Date(Math.min(+end - 1000, +now))));
+    const rows = await truckoom.getVehicleTrackLogs(vehicleNo, uaeDate(start), uaeDate(new Date(Math.min(+end - 1000, +reservedAt))));
     const points = normalizeTrackLogs(rows, vehicleNo, start, end);
-    await TruckoomTrackHistory.updateOne({ _id: key }, { $set: { fetchedAt: now, points } }, { upsert: true });
+    await TruckoomTrackHistory.updateOne({ _id: key }, { $set: { fetchedAt: reservedAt, points } }, { upsert: true });
     return points;
   } catch {
     // A vendor failure must not erase the last usable GPS or block a delivery.
