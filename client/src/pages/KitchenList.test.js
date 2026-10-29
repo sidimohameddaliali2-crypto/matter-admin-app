@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import api from '../utils/api';
 import KitchenList from './KitchenList';
 
-jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn() } }));
+jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn(), patch: jest.fn() } }));
 jest.mock('../components/PartnerKitchenOrders', () => () => null);
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -42,7 +42,27 @@ const select = async (element, value) => {
 const dateSelect = () => [...container.querySelectorAll('h3')].find((node) => node.textContent === 'Missing Meal Selections').parentElement.querySelector('select');
 const paperSelect = () => [...container.querySelectorAll('label')].find((node) => node.textContent === 'Day kitchen paper').parentElement.querySelector('select');
 
+test('open date shows customer choices and deadline, disables auto assign and makes no assignment POST', async () => {
+  const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-01T00:00:00Z'));
+  const originalGet = api.get.getMockImplementation();
+  const writes = api.post.mock.calls.length;
+  api.get.mockImplementation(async (path, options) => path.endsWith('/kitchen-state') ? { data: {
+    state: 'selection-open', data: { success: true, preparation: 'selection-open', data: {
+      kitchenSelections: [{ email, matterCustomerId: 'permanent', selectedMeals: [{ date: friday, mealType: 'main', mealName: 'Customer chosen beef' }] }],
+      kitchenInputs: [input()], rosterComplete: true, kitchenRoster: [{ customer_id: 'permanent', email, subscription_id: 'matter-current', meal_frequency: 1 }],
+    } },
+  } } : originalGet(path, options));
+  try {
+    await select(dateSelect(), friday);
+    expect(container.textContent).toContain('Customer chosen beef');
+    expect(container.textContent).toContain('Customer selection is still open until');
+    expect([...container.querySelectorAll('button')].find(button => button.textContent === 'Auto-Assign').disabled).toBe(true);
+    expect(api.post).toHaveBeenCalledTimes(writes);
+  } finally { now.mockRestore(); }
+});
+
 beforeEach(async () => {
+  localStorage.clear();
   mockExcelRows.mockImplementation((rows) => rows);
   api.get.mockImplementation(async (path) => {
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', startDate: thursday, endDate: friday }] } };
@@ -70,6 +90,18 @@ test('selecting the prepared Thursday in the paper control preserves selections 
   expect(container.textContent).not.toContain('No customer selections found for this menu.');
   expect(api.post).toHaveBeenCalledTimes(calls);
   expect(api.get.mock.calls.some(([path]) => path.includes('/matter/'))).toBe(false);
+});
+
+test('customer status tabs filter the prepared view without rerunning assignments', async () => {
+  const preparations = api.post.mock.calls.length;
+  const filter = container.querySelector('[aria-label="Customer status filter"]');
+  const tabs = [...filter.querySelectorAll('button')];
+  await act(async () => tabs.find(button => button.textContent === 'Missing').click());
+  expect(tabs.find(button => button.textContent === 'Missing').getAttribute('aria-pressed')).toBe('true');
+  expect(container.textContent).toContain('No customers match the current filters.');
+  await act(async () => tabs.find(button => button.textContent === 'All').click());
+  expect(container.querySelector('.kitchen-customer h2').textContent).toBe('Matter Fixture');
+  expect(api.post).toHaveBeenCalledTimes(preparations);
 });
 
 test('changing either date control keeps both synchronized and prepares the new date', async () => {
@@ -180,10 +212,9 @@ test('an unavailable subscription stays on its customer while the page and verif
   });
   await select(paperSelect(), friday);
   expect(container.textContent).toContain('Matter Fixture');
-  expect(container.textContent).toContain(expiredEmail);
-  expect(container.textContent).toContain('Not scheduled for');
+  expect(container.querySelector('.kitchen-customer-index').textContent).not.toContain(expiredEmail);
   expect(container.textContent).not.toContain('customer(s) have incomplete kitchen inputs');
-  expect(container.textContent).toContain('Unavailable');
+  expect(container.querySelector('.kitchen-customer-index').textContent).not.toContain('Not scheduled');
   expect(container.textContent).not.toContain('Saved selection has no verified Matter customer ID.');
   expect(container.textContent).not.toContain('No customer selections found for this menu.');
   expect(downloadButton('Download Day Excel').disabled).toBe(false);
@@ -193,4 +224,26 @@ test('an unavailable subscription stays on its customer while the page and verif
   expect(exportedRows).toHaveLength(1);
   expect(exportedRows[0]).toMatchObject({ Customer: 'Matter Fixture', Meal: 'Fixture dish' });
   expect(container.textContent).toContain('Matter Fixture');
+});
+
+test('removed setup controls stay absent and partner/paper tools are grouped under Kitchen Paper', () => {
+  expect(container.querySelector('#kitchen-downloads summary').textContent).toContain('Kitchen Paper');
+  for (const text of ['Preparation help', 'Upload format & assignment rules', 'Upload Weekly Menu', 'Show only missing']) expect(container.textContent).not.toContain(text);
+  expect([...container.querySelectorAll('button')].some(button => button.textContent.trim() === 'Template')).toBe(false);
+});
+
+test('a failed snack edit keeps its editor open and does not report a completed save', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, options) => path.endsWith('/kitchen-snack-presets')
+    ? { data: { success: true, data: { presetsByName: { truffle: { snackName: 'Truffle', C: 15, P: 10, F: 6 } } } } }
+    : originalGet(path, options));
+  await act(async () => container.querySelector('button[title="Reload selections and re-fetch nutrition data from the website"]').click());
+  await act(async () => downloadButton('Snack Macros (PCF)').click());
+  const name = [...container.querySelectorAll('span')].find(node => node.textContent.trim() === 'Truffle');
+  await act(async () => name.parentElement.querySelector('[title="Edit macros"]').click());
+  api.patch.mockRejectedValueOnce(new Error('Storage unavailable'));
+  const save = [...container.querySelectorAll('button')].find(button => button.textContent.trim() === 'Save');
+  await act(async () => save.click());
+  expect([...container.querySelectorAll('button')].some(button => button.textContent.trim() === 'Save')).toBe(true);
+  expect([...container.querySelectorAll('input[type="number"]')].some(input => input.value === '15')).toBe(true);
 });

@@ -1,7 +1,12 @@
 import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady } from '../utils/kitchenIntegrity';
+import useKitchenSelectionWindow from '../lib/useKitchenSelectionWindow';
 import { assertKitchenRosterCovered, verifiedKitchenRoster, hasKitchenDeliveryOnDate } from '../lib/kitchenSnapshot';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
-import { ChefHat, Download, Loader, RefreshCw } from 'lucide-react';
+import { Download, Loader, RefreshCw } from 'lucide-react';
+import { KitchenWorkspaceHeader, KitchenEmptyState, KitchenAutoScopeControl } from '../components/KitchenWorkspace';
+import useKitchenCurrentScope from '../lib/useKitchenCurrentScope';
+import { formatKitchenDay } from '../lib/kitchenDayScope';
+import KitchenCountingGroups from '../components/KitchenCountingGroups';
 // xlsx is only needed once a staff member clicks an export button — loaded
 // on first use and memoized instead of shipping it in the app's shared
 // bundle for every page/route (see KitchenList.js for the same pattern).
@@ -19,6 +24,8 @@ import {
   formatDateLabel,
   fetchBreakfastPresets,
   fetchSnackPresets,
+  toBreakfastPresetState,
+  toSnackPresetState,
   getCustomerName,
   enrichSelectionsWithNutrition,
   deriveDateKeys
@@ -75,10 +82,23 @@ const KitchenCounting = () => {
     setCustomerEntries([]);
   }, [selectedMenuId]);
 
+  const changeKitchenDate = date => {
+    if (date === selectedDate) return;
+    requestGuard.current.cancel();
+    setLoadedScope('');
+    setSelectedDate(date);
+  };
+
+  const automaticScope = useKitchenCurrentScope({ menus, menuId: selectedMenuId, date: selectedDate,
+    onMenu: id => { requestGuard.current.cancel(); setLoadedScope(''); setSelectedDate(''); setSelectedMenuId(id); },
+    onDate: changeKitchenDate,
+  });
+
   const selectedMenu = useMemo(
     () => menus.find((m) => m._id === selectedMenuId) || null,
     [menus, selectedMenuId]
   );
+  const selectionWindow = useKitchenSelectionWindow(selectedMenu, selectedDate);
 
   // Date dropdown sources, fetched as soon as a menu is picked (cheap — just
   // the option maps and a raw, unenriched selections list, not the full
@@ -146,11 +166,13 @@ const KitchenCounting = () => {
       if (!response.data?.success) throw new Error(response.data?.message || 'Selections could not be verified.');
       const rawSelections = response.data?.success ? (response.data.data || []) : [];
 
-      const [breakfastState, snackState] = await Promise.all([
+      const [rawBreakfastState, rawSnackState] = await Promise.all([
         preparation.data?.kitchenBreakfastPreset || fetchBreakfastPresets(api, selectedMenuId),
         preparation.data?.kitchenSnackPreset || fetchSnackPresets(api),
       ]);
 
+      const breakfastState = toBreakfastPresetState(rawBreakfastState);
+      const snackState = toSnackPresetState(rawSnackState);
       // Use the same fresh, email-first nutrition resolution as Kitchen List.
       // A menu with hundreds of customers means hundreds of individual Matter
       // API calls (8 at a time) — that can legitimately take a while on a
@@ -329,26 +351,14 @@ const KitchenCounting = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-amber-50 p-4 md:p-6">
-      <div className="mx-auto max-w-5xl space-y-6">
-        <PartnerKitchenOrders date={selectedDate} counting />
-        <div className="rounded-3xl bg-slate-900 p-6 text-white shadow-xl">
-          <div className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-sm text-amber-200">
-            <ChefHat size={16} /> Kitchen & Menus
-          </div>
-          <h1 className="mt-3 text-3xl font-bold tracking-tight">Kitchen Counting</h1>
-          <p className="mt-2 max-w-2xl text-sm text-slate-300">
-            How many of each meal to cook for a date (a customer who picked the same dish twice counts twice), and
-            the running total protein/carb/veg weight needed across every one of them — customer 1's portion +
-            customer 2's + customer 3's, and so on — counted from the exact same assigned meals shown on Kitchen
-            List for that menu and date.
-          </p>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <label className="mb-2 block text-sm font-semibold text-slate-700">Menu</label>
+    <div className="kitchen-workspace">
+      <div className="kitchen-workspace-inner">
+        <KitchenWorkspaceHeader counting dateLabel={formatKitchenDay(selectedDate)}>
+          <div className="kitchen-count-controls">
+          <div className="kitchen-step">
+            <label htmlFor="kitchen-count-menu" className="mb-2 block text-sm font-semibold text-slate-700">Menu</label>
             <select
+              id="kitchen-count-menu"
               value={selectedMenuId}
               onChange={(e) => { requestGuard.current.cancel(); setLoadedScope(''); setSelectedDate(''); setSelectedMenuId(e.target.value); }}
               disabled={loadingMenus}
@@ -361,18 +371,19 @@ const KitchenCounting = () => {
             </select>
           </div>
 
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
-            <label className="mb-2 block text-sm font-semibold text-slate-700">Date</label>
+          <div className="kitchen-step">
+            <label htmlFor="kitchen-count-date" className="mb-2 block text-sm font-semibold text-slate-700">Date</label>
             <div className="flex gap-3">
               <select
+                id="kitchen-count-date"
                 value={selectedDate}
-                onChange={(e) => { requestGuard.current.cancel(); setLoadedScope(''); setSelectedDate(e.target.value); }}
+                onChange={e => changeKitchenDate(e.target.value)}
                 disabled={!selectedMenuId || menuDateKeys.length === 0}
                 className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm focus:border-slate-900 focus:outline-none disabled:opacity-50"
               >
                 <option value="">Select a date...</option>
                 {menuDateKeys.map((key) => (
-                  <option key={key} value={key}>{formatDateLabel(key)}</option>
+                  <option key={key} value={key}>{formatKitchenDay(key)}</option>
                 ))}
               </select>
               <button
@@ -387,6 +398,13 @@ const KitchenCounting = () => {
             </div>
           </div>
         </div>
+        </KitchenWorkspaceHeader>
+        <KitchenAutoScopeControl enabled={automaticScope.enabled} onChange={automaticScope.setEnabled} message={automaticScope.message} />
+
+
+        {!selectedDate && <KitchenEmptyState counting hasMenu={!!selectedMenuId} />}
+        {selectedMenu && selectedDate && !selectionWindow.canAutoAssign && <p role="status" className="rounded-xl bg-amber-50 p-4 text-sm text-amber-900">{selectionWindow.message} Counts can only be confirmed once every active customer has meals.</p>}
+        <div className="kitchen-date-chips" aria-label="Delivery dates">{menuDateKeys.map(date => <button type="button" key={date} aria-pressed={selectedDate === date} onClick={() => changeKitchenDate(date)}>{formatDateLabel(date)}</button>)}</div>
 
         {error && <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}
 
@@ -401,10 +419,10 @@ const KitchenCounting = () => {
         )}
 
         {!loading && selectedDate && (
-          <div className="rounded-2xl bg-white p-4 shadow-sm ring-1 ring-slate-200">
+          <div className="kitchen-count-body">
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
               <div>
-                <h2 className="text-sm font-semibold text-slate-700">
+                <h2 className="kitchen-section-heading">
                   Cook counts — {formatDateLabel(selectedDate)}
                 </h2>
                 <p className="text-xs text-slate-400 mt-1">{totalMealCount} main meal(s) total, matching Kitchen List.</p>
@@ -413,7 +431,7 @@ const KitchenCounting = () => {
                 type="button"
                 onClick={exportToExcel}
                 disabled={loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}` || countRows.length === 0}
-                className="inline-flex items-center gap-2 rounded-2xl bg-amber-400 px-4 py-2.5 text-sm font-semibold text-slate-900 hover:bg-amber-300 disabled:opacity-50"
+                className="kitchen-button-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold disabled:opacity-50"
               >
                 <Download size={16} /> Export Excel
               </button>
@@ -422,50 +440,12 @@ const KitchenCounting = () => {
             {countRows.length === 0 ? (
               <p className="text-sm text-slate-400">{loading ? 'Preparing kitchen counts...' : error ? 'Counts are unavailable until preparation succeeds.' : 'No meals assigned for this date yet.'}</p>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-200 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
-                      <th className="py-2 pr-3">Category</th>
-                      <th className="py-2 pr-3">Meal Name</th>
-                      <th className="py-2 pr-3 text-right">Count</th>
-                      <th className="py-2 pr-3 text-right">Total Protein (g)</th>
-                      <th className="py-2 pr-3 text-right">Total Carb (g)</th>
-                      <th className="py-2 pr-3 text-right">Total Veg (g)</th>
-                      <th className="py-2 text-right">Customers</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {countRows.map((row, index) => (
-                      <tr key={`${row.category}-${row.mealName}-${index}`} className="border-b border-slate-100">
-                        <td className="py-2 pr-3">
-                          <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-600">
-                            {CATEGORY_LABEL[row.category] || row.category}
-                          </span>
-                        </td>
-                        <td className="py-2 pr-3 font-medium text-slate-800">{row.mealName}</td>
-                        <td className="py-2 pr-3 text-right font-semibold text-slate-900">{row.count}</td>
-                        <td className="py-2 pr-3 text-right text-slate-600">{Math.round(row.totalProteinWeight)}</td>
-                        <td className="py-2 pr-3 text-right text-slate-600">{Math.round(row.totalCarbWeight)}</td>
-                        <td className="py-2 pr-3 text-right text-slate-600">{Math.round(row.totalVegWeight)}</td>
-                        <td className="py-2 text-right">
-                          <button
-                            type="button"
-                            onClick={() => downloadMealCustomerList(row.category, row.mealName)}
-                            title={`Download every customer who has ${row.mealName}, with their portion weight`}
-                            className="inline-flex items-center gap-1 rounded-lg border border-slate-300 px-2 py-1 text-xs font-medium text-slate-600 hover:bg-slate-50"
-                          >
-                            <Download size={12} />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              <KitchenCountingGroups rows={countRows} onDownload={downloadMealCustomerList} />
             )}
+            <p className="kitchen-table-note">Weights are displayed in kg; Excel exports retain grams. Bars show each dish’s share of its category total. Large breakfasts have their own row.</p>
           </div>
         )}
+        <details className="kitchen-paper-section kitchen-count-paper"><summary>Kitchen Paper</summary><p className="kitchen-table-note">Customer PDF, Word and Excel papers are available in <a href="/kitchen-list">Kitchen List</a>.</p><PartnerKitchenOrders date={selectedDate} counting /></details>
       </div>
     </div>
   );

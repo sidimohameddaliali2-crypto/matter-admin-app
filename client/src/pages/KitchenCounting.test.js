@@ -75,3 +75,31 @@ test('clearing the date invalidates a request still loading', async () => {
   expect(container.textContent).not.toContain('Cook counts');
   expect(container.textContent).not.toContain('Export Excel');
 });
+
+const selectedDateChip = () => container.querySelector('[aria-label="Delivery dates"] button[aria-pressed="true"]');
+const exportButton = () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel'));
+
+test('clicking the current date preserves loaded counts and Excel export without reloading', async () => {
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  expect(exportButton().disabled).toBe(false);
+  const reads = api.get.mock.calls.length, preparations = api.post.mock.calls.length;
+  await act(async () => selectedDateChip().click());
+  expect(container.textContent).toContain('1 main meal(s) total');
+  expect(exportButton().disabled).toBe(false);
+  expect(api.get).toHaveBeenCalledTimes(reads);
+  expect(api.post).toHaveBeenCalledTimes(preparations);
+});
+
+test('clicking the current date during loading keeps the request alive and clears the spinner when it completes', async () => {
+  await select(1, A);
+  expect(container.textContent).toContain('Loading kitchen counts...');
+  const reads = api.get.mock.calls.length, preparations = api.post.mock.calls.length;
+  await act(async () => selectedDateChip().click());
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  expect(container.textContent).not.toContain('Loading kitchen counts...');
+  expect(container.textContent).toContain('1 main meal(s) total');
+  expect(exportButton().disabled).toBe(false);
+  expect(api.get).toHaveBeenCalledTimes(reads);
+  expect(api.post).toHaveBeenCalledTimes(preparations);
+});
