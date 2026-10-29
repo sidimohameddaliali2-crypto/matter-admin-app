@@ -1515,9 +1515,11 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
         const dayPools = Array.isArray(rawPools)
           ? { first: rawPools, second: [] }
           : { first: rawPools?.first || [], second: rawPools?.second || [] };
+        // Share the executed Promise, not a Mongoose Query: awaiting the same
+        // Query in concurrent customer workers attempts to execute it again.
         if (!ingredientReads.has(dateKey)) ingredientReads.set(dateKey, MenuItem.find({
           _id: { $in: (menu.meals || []).flatMap(day => day.items || []) }, itemDate: new Date(dateKey), mealType: 'snack',
-        }).lean());
+        }).lean().exec());
         const ingredients = await ingredientReads.get(dateKey);
         const eligibleFirst = mergeKitchenMetadata(dayPools.first, ingredients).filter((opt) => !optionExcludedByCustomer(opt, exclusions));
         const eligibleSecond = mergeKitchenMetadata(dayPools.second, ingredients).filter((opt) => !optionExcludedByCustomer(opt, exclusions));

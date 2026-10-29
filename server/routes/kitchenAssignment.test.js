@@ -4,9 +4,51 @@ import WeeklyMenu from '../models/WeeklyMenu.js';
 import MenuItem from '../models/MenuItem.js';
 import Customer from '../models/Customer.js';
 import Record from '../models/MenuSelectionRecord.js';
+import Snack from '../models/KitchenSnackPreset.js';
 import matter from '../services/matterApiService.js';
 import { runAssignMainMeals, runAssignSnacks, runAssignMatterCoreMeals } from './menus.js';
 import { preparationHasFailures } from '../services/kitchenPreparation.js';
+
+for (const date of ['2026-10-31', '2026-11-01']) {
+  test(`concurrent snack preparation shares one executed ingredient read on ${date}`, async t => {
+    const records = Array.from({ length: 18 }, (_, index) => ({ _id: `record-${index}`, email: `customer-${index}@example.invalid`,
+      matterCustomerId: String(index + 1), skippedDays: [], selectedMeals: [{ date, mealType: 'main', mealName: 'Saved customer choice' }] }));
+    const inputs = records.map(record => ({ customer_id: record.matterCustomerId, snacks_per_day: 2, exclusions: ['Peanuts'], active_delivery_dates: [date] }));
+    const query = value => ({ select() { return this; }, lean: async () => value });
+    t.mock.method(WeeklyMenu, 'findById', () => query({ meals: [{ items: [] }], snackOptionsByDate: {
+      [date]: { first: [{ name: 'Peanut bite' }], second: [{ name: 'Safe bite' }] },
+    } }));
+    t.mock.method(Record, 'find', async () => records);
+    t.mock.method(Snack, 'findOne', () => query({ presetsByName: { 'safe bite': { C: 15, P: 10, F: 6 } } }));
+    t.mock.method(matter, 'getKitchenNutrition', () => assert.fail('Use supplied fixture nutrition; no network'));
+    const makeQuery = MenuItem.find.bind(MenuItem);
+    let executions = 0, reads = 0;
+    t.mock.method(MenuItem, 'find', filter => {
+      reads++;
+      assert.equal(filter.itemDate.toISOString().slice(0, 10), date);
+      const ingredientQuery = makeQuery(filter);
+      // A real Mongoose Query is a single-execution thenable, unlike a Promise.
+      let executed = false;
+      t.mock.method(ingredientQuery, 'exec', async () => {
+        if (executed) throw new Error('Query was already executed: MenuItem.find');
+        executed = true; executions++;
+        await new Promise(resolve => setImmediate(resolve));
+        return [{ mealName: 'Peanut bite', ingredients: 'Peanuts' }, { mealName: 'Safe bite', ingredients: 'Oats' }];
+      });
+      return ingredientQuery;
+    });
+    const writes = [];
+    t.mock.method(Record, 'updateOne', async (filter, update) => { writes.push({ filter, meals: update.$push.selectedMeals.$each }); return { modifiedCount: 1 }; });
+    const before = JSON.stringify(records);
+    const result = await runAssignSnacks('menu', { date }, { matterInputs: inputs });
+    assert.equal(reads, 1);
+    assert.equal(executions, 1);
+    assert.equal(result.data.assigned, 36);
+    assert.equal(writes.length, 18);
+    assert(writes.every(write => write.meals.length === 2 && write.meals.every(meal => meal.mealName === 'Safe bite')));
+    assert.equal(JSON.stringify(records), before, 'Existing customer choices stay intact');
+  });
+}
 
 test('assignment fills only missing quantities, respects skips, and queries only this menu', async () => {
   const original = { menu: WeeklyMenu.findById, items: MenuItem.find, customers: Customer.find, record: Record.findOne, records: Record.find, nutrition: matter.getKitchenNutrition, write: Record.findOneAndUpdate };
