@@ -11,10 +11,10 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); jest.useRealTimers(); });
 
-function Harness({ menus, prepared }) {
+function Harness({ menus, prepared, lockMenu = false }) {
   const [menuId, setMenu] = useState(''), [date, setDate] = useState('');
   useEffect(() => { setDate(''); }, [menuId]);
-  const mode = useKitchenCurrentScope({ menus, menuId, date, onMenu: id => { setDate(''); setMenu(id); }, onDate: setDate });
+  const mode = useKitchenCurrentScope({ menus, menuId, date, lockMenu, onMenu: id => { setDate(''); setMenu(id); }, onDate: setDate });
   useEffect(() => { if (menuId && date) prepared(menuId, date); }, [menuId, date, prepared]);
   return <><button onClick={() => mode.setEnabled(!mode.enabled)}>Toggle</button><button onClick={() => setDate('2026-10-29')}>Other day</button><output>{menuId}|{date}</output><p>{mode.message}</p></>;
 }
@@ -40,4 +40,27 @@ test('a later visit starts automatically, and overlapping menus never start a gu
   expect(container.textContent).toContain('More than one');
   await act(async () => root.render(<Harness menus={[active]} prepared={prepared} />));
   expect(prepared.mock.calls).toEqual([['active', '2026-10-28']]);
+});
+
+test('locked mode defaults on despite a saved off preference, keeps manual dates and does not change Counting preference', async () => {
+  localStorage.setItem(KITCHEN_AUTO_SCOPE_KEY, 'false');
+  const prepared = jest.fn();
+  await act(async () => root.render(<Harness menus={[active]} prepared={prepared} lockMenu />));
+  expect(prepared.mock.calls).toEqual([['active', '2026-10-28']]);
+  await act(async () => container.querySelector('button').click());
+  await act(async () => container.querySelectorAll('button')[1].click());
+  expect(container.querySelector('output').textContent).toBe('active|2026-10-29');
+  expect(localStorage.getItem(KITCHEN_AUTO_SCOPE_KEY)).toBe('false');
+});
+
+test('locked mode blocks ambiguous or missing active menus instead of offering manual menu switching', async () => {
+  const prepared = jest.fn();
+  await act(async () => root.render(<Harness menus={[active, { ...active, _id: 'overlap' }]} prepared={prepared} lockMenu />));
+  expect(prepared).not.toHaveBeenCalled();
+  expect(container.textContent).toContain('Resolve the overlap in Menu Management');
+  await act(async () => root.render(<Harness menus={[active]} prepared={prepared} lockMenu />));
+  expect(prepared).toHaveBeenCalledTimes(1);
+  await act(async () => root.render(<Harness menus={[{ ...active, isActive: false }]} prepared={prepared} lockMenu />));
+  expect(container.querySelector('output').textContent).toBe('|');
+  expect(container.textContent).toContain('Activate the current menu in Menu Management');
 });
