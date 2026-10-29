@@ -82,9 +82,16 @@ const KitchenCounting = () => {
     setCustomerEntries([]);
   }, [selectedMenuId]);
 
+  const changeKitchenDate = date => {
+    if (date === selectedDate) return;
+    requestGuard.current.cancel();
+    setLoadedScope('');
+    setSelectedDate(date);
+  };
+
   const automaticScope = useKitchenCurrentScope({ menus, menuId: selectedMenuId, date: selectedDate,
     onMenu: id => { requestGuard.current.cancel(); setLoadedScope(''); setSelectedDate(''); setSelectedMenuId(id); },
-    onDate: date => { if (date !== selectedDate) { requestGuard.current.cancel(); setLoadedScope(''); setSelectedDate(date); } },
+    onDate: changeKitchenDate,
   });
 
   const selectedMenu = useMemo(
@@ -370,7 +377,7 @@ const KitchenCounting = () => {
               <select
                 id="kitchen-count-date"
                 value={selectedDate}
-                onChange={(e) => { requestGuard.current.cancel(); setLoadedScope(''); setSelectedDate(e.target.value); }}
+                onChange={e => changeKitchenDate(e.target.value)}
                 disabled={!selectedMenuId || menuDateKeys.length === 0}
                 className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm focus:border-slate-900 focus:outline-none disabled:opacity-50"
               >
@@ -397,7 +404,7 @@ const KitchenCounting = () => {
 
         {!selectedDate && <KitchenEmptyState counting hasMenu={!!selectedMenuId} />}
         {selectedMenu && selectedDate && !selectionWindow.canAutoAssign && <p role="status" className="rounded-xl bg-amber-50 p-4 text-sm text-amber-900">{selectionWindow.message} Counts can only be confirmed once every active customer has meals.</p>}
-        <div className="kitchen-date-chips" aria-label="Delivery dates">{menuDateKeys.map(date => <button type="button" key={date} aria-pressed={selectedDate === date} onClick={() => { requestGuard.current.cancel(); setLoadedScope(''); setSelectedDate(date); }}>{formatDateLabel(date)}</button>)}</div>
+        <div className="kitchen-date-chips" aria-label="Delivery dates">{menuDateKeys.map(date => <button type="button" key={date} aria-pressed={selectedDate === date} onClick={() => changeKitchenDate(date)}>{formatDateLabel(date)}</button>)}</div>
 
         {error && <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}
 
