@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
-import { useSelector } from 'react-redux';
+import { useDispatch, useSelector, useStore } from 'react-redux';
 import io from 'socket.io-client';
+import { logout } from '../store/slices/authSlice';
 
 const SocketContext = createContext();
 
@@ -21,6 +22,8 @@ export const useSocket = () => {
 // without reloading kept an unauthenticated socket open for the rest of
 // their session.
 export const SocketProvider = ({ children }) => {
+  const dispatch = useDispatch();
+  const store = useStore();
   const token = useSelector((state) => state.auth.token);
   const [socket, setSocket] = useState(null);
   const [onlineDrivers, setOnlineDrivers] = useState([]);
@@ -40,6 +43,17 @@ export const SocketProvider = ({ children }) => {
 
     setSocket(newSocket);
 
+    // Clear staff credentials only. Unsynced driver work stays in IndexedDB
+    // so it can be retried after the driver signs in with the new password.
+    const handleSessionRevoked = () => {
+      if (store.getState().auth.token === token) dispatch(logout());
+    };
+    const handleConnectError = (error) => {
+      if (error.message === 'Not authorized') handleSessionRevoked();
+    };
+    newSocket.on('auth:revoked', handleSessionRevoked);
+    newSocket.on('connect_error', handleConnectError);
+
     newSocket.on('drivers:statusUpdate', (data) => {
       setOnlineDrivers(data.onlineDrivers);
     });
@@ -49,8 +63,12 @@ export const SocketProvider = ({ children }) => {
       console.log('Delivery update:', data);
     });
 
-    return () => newSocket.close();
-  }, [token]);
+    return () => {
+      newSocket.off('auth:revoked', handleSessionRevoked);
+      newSocket.off('connect_error', handleConnectError);
+      newSocket.close();
+    };
+  }, [dispatch, store, token]);
 
   const value = {
     socket,

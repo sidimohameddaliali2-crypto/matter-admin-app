@@ -81,3 +81,30 @@ test('manual retry uses the queue record id rather than the delivery Mongo id',a
  expect(storage.updateQueueItemSyncStatus).toHaveBeenCalledWith(8,'pending');
  expect(storage.updateQueueItemSyncStatus).not.toHaveBeenCalledWith('mongo-id','pending');
 });
+
+test('a revoked session retains queued proof and delivery work until authenticated retry succeeds', async () => {
+  const item = { id: 20, deliveryId: 'd-session', status: 'delivered', proof: { photoCapturedAt: '2026-10-29T04:00:00Z' } };
+  const photo = { id: 21, deliveryId: item.deliveryId, photoDataUrl: 'offline-proof' };
+  storage.getPendingSyncQueue.mockResolvedValue([item]);
+  storage.getPendingPhotos.mockResolvedValue([photo]);
+  storage.getQueueItemsByStatus.mockImplementation(async status => status === 'failed' ? [item] : []);
+  uploadPhoto.mockResolvedValue('/uploaded-proof.jpg');
+  const revoked = Object.assign(new Error('Not authorized, token failed'), { response: { status: 401 } });
+  api.patch.mockRejectedValueOnce(revoked);
+
+  await syncOfflineData();
+  expect(storage.markPhotoSynced).not.toHaveBeenCalled();
+  expect(storage.markQueueItemSynced).not.toHaveBeenCalled();
+  expect(storage.updateQueueItemSyncStatus).toHaveBeenCalledWith(item.id, 'failed', revoked.message);
+
+  // Signing back in changes API credentials, not the persisted queue or proof.
+  await retryDeliverySync(item.deliveryId);
+  expect(storage.updateQueueItemSyncStatus).toHaveBeenCalledWith(item.id, 'pending');
+  api.patch.mockResolvedValue({ data: { success: true, delivery: { _id: item.deliveryId, status: item.status } } });
+  await syncOfflineData();
+  expect(api.patch).toHaveBeenLastCalledWith('/deliveries/d-session/status', expect.objectContaining({
+    proof: expect.objectContaining({ photoCapturedAt: item.proof.photoCapturedAt, photoUrl: '/uploaded-proof.jpg' })
+  }));
+  expect(storage.markPhotoSynced).toHaveBeenCalledWith(photo.id);
+  expect(storage.markQueueItemSynced).toHaveBeenCalledWith(item.id);
+});
