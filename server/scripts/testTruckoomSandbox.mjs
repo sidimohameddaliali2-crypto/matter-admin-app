@@ -42,9 +42,9 @@ const server=http.createServer(async(req,res)=>{
         assert.deepEqual(body.coordinates,[[25.1124,55.2056]]);
         assert.equal(body.geofence_type,'circle');assert.equal(body.geo_shape,'circle');
         assert.equal(body.company_name,company);
-        assert.equal(body.geofence_group,'Sandbox Customers');
+        assert.equal(Object.hasOwn(body,'geofence_group'),false);
         const id='sandbox-fence-1';
-        state.fences.set(id,{'Geofence Id':id,'Geofence name':body.geofence_name,'Company Name':body.company_name,'Geofence Group':body.geofence_group,Radius:Number(body.radius)});
+        state.fences.set(id,{'Geofence Id':id,'Geofence name':body.geofence_name,'Company Name':body.company_name,'Geofence Group':'--',Radius:Number(body.radius)});
         response={result:1,data:{geofenceId:id}};
       }else if(method==='getGeofenceList'){
         response={result:1,data:[...state.fences.values(),{'Geofence Id':'other-company','Company Name':'Another Sandbox Company'}]};
@@ -68,14 +68,14 @@ try{
     config.proxy=false;return config;
   });
   const service=new truckoom.constructor();
-  Object.assign(service,{baseURL:`${origin}/webservice`,...credentials,companyName:company,customerGeofenceGroup:'Sandbox Customers'});
+  Object.assign(service,{baseURL:`${origin}/webservice`,...credentials,companyName:company});
   const tokens=await Promise.all([service.getAccessToken(),service.getAccessToken()]);
   assert.deepEqual(tokens,[token,token]);assert.equal(state.tokenRequests,1);pass('token authentication and shared token request');
   const id=await service.createCustomerGeofence(fenceName,{lat:25.1124,lng:55.2056},50);
   const fences=await service.getGeofences();
   assert.equal(fences.length,1);assert.equal(fences[0]['Geofence Id'],id);assert.equal(fences[0].Radius,0.05);
-  assert.equal(fences[0]['Geofence Group'],'Sandbox Customers');
-  pass('50 m circle creation, group assignment, company filtering and listing');
+  assert.equal(fences[0]['Geofence Group'],'--');
+  pass('50 m ungrouped circle creation, company filtering and listing');
   assert.deepEqual(await service.getGeofenceAlerts('26-10-2026'),[]);
   pass('created circle alone does not imply alerts in the unlinked fixture');
   // Fixture setup only: this is NOT a made-up Truckoom vehicle-linking API.
