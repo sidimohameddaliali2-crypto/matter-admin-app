@@ -8,7 +8,10 @@ const readPreference = () => { try { return localStorage.getItem(KITCHEN_AUTO_SC
 export default function useKitchenCurrentScope({ menus, menuId, date, onMenu, onDate, lockMenu = false }) {
   const [preference, setEnabled] = useState(readPreference);
   const enabled = lockMenu || preference;
-  const [now, setNow] = useState(() => new Date());
+  const [, refreshClock] = useState(0);
+  // Read the real clock on every render as well as waking at day boundaries:
+  // a suspended tab may miss its timer before a staff member switches menus.
+  const now = new Date();
   const today = kitchenToday(now);
   const applied = useRef(null), pending = useRef(null);
   const callbacks = useRef({ onMenu, onDate });
@@ -17,11 +20,13 @@ export default function useKitchenCurrentScope({ menus, menuId, date, onMenu, on
   const choice = lockMenu ? { menu: access.availableMenus.find(menu => String(menu._id) === menuId) || access.defaultMenu,
     ambiguous: access.currentAmbiguous } : currentKitchenMenu(menus, today);
   const targetDate = choice.menu && getDateKey(choice.menu.startDate) > today ? getDateKey(choice.menu.startDate) : today;
+  const nextDubaiMidnight = Date.parse(`${today}T00:00:00Z`) + 24 * 3600000 - 240 * 60000;
+  const nextClockChange = Math.min(access.nextChangeAt, nextDubaiMidnight);
   useEffect(() => {
     if (!lockMenu) return undefined;
-    const timer = setTimeout(() => setNow(new Date()), Math.max(1, access.nextChangeAt - Date.now()));
+    const timer = setTimeout(() => refreshClock(value => value + 1), Math.max(1, nextClockChange - Date.now()));
     return () => clearTimeout(timer);
-  }, [lockMenu, access.nextChangeAt]);
+  }, [lockMenu, nextClockChange]);
   useEffect(() => {
     if (!lockMenu) try { localStorage.setItem(KITCHEN_AUTO_SCOPE_KEY, String(enabled)); } catch { /* Manual selection still works. */ }
     if (!enabled) { applied.current = null; pending.current = null; return; }

@@ -87,3 +87,47 @@ test('Friday 15:00 unlocks next week in an already-open page; switching menus pi
   });
   expect(container.querySelector('output').textContent).toBe('active|2026-10-30');
 });
+
+const switchMenu = async id => act(async () => {
+  container.querySelector('select').value = id;
+  container.querySelector('select').dispatchEvent(new Event('change', { bubbles: true }));
+});
+
+test.each([
+  ['Saturday', '2026-10-31T08:00:00Z', '2026-10-31'],
+  ['Sunday', '2026-11-01T08:00:00Z', '2026-11-01'],
+])('returning to the current menu on %s prepares that Dubai day instead of stale Friday', async (_day, instant, expectedDate) => {
+  jest.setSystemTime(new Date('2026-10-30T12:00:00Z'));
+  const next = { ...active, _id: 'scheduled', isPublished: false, startDate: '2026-11-02', endDate: '2026-11-08' };
+  const prepared = jest.fn();
+  await act(async () => root.render(<Harness menus={[active, next]} prepared={prepared} lockMenu />));
+  await switchMenu('scheduled');
+  expect(prepared.mock.calls.at(-1)).toEqual(['scheduled', '2026-11-02']);
+  const preparations = prepared.mock.calls.length;
+  await act(async () => jest.advanceTimersByTime(Date.parse(instant) - Date.now()));
+  expect(prepared).toHaveBeenCalledTimes(preparations);
+  await switchMenu('active');
+  expect(prepared.mock.calls.at(-1)).toEqual(['active', expectedDate]);
+});
+
+test('switching menus after a sleeping tab wakes uses current time even if the midnight timer has not run', async () => {
+  jest.setSystemTime(new Date('2026-10-30T12:00:00Z'));
+  const next = { ...active, _id: 'scheduled', isPublished: false, startDate: '2026-11-02', endDate: '2026-11-08' };
+  const prepared = jest.fn();
+  await act(async () => root.render(<Harness menus={[active, next]} prepared={prepared} lockMenu />));
+  await switchMenu('scheduled');
+  jest.setSystemTime(new Date('2026-11-01T08:00:00Z')); // Deliberately do not run timers.
+  await switchMenu('active');
+  expect(prepared.mock.calls.at(-1)).toEqual(['active', '2026-11-01']);
+});
+
+test('midnight clock refresh preserves a manually selected delivery date and does not prepare again', async () => {
+  jest.setSystemTime(new Date('2026-10-30T12:00:00Z'));
+  const prepared = jest.fn();
+  await act(async () => root.render(<Harness menus={[active]} prepared={prepared} lockMenu />));
+  await act(async () => container.querySelectorAll('button')[1].click());
+  const preparations = prepared.mock.calls.length;
+  await act(async () => jest.advanceTimersByTime(44 * 3600000));
+  expect(container.querySelector('output').textContent).toBe('active|2026-10-29');
+  expect(prepared).toHaveBeenCalledTimes(preparations);
+});
