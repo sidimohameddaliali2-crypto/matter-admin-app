@@ -1,4 +1,26 @@
-import { currentKitchenMenu, kitchenToday, formatKitchenDay, visibleKitchenCustomer, kitchenCustomerDay } from './kitchenDayScope';
+import { currentKitchenMenu, kitchenMenuAccess, kitchenToday, formatKitchenDay, visibleKitchenCustomer, kitchenCustomerDay } from './kitchenDayScope';
+
+const current = { _id: 'current', isActive: true, isPublished: true, startDate: '2026-10-26', endDate: '2026-11-01' };
+const scheduled = { ...current, _id: 'scheduled', isPublished: false, startDate: '2026-11-02', endDate: '2026-11-08' };
+test.each(['2026-10-29T18:00:00Z', '2026-10-30T10:59:59.999Z'])('scheduled menu stays hidden before Friday 15:00 Dubai: %s', now => {
+  expect(kitchenMenuAccess([current, scheduled], new Date(now)).availableMenus).toEqual([current]);
+});
+test.each(['2026-10-30T11:00:00Z', '2026-10-31T12:00:00Z', '2026-11-01T19:59:59.999Z'])('active and next scheduled menu are available through the weekend: %s', now => {
+  const access = kitchenMenuAccess([current, scheduled, { ...scheduled, _id: 'stopped', isActive: false }, { ...scheduled, _id: 'later', startDate: '2026-11-09' }], new Date(now));
+  expect(access.availableMenus).toEqual([current, scheduled]);
+  expect(access.defaultMenu).toBe(current);
+});
+test('a new Dubai week removes the old menu and waits until Friday to open the following week', () => {
+  const published = { ...scheduled, isPublished: true };
+  const later = { ...scheduled, _id: 'later', startDate: '2026-11-09', endDate: '2026-11-15' };
+  expect(kitchenMenuAccess([current, published, later], new Date('2026-11-01T20:00:00Z')).availableMenus).toEqual([published]);
+  expect(kitchenMenuAccess([current, published, later], new Date('2026-11-06T11:00:00Z')).availableMenus).toEqual([published, later]);
+});
+test('overlapping scheduled menus are not guessed or offered', () => {
+  const access = kitchenMenuAccess([current, scheduled, { ...scheduled, _id: 'duplicate' }], new Date('2026-10-30T11:00:00Z'));
+  expect(access.scheduledAmbiguous).toBe(true);
+  expect(access.availableMenus).toEqual([current]);
+});
 
 test('automatic menu selection uses today in Dubai and refuses expired, unpublished or ambiguous menus', () => {
   expect(kitchenToday(new Date('2026-10-27T21:30:00Z'))).toBe('2026-10-28');
