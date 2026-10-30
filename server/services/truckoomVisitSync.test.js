@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import axios from 'axios';
 import truckoom from './truckoomApiService.js';
+import truckoomHistory from './truckoomHistoryService.js';
 import Delivery from '../models/Delivery.js';
 import CustomerGeofence from '../models/CustomerGeofence.js';
 import TrackerSyncLease from '../models/TrackerSyncLease.js';
@@ -26,6 +27,7 @@ function setup(t, overrides = {}) {
   const writes = [];
   const dates = [];
   t.mock.method(truckoom, 'isConfigured', () => true);
+  t.mock.method(truckoomHistory, 'getPoints', async () => []);
   t.mock.method(TrackerSyncLease, 'findOneAndUpdate', async (_filter, update) => ({ owner: update.$set.owner }));
   t.mock.method(TrackerSyncLease, 'updateOne', async () => ({ matchedCount: 1 }));
   t.mock.method(TrackerSyncLease, 'deleteOne', async () => ({}));
@@ -294,4 +296,58 @@ test('token authentication, private list filtering and 50 m creation match the s
   await truckoom.deleteCustomerGeofence('3');
   assert.ok(calls[3].url.endsWith('?token=deletGeofence'));
   assert.deepEqual(calls[3].body, { project_id: '49', geofence_id: '3' });
+});
+
+
+test('historical vendor GPS fills visits missing from local recording and is shared across customer stops', async t => {
+  const fixture = setup(t);
+  t.mock.method(truckoom, 'getGeofenceAlerts', async () => []);
+  const start = getBusinessDayBounds(fixture.now).startOfDay;
+  const at = minutes => new Date(+start + minutes * 60000);
+  t.mock.method(Delivery, 'find', () => ({populate: () => ({lean: async () => [fixture.row, {...fixture.row, _id: 'second'}]})}));
+  t.mock.method(truckoomHistory, 'getPoints', async vehicle => {
+    assert.equal(vehicle, 'V1');
+    return [{latitude:25.1,longitude:55.2,gpsTime:at(300)}, {latitude:25.2,longitude:55.2,gpsTime:at(310)}];
+  });
+  await syncCustomerTrackerVisits({now:fixture.now});
+  assert.equal(truckoomHistory.getPoints.mock.callCount(),1);
+  for (const write of fixture.writes) {
+    const visit = write.update.$set.trackerVisit;
+    assert.equal(visit.status, 'gps_visit_observed');
+    assert.equal(visit.evidenceSource, 'truckoom_gps_samples');
+    assert.equal(+visit.arrivedAt,+at(300));
+    assert.equal(+visit.departedAt,+at(310));
+  }
+});
+
+test('history transport failure preserves locally sampled GPS and never becomes confirmed alert evidence', async t => {
+  const fixture = setup(t);
+  t.mock.method(truckoom, 'getGeofenceAlerts', async () => []);
+  t.mock.method(truckoomHistory, 'getPoints', async () => {throw new Error('timeout');});
+  const start = getBusinessDayBounds(fixture.now).startOfDay;
+  t.mock.method(VehicleLocationHistory, 'find', () => ({select: () => ({lean: async () => [
+    {driver:'driver1',latitude:25.1,longitude:55.2,gpsTime:new Date(+start+300*60000)},
+    {driver:'driver1',latitude:25.2,longitude:55.2,gpsTime:new Date(+start+310*60000)},
+  ]})}));
+  await syncCustomerTrackerVisits({now:fixture.now});
+  assert.equal(fixture.writes[0].update.$set.trackerVisit.status,'gps_visit_observed');
+});
+
+
+test('cached historical GPS does not hide a later locally recorded customer visit', async t => {
+  const fixture = setup(t);
+  t.mock.method(truckoom, 'getGeofenceAlerts', async () => []);
+  const start = getBusinessDayBounds(fixture.now).startOfDay;
+  const at = minutes => new Date(+start + minutes * 60000);
+  t.mock.method(truckoomHistory,'getPoints',async()=>[
+    {latitude:25.2,longitude:55.2,gpsTime:at(100)},
+  ]);
+  t.mock.method(VehicleLocationHistory,'find',()=>({select:()=>({lean:async()=>[
+    {driver:'driver1',latitude:25.1,longitude:55.2,gpsTime:at(300)},
+    {driver:'driver1',latitude:25.2,longitude:55.2,gpsTime:at(310)},
+  ]})}));
+  await syncCustomerTrackerVisits({now:fixture.now});
+  const visit=fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.status,'gps_visit_observed');
+  assert.equal(+visit.arrivedAt,+at(300));
 });
