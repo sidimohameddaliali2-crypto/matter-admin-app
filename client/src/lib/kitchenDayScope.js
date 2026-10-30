@@ -14,6 +14,29 @@ export const currentKitchenMenu = (menus, date) => {
   return { menu: matches.length === 1 ? matches[0] : null, ambiguous: matches.length > 1 };
 };
 
+// Staff may prepare next week's scheduled menu from Friday 15:00 Dubai,
+// without publishing it or changing customer-facing selection deadlines.
+export const kitchenMenuAccess = (menus, now = new Date(), today = kitchenToday(now)) => {
+  const monday = new Date(`${today}T00:00:00Z`);
+  monday.setUTCDate(monday.getUTCDate() - (monday.getUTCDay() + 6) % 7);
+  const release = new Date(monday);
+  release.setUTCDate(release.getUTCDate() + 4);
+  release.setUTCHours(11, 0, 0, 0); // Friday 15:00 at UTC+4.
+  const nextMonday = new Date(monday);
+  nextMonday.setUTCDate(nextMonday.getUTCDate() + 7);
+  const nextKey = nextMonday.toISOString().slice(0, 10);
+  const rollover = new Date(nextMonday.getTime() - 240 * 60000);
+  const current = currentKitchenMenu(menus, today);
+  const released = new Date(now).getTime() >= release.getTime();
+  const scheduled = released ? menus.filter(menu => menu.isActive !== false
+    && getDateKey(menu.startDate) === nextKey && getDateKey(menu.endDate) >= nextKey) : [];
+  const nextMenu = scheduled.length === 1 ? scheduled[0] : null;
+  const availableMenus = current.ambiguous ? [] : [current.menu, nextMenu].filter(Boolean);
+  return { availableMenus, defaultMenu: current.menu || (!current.ambiguous ? nextMenu : null),
+    currentAmbiguous: current.ambiguous, scheduledAmbiguous: scheduled.length > 1,
+    nextMenuId: nextMenu?._id, nextChangeAt: released ? rollover.getTime() : release.getTime() };
+};
+
 export const visibleKitchenCustomer = (entry, roster, date) => {
   if (!date || !Array.isArray(roster) || entry.kitchenProductionExcluded) return false;
   if (!hasKitchenDeliveryOnDate(entry, roster, date)) return false;
