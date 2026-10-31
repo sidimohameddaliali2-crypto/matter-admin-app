@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
+import { assertCurrentStaffSession } from '../services/staffSessionService.js';
 
 // Shared by HTTP and Socket.IO. Never accept a built-in fallback signing key.
 export const authenticateStaffToken = async (token) => {
@@ -12,6 +13,7 @@ export const authenticateStaffToken = async (token) => {
   }
   const user = await User.findById(decoded.id).select('-password');
   if (!user || !user.isActive) throw new Error('Not authorized');
+  assertCurrentStaffSession(decoded, user);
   return user;
 };
 

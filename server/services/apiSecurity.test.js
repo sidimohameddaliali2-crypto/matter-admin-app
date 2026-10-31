@@ -129,15 +129,20 @@ test('staff API and socket security boundaries', async (t) => {
       await authenticateSocket(socket, (error) => assert.equal(error, undefined));
       assert.equal(socket.data.user._id, 'driver');
     });
-    await t.test('driver rooms are restricted to self and client events cannot forge status broadcasts', () => {
+    await t.test('driver rooms are restricted to self and client events cannot forge status broadcasts', async () => {
       const rooms = [];
       const handlers = {};
-      registerStaffSocket({ data: { user: users.driver }, join: (room) => rooms.push(room), on: (event, handler) => { handlers[event] = handler; } });
-      assert.deepEqual(rooms, ['driver:driver']);
+      await registerStaffSocket({
+        handshake: { auth: { token: tokenFor('driver') } },
+        data: { user: users.driver }, join: (room) => rooms.push(room),
+        on: (event, handler) => { handlers[event] = handler; }
+      });
+      assert.deepEqual(rooms, ['staff:driver', 'driver:driver']);
       handlers['driver:join']('someone-else');
-      assert.deepEqual(rooms, ['driver:driver']);
+      assert.deepEqual(rooms, ['staff:driver', 'driver:driver']);
       assert.equal(handlers['delivery:statusUpdate'], undefined);
       assert.equal(handlers['driver:statusUpdate'], undefined);
+      handlers.disconnect();
     });
   } finally {
     server.closeAllConnections();
