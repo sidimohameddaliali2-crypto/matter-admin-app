@@ -1,7 +1,7 @@
 import {randomBytes} from 'node:crypto';
 const prefix='/api/reporting-ui';
 const writers=new Set(['super_admin','admin','manager','dispatcher']);
-const readPath=p=>p==='/'||p==='/api/reporting/status'||p==='/api/reporting/reviews'||/^\/report-data\/(detail|history|query|archive|snapshot)-[a-f0-9]{64}\.json$/.test(p)||['/api/reporting/photo','/api/reporting/photo/image'].includes(p);
+const readPath=p=>p==='/'||p==='/api/reporting/status'||p==='/api/reporting/reviews'||p==='/api/reporting/photo-proposals'||/^\/report-data\/(detail|history|query|archive|snapshot)-[a-f0-9]{64}\.json$/.test(p)||['/api/reporting/photo','/api/reporting/photo/image'].includes(p);
 const writePath=p=>['/api/reporting/reviews','/api/reporting/reviews/migrate','/api/reporting/fresh-run','/api/reporting/api-refresh'].includes(p);
 const cookieValue=req=>String(req.headers.cookie||'').split(';').map(v=>v.trim()).find(v=>v.startsWith('matter_report_session='))?.slice(22);
 export function createReportingUiGateway({express,protect,checkPermission,origin,upstream,enabled=false,now=Date.now}){
