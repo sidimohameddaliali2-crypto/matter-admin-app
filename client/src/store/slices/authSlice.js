@@ -1,6 +1,7 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import api from '../../utils/api';
 import { updateUser } from './userSlice';
+import { disconnectReportingWorkspace } from '../../utils/reportingWorkspaceSession';
 
 // Safe localStorage parsing function
 const getStoredUser = () => {
@@ -76,6 +77,7 @@ const authSlice = createSlice({
   },
   reducers: {
     logout: (state) => {
+      disconnectReportingWorkspace();
       state.user = null;
       state.token = null;
       try {
@@ -90,6 +92,7 @@ const authSlice = createSlice({
     },
     // Add this to clear invalid data
     clearInvalidData: (state) => {
+      disconnectReportingWorkspace();
       state.user = null;
       state.token = null;
       try {

@@ -1,0 +1,35 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import express from 'express';
+import jwt from 'jsonwebtoken';
+import User from '../models/User.js';
+import {protect,checkPermission} from '../middleware/auth.js';
+import {createReportingUiGateway} from './reportingUiGateway.js';
+
+test('full report uses native staff permission, isolated iframe sessions and bounded report-only actions',async t=>{
+ const prior=User.findById,old=process.env.JWT_SECRET;process.env.JWT_SECRET='synthetic-test-key-not-a-production-credential';
+ const users={admin:{_id:'admin',name:'Synthetic reviewer',role:'admin',isActive:true,permissions:{reports:true}},viewer:{_id:'viewer',role:'viewer',isActive:true,permissions:{reports:true}},denied:{_id:'denied',role:'admin',isActive:true,permissions:{reports:false}}};
+ User.findById=id=>({select:async()=>users[id]});t.after(()=>{User.findById=prior;if(old===undefined)delete process.env.JWT_SECRET;else process.env.JWT_SECRET=old;});
+ let clock=1000,onRead=async()=>{};const calls=[];const upstream=async request=>{calls.push(request);await onRead();if(request.path==='/')return {status:200,type:'text/html',body:Buffer.from('<html><head></head><body><script>fetch("/api/reporting/status")</script></body></html>')};return {status:200,type:'application/json',body:Buffer.from(JSON.stringify(request.path.endsWith('/status')?{token:'private-service-csrf',readOnly:false}:{ok:true}))};};
+ const app=express(),server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));t.after(()=>new Promise(r=>server.close(r)));const origin='http://127.0.0.1:'+server.address().port;
+ app.use('/disabled',createReportingUiGateway({express,protect,checkPermission,origin,upstream}));app.use('/api/reporting-ui',createReportingUiGateway({express,protect,checkPermission,origin,upstream,enabled:true,now:()=>clock}));
+ const token=id=>jwt.sign({id},process.env.JWT_SECRET,{expiresIn:'1h'}),request=(p,opts={})=>fetch(origin+'/api/reporting-ui'+p,opts);
+ const connect=async id=>{const r=await request('/session',{method:'POST',headers:{Origin:origin,Authorization:'Bearer '+token(id),'Content-Type':'application/json'},body:'{}'});return {r,cookie:r.headers.get('set-cookie')?.split(';')[0],data:await r.json()};};
+ assert.equal((await fetch(origin+'/disabled/')).status,404);assert.equal((await request('/')).status,401);assert.equal((await connect('denied')).r.status,403);
+ const admin=await connect('admin');assert.equal(admin.r.status,200);assert.match(admin.r.headers.get('set-cookie'),/HttpOnly/);assert.ok(!JSON.stringify(admin.data).includes('private-service'));
+ assert.match(admin.data.generation,/^[a-f0-9]{32}$/);
+ const html=await(await request('/?screen=reports&view=1&tab=mirror',{headers:{Cookie:admin.cookie}})).text();assert.match(html,/base href="\/api\/reporting-ui\/"/);assert.match(html,/\/api\/reporting-ui\/api\/reporting\/status/);assert.ok(!html.includes(token('admin')));assert.equal(calls.at(-1).path,'/');
+ const status=await(await request('/api/reporting/status',{headers:{Cookie:admin.cookie}})).json();assert.notEqual(status.token,'private-service-csrf');
+ const post=(p,body,extra={})=>request(p,{method:'POST',headers:{Cookie:admin.cookie,Origin:origin,'Content-Type':'application/json','X-Reporting-Token':status.token,...extra},body:JSON.stringify(body)});
+ assert.equal((await post('/api/reporting/reviews',{authorName:'forged'})).status,200);assert.equal(calls.at(-1).body.authorName,'Synthetic reviewer');assert.equal('reviewer' in calls.at(-1).body,false);
+ assert.equal((await post('/api/reporting/reviews',{}, {Origin:'https://foreign.invalid'})).status,403);
+ assert.equal((await post('/api/reporting/reviews',{}, {'X-Reporting-Token':'bad'})).status,403);
+ assert.equal((await post('/api/reporting/reviews/migrate',{state:{untrusted:'browser history'}})).status,200);assert.equal(calls.at(-1).path,'/api/reporting/reviews');assert.equal(calls.at(-1).method,'GET');assert.equal(calls.at(-1).body,undefined);assert.equal((await post('/api/deliveries',{})).status,404);
+ const before=calls.length;assert.equal((await request('/report-data/not-a-hash.json',{headers:{Cookie:admin.cookie}})).status,404);assert.equal(calls.length,before);
+ const viewer=await connect('viewer');const vs=await(await request('/api/reporting/status',{headers:{Cookie:viewer.cookie}})).json();assert.equal(vs.readOnly,true);
+ assert.equal((await request('/api/reporting/reviews',{method:'POST',headers:{Cookie:viewer.cookie,Origin:origin,'Content-Type':'application/json','X-Reporting-Token':vs.token},body:'{}'})).status,403);
+ users.admin.permissions.reports=false;assert.equal((await request('/',{headers:{Cookie:admin.cookie}})).status,403);users.admin.permissions.reports=true;
+ onRead=async()=>{users.admin.permissions.reports=false;};assert.equal((await request('/',{headers:{Cookie:admin.cookie}})).status,403);users.admin.permissions.reports=true;onRead=async()=>{};
+ clock+=91000;assert.equal((await request('/',{headers:{Cookie:admin.cookie}})).status,401);
+ const again=await connect('admin');assert.equal((await request('/session',{method:'DELETE',headers:{Cookie:again.cookie,Origin:origin}})).status,204);assert.equal((await request('/',{headers:{Cookie:again.cookie}})).status,401);
+});

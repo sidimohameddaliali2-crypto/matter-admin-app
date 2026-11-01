@@ -17,6 +17,7 @@ import DeliveryDetail from './pages/DeliveryDetail';
 import AddDelivery from './pages/AddDelivery';
 import BagTracking from './pages/BagOperations';
 import Reports from './pages/Reports';
+import ReportingWorkspace from './pages/ReportingWorkspace';
 import ReportingEvidence from './pages/ReportingEvidence';
 import CreateDriver from './pages/CreateDriver';
 import DriverMobile from './pages/DriverMobile';
@@ -489,7 +490,7 @@ function App() {
               <ProtectedRoute>
                 <PermissionBasedRoute permission="reports">
                   <Layout>
-                    <Reports />
+                    {process.env.REACT_APP_REPORTING_WORKSPACE==='true' ? <ReportingWorkspace /> : <Reports />}
                   </Layout>
                 </PermissionBasedRoute>
               </ProtectedRoute>
