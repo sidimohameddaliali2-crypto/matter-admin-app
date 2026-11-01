@@ -17,6 +17,7 @@ import DeliveryDetail from './pages/DeliveryDetail';
 import AddDelivery from './pages/AddDelivery';
 import BagTracking from './pages/BagOperations';
 import Reports from './pages/Reports';
+import ReportingEvidence from './pages/ReportingEvidence';
 import CreateDriver from './pages/CreateDriver';
 import DriverMobile from './pages/DriverMobile';
 import Users from './pages/Users'
@@ -481,6 +482,9 @@ function App() {
               </ProtectedRoute>
             } />
             
+            {process.env.REACT_APP_REPORTING_EVIDENCE === 'true' && <Route path="/reports/evidence" element={
+              <ProtectedRoute><PermissionBasedRoute permission="reports"><Layout><ReportingEvidence /></Layout></PermissionBasedRoute></ProtectedRoute>
+            } />}
             <Route path="/reports" element={
               <ProtectedRoute>
                 <PermissionBasedRoute permission="reports">

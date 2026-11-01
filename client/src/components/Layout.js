@@ -44,6 +44,7 @@ const NAV_ITEMS = [
   { name: 'Delivery Changes', href: '/delivery-changes', icon: ReplaceAll, permission: 'delivery_changes', group: 'Operations' },
   { name: 'Bag Operations', href: '/bags', icon: ShoppingBag, permission: 'bags', group: 'Operations' },
   { name: 'Report', href: '/reports', icon: BarChart3, permission: 'reports', group: 'Operations' },
+  ...(process.env.REACT_APP_REPORTING_EVIDENCE === 'true' ? [{ name: 'Delivery evidence', href: '/reports/evidence', icon: FileText, permission: 'reports', group: 'Operations' }] : []),
   { name: 'Events', href: '/events', icon: Calendar, permission: 'events', group: 'Operations' },
   { name: 'Complaints', href: '/complaints', icon: AlertTriangle, permission: 'complaints', group: 'Operations' },
 
