@@ -5,6 +5,15 @@ import { isMatterCoreDoubleDay } from './matterCoreDelivery.js';
 // Week of Mon 2026-10-19: Mon 19, Tue 20, Wed 21, Thu 22, Fri 23
 const MWF = ['2026-10-19', '2026-10-21', '2026-10-23'];
 
+test('explicit Matter double dates support a Wednesday start and override inferred weekly patterns', () => {
+  const dates = ['2026-11-04', '2026-11-06'];
+  assert.equal(isMatterCoreDoubleDay('2026-11-04', dates, ['2026-11-04']), true);
+  assert.equal(isMatterCoreDoubleDay('2026-11-06', dates, ['2026-11-04']), false);
+  assert.equal(isMatterCoreDoubleDay('2026-11-04', dates, []), false);
+  assert.equal(isMatterCoreDoubleDay('2026-11-02', dates, ['2026-11-02']), false);
+  assert.equal(isMatterCoreDoubleDay(MWF[0], MWF, []), false);
+});
+
 test('Monday and Wednesday of a Mon/Wed/Fri customer are double days', () => {
   assert.equal(isMatterCoreDoubleDay('2026-10-19', MWF), true);
   assert.equal(isMatterCoreDoubleDay('2026-10-21', MWF), true);

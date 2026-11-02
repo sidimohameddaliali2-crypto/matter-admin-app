@@ -17,7 +17,7 @@ export const hasKitchenDeliveryOnDate = (entry, roster, date) => {
 
 export const requiredKitchenMeals = (sub, entry, date) => {
   const core = String(sub.plan_name || '').trim().toLowerCase() === 'matter core';
-  return Math.max(1, Number(sub.meal_frequency) || 1) * (core && isMatterCoreDoubleDay(date, entry?.deliveryDates || sub.active_delivery_dates) ? 2 : 1);
+  return Math.max(1, Number(sub.meal_frequency) || 1) * (core && isMatterCoreDoubleDay(date, entry?.deliveryDates || sub.active_delivery_dates, entry?.doubleDeliveryDates ?? sub.double_delivery_dates) ? 2 : 1);
 };
 
 export const assertKitchenRosterCovered = (selections, roster, date) => {

@@ -2,7 +2,7 @@ import axios from 'axios';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { cacheGet, cacheSet } from '../config/cache.js';
-import { resolveMatterDeliveryAddress, matterMealContract, matterWeekendEnabled } from './matterSubscriptionContract.js';
+import { resolveMatterDeliveryAddress, matterMealContract, matterWeekendEnabled, matterDoubleDeliveryDates } from './matterSubscriptionContract.js';
 
 // A customer's macro/plan config on Matter changes on the order of days or
 // weeks (subscription edits, pause/resume), not mid-shift — caching these
@@ -78,6 +78,7 @@ const activeDeliveryDates = (subscription) => (subscription?.delivery_schedule |
 export const buildNutritionResult = (subscription) => ({
   delivery_address_resolution: resolveMatterDeliveryAddress(subscription.customer_addresses),
   meal_contract: matterMealContract(subscription),
+  double_delivery_dates: matterDoubleDeliveryDates(subscription),
   source_fetched_at: new Date().toISOString(),
   source_updated_at: subscription.updated_at ?? null,
   subscription_id: subscription.subscription_id,
@@ -164,7 +165,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionByEmail(email) {
     const normalizedEmail = String(email || '').trim().toLowerCase();
-    const cacheKey = `matter:nutrition:v2:email:${normalizedEmail}`;
+    const cacheKey = `matter:nutrition:v3:email:${normalizedEmail}`;
     const cached = normalizedEmail ? await cacheGet(cacheKey) : null;
     if (cached) return cached;
 
@@ -192,7 +193,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionBySubscriptionId(subscriptionId) {
     if (!subscriptionId) return null;
-    const cacheKey = `matter:nutrition:v2:sub:${subscriptionId}`;
+    const cacheKey = `matter:nutrition:v3:sub:${subscriptionId}`;
     const cached = await cacheGet(cacheKey);
     if (cached) return cached;
 
@@ -213,7 +214,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionByCustomerId(customerId) {
     if (!customerId) return null;
-    const cacheKey = `matter:nutrition:v2:cust:${customerId}`;
+    const cacheKey = `matter:nutrition:v3:cust:${customerId}`;
     const cached = await cacheGet(cacheKey);
     if (cached) return cached;
 
@@ -417,6 +418,7 @@ class MatterApiService {
             delivery_window: detail.data.delivery_window || null,
             meal_frequency: detail.data.plan?.meal_frequency ?? null,
             active_delivery_dates: activeDeliveryDates(detail.data),
+            double_delivery_dates: matterDoubleDeliveryDates(detail.data),
             snacks_per_day: detail.data.snacks_per_day ?? null,
             breakfast_included: typeof detail.data.breakfast_included === 'boolean' ? detail.data.breakfast_included : null,
             exclusions: (detail.data.exclusions || []).map((ex) => ex.title).filter(Boolean),

@@ -25,7 +25,7 @@ const sourceVersion = async menuId => {
     MenuItem.find({ _id: { $in: (menu.meals || []).flatMap(day => day.items || []) } }).select('_id updatedAt __v').sort({ _id: 1 }).lean(),
     Archive.find({ 'original.weeklyMenuId': menuId }).select('_id createdAt updatedAt').sort({ _id: 1 }).lean(),
   ]);
-  return createHash('sha256').update(JSON.stringify([menu, records, breakfast, snack, items, archives])).digest('hex');
+  return createHash('sha256').update(JSON.stringify(['dated-core-food-days-v1', menu, records, breakfast, snack, items, archives])).digest('hex');
 };
 
 const capture = async menuId => {

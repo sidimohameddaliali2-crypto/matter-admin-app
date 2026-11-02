@@ -25,6 +25,14 @@ export function matterMealContract(subscription) {
   };
 }
 
+export function matterDoubleDeliveryDates(subscription) {
+  if (!Array.isArray(subscription?.delivery_schedule)) return null;
+  const active = subscription.delivery_schedule.filter(row => row.status === 'active');
+  if (!active.every(row => typeof row.is_double === 'boolean' || [1, 2].includes(row.food_days))) return null;
+  return active.filter(row => row.food_days === 2 || (row.food_days !== 1 && row.is_double === true))
+    .map(row => String(row.date).slice(0, 10)).sort();
+}
+
 // Matter's dated schedule wins over the legacy internal weekend flag.
 // Include paused days: pausing a weekend must not remove weekend eligibility.
 export function matterWeekendEnabled(subscription, fallback = false) {

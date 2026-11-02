@@ -3,7 +3,8 @@
 // Tuesday) and on Wednesday (covering Wednesday + Thursday); Friday stays a
 // single delivery.
 //
-// A date counts as a double-delivery day only when the customer's own Matter
+// Prefer Matter's explicit double-delivery dates. For older API responses
+// without food-day flags, infer a double day only when the customer's Matter
 // delivery dates for that week are exactly that pattern: deliveries on Mon,
 // Wed and Fri and none on Tue or Thu. A customer who is normally delivered
 // every day but has one day paused is therefore never mistaken for it.
@@ -12,7 +13,11 @@
 // rule (the client can't import from server/), keep the two in step.
 const dayKey = (utcMs) => new Date(utcMs).toISOString().slice(0, 10);
 
-export function isMatterCoreDoubleDay(dateKey, deliveryDates) {
+export function isMatterCoreDoubleDay(dateKey, deliveryDates, doubleDeliveryDates) {
+  // Matter's explicit dated food-day flags cover midweek starts and pauses.
+  // null/undefined retains the old pattern only for APIs without those flags.
+  if (Array.isArray(doubleDeliveryDates)) return Array.isArray(deliveryDates)
+    && deliveryDates.includes(dateKey) && doubleDeliveryDates.includes(dateKey);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || '')) || !Array.isArray(deliveryDates)) return false;
   const [y, m, d] = dateKey.split('-').map(Number);
   const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 1 = Monday, 3 = Wednesday
