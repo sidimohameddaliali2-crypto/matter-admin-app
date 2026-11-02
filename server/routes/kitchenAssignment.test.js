@@ -9,6 +9,36 @@ import matter from '../services/matterApiService.js';
 import { runAssignMainMeals, runAssignSnacks, runAssignMatterCoreMeals } from './menus.js';
 import { preparationHasFailures } from '../services/kitchenPreparation.js';
 
+test('Wednesday Core starter tops up a second main, removes only an unentitled auto breakfast and is idempotent', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-02T08:00:00Z') });
+  const date = '2026-11-04', chicken = '507f1f77bcf86cd799439011', beef = '507f1f77bcf86cd799439012';
+  const query = value => ({ select() { return this; }, sort() { return this; }, lean: async () => value });
+  const chosen = { date, mealType: 'main', mealName: 'Customer chicken', quantity: 1, remark: 'veg', slotNumber: 0 };
+  const record = { _id: 'record', matterCustomerId: 'fixture', selectedMeals: [chosen,
+    { date, mealType: 'breakfast', mealName: 'Old auto breakfast', isAutoAssigned: true }], skippedDays: [] };
+  t.mock.method(WeeklyMenu, 'findById', () => query({ meals: [{ items: [chicken, beef] }], breakfastOptionsByDate: { [date]: [{ name: 'Breakfast option' }] }, snackOptionsByDate: {} }));
+  t.mock.method(MenuItem, 'find', filter => query(filter.mealType === 'main' ? [
+    { _id: chicken, mealName: 'Customer chicken', portionType: 'chicken' }, { _id: beef, mealName: 'Beef option', portionType: 'beef' },
+  ] : []));
+  t.mock.method(Record, 'find', () => query([]));
+  t.mock.method(Record, 'findOne', () => query(record));
+  const audit = [];
+  t.mock.method(Record, 'updateOne', async (_filter, update) => { record.selectedMeals = update.$set.selectedMeals; audit.push(update.$push.kitchenAudit); return { modifiedCount: 1 }; });
+  const append = t.mock.method(Record, 'findOneAndUpdate', async (_filter, update) => { record.selectedMeals.push(...update.$push.selectedMeals.$each); return record; });
+  const nutrition = { customer_id: 'fixture', customer_email: 'fixture@example.invalid', customer_name: 'Fixture', subscription_id: 'fixture-sub', plan_name: 'Matter Core',
+    meal_frequency: 1, breakfast_included: false, snacks_per_day: 0, exclusions: [], active_delivery_dates: [date, '2026-11-06'], double_delivery_dates: [date] };
+  const result = await runAssignMatterCoreMeals('menu', date, [{ email: nutrition.customer_email }], { snackOnly: true, includeBreakfast: true, matterInputs: [nutrition] });
+  assert.equal(result.data.assignedMainMeals, 1);
+  assert.equal(result.data.assignedBreakfast, 0);
+  assert.equal(record.selectedMeals.length, 2);
+  assert(record.selectedMeals.includes(chosen));
+  assert(record.selectedMeals.every(meal => meal.mealType === 'main'));
+  assert.equal(audit.length, 1);
+  await runAssignMatterCoreMeals('menu', date, [{ email: nutrition.customer_email }], { matterInputs: [nutrition] });
+  assert.equal(append.mock.callCount(), 1, 'Retries do not duplicate the main meal');
+  assert.equal(audit.length, 1, 'Retries do not repeat the removal audit');
+});
+
 for (const date of ['2026-10-31', '2026-11-01']) {
   test(`concurrent snack preparation shares one executed ingredient read on ${date}`, async t => {
     const records = Array.from({ length: 18 }, (_, index) => ({ _id: `record-${index}`, email: `customer-${index}@example.invalid`,

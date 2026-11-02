@@ -8,6 +8,17 @@ import { buildMatterDeliverySnapshot, importMatterDeliveriesForDate } from './ma
 import { compareMatterDelivery } from './matterDeliveryComparison.js';
 import { serializeDelivery } from '../routes/externalDeliveryApi.js';
 import Delivery from '../models/Delivery.js';
+import { matterDoubleDeliveryDates } from './matterSubscriptionContract.js';
+
+test('nutrition and roster contract retain explicit midweek double dates without inventing flags on older schedules', () => {
+  const sub = { delivery_schedule: [{ date: '2026-11-04', status: 'active', is_double: true, food_days: 2 },
+    { date: '2026-11-06', status: 'active', is_double: false, food_days: 1 }, { date: '2026-11-09', status: 'paused', is_double: true, food_days: 2 }] };
+  assert.deepEqual(matterDoubleDeliveryDates(sub), ['2026-11-04']);
+  assert.deepEqual(buildNutritionResult(sub).double_delivery_dates, ['2026-11-04']);
+  assert.equal(matterDoubleDeliveryDates({ delivery_schedule: [{ date: '2026-11-04', status: 'active' }] }), null);
+  assert.equal(matterDoubleDeliveryDates({}), null);
+  assert.deepEqual(matterDoubleDeliveryDates({ delivery_schedule: [{ date: '2026-11-06', status: 'active', food_days: 1 }] }), []);
+});
 import Customer from '../models/Customer.js';
 import matterRouter from '../routes/matterApi.js';
 

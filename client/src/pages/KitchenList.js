@@ -2444,11 +2444,15 @@ ${body}
         <KitchenWorkspaceHeader dateLabel={formatKitchenDay(missingCheckDate)}>
           <div className="kitchen-stepbar">
             <div className="kitchen-step"><span className="kitchen-step-number">01</span><div>
-              <label htmlFor="kitchen-list-menu">Active menu</label>
-              <select id="kitchen-list-menu" value={selectedMenuId} disabled title="Kitchen List always uses the current published active menu" className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm disabled:opacity-75">
-                <option value="">{loadingMenus ? 'Loading active menu...' : 'No current active menu'}</option>
-                {menus.filter(menu => menu._id === selectedMenuId).map((menu) => (
-                  <option key={menu._id} value={menu._id}>{toSentenceCase(menu.title || menu.name) || 'Untitled menu'}</option>
+              <label htmlFor="kitchen-list-menu">Kitchen menu</label>
+              <select id="kitchen-list-menu" value={selectedMenuId} disabled={automaticScope.availableMenus.length < 2}
+                onChange={event => {
+                  if (event.target.value === selectedMenuId || !automaticScope.availableMenus.some(menu => String(menu._id) === event.target.value)) return;
+                  selectionRequests.current.cancel(); setLoadedSelectionScope(''); setMissingCheckDate(''); setPdfDate(''); setSelectedMenuId(event.target.value);
+                }} title="Next week's scheduled menu becomes available Friday at 3 PM Dubai time" className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm disabled:opacity-75">
+                <option value="" disabled>{loadingMenus ? 'Loading active menu...' : 'No current active menu'}</option>
+                {automaticScope.availableMenus.map((menu) => (
+                  <option key={menu._id} value={menu._id}>{toSentenceCase(menu.title || menu.name) || 'Untitled menu'}{menu._id === automaticScope.nextMenuId ? ' — Scheduled next week' : ''}</option>
                 ))}
               </select></div></div>
             <div className="kitchen-step"><span className="kitchen-step-number">02</span><div><label htmlFor="kitchen-header-date">Date</label>
@@ -2458,7 +2462,9 @@ ${body}
           <button type="button" title="Reload selections and re-fetch nutrition data from the website" className="kitchen-reload" disabled={!selectedMenuId || !missingCheckDate || loadingSelections} onClick={() => { nutritionCacheRef.current.clear(); setDeliveryCheck(null); loadSelections(); }}><RefreshCw size={16} className={loadingSelections ? 'animate-spin' : ''} /></button>
           <button type="button" className="kitchen-download-trigger" aria-expanded={downloadsOpen} aria-controls="kitchen-downloads" disabled={!menuDateKeys.length} onClick={() => setDownloadsOpen(open => !open)}><Download size={16} /> Kitchen Paper <ChevronDown size={14} /></button>
         </KitchenWorkspaceHeader>
-        <p className="text-sm text-slate-600">{loadingMenus ? 'Loading active menu...' : automaticScope.message || 'The active menu is selected automatically and locked. Choose any delivery date within this menu.'}</p>
+        <p className="text-sm text-slate-600">{loadingMenus ? 'Loading active menu...' : automaticScope.message || (automaticScope.availableMenus.length > 1
+          ? 'Choose the active menu or next week’s scheduled menu. Delivery-date assignment deadlines still apply.'
+          : 'The active menu is selected automatically and locked. Next week’s scheduled menu opens Friday at 3 PM Dubai time.')}</p>
         {menuDateKeys.length > 0 && <details id="kitchen-downloads" className="kitchen-export-panel kitchen-paper-section" open={downloadsOpen}>
           <summary onClick={event => { event.preventDefault(); setDownloadsOpen(open => !open); }}><FileText size={18} /> Kitchen Paper <span className="kitchen-export-formats">PDF · Word · Excel</span></summary>
           <button type="button" className="kitchen-download-close" onClick={() => setDownloadsOpen(false)}>Close downloads</button>

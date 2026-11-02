@@ -16,7 +16,7 @@ function Harness({ menus, prepared, lockMenu = false }) {
   useEffect(() => { setDate(''); }, [menuId]);
   const mode = useKitchenCurrentScope({ menus, menuId, date, lockMenu, onMenu: id => { setDate(''); setMenu(id); }, onDate: setDate });
   useEffect(() => { if (menuId && date) prepared(menuId, date); }, [menuId, date, prepared]);
-  return <><button onClick={() => mode.setEnabled(!mode.enabled)}>Toggle</button><button onClick={() => setDate('2026-10-29')}>Other day</button><output>{menuId}|{date}</output><p>{mode.message}</p></>;
+  return <><button onClick={() => mode.setEnabled(!mode.enabled)}>Toggle</button><button onClick={() => setDate('2026-10-29')}>Other day</button><select value={menuId} onChange={event => { setDate(''); setMenu(event.target.value); }}><option value="" />{mode.availableMenus.map(menu => <option key={menu._id} value={menu._id}>{menu._id}</option>)}</select><output>{menuId}|{date}</output><p>{mode.message}</p></>;
 }
 
 test('opting in remembers the choice and prepares today once, after the menu reset, while still allowing manual dates', async () => {
@@ -63,4 +63,71 @@ test('locked mode blocks ambiguous or missing active menus instead of offering m
   await act(async () => root.render(<Harness menus={[{ ...active, isActive: false }]} prepared={prepared} lockMenu />));
   expect(container.querySelector('output').textContent).toBe('|');
   expect(container.textContent).toContain('Activate the current menu in Menu Management');
+});
+
+test('Friday 15:00 unlocks next week in an already-open page; switching menus picks a valid date without snapping back', async () => {
+  jest.setSystemTime(new Date('2026-10-30T10:59:59Z'));
+  const next = { ...active, _id: 'scheduled', isPublished: false, startDate: '2026-11-02', endDate: '2026-11-08' };
+  const prepared = jest.fn();
+  await act(async () => root.render(<Harness menus={[active, next]} prepared={prepared} lockMenu />));
+  expect(container.querySelectorAll('option')).toHaveLength(2);
+  expect(prepared.mock.calls).toEqual([['active', '2026-10-30']]);
+  await act(async () => jest.advanceTimersByTime(1000));
+  expect(container.querySelectorAll('option')).toHaveLength(3);
+  expect(prepared).toHaveBeenCalledTimes(1);
+  await act(async () => {
+    container.querySelector('select').value = 'scheduled';
+    container.querySelector('select').dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  expect(container.querySelector('output').textContent).toBe('scheduled|2026-11-02');
+  expect(prepared.mock.calls.at(-1)).toEqual(['scheduled', '2026-11-02']);
+  await act(async () => {
+    container.querySelector('select').value = 'active';
+    container.querySelector('select').dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  expect(container.querySelector('output').textContent).toBe('active|2026-10-30');
+});
+
+const switchMenu = async id => act(async () => {
+  container.querySelector('select').value = id;
+  container.querySelector('select').dispatchEvent(new Event('change', { bubbles: true }));
+});
+
+test.each([
+  ['Saturday', '2026-10-31T08:00:00Z', '2026-10-31'],
+  ['Sunday', '2026-11-01T08:00:00Z', '2026-11-01'],
+])('returning to the current menu on %s prepares that Dubai day instead of stale Friday', async (_day, instant, expectedDate) => {
+  jest.setSystemTime(new Date('2026-10-30T12:00:00Z'));
+  const next = { ...active, _id: 'scheduled', isPublished: false, startDate: '2026-11-02', endDate: '2026-11-08' };
+  const prepared = jest.fn();
+  await act(async () => root.render(<Harness menus={[active, next]} prepared={prepared} lockMenu />));
+  await switchMenu('scheduled');
+  expect(prepared.mock.calls.at(-1)).toEqual(['scheduled', '2026-11-02']);
+  const preparations = prepared.mock.calls.length;
+  await act(async () => jest.advanceTimersByTime(Date.parse(instant) - Date.now()));
+  expect(prepared).toHaveBeenCalledTimes(preparations);
+  await switchMenu('active');
+  expect(prepared.mock.calls.at(-1)).toEqual(['active', expectedDate]);
+});
+
+test('switching menus after a sleeping tab wakes uses current time even if the midnight timer has not run', async () => {
+  jest.setSystemTime(new Date('2026-10-30T12:00:00Z'));
+  const next = { ...active, _id: 'scheduled', isPublished: false, startDate: '2026-11-02', endDate: '2026-11-08' };
+  const prepared = jest.fn();
+  await act(async () => root.render(<Harness menus={[active, next]} prepared={prepared} lockMenu />));
+  await switchMenu('scheduled');
+  jest.setSystemTime(new Date('2026-11-01T08:00:00Z')); // Deliberately do not run timers.
+  await switchMenu('active');
+  expect(prepared.mock.calls.at(-1)).toEqual(['active', '2026-11-01']);
+});
+
+test('midnight clock refresh preserves a manually selected delivery date and does not prepare again', async () => {
+  jest.setSystemTime(new Date('2026-10-30T12:00:00Z'));
+  const prepared = jest.fn();
+  await act(async () => root.render(<Harness menus={[active]} prepared={prepared} lockMenu />));
+  await act(async () => container.querySelectorAll('button')[1].click());
+  const preparations = prepared.mock.calls.length;
+  await act(async () => jest.advanceTimersByTime(44 * 3600000));
+  expect(container.querySelector('output').textContent).toBe('active|2026-10-29');
+  expect(prepared).toHaveBeenCalledTimes(preparations);
 });

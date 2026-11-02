@@ -57,7 +57,18 @@ export const kitchenMealWarnings = (meal) => [
 export const assertKitchenExportReady = (entries) => {
   const invalid = entries.filter((entry) => entry.calculationStatus === 'incomplete'
     || entry.hasMatterCoreLookupIssue || (entry.inputErrors || []).length);
-  if (invalid.length) throw new Error(`Kitchen export blocked: ${invalid.length} customer(s) have unresolved inputs or Matter Core combinations. Refresh and resolve them first.`);
+  if (invalid.length) {
+    const details = invalid.slice(0, 5).map(entry => {
+      const name = entry.customerName || entry.matterName || entry.email || entry.customerId || 'Unknown customer';
+      const reasons = [...(entry.inputErrors || [])];
+      if (entry.hasMatterCoreLookupIssue) {
+        const meal = (entry.selectedMeals || []).find(row => row.flags?.matterCoreLookupMissing);
+        reasons.push(meal ? `unsupported Matter Core weights for ${meal.mealName || 'meal'} (P ${meal.proteinWeight}g / C ${meal.carbWeight}g)` : 'unsupported Matter Core weight combination');
+      }
+      return `${name}: ${reasons.join('; ') || 'required nutrition inputs are unresolved'}`;
+    });
+    throw new Error(`Kitchen export blocked: ${invalid.length} customer(s) have unresolved inputs or Matter Core combinations. ${details.join(' | ')}${invalid.length > 5 ? ' | More customers require review.' : ''}`);
+  }
 };
 
 // Loading is explicit: GET /selections never launches unobservable writes.
