@@ -37,18 +37,8 @@ const DeliveryChanges = () => {
 
  const handleApplyChange = async (changeId) => {
   try {
-    console.log('Applying change:', changeId);
-    
-    // First, let's debug what's happening
-    const debugResponse = await api.get(`/delivery-changes/debug/${changeId}`);
-    console.log('Debug info:', debugResponse.data);
-
-    if (debugResponse.data.deliveryCount === 0) {
-      alert(`No delivery found for customer ${debugResponse.data.change.customerId} on ${new Date(debugResponse.data.change.scheduledDate).toLocaleDateString()}. Please create the delivery first.`);
-      return;
-    }
-
-    // Now apply the change
+    // The apply endpoint performs the existence/status checks. Diagnostics
+    // are admin-only and are not part of the dispatcher workflow.
     const response = await api.post(`/delivery-changes/${changeId}/apply`);
     
     if (response.data.success) {
