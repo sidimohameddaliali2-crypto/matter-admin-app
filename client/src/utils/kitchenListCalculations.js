@@ -41,11 +41,14 @@ const getDateKey = (value) => {
 
 // Owner (2026-10-23): a Matter Core customer delivered only Mon/Wed/Fri gets a
 // DOUBLE delivery on Monday (Mon+Tue) and Wednesday (Wed+Thu); Friday stays
-// single. A date is a double day only when the customer's Matter delivery dates
+// single. Explicit Matter double dates take precedence, including midweek
+// starts. Without those API flags, infer double days only when delivery dates
 // for that week are exactly Mon+Wed+Fri with no Tue/Thu (so a daily customer with
 // one paused day is never mistaken for it). Same rule as
 // server/utils/matterCoreDelivery.js (the client can't import from server/).
-export const isMatterCoreDoubleDay = (dateKey, deliveryDates) => {
+export const isMatterCoreDoubleDay = (dateKey, deliveryDates, doubleDeliveryDates) => {
+  if (Array.isArray(doubleDeliveryDates)) return Array.isArray(deliveryDates)
+    && deliveryDates.includes(dateKey) && doubleDeliveryDates.includes(dateKey);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dateKey || '')) || !Array.isArray(deliveryDates)) return false;
   const [y, m, d] = dateKey.split('-').map(Number);
   const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
@@ -826,7 +829,7 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
       // see isMatterCoreDoubleDay) the day carries twice the meals, but each
       // meal keeps its normal size: divide by the plan's meals per day, not by
       // the doubled row count.
-      const coreDoubleDay = isMatterCoreDoubleDay(dayKey, customer?.deliveryDates);
+      const coreDoubleDay = isMatterCoreDoubleDay(dayKey, customer?.deliveryDates, customer?.doubleDeliveryDates);
       const coreMealCount = coreDoubleDay
         ? Math.max(1, Number(customer?.mealsPerDay) || Math.round(dayMealCount / 2))
         : dayMealCount;

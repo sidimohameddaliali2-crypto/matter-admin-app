@@ -353,6 +353,7 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
       mealsPerDay: nutrition?.meal_frequency ?? null,
       breakfastIncluded: typeof nutrition?.breakfast_included === 'boolean' ? nutrition.breakfast_included : null,
       deliveryDates: Array.isArray(nutrition?.active_delivery_dates) ? nutrition.active_delivery_dates : null,
+      doubleDeliveryDates: Array.isArray(nutrition?.double_delivery_dates) ? nutrition.double_delivery_dates : null,
       dietaryRestrictions: Array.isArray(nutrition?.exclusions) ? nutrition.exclusions : null,
       ...(extended ? {
         deliveryAddress: nutrition?.delivery_address_resolution?.address || null,

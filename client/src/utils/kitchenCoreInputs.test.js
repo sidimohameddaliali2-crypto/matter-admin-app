@@ -3,6 +3,29 @@ import { assertKitchenExportReady } from './kitchenIntegrity';
 import { enrichSelectionsWithNutrition } from '../lib/kitchenData';
 import { assertKitchenRosterCovered } from '../lib/kitchenSnapshot';
 
+test('Wednesday starter gets two full Core portions from dated Matter flags, matching coverage and paper calculations', async () => {
+  const date = '2026-11-04';
+  const nutrition = { customer_id: 'fixture', customer_email: 'fixture@example.invalid', customer_name: 'Fixture', subscription_id: 'fixture-sub',
+    source_fetched_at: new Date().toISOString(), plan_name: 'Matter Core', meal_frequency: 1, snacks_per_day: 0, breakfast_included: false,
+    macros: { carbohydrates: 100, protein: 100, fat: 11 }, exclusions: [], active_delivery_dates: [date, '2026-11-06'], double_delivery_dates: [date],
+    delivery_address_resolution: { status: 'resolved', address: { id: 'address' } } };
+  const meals = [0, 1].map(slotNumber => ({ date, mealType: 'main', mealName: 'Fixture main', slotNumber, isAutoAssigned: true }));
+  const [entry] = await enrichSelectionsWithNutrition({ get: async () => ({ data: { success: true, data: nutrition } }) }, [{ email: nutrition.customer_email, selectedMeals: meals }], { current: new Map() }, { extended: true });
+  expect(entry.doubleDeliveryDates).toEqual([date]);
+  const result = calculateKitchenListEntry({ customer: entry, selectedMeals: meals });
+  expect(result.selectedMeals).toHaveLength(2);
+  for (const meal of result.selectedMeals) {
+    expect(meal.proteinWeight).toBe(100); expect(meal.carbWeight).toBe(100); expect(meal.vegWeight).toBe(0);
+    expect(meal.macros).toEqual({ C: 28, P: 25, F: 11, calories: 311 });
+    expect(meal.flags.matterCoreDoubleDelivery).toBe(true);
+    expect(meal.flags.matterCoreLookupMissing).toBe(false);
+  }
+  const roster = [{ customer_id: 'fixture', name: 'Fixture', plan_name: 'Matter Core', meal_frequency: 1, active_delivery_dates: nutrition.active_delivery_dates, double_delivery_dates: [date] }];
+  expect(() => assertKitchenRosterCovered([entry], roster, date)).not.toThrow();
+  expect(() => assertKitchenRosterCovered([{ ...entry, selectedMeals: meals.slice(0, 1) }], roster, date)).toThrow('needs 2 meal(s)');
+  expect(() => assertKitchenExportReady([result])).not.toThrow();
+});
+
 test('Core Monday and Wednesday require doubled mains with normal portions; Friday remains single', () => {
   const deliveryDates = ['2026-10-26', '2026-10-28', '2026-10-30'];
   const customer = { matterCustomerId: 'person', planName: 'Matter Core', mealsPerDay: 2, deliveryDates, targetMacros: { C: 300, P: 300, F: null } };
