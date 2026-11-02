@@ -168,7 +168,64 @@ curl -H "x-api-key: 9f2a3c..." \
 `location` is `null` for a vehicle not currently reporting a GPS fix.
 `driver` is `null` for a vehicle with no driver mapped to it
 (`User.profile.truckoomVehicleNo`). Polled the same way the deliveries
-endpoint is — there's no history, only the current position.
+endpoint is. This endpoint returns only the current position; recorded history is available separately below.
+
+### `GET /api/external/drivers/locations/history`
+
+Returns GPS points already collected by the server. Uses the same `x-api-key`
+(or Bearer API key) as the existing delivery and live-location endpoints.
+It does not make a Truckoom request or generate missing points.
+
+```bash
+curl -H "x-api-key: YOUR_API_KEY" \
+  "https://matterapp.online/api/external/drivers/locations/history?vehicleNo=71592&date=2026-11-01&limit=500&page=1"
+```
+
+Provide `vehicleNo`, `driverId`, or both. `driverId` filters the driver saved
+with each GPS point, rather than the vehicle's current driver assignment.
+For a date range, replace `date` with both `dateFrom` and `dateTo`:
+
+```text
+/api/external/drivers/locations/history?driverId=DRIVER_MONGO_ID&dateFrom=2026-10-30&dateTo=2026-11-02
+```
+
+- `date`: valid `YYYY-MM-DD`, covering that entire Dubai business day.
+- `dateFrom` / `dateTo`: both required for a range; date-only boundaries include
+  both whole business days. ISO timestamps with an explicit timezone are also
+  accepted, including the final instant. Do not combine a range with `date`.
+- Maximum range: seven days. No unbounded query is allowed.
+- `page`: starts at 1, maximum 10000. `limit`: default 500, maximum 1000.
+- Results sort by `recordedAt`, then the point ID, ascending. Follow
+  `pagination.pages` to retrieve remaining points; no silent 10000-point cutoff.
+
+```json
+{
+  "success": true,
+  "data": [{
+    "id": "POINT_ID",
+    "vehicleNo": "71592",
+    "driverId": "DRIVER_ID_AT_RECORDING_TIME",
+    "location": { "lat": 25.1, "lng": 55.2 },
+    "gpsTime": "2026-10-31T21:00:00.000Z",
+    "recordedAt": "2026-10-31T21:00:30.000Z",
+    "source": "server_recorded_gps"
+  }],
+  "range": {
+    "from": "2026-10-31T20:00:00.000Z",
+    "toExclusive": "2026-11-01T20:00:00.000Z",
+    "filteredBy": "recordedAt"
+  },
+  "pagination": { "page": 1, "limit": 500, "total": 1, "pages": 1 }
+}
+```
+
+All returned timestamps are UTC. `gpsTime` is the tracker-reported position
+measurement time; `recordedAt` is when our server collected it. Date filtering
+uses `recordedAt`, so delayed tracker packets can have an earlier `gpsTime`.
+`gpsTime`, `driverId`, or `location` can be null when unavailable or invalid.
+An empty `data` array means no saved points match, not that the vehicle was
+stationary. The separate Truckoom historical API cache is not included here.
+Invalid filters return 400; storage failures return a generic 500 response.
 
 ## Notes
 
