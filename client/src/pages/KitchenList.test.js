@@ -57,7 +57,7 @@ test('open date shows customer choices and deadline, disables auto assign and ma
     await select(dateSelect(), friday);
     expect(container.textContent).toContain('Customer chosen beef');
     expect(container.textContent).toContain('Customer selection is still open until');
-    expect([...container.querySelectorAll('button')].find(button => button.textContent === 'Auto-Assign').disabled).toBe(true);
+    expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Auto-Assign')).toBe(false);
     expect(api.post).toHaveBeenCalledTimes(writes);
   } finally { now.mockRestore(); }
 });
@@ -90,6 +90,27 @@ test('Kitchen List automatically uses only the active menu and locks the selecto
   expect(container.textContent).toContain('active menu is selected automatically and locked');
   expect(container.textContent).not.toContain('Use active menu & today automatically');
   expect(container.querySelector('#kitchen-header-date').disabled).toBe(false);
+});
+
+test('manual check and assignment buttons are removed while loading still prepares automatically', () => {
+  const buttons = [...container.querySelectorAll('button')].map(button => button.textContent.trim());
+  expect(buttons).not.toContain('Check Missing Selections');
+  expect(buttons).not.toContain('Auto-Assign');
+  expect(api.post.mock.calls.some(([path]) => path.endsWith('/auto-populate-missing'))).toBe(true);
+  expect(api.post.mock.calls.some(([path]) => /\/assign-(main-meals|snacks|matter-core-meals)$/.test(path))).toBe(false);
+  expect(container.textContent).toContain('Matter Fixture');
+});
+
+test('Refresh requests fresh preparation when a ready snapshot exists, keeping saved choices visible', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => path.endsWith('/kitchen-state')
+    ? { data: { state: 'ready', data: { success: true, preparation: 'completed', data: {} } } } : originalGet(path, config));
+  const originalPost = api.post.getMockImplementation();
+  api.post.mockImplementation(async (path, body, config) => path.endsWith('/kitchen-state')
+    ? { data: { state: 'ready', data: await originalPost(path, body, config).then(result => result.data) } } : originalPost(path, body, config));
+  await act(async () => container.querySelector('button[title="Reload selections and re-fetch nutrition data from the website"]').click());
+  expect(api.post).toHaveBeenCalledWith('/menus/menu/kitchen-state', { date: thursday, refresh: true }, { timeout: 30000 });
+  expect(container.textContent).toContain('Matter Fixture');
 });
 
 test('selecting the prepared Thursday in the paper control preserves selections without reloading', async () => {

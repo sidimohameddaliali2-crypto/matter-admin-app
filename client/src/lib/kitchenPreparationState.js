@@ -1,4 +1,4 @@
-export const loadPreparedKitchenState = async (api, menuId, date, isCurrent) => {
+export const loadPreparedKitchenState = async (api, menuId, date, isCurrent, { refresh = false } = {}) => {
   const path = `/menus/${menuId}/kitchen-state`;
   let response;
   try { response = await api.get(path, { params: { date }, timeout: 180000 }); }
@@ -6,7 +6,7 @@ export const loadPreparedKitchenState = async (api, menuId, date, isCurrent) => 
   if (!response?.data?.state) return null;
   let state = response.data;
   const deadline = Date.now() + 300000;
-  if (state.state === 'missing') state = (await api.post(path, { date }, { timeout: 30000 })).data;
+  if (state.state === 'missing' || (refresh && state.state === 'ready')) state = (await api.post(path, { date, ...(refresh ? { refresh: true } : {}) }, { timeout: 30000 })).data;
   while (isCurrent()) {
     if (state.state === 'ready' || state.state === 'selection-open') return state.data;
     if (['failed', 'stale'].includes(state.state) || state.success === false) throw new Error(state.message || 'Kitchen preparation failed. Retry the selected date.');

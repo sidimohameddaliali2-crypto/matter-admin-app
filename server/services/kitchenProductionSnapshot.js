@@ -42,7 +42,7 @@ const capture = async menuId => {
   };
 };
 
-export const readKitchenState = async (menuId, date, jobId) => {
+export const readKitchenState = async (menuId, date, jobId, { refresh = false } = {}) => {
   const selectionWindow = await readKitchenSelectionWindow(menuId, date);
   if (!selectionWindow.canAutoAssign) {
     // Reading an open day must never run the assignment or pause-reconciliation
@@ -74,13 +74,13 @@ export const readKitchenState = async (menuId, date, jobId) => {
   }
   const version = await sourceVersion(menuId);
   const ready = await Snapshot.findOne({ menuId, date, status: 'ready' }).sort({ createdAt: -1 }).lean();
-  if (snapshotIsFresh(ready, version)) return { state: 'ready', data: ready.payload };
+  if (!refresh && snapshotIsFresh(ready, version)) return { state: 'ready', data: ready.payload };
   const running = await Snapshot.findOne({ menuId, date, status: 'running', createdAt: { $gte: new Date(Date.now() - 300000) } }).sort({ createdAt: -1 }).lean();
   return running ? { state: 'running', jobId: String(running._id) } : { state: 'missing' };
 };
 
-export const beginKitchenState = async (menuId, date, prepare) => {
-  const current = await readKitchenState(menuId, date);
+export const beginKitchenState = async (menuId, date, prepare, options = {}) => {
+  const current = await readKitchenState(menuId, date, undefined, options);
   if (current.state !== 'missing') return current;
   const job = await Snapshot.create({ menuId, date, status: 'running', expiresAt: new Date(Date.now() + 7 * 86400000) });
   setImmediate(async () => {
