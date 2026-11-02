@@ -5,7 +5,7 @@ import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { Download, Loader, RefreshCw } from 'lucide-react';
 import { KitchenWorkspaceHeader, KitchenEmptyState, KitchenAutoScopeControl } from '../components/KitchenWorkspace';
 import useKitchenCurrentScope from '../lib/useKitchenCurrentScope';
-import { formatKitchenDay } from '../lib/kitchenDayScope';
+import { formatKitchenDay, kitchenCustomerDay } from '../lib/kitchenDayScope';
 import KitchenCountingGroups from '../components/KitchenCountingGroups';
 // xlsx is only needed once a staff member clicks an export button — loaded
 // on first use and memoized instead of shipping it in the app's shared
@@ -215,7 +215,9 @@ const KitchenCounting = () => {
       const hasDelivery = (entry) => hasKitchenDeliveryOnDate(entry, deliverySubs, selectedDate);
 
       if (!current()) return;
-      const deliverable = computed.filter(hasDelivery);
+      // Calculate the full record first, then validate only this cooking day,
+      // exactly as Kitchen List does. Another day's lookup cannot block it.
+      const deliverable = computed.filter(hasDelivery).map(entry => kitchenCustomerDay(entry, selectedDate));
       assertKitchenExportReady(deliverable);
       setCustomerEntries(deliverable);
       setLoadedScope(scope);

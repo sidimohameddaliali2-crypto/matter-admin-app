@@ -79,6 +79,41 @@ test('clearing the date invalidates a request still loading', async () => {
 const selectedDateChip = () => container.querySelector('[aria-label="Delivery dates"] button[aria-pressed="true"]');
 const exportButton = () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel'));
 
+const useMixedCoreDates = () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => {
+    if (path.endsWith('/selections')) return { data: { success: true, data: [{ ...entry, selectedMeals: [
+      { date: A, mealType: 'main', mealName: 'Valid day meal' },
+      { date: B, mealType: 'main', mealName: 'Other day first meal' },
+      { date: B, mealType: 'main', mealName: 'Other day second meal' },
+    ] }] } };
+    if (path.includes('kitchen-inputs')) return { data: { success: true, data: {
+      customer_name: 'Core Fixture', plan_name: 'Matter Core', macros: { carbohydrates: 100, protein: 100, fat: 11 },
+      meal_frequency: 1, snacks_per_day: 0, breakfast_included: false, exclusions: [], active_delivery_dates: [A, B], double_delivery_dates: [],
+    } } };
+    return originalGet(path, config);
+  });
+};
+
+test('an unsupported Core portion on another date must not block valid selected-day counts or export', async () => {
+  useMixedCoreDates();
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  expect(container.textContent).not.toContain('Kitchen export blocked');
+  expect(container.textContent).toContain('1 main meal(s) total');
+  expect(exportButton().disabled).toBe(false);
+});
+
+test('an unsupported Core portion on the selected date still blocks export', async () => {
+  useMixedCoreDates();
+  await select(1, B);
+  await act(async () => pending[B]({ data: { success: true, data: [{ email: entry.email }] } }));
+  expect(container.textContent).toContain('Kitchen export blocked');
+  expect(container.textContent).toContain('Core Fixture');
+  expect(container.textContent).toContain('P 50g / C 50g');
+  expect(exportButton().disabled).toBe(true);
+});
+
 test('clicking the current date preserves loaded counts and Excel export without reloading', async () => {
   await select(1, A);
   await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
