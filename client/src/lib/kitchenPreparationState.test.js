@@ -1,5 +1,20 @@
 import { loadPreparedKitchenState } from './kitchenPreparationState';
 
+test('simultaneous List/Counting loads share one read, cancelled consumers cannot discard another view, later reads verify again', async () => {
+  let release, active = true;
+  const payload={snapshotId:'same-version',data:{kitchenSelections:[{selectedMeals:[{mealName:'Chosen meal',quantity:2,remark:'veg'}]}]}};
+  const api={get:jest.fn(()=>new Promise(resolve=>{release=resolve;})),post:jest.fn()};
+  const first=loadPreparedKitchenState(api,'menu','2026-11-06',()=>active);
+  const rejected=expect(first).rejects.toThrow('selection changed');
+  const second=loadPreparedKitchenState(api,'menu','2026-11-06',()=>true);
+  active=false;release({data:{state:'ready',data:payload}});
+  await rejected;expect(await second).toBe(payload);expect(api.get).toHaveBeenCalledTimes(1);
+  api.get.mockResolvedValueOnce({data:{state:'ready',data:payload}});
+  expect(await loadPreparedKitchenState(api,'menu','2026-11-06',()=>true)).toBe(payload);
+  expect(api.get).toHaveBeenCalledTimes(2);
+  expect(api.post).not.toHaveBeenCalled();
+});
+
 test('open selection returns existing choices without starting assignment or a preparation job', async () => {
   const payload = { preparation: 'selection-open', selectionWindow: { canAutoAssign: false }, data: { kitchenSelections: [{ selectedMeals: [{ mealName: 'Customer choice' }] }] } };
   const api = { get: jest.fn().mockResolvedValue({ data: { state: 'selection-open', data: payload } }), post: jest.fn() };

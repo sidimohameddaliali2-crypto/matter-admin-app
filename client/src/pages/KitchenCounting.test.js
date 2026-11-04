@@ -48,6 +48,12 @@ afterEach(async () => {
   container.remove(); jest.clearAllMocks();
 });
 
+test('before choosing a date, date discovery needs one small request and no complete selections download', () => {
+  expect(api.get.mock.calls.filter(([url])=>url.endsWith('/kitchen-dates'))).toHaveLength(1);
+  expect(api.get.mock.calls.filter(([url])=>url.endsWith('/selections'))).toHaveLength(0);
+  expect(api.get.mock.calls.filter(([url])=>/\/(main-meal-options|breakfast-options|snack-options)$/.test(url))).toHaveLength(0);
+});
+
 test('obsolete date A cannot overwrite date B, and a failed refresh cannot export B as current', async () => {
   await select(1, A);
   expect(pending[A]).toBeDefined();
