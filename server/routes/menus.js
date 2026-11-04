@@ -17,6 +17,7 @@ import { isMatterCoreDoubleDay } from '../utils/matterCoreDelivery.js';
 import { appendKitchenMeals } from '../services/kitchenSelectionWrite.js';
 import { kitchenDateUnavailable } from '../services/kitchenDeliveryEligibility.js';
 import { reconcileCoreBreakfast } from '../services/kitchenBreakfastEntitlement.js';
+import { reconcileCoreMainMeals } from '../services/kitchenCoreEntitlement.js';
 import { toKitchenOption, kitchenConflictList, kitchenConflictFields, mergeKitchenMetadata } from '../services/kitchenExclusions.js';
 import { kitchenUpload } from '../services/kitchenUpload.js';
 import { saveManagedMenu } from '../services/managedMenuSave.js';
@@ -1676,7 +1677,7 @@ const mapWithConcurrency = async (items, limit, mapper) => {
 async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly = false, includeBreakfast = false, matterInputs = [] } = {}) {
 
   const menu = await WeeklyMenu.findById(menuId)
-    .select('matterCoreMealOptionsByDate breakfastOptionsByDate snackOptionsByDate meals selectionDeadlines')
+    .select('breakfastOptionsByDate snackOptionsByDate meals selectionDeadlines')
     .lean();
   if (!menu) {
     return { error: 'Menu not found', status: 404 };
@@ -1695,11 +1696,10 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     mealType: 'main',
     usedForCorePlan: true
   }).lean();
-  let mealList = corePlanMenuItems.map(toKitchenOption);
-  // Fallback for dates that haven't been tagged in the new meal editor yet.
-  if (mealList.length === 0) {
-    mealList = (menu.matterCoreMealOptionsByDate || {})[dateKey] || [];
-  }
+  // Owner (2026-11-04): Core mains must be explicitly tagged on this date.
+  // An old rotation list is not evidence that a dish is still tagged. With
+  // no tags, keep the slots unassigned until staff configure the Core menu.
+  const mealList = corePlanMenuItems.map(toKitchenOption);
   let breakfastOptions = (menu.breakfastOptionsByDate || {})[dateKey] || [];
   if (breakfastOptions.length === 0) {
     // No hand-built breakfast list for the date — use that day's breakfast
@@ -1757,6 +1757,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     let existingRecord = await MenuSelectionRecord.findOne({ weeklyMenuId: menuId, email }).lean();
     if (await kitchenDateUnavailable(existingRecord, dateKey, customer.nutrition)) continue;
     existingRecord = await reconcileCoreBreakfast(existingRecord, dateKey, customer.nutrition);
+    existingRecord = await reconcileCoreMainMeals(existingRecord, dateKey, customer.nutrition);
     const existingMainMealsCount = (existingRecord?.selectedMeals || []).filter(
       (m) => toDateKey(m.date) === dateKey && m.mealType === 'main'
     ).reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
@@ -1806,9 +1807,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
         newMeals.push({
           date: new Date(dateKey),
           mealType: 'main',
-          // Only MenuItem-sourced options have a real _id (the fallback
-          // pool's plain {name} entries don't).
-          menuItemId: chosen._id || undefined,
+          menuItemId: chosen._id,
           mealName: chosen.name,
           quantity: 1,
           slotNumber: position,
@@ -1948,7 +1947,7 @@ async function runAutoPopulateMissing(menuId, dateKey, options) {
 }
 
 async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs = false } = {}) {
-  const cacheKey = `menu:${menuId}:autoPopulated:v3:${dateKey}`;
+  const cacheKey = `menu:${menuId}:autoPopulated:v5:${dateKey}`;
   const cached = freshInputs ? null : await cacheGet(cacheKey);
   if (cached && !freshInputs) return { data: cached, cached: true };
 
@@ -1997,6 +1996,7 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
     }
     if (await kitchenDateUnavailable(record, dateKey, nutrition)) continue;
     record = await reconcileCoreBreakfast(record, dateKey, nutrition);
+    record = await reconcileCoreMainMeals(record, dateKey, nutrition);
     const core = String(nutrition.plan_name || '').trim().toLowerCase() === 'matter core';
     const portions = (record?.selectedMeals || []).filter((meal) => toDateKey(meal.date) === dateKey && (core ? meal.mealType === 'main' : meal.mealType !== 'snack'))
       .reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
