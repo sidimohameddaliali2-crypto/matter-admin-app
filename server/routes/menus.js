@@ -23,6 +23,8 @@ import { kitchenUpload } from '../services/kitchenUpload.js';
 import { saveManagedMenu } from '../services/managedMenuSave.js';
 import { assertAssignmentMacros } from '../services/kitchenMacroValidation.js';
 import { readKitchenState, beginKitchenState } from '../services/kitchenProductionSnapshot.js';
+import { kitchenMenuDates } from '../services/kitchenMenuDates.js';
+import { menuSelectionNames } from '../services/menuSelectionNames.js';
 import { assertKitchenSelectionClosed, readKitchenSelectionWindow } from '../services/kitchenSelectionDeadline.js';
 import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
 import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
@@ -2942,6 +2944,22 @@ router.delete('/:id', protect, async (req, res) => {
  * Reads local meal choices only. Matter supplies customer details separately.
  * This GET never backfills or reads Internal Customer records.
  */
+router.get('/:id/kitchen-dates', protect, async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) return res.status(404).json({ success: false, message: 'Menu not found' });
+    const menu = await WeeklyMenu.findById(req.params.id)
+      .select('startDate endDate mainMealOptionsByDate breakfastOptionsByDate snackOptionsByDate').lean();
+    if (!menu) return res.status(404).json({ success: false, message: 'Menu not found' });
+    const dates = await MenuSelectionRecord.aggregate([
+      { $match: { weeklyMenuId: new mongoose.Types.ObjectId(req.params.id) } },
+      { $unwind: '$selectedMeals' },
+      { $group: { _id: '$selectedMeals.date' } },
+    ]);
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, data: kitchenMenuDates(menu, dates.map(row => row._id)) });
+  } catch (error) { return res.status(500).json({ success: false, message: error.message }); }
+});
+
 router.get('/:id/selections', protect, async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
@@ -2954,9 +2972,17 @@ router.get('/:id/selections', protect, async (req, res) => {
       'original.weeklyMenuId': new mongoose.Types.ObjectId(req.params.id), 'original.email': { $in: aliases },
     }).lean() : [];
     const visible = excludeRecreatedArchivedAliases(rows, archives);
+    let names = null;
+    if (req.query?.includeNames === 'true') {
+      // Summary names only: no live macro/address requests while browsing.
+      // Failed name lookup must not hide saved customer choices.
+      try { names = menuSelectionNames(visible, await matterApiService.listAllSubscriptions()); }
+      catch { names = new Map(); }
+    }
     res.json({ success: true, data: visible.map((record) => {
       const row = record.toObject ? record.toObject() : record;
       return { _id: row._id, email: row.email, matterEmail: row.matterEmail || null,
+        ...(names ? names.get(String(row._id)) || { firstName: '', lastName: '' } : {}),
         customerId: row.matterCustomerId || null, matterCustomerId: row.matterCustomerId || null,
         matterSubscriptionId: row.matterSubscriptionId || null,
         selectedMeals: row.selectedMeals || [], skippedDays: row.skippedDays || [], dayNotes: row.dayNotes || [],

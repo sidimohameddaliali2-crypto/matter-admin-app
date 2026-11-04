@@ -1,4 +1,4 @@
-export const loadPreparedKitchenState = async (api, menuId, date, isCurrent) => {
+const fetchPreparedKitchenState = async (api, menuId, date, isCurrent) => {
   const path = `/menus/${menuId}/kitchen-state`;
   let response;
   try { response = await api.get(path, { params: { date }, timeout: 180000 }); }
@@ -16,4 +16,29 @@ export const loadPreparedKitchenState = async (api, menuId, date, isCurrent) => 
     state = (await api.get(path, { params: { date, job: state.jobId }, timeout: 30000 })).data;
   }
   throw new Error('Kitchen selection changed during preparation.');
+};
+
+// Share only in-flight work. Every later load still asks the server to verify
+// its source version/freshness; no new persistent roster cache is introduced.
+const inFlight = new WeakMap();
+export const loadPreparedKitchenState = async (api, menuId, date, isCurrent) => {
+  if (!isCurrent()) throw new Error('Kitchen selection changed during preparation.');
+  let requests = inFlight.get(api);
+  if (!requests) { requests = new Map(); inFlight.set(api, requests); }
+  const key = `${menuId}:${date}`;
+  let shared = requests.get(key);
+  if (!shared) {
+    shared = { consumers: new Set() };
+    requests.set(key, shared);
+  }
+  const consumer = { isCurrent };
+  shared.consumers.add(consumer);
+  if (!shared.promise) shared.promise = fetchPreparedKitchenState(api, menuId, date,
+    () => [...shared.consumers].some(item => item.isCurrent()))
+    .finally(() => { if (requests.get(key) === shared) requests.delete(key); });
+  try {
+    const result = await shared.promise;
+    if (!isCurrent()) throw new Error('Kitchen selection changed during preparation.');
+    return result;
+  } finally { shared.consumers.delete(consumer); }
 };

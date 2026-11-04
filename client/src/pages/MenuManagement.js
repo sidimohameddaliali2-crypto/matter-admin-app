@@ -1,4 +1,5 @@
-import { enrichSelectionsWithNutrition } from '../lib/kitchenData';
+import MenuSelectionBrowser from '../components/MenuSelectionBrowser';
+import { loadMenuSelectionSummaries, loadMenuSelectionDetails } from '../lib/menuSelectionLoading';
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Plus,
@@ -119,8 +120,11 @@ const MenuManagement = () => {
   const [selectionMenuId, setSelectionMenuId] = useState(null);
   const [menuSelections, setMenuSelections] = useState([]);
   const [selectionLoading, setSelectionLoading] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [selectionExporting, setSelectionExporting] = useState(false);
+  const selectionRequests = useRef(0);
+  const detailRequests = useRef(0);
   const [selectionError, setSelectionError] = useState(null);
-  const [selectionSearch, setSelectionSearch] = useState('');
   const [selectionDates, setSelectionDates] = useState([]);
   const [uploadError, setUploadError] = useState(null);
   const [isUploadingMenu, setIsUploadingMenu] = useState(false);
@@ -156,6 +160,7 @@ const MenuManagement = () => {
 
   useEffect(() => {
     fetchMenus();
+    return () => { selectionRequests.current++; detailRequests.current++; };
   }, []);
 
   const fetchMenus = async () => {
@@ -850,44 +855,37 @@ const MenuManagement = () => {
     }
   };
 
-  const handleViewSelections = async (menuId) => {
-    if (selectionMenuId === menuId) {
-      setSelectionMenuId(null);
-      setMenuSelections([]);
-      setSelectionError(null);
-      return;
-    }
-
+  const openCustomerSelection = async customer => {
+    const request = ++detailRequests.current;
+    setDetailLoading(true);
     try {
-      setSelectionLoading(true);
-      setSelectionError(null);
-      setSelectionMenuId(menuId);
-      setSelectionSearch('');
-
-      // calculate date range for the selected menu
-      const menu = menus.find(m => m._id === menuId);
-      if (menu) {
-        setSelectionDates(getDateRange(menu.startDate, menu.endDate));
-      } else {
-        setSelectionDates([]);
-      }
-
-      const response = await api.get(`/menus/${menuId}/selections`);
-      if (response.data?.success) {
-        const data = await enrichSelectionsWithNutrition(api, response.data.data || [], { current: new Map() }, { extended: true });
-        setMenuSelections(data);
-        // Update the menu card's selectionCount in local state so the badge stays accurate
-        setMenus(prev => prev.map(m =>
-          m._id === menuId ? { ...m, selectionCount: data.length } : m
-        ));
-      } else {
-        setSelectionError(response.data?.message || 'Failed to load selections');
-      }
+      const [detail] = await loadMenuSelectionDetails(api, [customer]);
+      if (detailRequests.current === request) setSelectedCustomerDetail(detail);
     } catch (err) {
-      setSelectionError(err.response?.data?.message || 'Failed to load selections');
-    } finally {
-      setSelectionLoading(false);
-    }
+      if (detailRequests.current === request) setSelectionError(err.message || 'Failed to load customer');
+    } finally { if (detailRequests.current === request) setDetailLoading(false); }
+  };
+
+  const handleViewSelections = async menuId => {
+    const request = ++selectionRequests.current;
+    detailRequests.current++;
+    setDetailLoading(false);
+    setSelectedCustomerDetail(null);
+    setMenuSelections([]);
+    setSelectionError(null);
+    if (selectionMenuId === menuId) { setSelectionMenuId(null); setSelectionLoading(false); return; }
+    setSelectionLoading(true);
+    setSelectionMenuId(menuId);
+    const menu = menus.find(m => m._id === menuId);
+    setSelectionDates(menu ? getDateRange(menu.startDate, menu.endDate) : []);
+    try {
+      const data = await loadMenuSelectionSummaries(api, menuId);
+      if (selectionRequests.current !== request) return;
+      setMenuSelections(data);
+      setMenus(prev => prev.map(m => m._id === menuId ? { ...m, selectionCount: data.length } : m));
+    } catch (err) {
+      if (selectionRequests.current === request) setSelectionError(err.response?.data?.message || err.message || 'Failed to load selections');
+    } finally { if (selectionRequests.current === request) setSelectionLoading(false); }
   };
 
   const handleDownloadMenuPDF = async (menu) => {
@@ -1346,8 +1344,11 @@ const MenuManagement = () => {
     }
   };
 
-  const handleDownloadSelections = (menu) => {
+  const handleDownloadSelections = async (menu) => {
     if (!Array.isArray(menuSelections) || menuSelections.length === 0) return;
+    setSelectionExporting(true);
+    try {
+    const exportSelections = await loadMenuSelectionDetails(api, menuSelections);
 
     const menuTitle = menu?.title || 'menu-selections';
 
@@ -1369,7 +1370,7 @@ const MenuManagement = () => {
 
     const mealDateList = Array.from(
       new Set(
-        menuSelections
+        exportSelections
           .flatMap((customer) => customer.selectedMeals || [])
           .map((meal) => getDateKey(meal.date || meal.menuItemId?.itemDate))
           .filter(Boolean)
@@ -1387,7 +1388,7 @@ const MenuManagement = () => {
     if (dateList.length === 0) {
       const rows = [
         ['NAME', 'CUS ID', 'STATUS', 'AUTO-ASSIGNED'],
-        ...menuSelections.map((customer) => [
+        ...exportSelections.map((customer) => [
           `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || 'Unnamed Customer',
           customer.customerId || '',
           'No meal selection',
@@ -1405,7 +1406,7 @@ const MenuManagement = () => {
     // Pre-compute which dates have at least one customer with selections.
     // If any customer selected for a date, the day was open for selection.
     const datesWithAnySelections = new Set(
-      menuSelections
+      exportSelections
         .flatMap((c) => (c.selectedMeals || []).map((m) => getDateKey(m.date || m.menuItemId?.itemDate)))
         .filter(Boolean)
     );
@@ -1417,7 +1418,7 @@ const MenuManagement = () => {
       const uniqueMealsSet = new Set();
       const customerData = [];
 
-      menuSelections.forEach((customer) => {
+      exportSelections.forEach((customer) => {
         const customerName = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || 'Unnamed Customer';
         const selections = Array.isArray(customer.selectedMeals) ? customer.selectedMeals : [];
         const mealsForDate = selections.filter((meal) => {
@@ -1552,6 +1553,8 @@ const MenuManagement = () => {
 
     const safeTitle = String(menuTitle || 'menu-selections').replace(/[^a-z0-9-_]+/gi, '_');
     XLSX.writeFile(wb, `${safeTitle}-selections.xlsx`);
+    } catch (err) { setSelectionError(err.message || 'Failed to export selections'); }
+    finally { setSelectionExporting(false); }
   };
 
   if (loading) {
@@ -2391,7 +2394,7 @@ const MenuManagement = () => {
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => handleDownloadSelections(menu)}
-                          disabled={selectionLoading || menuSelections.length === 0}
+                          disabled={selectionLoading || selectionExporting || menuSelections.length === 0}
                           className="flex items-center gap-2 bg-matter-accent2-300 text-matter-navy hover:bg-matter-accent2-400 px-3 py-2 rounded-lg transition text-sm disabled:opacity-50"
                         >
                           <Download size={16} />
@@ -2407,6 +2410,8 @@ const MenuManagement = () => {
                       </div>
                     </div>
 
+                    {detailLoading && <p role="status" className="text-sm text-matter-neutral-600">Checking current Matter customer details...</p>}
+                    {selectionExporting && <p role="status" className="text-sm text-matter-neutral-600">Checking customer names for export...</p>}
                     {selectionLoading && (
                       <div className="flex items-center gap-2 text-matter-neutral-700">
                         <Loader className="animate-spin" size={16} />
@@ -2424,32 +2429,12 @@ const MenuManagement = () => {
                       <div className="text-matter-neutral-600 text-sm">No selections yet.</div>
                     )}
 
-                    {menuSelections.length > 0 && (
-                      <div className="mb-4">
-                        <input
-                          type="text"
-                          placeholder="Search customers..."
-                          value={selectionSearch}
-                          onChange={(e) => setSelectionSearch(e.target.value)}
-                          className="w-full px-3 py-2 border border-matter-neutral-300 rounded-lg focus:ring-2 focus:ring-matter-sky focus:border-transparent"
-                        />
-                      </div>
-                    )}
-
                     {!selectionLoading && !selectionError && menuSelections.length > 0 && (
                       <div className="space-y-3">
-                        {menuSelections
-                          .filter((cust) => {
-                            const q = selectionSearch.toLowerCase();
-                            if (!q) return true;
-                            const name = `${cust.firstName || ''} ${cust.lastName || ''}`.toLowerCase();
-                            const email = (cust.email || '').toLowerCase();
-                            return name.includes(q) || email.includes(q);
-                          })
-                          .map((customer) => (
+                        <MenuSelectionBrowser key={selectionMenuId} customers={menuSelections} renderCustomer={(customer) => (
                           <div 
                             key={customer._id} 
-                            onClick={() => setSelectedCustomerDetail(customer)}
+                            onClick={() => openCustomerSelection(customer)}
                             className="bg-white rounded-lg p-4 border-2 border-matter-neutral-300 shadow-sm hover:shadow-md transition-shadow cursor-pointer hover:border-matter-accent-400"
                           >
                             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-3">
@@ -2680,7 +2665,7 @@ const MenuManagement = () => {
                               </div>
                             )}
                           </div>
-                        ))}
+                        )} />
                       </div>
                     )}
                   </div>
