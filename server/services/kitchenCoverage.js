@@ -14,6 +14,7 @@ export const assertPreparedCoverage = (data, date) => {
     const required = Math.max(1, Number(sub.meal_frequency) || 1) * (core && isMatterCoreDoubleDay(date, sub.active_delivery_dates, sub.double_delivery_dates) ? 2 : 1);
     const name = sub.name || sub.email || sub.customer_id;
     if (!entry || portions('portion') < required) throw new Error(`${date}: ${name} needs ${required} meal(s), but has ${portions('portion')}. Check active delivery and assignments.`);
+    if (core && portions('portion') > required) throw new Error(`${date}: ${name} has ${portions('portion')} Matter Core main meal(s), but entitlement is ${required}. Review excess selections before preparation.`);
     if (sub.snacks_per_day != null && portions('snack') < Number(sub.snacks_per_day)) throw new Error(`${date}: ${name} is missing required snacks.`);
     if (core && sub.breakfast_included === true && !portions('breakfast')) throw new Error(`${date}: ${name} is missing the included breakfast.`);
     for (const meal of meals) {
