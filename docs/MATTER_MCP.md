@@ -3,13 +3,18 @@
 The Express API now serves a stateless Streamable HTTP MCP endpoint at `/api/mcp`.
 It is disabled until explicitly enabled in the server environment. It provides:
 
-- `matter_list_deliveries`: paginated search, with business-day filtering.
+- `matter_list_deliveries`: paginated stored-record search, with business-day filtering.
 - `matter_get_delivery`: delivery details, including existing photo URLs.
 - `matter_search_customers`: customer lookup, only with the customers permission.
 - `matter_create_delivery`: create a delivery, collection, or task.
 - `matter_update_delivery`: change address, schedule, notes, company, or zone.
 
 Create/update tools only appear for credentials with `allowWrites: true`.
+Delivery lookups use `GET /api/deliveries?view=records`, which includes Sunday
+bookings even when the normal dispatch list combines them into Saturday. It does
+not carry Sunday-only bookings into Saturday search results. Dates and pagination
+therefore describe stored bookings, not physical dispatch trips. Normal delivery
+lists retain their existing weekend combining and staff/driver access restrictions.
 The endpoint does not provide driver assignment, completion, deletion, bag custody,
 kitchen tools, or image inspection. Photo URLs are returned as data, not downloaded.
 
