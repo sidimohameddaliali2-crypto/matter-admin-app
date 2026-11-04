@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import User from '../models/User.js';
 import { authenticateMcpCredential } from '../services/matterMcpAuth.js';
 import { createMatterApiClient, createMatterMcpServer } from '../services/matterMcpService.js';
+import { businessOffsetMs } from '../utils/businessDate.js';
 
 export function createMcpRouter({
   env = process.env,
@@ -45,7 +46,7 @@ export function createMcpRouter({
       });
       server = createMatterMcpServer({
         request, permissions, allowWrites,
-        offsetMinutes: Number(env.LOCAL_TIMEZONE_OFFSET_MINUTES || 240),
+        offsetMinutes: businessOffsetMs(env) / 60000,
       });
       transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
       res.on('close', () => {

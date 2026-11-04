@@ -267,6 +267,24 @@ test('HTTP MCP discovery and writes use the same active staff identity through l
     assert.ok(!result.isError);
     assert.equal(calls[0].url.origin, endpoint.origin);
     assert.equal(calls[0].url.pathname, `/api/deliveries/${recordId}`);
+    const timezoneCases = [
+      { fallback: '60', start: '2026-11-04T23:00:00.000Z', end: '2026-11-05T22:59:59.999Z' },
+      { local: '120', fallback: '60', start: '2026-11-04T22:00:00.000Z', end: '2026-11-05T21:59:59.999Z' },
+      { local: '0', fallback: '60', start: '2026-11-05T00:00:00.000Z', end: '2026-11-05T23:59:59.999Z' },
+      { local: '', fallback: '-300', start: '2026-11-05T05:00:00.000Z', end: '2026-11-06T04:59:59.999Z' },
+      { start: '2026-11-04T20:00:00.000Z', end: '2026-11-05T19:59:59.999Z' },
+      { local: 'invalid', fallback: '60', start: '2026-11-04T20:00:00.000Z', end: '2026-11-05T19:59:59.999Z' },
+    ];
+    for (const timezone of timezoneCases) {
+      delete env.LOCAL_TIMEZONE_OFFSET_MINUTES;
+      delete env.BUSINESS_TZ_OFFSET_MINUTES;
+      if (timezone.local !== undefined) env.LOCAL_TIMEZONE_OFFSET_MINUTES = timezone.local;
+      if (timezone.fallback !== undefined) env.BUSINESS_TZ_OFFSET_MINUTES = timezone.fallback;
+      const lookup = await client.callTool({ name: 'matter_list_deliveries', arguments: { date: '2026-11-05' } });
+      assert.ok(!lookup.isError);
+      assert.equal(calls.at(-1).url.searchParams.get('dateFrom'), timezone.start);
+      assert.equal(calls.at(-1).url.searchParams.get('dateTo'), timezone.end);
+    }
     env.MATTER_MCP_CREDENTIALS = '[]';
     assert.equal((await fetch(endpoint, { headers: { Authorization: `Bearer ${credential}` } })).status, 401);
     env.ENABLE_MATTER_MCP = 'false';

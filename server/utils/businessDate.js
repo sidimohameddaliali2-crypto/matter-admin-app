@@ -11,9 +11,9 @@
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DATE_KEY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-export function businessOffsetMs() {
+export function businessOffsetMs(env = process.env) {
   const minutes = Number.parseInt(
-    process.env.LOCAL_TIMEZONE_OFFSET_MINUTES || process.env.BUSINESS_TZ_OFFSET_MINUTES || '240',
+    env.LOCAL_TIMEZONE_OFFSET_MINUTES || env.BUSINESS_TZ_OFFSET_MINUTES || '240',
     10
   );
   return (Number.isNaN(minutes) ? 240 : minutes) * 60 * 1000;
