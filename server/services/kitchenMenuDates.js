@@ -4,8 +4,8 @@ const dateKey = value => {
 };
 
 // Same date discovery as the client, without transferring customer records.
-export const kitchenMenuDates = (menu, selectedDates = []) => {
-  const keys = new Set(selectedDates.map(dateKey).filter(Boolean));
+export const kitchenMenuDates = (menu, selectedDates = [], uploadedDates = []) => {
+  const keys = new Set([...selectedDates, ...uploadedDates].map(dateKey).filter(Boolean));
   for (const field of ['mainMealOptionsByDate', 'breakfastOptionsByDate', 'snackOptionsByDate']) {
     for (const key of Object.keys(menu[field] || {})) keys.add(key);
   }

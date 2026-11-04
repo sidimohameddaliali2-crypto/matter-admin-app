@@ -2948,15 +2948,21 @@ router.get('/:id/kitchen-dates', protect, async (req, res) => {
   try {
     if (!isValidObjectId(req.params.id)) return res.status(404).json({ success: false, message: 'Menu not found' });
     const menu = await WeeklyMenu.findById(req.params.id)
-      .select('startDate endDate mainMealOptionsByDate breakfastOptionsByDate snackOptionsByDate').lean();
+      .select('startDate endDate mainMealOptionsByDate breakfastOptionsByDate snackOptionsByDate meals.items').lean();
     if (!menu) return res.status(404).json({ success: false, message: 'Menu not found' });
-    const dates = await MenuSelectionRecord.aggregate([
-      { $match: { weeklyMenuId: new mongoose.Types.ObjectId(req.params.id) } },
-      { $unwind: '$selectedMeals' },
-      { $group: { _id: '$selectedMeals.date' } },
+    const itemIds = (menu.meals || []).flatMap(day => day.items || []);
+    // Rotation endpoints also discover dates from linked uploaded MenuItems.
+    // Read only their distinct dates here, never the full meal/customer data.
+    const [dates, uploadedDates] = await Promise.all([
+      MenuSelectionRecord.aggregate([
+        { $match: { weeklyMenuId: new mongoose.Types.ObjectId(req.params.id) } },
+        { $unwind: '$selectedMeals' },
+        { $group: { _id: '$selectedMeals.date' } },
+      ]),
+      itemIds.length ? MenuItem.distinct('itemDate', { _id: { $in: itemIds } }) : [],
     ]);
     res.set('Cache-Control', 'no-store');
-    return res.json({ success: true, data: kitchenMenuDates(menu, dates.map(row => row._id)) });
+    return res.json({ success: true, data: kitchenMenuDates(menu, dates.map(row => row._id), uploadedDates) });
   } catch (error) { return res.status(500).json({ success: false, message: error.message }); }
 });
 
