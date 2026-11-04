@@ -125,6 +125,8 @@ const MenuManagement = () => {
   const selectionRequests = useRef(0);
   const detailRequests = useRef(0);
   const activeSelectionMenu = useRef(null);
+  const pendingCustomerDetail = useRef(null);
+  const deletingSelectionKeys = useRef(new Set());
   const [selectionError, setSelectionError] = useState(null);
   const [selectionDates, setSelectionDates] = useState([]);
   const [uploadError, setUploadError] = useState(null);
@@ -808,18 +810,25 @@ const MenuManagement = () => {
     const name = `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || customer.email;
     if (!window.confirm(`Delete meal selection for ${name}?`)) return;
 
+    const key = `${menuId}:${customer.email}`;
+    if (deletingSelectionKeys.current.has(key)) return;
+    deletingSelectionKeys.current.add(key);
+    if (pendingCustomerDetail.current?.key === key) {
+      detailRequests.current++;
+      pendingCustomerDetail.current = null;
+      setDetailLoading(false);
+    }
+    setSelectedCustomerDetail(previous => activeSelectionMenu.current === menuId && previous?.email === customer.email ? null : previous);
+
     try {
       await api.delete(`/menus/${menuId}/selections/${encodeURIComponent(customer.email)}`);
-      setMenuSelections(prev => prev.filter(c => c.email !== customer.email));
+      if (activeSelectionMenu.current === menuId) setMenuSelections(prev => prev.filter(c => c.email !== customer.email));
       setMenus(prev => prev.map(m =>
         m._id === menuId ? { ...m, selectionCount: Math.max(0, (m.selectionCount || 1) - 1) } : m
       ));
-      if (selectedCustomerDetail?.email === customer.email) {
-        setSelectedCustomerDetail(null);
-      }
     } catch (err) {
       alert(err.response?.data?.message || 'Failed to delete selection');
-    }
+    } finally { deletingSelectionKeys.current.delete(key); }
   };
 
   const getShareLink = async (menuId) => {
@@ -860,6 +869,7 @@ const MenuManagement = () => {
     selectionRequests.current++;
     detailRequests.current++;
     activeSelectionMenu.current = null;
+    pendingCustomerDetail.current = null;
     setDetailLoading(false);
     setSelectionLoading(false);
     setSelectedCustomerDetail(null);
@@ -872,20 +882,27 @@ const MenuManagement = () => {
   const openCustomerSelection = async customer => {
     const menuId = activeSelectionMenu.current;
     if (!menuId) return;
+    const key = `${menuId}:${customer.email}`;
+    if (deletingSelectionKeys.current.has(key)) return;
     const request = ++detailRequests.current;
-    const current = () => detailRequests.current === request && activeSelectionMenu.current === menuId;
+    pendingCustomerDetail.current = { key, request };
+    const current = () => detailRequests.current === request && activeSelectionMenu.current === menuId && !deletingSelectionKeys.current.has(key);
     setDetailLoading(true);
     try {
       const [detail] = await loadMenuSelectionDetails(api, [customer]);
       if (current()) setSelectedCustomerDetail(detail);
     } catch (err) {
       if (current()) setSelectionError(err.message || 'Failed to load customer');
-    } finally { if (current()) setDetailLoading(false); }
+    } finally {
+      if (current()) setDetailLoading(false);
+      if (pendingCustomerDetail.current?.request === request) pendingCustomerDetail.current = null;
+    }
   };
 
   const handleViewSelections = async menuId => {
     if (activeSelectionMenu.current === menuId) { closeSelections(); return; }
     activeSelectionMenu.current = menuId;
+    pendingCustomerDetail.current = null;
     const request = ++selectionRequests.current;
     detailRequests.current++;
     setDetailLoading(false);

@@ -10,6 +10,69 @@ jest.mock('jspdf',()=>jest.fn());
 jest.mock('xlsx-js-style',()=>({utils:{}}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
 
+test.each([true,false])('deletion success=%s preserves other pending customers and failed selections remain openable',async success=>{
+  let release;
+  const confirm=jest.spyOn(window,'confirm').mockReturnValue(true),alert=jest.spyOn(window,'alert').mockImplementation(()=>{});
+  const rows=['a','b'].map(id=>({_id:id,firstName:`Customer ${id}`,email:`${id}@example.invalid`,matterCustomerId:id,selectedMeals:[]}));
+  let details=0;
+  api.get.mockImplementation(async(url,config)=>{
+    if(url==='/menus')return{data:{success:true,data:[{_id:'menu',title:'Fixture',startDate:'2026-11-06',endDate:'2026-11-06',meals:[]}]}};
+    if(url.endsWith('/selections'))return{data:{success:true,data:rows}};
+    if(url.includes('kitchen-inputs')){
+      if(++details===1)return new Promise(resolve=>{release=resolve;});
+      return{data:{success:true,data:{customer_id:config.params.customerId,customer_name:'Fresh Detail',customer_email:config.params.email,subscription_id:'sub'}}};
+    }
+    return{data:{success:true,data:{}}};
+  });
+  api.delete.mockImplementation(async()=>{if(!success)throw new Error('Delete failed');return{data:{success:true}};});
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  try{
+    await act(async()=>root.render(<MenuManagement/>));
+    await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent==='View selections').click());
+    await act(async()=>node.querySelectorAll('.cursor-pointer.border-2')[0].click());
+    await act(async()=>node.querySelectorAll('button[title="Delete selection"]')[success?1:0].click());
+    await act(async()=>release({data:{success:true,data:{customer_id:'a',customer_name:'Pending A Detail',customer_email:rows[0].email,subscription_id:'sub'}}}));
+    if(success){
+      expect(node.textContent).toContain('Pending A Detail');
+      expect(node.textContent).not.toContain('Customer b');
+    }else{
+      expect(node.textContent).not.toContain('Pending A Detail');
+      expect(node.textContent).toContain('Customer a');
+      expect(alert).toHaveBeenCalledWith('Failed to delete selection');
+      await act(async()=>node.querySelectorAll('.cursor-pointer.border-2')[0].click());
+      expect(node.textContent).toContain('Fresh Detail');
+    }
+  }finally{await act(async()=>root.unmount());node.remove();confirm.mockRestore();alert.mockRestore();jest.clearAllMocks();}
+});
+
+test.each(['during deletion','after deletion'])('a deleted selection cannot reopen from details arriving %s',async timing=>{
+  let releaseDetails,releaseDelete;
+  const confirm=jest.spyOn(window,'confirm').mockReturnValue(true);
+  const raw={_id:'person',firstName:'Saved',email:'person@example.invalid',matterCustomerId:'person',selectedMeals:[{mealName:'Obsolete choice',quantity:2,remark:'veg'}]};
+  api.get.mockImplementation(async url=>{
+    if(url==='/menus')return{data:{success:true,data:[{_id:'menu',title:'Fixture',startDate:'2026-11-06',endDate:'2026-11-06',meals:[]}]}};
+    if(url.endsWith('/selections'))return{data:{success:true,data:[raw]}};
+    if(url.includes('kitchen-inputs'))return new Promise(resolve=>{releaseDetails=resolve;});
+    return{data:{success:true,data:{}}};
+  });
+  api.delete.mockImplementation(()=>new Promise(resolve=>{releaseDelete=resolve;}));
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  try{
+    await act(async()=>root.render(<MenuManagement/>));
+    await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent==='View selections').click());
+    await act(async()=>node.querySelector('[aria-label="Search customers"]').closest('div').querySelector('.cursor-pointer').click());
+    await act(async()=>node.querySelector('button[title="Delete selection"]').click());
+    expect(api.delete).toHaveBeenCalledWith('/menus/menu/selections/person%40example.invalid');
+    if(timing==='after deletion')await act(async()=>releaseDelete({data:{success:true}}));
+    await act(async()=>releaseDetails({data:{success:true,data:{customer_id:'person',customer_name:'Deleted Customer Detail',customer_email:raw.email,subscription_id:'sub'}}}));
+    expect(node.textContent).not.toContain('Deleted Customer Detail');
+    expect(node.querySelector('.fixed.inset-0.bg-opacity-50')).toBeNull();
+    expect(node.textContent).not.toContain('Checking current Matter customer details');
+    if(timing==='during deletion')await act(async()=>releaseDelete({data:{success:true}}));
+    expect(node.textContent).not.toContain('Obsolete choice');
+  }finally{await act(async()=>root.unmount());node.remove();confirm.mockRestore();jest.clearAllMocks();}
+});
+
 test.each(['close button','outside overlay','hide selections'])('closing through %s cancels pending details and clears loading without reopening a modal',async closePath=>{
   let release;
   const raw={_id:'person',firstName:'Saved',email:'person@example.invalid',matterCustomerId:'person',selectedMeals:[{mealName:'Chosen chicken',quantity:2,remark:'veg'}]};
