@@ -842,8 +842,11 @@ router.get('/', async (req, res) => {
       .lean();
 
     const timedDeliveries = deliveries.map(delivery => enrichDeliveryTiming(delivery));
-    const combinedDeliveries = await applyWeekendCombining(timedDeliveries);
-    const enhancedDeliveries = await injectSundayOnlyIntoSaturday(query, dateFrom, dateTo, combinedDeliveries);
+    let enhancedDeliveries = timedDeliveries;
+    if (req.query.view !== 'records') {
+      const combinedDeliveries = await applyWeekendCombining(timedDeliveries);
+      enhancedDeliveries = await injectSundayOnlyIntoSaturday(query, dateFrom, dateTo, combinedDeliveries);
+    }
 
     const total = await Delivery.countDocuments(query);
 

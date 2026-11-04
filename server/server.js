@@ -191,6 +191,7 @@ import yellowblockRoutes from './routes/yellowblock.js';
 import externalDeliveryApiRoutes from './routes/externalDeliveryApi.js';
 import externalDriverLocationApiRoutes from './routes/externalDriverLocationApi.js';
 import mobileUpdatesRoutes from './routes/mobileUpdates.js';
+import mcpRoutes from './routes/mcp.js';
 
 // Import cache initialization
 import { initRedis, getRedisClient } from './config/cache.js';
@@ -202,6 +203,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users/drivers', driverRoutes); // Allow driver routes under /api/users/drivers
 app.use('/api/users', userRoutes);
 app.use('/api/deliveries', deliveryRoutes);
+app.use('/api/mcp', mcpRoutes);
 app.use('/api/bags', bagRoutes);
 app.use('/api/bag-operations', bagOperationsRoutes);
 app.use('/api/bag-refunds', bagRefundRoutes);
