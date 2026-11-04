@@ -107,46 +107,17 @@ const KitchenCounting = () => {
   // menu's own startDate/endDate, so a menu the kitchen had already uploaded
   // rotation options for — but with no explicit date range set — showed no
   // dates at all here even though Kitchen List showed them correctly.
-  const [mainMealOptionsByDate, setMainMealOptionsByDate] = useState({});
-  const [breakfastOptionsByDate, setBreakfastOptionsByDate] = useState({});
-  const [snackOptionsByDate, setSnackOptionsByDate] = useState({});
-  const [menuSelectionsForDates, setMenuSelectionsForDates] = useState([]);
-
+  const [knownDateKeys, setKnownDateKeys] = useState([]);
   useEffect(() => {
-    if (!selectedMenuId) {
-      setMainMealOptionsByDate({});
-      setBreakfastOptionsByDate({});
-      setSnackOptionsByDate({});
-      setMenuSelectionsForDates([]);
-      return;
-    }
+    setKnownDateKeys([]);
+    if (!selectedMenuId) return;
     let cancelled = false;
-    (async () => {
-      const [mainRes, breakfastRes, snackRes, selectionsRes] = await Promise.all([
-        api.get(`/menus/${selectedMenuId}/main-meal-options`).catch(() => null),
-        api.get(`/menus/${selectedMenuId}/breakfast-options`).catch(() => null),
-        api.get(`/menus/${selectedMenuId}/snack-options`).catch(() => null),
-        api.get(`/menus/${selectedMenuId}/selections`).catch(() => null)
-      ]);
-      if (cancelled) return;
-      setMainMealOptionsByDate(mainRes?.data?.data || {});
-      setBreakfastOptionsByDate(breakfastRes?.data?.data || {});
-      setSnackOptionsByDate(snackRes?.data?.data || {});
-      setMenuSelectionsForDates(selectionsRes?.data?.success ? (selectionsRes.data.data || []) : []);
-    })();
+    api.get(`/menus/${selectedMenuId}/kitchen-dates`, { timeout: 30000 }).then(response => {
+      if (!cancelled && response.data?.success && Array.isArray(response.data.data)) setKnownDateKeys(response.data.data);
+    }).catch(() => { /* The explicit menu range remains available. */ });
     return () => { cancelled = true; };
   }, [selectedMenuId]);
-
-  const menuDateKeys = useMemo(
-    () => deriveDateKeys({
-      menuSelections: menuSelectionsForDates,
-      mainMealOptionsByDate,
-      breakfastOptionsByDate,
-      snackOptionsByDate,
-      selectedMenu
-    }),
-    [menuSelectionsForDates, mainMealOptionsByDate, breakfastOptionsByDate, snackOptionsByDate, selectedMenu]
-  );
+  const menuDateKeys = useMemo(() => knownDateKeys.length ? knownDateKeys : deriveDateKeys({ selectedMenu }), [knownDateKeys, selectedMenu]);
 
   const loadCounts = useCallback(async () => {
     const request = requestGuard.current.begin();
@@ -181,23 +152,12 @@ const KitchenCounting = () => {
       // under the spinner so a slow load reads as slow, not frozen.
       if (!current()) return;
       setLoadProgress({ done: 0, total: rawSelections.length });
+      let completed = 0, progressAt = Date.now();
       const enrichedSelections = await enrichSelectionsWithNutrition(api, rawSelections, nutritionCacheRef, {
         matterInputs: preparation.cached ? [] : preparation.data?.kitchenInputs,
         productionScope: !preparation.cached && preparation.data?.rosterComplete === true
           ? { complete: true, date: selectedDate, roster: preparation.data.kitchenRoster } : null,
-        onEach: () => { if (current()) setLoadProgress((prev) => ({ ...prev, done: prev.done + 1 })); }
-      });
-
-      const computed = enrichedSelections.map((entry) => {
-        const mealCount = Array.isArray(entry.selectedMeals)
-          ? entry.selectedMeals.filter((m) => String(m.mealType || '').toLowerCase() !== 'breakfast').length
-          : 0;
-        return calculateKitchenListEntry({
-          customer: { ...entry, mealCount, customerName: getCustomerName(entry) },
-          selectedMeals: entry.selectedMeals || [],
-          breakfastPreset: breakfastState,
-          snackPreset: snackState
-        });
+        onEach: () => { completed++; if (current() && (completed === rawSelections.length || Date.now() - progressAt >= 100)) { progressAt = Date.now(); setLoadProgress({ done: completed, total: rawSelections.length }); } }
       });
 
       // Owner (2026-10-09): a customer with a saved selection but no active
@@ -214,10 +174,22 @@ const KitchenCounting = () => {
       assertKitchenRosterCovered(enrichedSelections, deliverySubs, selectedDate);
       const hasDelivery = (entry) => hasKitchenDeliveryOnDate(entry, deliverySubs, selectedDate);
 
+      const computed = enrichedSelections.filter(hasDelivery).map((entry) => {
+        const mealCount = Array.isArray(entry.selectedMeals)
+          ? entry.selectedMeals.filter((m) => String(m.mealType || '').toLowerCase() !== 'breakfast').length
+          : 0;
+        return calculateKitchenListEntry({
+          customer: { ...entry, mealCount, customerName: getCustomerName(entry) },
+          selectedMeals: entry.selectedMeals || [],
+          breakfastPreset: breakfastState,
+          snackPreset: snackState
+        });
+      });
+
       if (!current()) return;
       // Calculate the full record first, then validate only this cooking day,
       // exactly as Kitchen List does. Another day's lookup cannot block it.
-      const deliverable = computed.filter(hasDelivery).map(entry => kitchenCustomerDay(entry, selectedDate));
+      const deliverable = computed.map(entry => kitchenCustomerDay(entry, selectedDate));
       assertKitchenExportReady(deliverable);
       setCustomerEntries(deliverable);
       setLoadedScope(scope);

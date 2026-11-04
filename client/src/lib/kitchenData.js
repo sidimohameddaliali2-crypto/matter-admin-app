@@ -268,7 +268,23 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
   matterInputs = [],
     productionScope = null,
   onEach
-} = {}) => mapWithConcurrency(rawSelections, concurrency, async (entry) => {
+} = {}) => {
+  const byCustomer = new Map(), byEmail = new Map(), bySubscription = new Map();
+  const add = (map, key, input) => { if (key) map.set(key, [...(map.get(key) || []), input]); };
+  for (const input of Array.isArray(matterInputs) ? matterInputs : []) {
+    if (input.subscription_id == null || !input.customer_email) continue;
+    add(byCustomer, String(input.customer_id), input);
+    add(byEmail, String(input.customer_email).trim().toLowerCase(), input);
+    add(bySubscription, String(input.subscription_id), input);
+  }
+  const rosterIds = new Set((Array.isArray(productionScope?.roster) ? productionScope.roster : []).map(sub => String(sub.customer_id)));
+  // Freshness is still checked at use time, including workers queued behind
+  // slow requests. Indexing must never extend the accepted input lifetime.
+  const freshMatches = rows => (rows || []).filter(input => {
+    const age = Date.now() - Date.parse(input.source_fetched_at);
+    return age >= 0 && age < 180000;
+  });
+  return mapWithConcurrency(rawSelections, concurrency, async (entry) => {
     entry = { ...entry, kitchenProductionExcluded: false, kitchenExclusionDate: null };
   const email = String(entry?.matterEmail || entry?.email || '').trim();
   const subscriptionId = String(entry?.matterSubscriptionId || '').trim();
@@ -278,7 +294,7 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
     // verified. A cancelled/expired account's saved identity stays intact.
     if (matterCustomerId && productionScope?.complete === true && productionScope.date
       && Array.isArray(productionScope.roster)
-      && !productionScope.roster.some((sub) => matchesMatterSubscription(entry, sub))) {
+      && !rosterIds.has(matterCustomerId)) {
       onEach?.();
       return { ...entry, nutritionStatus: 'not-scheduled', nutritionSource: 'matter', nutritionError: null,
         kitchenProductionExcluded: true, kitchenExclusionDate: productionScope.date, deliveryDates: [] };
@@ -297,14 +313,10 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
     // internal profiles or a browser cache. Reuse by exact email so hundreds
     // of customers do not each repeat the list+detail requests just made.
     const normalizedEmail = email.toLowerCase();
-    const fresh = (Array.isArray(matterInputs) ? matterInputs : []).filter((input) => {
-      const age = Date.now() - Date.parse(input.source_fetched_at);
-      return input.subscription_id != null && input.customer_email && age >= 0 && age < 180000;
-    });
-    const emailMatches = fresh.filter((input) => normalizedEmail && String(input.customer_email).trim().toLowerCase() === normalizedEmail);
+    const emailMatches = freshMatches(byEmail.get(normalizedEmail));
     const candidates = matterCustomerId
-      ? fresh.filter((input) => String(input.customer_id) === matterCustomerId)
-      : emailMatches.length ? emailMatches : fresh.filter((input) => subscriptionId && String(input.subscription_id) === subscriptionId);
+      ? freshMatches(byCustomer.get(matterCustomerId))
+      : emailMatches.length ? emailMatches : freshMatches(bySubscription.get(subscriptionId));
     const unique = new Map(candidates.map((input) => [String(input.subscription_id), input]));
     const nutritionResponse = unique.size === 1
       ? { data: { success: true, data: [...unique.values()][0] } }
@@ -373,7 +385,8 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
         : 'Matter subscription could not be verified. Refresh to retry.';
     return { ...entry, nutritionStatus: 'failed', nutritionSource: 'matter', nutritionError };
   }
-});
+  });
+};
 
 /**
  * Every date the kitchen might need to work on for this menu: dates that
