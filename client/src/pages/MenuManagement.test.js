@@ -10,6 +10,41 @@ jest.mock('jspdf',()=>jest.fn());
 jest.mock('xlsx-js-style',()=>({utils:{}}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
 
+test.each(['close button','outside overlay','hide selections'])('closing through %s cancels pending details and clears loading without reopening a modal',async closePath=>{
+  let release;
+  const raw={_id:'person',firstName:'Saved',email:'person@example.invalid',matterCustomerId:'person',selectedMeals:[{mealName:'Chosen chicken',quantity:2,remark:'veg'}]};
+  const before=JSON.stringify(raw);
+  api.get.mockImplementation(async url=>{
+    if(url==='/menus')return{data:{success:true,data:[{_id:'menu',title:'Fixture',startDate:'2026-11-06',endDate:'2026-11-06',meals:[]}]}};
+    if(url.endsWith('/selections'))return{data:{success:true,data:[raw]}};
+    if(url.includes('kitchen-inputs'))return new Promise(resolve=>{release=resolve;});
+    return{data:{success:true,data:{}}};
+  });
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  try{
+    await act(async()=>root.render(<MenuManagement/>));
+    await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent==='View selections').click());
+    await act(async()=>node.querySelector('[aria-label="Search customers"]').closest('div').querySelector('.cursor-pointer').click());
+    expect(release).toBeDefined();
+    expect(node.textContent).toContain('Checking current Matter customer details');
+    await act(async()=>{
+      if(closePath==='close button')node.querySelector('button[title="Close"]').click();
+      else if(closePath==='outside overlay')node.querySelector('.fixed.inset-0.bg-black\\/50').click();
+      else [...node.querySelectorAll('button')].find(b=>b.textContent==='Hide selections').click();
+    });
+    expect(node.querySelector('[aria-label="Search customers"]')).toBeNull();
+    // Open again before the old request returns: it must not open a stale
+    // customer's modal or leave the new panel's loading state active.
+    await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent==='View selections').click());
+    expect(node.textContent).not.toContain('Checking current Matter customer details');
+    await act(async()=>release({data:{success:true,data:{customer_id:'person',customer_name:'Late Matter Name',customer_email:raw.email,subscription_id:'sub'}}}));
+    expect(node.textContent).not.toContain('Late Matter Name');
+    expect(node.querySelector('.fixed.inset-0.bg-opacity-50')).toBeNull();
+    expect(JSON.stringify(raw)).toBe(before);
+    expect(api.put).not.toHaveBeenCalled();expect(api.delete).not.toHaveBeenCalled();
+  }finally{await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
+});
+
 test('an old menu response cannot replace the newly selected menu', async()=>{
   const pending={};
   api.get.mockImplementation(async url=>{

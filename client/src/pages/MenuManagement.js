@@ -124,6 +124,7 @@ const MenuManagement = () => {
   const [selectionExporting, setSelectionExporting] = useState(false);
   const selectionRequests = useRef(0);
   const detailRequests = useRef(0);
+  const activeSelectionMenu = useRef(null);
   const [selectionError, setSelectionError] = useState(null);
   const [selectionDates, setSelectionDates] = useState([]);
   const [uploadError, setUploadError] = useState(null);
@@ -160,7 +161,7 @@ const MenuManagement = () => {
 
   useEffect(() => {
     fetchMenus();
-    return () => { selectionRequests.current++; detailRequests.current++; };
+    return () => { selectionRequests.current++; detailRequests.current++; activeSelectionMenu.current = null; };
   }, []);
 
   const fetchMenus = async () => {
@@ -855,25 +856,42 @@ const MenuManagement = () => {
     }
   };
 
+  const closeSelections = () => {
+    selectionRequests.current++;
+    detailRequests.current++;
+    activeSelectionMenu.current = null;
+    setDetailLoading(false);
+    setSelectionLoading(false);
+    setSelectedCustomerDetail(null);
+    setSelectionMenuId(null);
+    setMenuSelections([]);
+    setSelectionDates([]);
+    setSelectionError(null);
+  };
+
   const openCustomerSelection = async customer => {
+    const menuId = activeSelectionMenu.current;
+    if (!menuId) return;
     const request = ++detailRequests.current;
+    const current = () => detailRequests.current === request && activeSelectionMenu.current === menuId;
     setDetailLoading(true);
     try {
       const [detail] = await loadMenuSelectionDetails(api, [customer]);
-      if (detailRequests.current === request) setSelectedCustomerDetail(detail);
+      if (current()) setSelectedCustomerDetail(detail);
     } catch (err) {
-      if (detailRequests.current === request) setSelectionError(err.message || 'Failed to load customer');
-    } finally { if (detailRequests.current === request) setDetailLoading(false); }
+      if (current()) setSelectionError(err.message || 'Failed to load customer');
+    } finally { if (current()) setDetailLoading(false); }
   };
 
   const handleViewSelections = async menuId => {
+    if (activeSelectionMenu.current === menuId) { closeSelections(); return; }
+    activeSelectionMenu.current = menuId;
     const request = ++selectionRequests.current;
     detailRequests.current++;
     setDetailLoading(false);
     setSelectedCustomerDetail(null);
     setMenuSelections([]);
     setSelectionError(null);
-    if (selectionMenuId === menuId) { setSelectionMenuId(null); setSelectionLoading(false); return; }
     setSelectionLoading(true);
     setSelectionMenuId(menuId);
     const menu = menus.find(m => m._id === menuId);
@@ -2387,7 +2405,7 @@ const MenuManagement = () => {
                 </div>
 
                 {selectionMenuId === menu._id && (
-                  <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={() => setSelectionMenuId(null)}>
+                  <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onClick={closeSelections}>
                   <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto p-6" onClick={(e) => e.stopPropagation()}>
                     <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2 mb-3">
                       <h4 className="font-heading-menu text-lg font-bold text-matter-navy">Customer Selections — {toSentenceCase(menu.title)}</h4>
@@ -2401,7 +2419,7 @@ const MenuManagement = () => {
                           Download Excel
                         </button>
                         <button
-                          onClick={() => setSelectionMenuId(null)}
+                          onClick={closeSelections}
                           className="text-matter-neutral-600 hover:text-matter-navy p-2 rounded-lg hover:bg-matter-neutral-100"
                           title="Close"
                         >
