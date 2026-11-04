@@ -1,3 +1,4 @@
+import { mockScheduledWork } from '../testSupport/scheduledWorkFixture.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import matter from './matterApiService.js';
@@ -6,7 +7,8 @@ import Lease from '../models/KitchenPreparationLease.js';
 import { importMatterDeliveriesForDate } from './matterDeliveryImportService.js';
 import { withKitchenPreparation, preparationHasFailures } from './kitchenPreparation.js';
 
-test('incomplete discovery blocks import before DB writes and recovery includes all subscriptions', async () => {
+test('incomplete discovery blocks import before DB writes and recovery includes all subscriptions', async t => {
+  mockScheduledWork(t);
   const original = { list: matter.listAllSubscriptions, detail: matter.getSubscription, find: Delivery.findOne, log: console.error };
   let fail = true;
   let reads = 0;

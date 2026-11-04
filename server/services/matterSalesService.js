@@ -25,7 +25,7 @@ export async function readSalesSubscriptionList() {
   }
   return [...rows.values()];
 }
-export async function refreshMatterSales() {
+export async function refreshMatterSales({ assertOwned = async () => {} } = {}) {
   if (inFlight) return inFlight;
   if (Date.now() - lastRefresh < 60000) return { reused: true };
   inFlight = (async () => {
@@ -43,17 +43,18 @@ export async function refreshMatterSales() {
     profiles.sort((a, b) => a.subscriptionId.localeCompare(b.subscriptionId));
     const sourceHash = hashSalesValue(profiles);
     const previous = await Snapshot.findOne().sort({ observedAt: -1 }).lean();
+    await assertOwned();
     if (previous?.sourceHash !== sourceHash) await Snapshot.create({ observedAt, lastVerifiedAt: observedAt, sourceHash, profiles });
     else await Snapshot.updateOne({ _id: previous._id }, { $set: { lastVerifiedAt: observedAt } });
     const today = toBusinessDateKey(observedAt);
-    const capturedDeliveries = await capturePendingMatterRevenue(profiles, observedAt);
+    const capturedDeliveries = await capturePendingMatterRevenue(profiles, observedAt, { assertOwned });
     lastRefresh = Date.now();
     return { observedAt, today, profiles: profiles.length, capturedDeliveries };
   })();
   try { return await inFlight; } finally { inFlight = undefined; }
 }
 
-export async function capturePendingMatterRevenue(profiles, observedAt = new Date()) {
+export async function capturePendingMatterRevenue(profiles, observedAt = new Date(), { assertOwned = async () => {} } = {}) {
     if (!profiles) {
       if (Snapshot.db.readyState !== 1) return 0;
       const latest = await Snapshot.findOne().sort({ observedAt: -1 }).lean();
@@ -88,6 +89,7 @@ export async function capturePendingMatterRevenue(profiles, observedAt = new Dat
         matterCustomerId: delivery.matterCustomerId ?? null, matterSubscriptionId: delivery.matterSubscriptionId ?? null,
         matterRevenue: { $exists: false }, status: delivery.status, scheduledTime: delivery.scheduledTime }, update: { $set: { matterRevenue: allocation } } } });
     }
+    await assertOwned();
     if (ops.length) return (await Delivery.bulkWrite(ops)).modifiedCount;
     return 0;
 }

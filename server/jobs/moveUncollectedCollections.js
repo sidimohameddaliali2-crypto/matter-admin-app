@@ -1,11 +1,10 @@
-import mongoose from 'mongoose';
+import { scheduleDailyWork } from '../services/scheduledWork.js';
 import Delivery from '../models/Delivery.js';
 
 // Move uncollected collection deliveries to next day at midnight
 // Only applies to type: Collection + status: assigned
 // Resets assignment, keeps bag links, updates timeline
 
-const RUN_HOUR = 0; // Midnight
 const TIMEZONE_OFFSET_MINUTES = parseInt(process.env.LOCAL_TIMEZONE_OFFSET_MINUTES || '240', 10); // Default: UAE
 
 function getTodayRange() {
@@ -18,7 +17,7 @@ function getTodayRange() {
   return { startOfDay, endOfDay };
 }
 
-async function moveUncollectedCollections() {
+async function moveUncollectedCollections({ assertOwned = async () => {} } = {}) {
   const { startOfDay, endOfDay } = getTodayRange();
   const filter = {
     type: 'Collection',
@@ -30,25 +29,23 @@ async function moveUncollectedCollections() {
   let moved = 0;
 
   for (const d of deliveries) {
-    // Move to next day
-    const nextDay = new Date(d.scheduledTime.getTime() + 24 * 60 * 60 * 1000);
-    d.scheduledTime = nextDay;
-    d.status = 'pending';
-    d.driver = null;
-    d.timeline.push({
-      status: 'moved_to_next_day',
-      timestamp: new Date(),
-      notes: 'Automatically moved to next day (uncollected)'
-    });
-    await d.save();
-    moved++;
+    await assertOwned();
+    // Compare-and-set prevents a retry/expired worker from moving the same
+    // row again or overwriting a dispatcher's concurrent assignment change.
+    const result = await Delivery.updateOne({ _id: d._id, type: 'Collection', status: 'assigned', driver: d.driver ?? null,
+      scheduledTime: d.scheduledTime }, { $set: {
+      scheduledTime: new Date(d.scheduledTime.getTime() + 86400000), status: 'pending', driver: null,
+    }, $push: { timeline: { status: 'moved_to_next_day', timestamp: new Date(),
+      notes: 'Automatically moved to next day (uncollected)' } } });
+    moved += result.modifiedCount;
+
   }
   return { moved };
 }
 
-export async function runMoveUncollectedCollectionsOnce() {
+export async function runMoveUncollectedCollectionsOnce(context = {}) {
   try {
-    const result = await moveUncollectedCollections();
+    const result = await moveUncollectedCollections(context);
     console.log(`[AutoMove] Moved ${result.moved} uncollected collections to next day.`);
     return result;
   } catch (err) {
@@ -58,16 +55,5 @@ export async function runMoveUncollectedCollectionsOnce() {
 }
 
 export function startMoveUncollectedCollectionsJob() {
-  // Calculate ms until next midnight local time
-  const now = new Date();
-  const nowLocal = new Date(now.getTime() + TIMEZONE_OFFSET_MINUTES * 60 * 1000);
-  const nextMidnight = new Date(nowLocal);
-  nextMidnight.setHours(RUN_HOUR, 0, 0, 0);
-  if (nowLocal >= nextMidnight) nextMidnight.setDate(nextMidnight.getDate() + 1);
-  const msUntilMidnight = nextMidnight - nowLocal;
-
-  setTimeout(() => {
-    runMoveUncollectedCollectionsOnce();
-    setInterval(runMoveUncollectedCollectionsOnce, 24 * 60 * 60 * 1000);
-  }, msUntilMidnight);
+  return scheduleDailyWork({ name: 'move-uncollected-collections', immediate: false, run: runMoveUncollectedCollectionsOnce });
 }

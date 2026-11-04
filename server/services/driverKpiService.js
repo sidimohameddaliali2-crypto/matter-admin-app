@@ -48,7 +48,7 @@ function currentMonthBoundsLocal() {
   return { monthStart: new Date(monthStartMs), now, period };
 }
 
-export async function recalculateDriverKPI(driverId) {
+export async function recalculateDriverKPI(driverId, { assertOwned = async () => {}, throwOnError = false } = {}) {
   try {
     const { monthStart, now, period } = currentMonthBoundsLocal();
 
@@ -93,6 +93,7 @@ export async function recalculateDriverKPI(driverId) {
       DRIVER_KPI_WEIGHT_DELAY * avgDelayMinutes;
     const kpiScore = Math.max(0, Math.min(100, rawScore));
 
+    await assertOwned();
     await User.findByIdAndUpdate(driverId, {
       'kpi.score': Math.round(kpiScore),
       // accuracyRate / avgLateTime are the pre-existing field names the UI
@@ -112,6 +113,7 @@ export async function recalculateDriverKPI(driverId) {
     });
   } catch (error) {
     console.error('Recalculate KPI error:', error);
+    if (throwOnError) throw error;
   }
 }
 
@@ -119,11 +121,11 @@ export async function recalculateDriverKPI(driverId) {
 // new month (or a day with no completed deliveries) still shows fresh
 // month-to-date numbers instead of stale ones from whenever a driver last
 // happened to complete a delivery.
-export async function recalculateAllDriverKPIs() {
+export async function recalculateAllDriverKPIs(context = {}) {
   const drivers = await User.find({ role: 'driver' }).select('_id').lean();
   let processed = 0;
   for (const driver of drivers) {
-    await recalculateDriverKPI(driver._id);
+    await recalculateDriverKPI(driver._id, { ...context, throwOnError: true });
     processed += 1;
   }
   return { processed };

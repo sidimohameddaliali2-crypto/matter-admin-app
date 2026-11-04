@@ -395,7 +395,7 @@ server.listen(PORT, () => {
 });
 
 // Start background jobs
-startFlaggedNotifier();
+startFlaggedNotifier((Number.parseInt(process.env.FLAGGED_ALERT_INTERVAL_HOURS || '24', 10) || 24) * 3600000);
 startMoveUncollectedCollectionsJob();
 startRecalculateDriverKpisJob();
 startImportMatterDeliveriesJob();
@@ -406,18 +406,6 @@ startCustomerTrackerVisitsJob(io);
 // Warm the Supy recipe search cache so the first meal-editor search of the
 // day isn't the one waiting on a ~2500-recipe cold fetch.
 supyService.warmCache();
-
-// Start background notifier if enabled (runs immediately and then at configured interval)
-if (process.env.ENABLE_FLAGGED_ALERTS === '1') {
-  const intervalHours = parseInt(process.env.FLAGGED_ALERT_INTERVAL_HOURS || '24', 10);
-  const intervalMs = intervalHours * 60 * 60 * 1000;
-  try {
-    startFlaggedNotifier(intervalMs);
-    console.log('Flagged alerts notifier started; intervalHours=', intervalHours);
-  } catch (err) {
-    console.error('Failed to start flagged notifier:', err.message);
-  }
-}
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err, promise) => {
