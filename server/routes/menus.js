@@ -17,11 +17,14 @@ import { isMatterCoreDoubleDay } from '../utils/matterCoreDelivery.js';
 import { appendKitchenMeals } from '../services/kitchenSelectionWrite.js';
 import { kitchenDateUnavailable } from '../services/kitchenDeliveryEligibility.js';
 import { reconcileCoreBreakfast } from '../services/kitchenBreakfastEntitlement.js';
+import { reconcileCoreMainMeals } from '../services/kitchenCoreEntitlement.js';
 import { toKitchenOption, kitchenConflictList, kitchenConflictFields, mergeKitchenMetadata } from '../services/kitchenExclusions.js';
 import { kitchenUpload } from '../services/kitchenUpload.js';
 import { saveManagedMenu } from '../services/managedMenuSave.js';
 import { assertAssignmentMacros } from '../services/kitchenMacroValidation.js';
 import { readKitchenState, beginKitchenState } from '../services/kitchenProductionSnapshot.js';
+import { kitchenMenuDates } from '../services/kitchenMenuDates.js';
+import { menuSelectionNames } from '../services/menuSelectionNames.js';
 import { assertKitchenSelectionClosed, readKitchenSelectionWindow } from '../services/kitchenSelectionDeadline.js';
 import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
 import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
@@ -1676,7 +1679,7 @@ const mapWithConcurrency = async (items, limit, mapper) => {
 async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly = false, includeBreakfast = false, matterInputs = [] } = {}) {
 
   const menu = await WeeklyMenu.findById(menuId)
-    .select('matterCoreMealOptionsByDate breakfastOptionsByDate snackOptionsByDate meals selectionDeadlines')
+    .select('breakfastOptionsByDate snackOptionsByDate meals selectionDeadlines')
     .lean();
   if (!menu) {
     return { error: 'Menu not found', status: 404 };
@@ -1695,11 +1698,10 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     mealType: 'main',
     usedForCorePlan: true
   }).lean();
-  let mealList = corePlanMenuItems.map(toKitchenOption);
-  // Fallback for dates that haven't been tagged in the new meal editor yet.
-  if (mealList.length === 0) {
-    mealList = (menu.matterCoreMealOptionsByDate || {})[dateKey] || [];
-  }
+  // Owner (2026-11-04): Core mains must be explicitly tagged on this date.
+  // An old rotation list is not evidence that a dish is still tagged. With
+  // no tags, keep the slots unassigned until staff configure the Core menu.
+  const mealList = corePlanMenuItems.map(toKitchenOption);
   let breakfastOptions = (menu.breakfastOptionsByDate || {})[dateKey] || [];
   if (breakfastOptions.length === 0) {
     // No hand-built breakfast list for the date — use that day's breakfast
@@ -1757,6 +1759,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     let existingRecord = await MenuSelectionRecord.findOne({ weeklyMenuId: menuId, email }).lean();
     if (await kitchenDateUnavailable(existingRecord, dateKey, customer.nutrition)) continue;
     existingRecord = await reconcileCoreBreakfast(existingRecord, dateKey, customer.nutrition);
+    existingRecord = await reconcileCoreMainMeals(existingRecord, dateKey, customer.nutrition);
     const existingMainMealsCount = (existingRecord?.selectedMeals || []).filter(
       (m) => toDateKey(m.date) === dateKey && m.mealType === 'main'
     ).reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
@@ -1806,9 +1809,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
         newMeals.push({
           date: new Date(dateKey),
           mealType: 'main',
-          // Only MenuItem-sourced options have a real _id (the fallback
-          // pool's plain {name} entries don't).
-          menuItemId: chosen._id || undefined,
+          menuItemId: chosen._id,
           mealName: chosen.name,
           quantity: 1,
           slotNumber: position,
@@ -1948,7 +1949,7 @@ async function runAutoPopulateMissing(menuId, dateKey, options) {
 }
 
 async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs = false } = {}) {
-  const cacheKey = `menu:${menuId}:autoPopulated:v3:${dateKey}`;
+  const cacheKey = `menu:${menuId}:autoPopulated:v5:${dateKey}`;
   const cached = freshInputs ? null : await cacheGet(cacheKey);
   if (cached && !freshInputs) return { data: cached, cached: true };
 
@@ -1997,6 +1998,7 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
     }
     if (await kitchenDateUnavailable(record, dateKey, nutrition)) continue;
     record = await reconcileCoreBreakfast(record, dateKey, nutrition);
+    record = await reconcileCoreMainMeals(record, dateKey, nutrition);
     const core = String(nutrition.plan_name || '').trim().toLowerCase() === 'matter core';
     const portions = (record?.selectedMeals || []).filter((meal) => toDateKey(meal.date) === dateKey && (core ? meal.mealType === 'main' : meal.mealType !== 'snack'))
       .reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
@@ -2942,6 +2944,28 @@ router.delete('/:id', protect, async (req, res) => {
  * Reads local meal choices only. Matter supplies customer details separately.
  * This GET never backfills or reads Internal Customer records.
  */
+router.get('/:id/kitchen-dates', protect, async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) return res.status(404).json({ success: false, message: 'Menu not found' });
+    const menu = await WeeklyMenu.findById(req.params.id)
+      .select('startDate endDate mainMealOptionsByDate breakfastOptionsByDate snackOptionsByDate meals.items').lean();
+    if (!menu) return res.status(404).json({ success: false, message: 'Menu not found' });
+    const itemIds = (menu.meals || []).flatMap(day => day.items || []);
+    // Rotation endpoints also discover dates from linked uploaded MenuItems.
+    // Read only their distinct dates here, never the full meal/customer data.
+    const [dates, uploadedDates] = await Promise.all([
+      MenuSelectionRecord.aggregate([
+        { $match: { weeklyMenuId: new mongoose.Types.ObjectId(req.params.id) } },
+        { $unwind: '$selectedMeals' },
+        { $group: { _id: '$selectedMeals.date' } },
+      ]),
+      itemIds.length ? MenuItem.distinct('itemDate', { _id: { $in: itemIds } }) : [],
+    ]);
+    res.set('Cache-Control', 'no-store');
+    return res.json({ success: true, data: kitchenMenuDates(menu, dates.map(row => row._id), uploadedDates) });
+  } catch (error) { return res.status(500).json({ success: false, message: error.message }); }
+});
+
 router.get('/:id/selections', protect, async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
@@ -2954,9 +2978,17 @@ router.get('/:id/selections', protect, async (req, res) => {
       'original.weeklyMenuId': new mongoose.Types.ObjectId(req.params.id), 'original.email': { $in: aliases },
     }).lean() : [];
     const visible = excludeRecreatedArchivedAliases(rows, archives);
+    let names = null;
+    if (req.query?.includeNames === 'true') {
+      // Summary names only: no live macro/address requests while browsing.
+      // Failed name lookup must not hide saved customer choices.
+      try { names = menuSelectionNames(visible, await matterApiService.listAllSubscriptions()); }
+      catch { names = new Map(); }
+    }
     res.json({ success: true, data: visible.map((record) => {
       const row = record.toObject ? record.toObject() : record;
       return { _id: row._id, email: row.email, matterEmail: row.matterEmail || null,
+        ...(names ? names.get(String(row._id)) || { firstName: '', lastName: '' } : {}),
         customerId: row.matterCustomerId || null, matterCustomerId: row.matterCustomerId || null,
         matterSubscriptionId: row.matterSubscriptionId || null,
         selectedMeals: row.selectedMeals || [], skippedDays: row.skippedDays || [], dayNotes: row.dayNotes || [],

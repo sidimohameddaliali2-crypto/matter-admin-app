@@ -9,6 +9,36 @@ import matter from '../services/matterApiService.js';
 import { runAssignMainMeals, runAssignSnacks, runAssignMatterCoreMeals } from './menus.js';
 import { preparationHasFailures } from '../services/kitchenPreparation.js';
 
+for (const tagged of [false, true]) {
+  test(`Core assignment ${tagged ? 'uses only dated tagged dishes' : 'leaves slots empty despite an old rotation when no dishes are tagged'}`, async t => {
+    t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-04T08:00:00Z') });
+    const date = '2026-11-06';
+    const query = value => ({ select() { return this; }, sort() { return this; }, lean: async () => value });
+    const id = '507f1f77bcf86cd799439011';
+    t.mock.method(WeeklyMenu, 'findById', () => query({ meals: [{ items: [id] }],
+      matterCoreMealOptionsByDate: { [date]: [{ name: 'Old untagged fallback' }] }, snackOptionsByDate: {} }));
+    t.mock.method(MenuItem, 'find', filter => {
+      if (filter.mealType !== 'main') return query([]);
+      assert.equal(filter.usedForCorePlan, true);
+      assert.equal(filter.itemDate.toISOString().slice(0, 10), date);
+      assert.deepEqual(filter._id.$in, [id]);
+      return query(tagged ? [{ _id: id, mealName: 'Tagged Core chicken', usedForCorePlan: true, portionType: 'chicken' }] : []);
+    });
+    t.mock.method(Record, 'find', () => query([]));
+    t.mock.method(Record, 'findOne', () => query(null));
+    const writes = [];
+    t.mock.method(Record, 'findOneAndUpdate', async (_, update) => { writes.push(...update.$push.selectedMeals.$each); return {}; });
+    const nutrition = { customer_id: 'fixture', customer_email: 'core@example.invalid', subscription_id: 'sub', plan_name: 'Matter Core',
+      meal_frequency: 2, breakfast_included: false, snacks_per_day: 0, exclusions: [], active_delivery_dates: [date], double_delivery_dates: [] };
+    const result = await runAssignMatterCoreMeals('menu', date, [{ email: nutrition.customer_email }], { matterInputs: [nutrition] });
+    assert.equal(result.data.assignedMainMeals, tagged ? 2 : 0);
+    assert.equal(result.data.skippedNoOption, tagged ? 0 : 2);
+    assert.equal(writes.length, tagged ? 2 : 0);
+    assert.ok(writes.every(meal => meal.menuItemId === id && meal.mealName === 'Tagged Core chicken'));
+    assert.equal(preparationHasFailures({ assignedMatterCore: result.data }), !tagged);
+  });
+}
+
 test('Wednesday Core starter tops up a second main, removes only an unentitled auto breakfast and is idempotent', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-02T08:00:00Z') });
   const date = '2026-11-04', chicken = '507f1f77bcf86cd799439011', beef = '507f1f77bcf86cd799439012';

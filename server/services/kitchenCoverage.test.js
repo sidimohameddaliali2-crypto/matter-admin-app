@@ -2,6 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { assertPreparedCoverage } from './kitchenCoverage.js';
 
+test('Core single delivery rejects extra portions, including quantity, without changing ordinary plan policy', () => {
+  const date = '2026-11-06';
+  const sub = { customer_id: 'person', name: 'Lauren fixture', meal_frequency: 1, plan_name: 'Matter Core',
+    active_delivery_dates: [date], double_delivery_dates: [] };
+  const data = { kitchenRoster: [sub], kitchenSelections: [{ matterCustomerId: 'person', selectedMeals: [{ date, mealType: 'main', quantity: 2 }] }] };
+  assert.throws(() => assertPreparedCoverage(data, date), /entitlement is 1/);
+  data.kitchenSelections[0].selectedMeals[0].quantity = 1;
+  assert.doesNotThrow(() => assertPreparedCoverage(data, date));
+  sub.plan_name = 'Custom'; data.kitchenSelections[0].selectedMeals[0].quantity = 2;
+  assert.doesNotThrow(() => assertPreparedCoverage(data, date));
+});
+
 test('snapshot completeness enforces Core double days, extra breakfast and snacks', () => {
   const date = '2026-10-26';
   const sub = { customer_id: 'person', name: 'Core fixture', meal_frequency: 2, plan_name: 'Matter Core',

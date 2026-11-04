@@ -2,6 +2,7 @@ import axios from 'axios';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { cacheGet, cacheSet } from '../config/cache.js';
+import { boundedMap } from './boundedMap.js';
 import { resolveMatterDeliveryAddress, matterMealContract, matterWeekendEnabled, matterDoubleDeliveryDates } from './matterSubscriptionContract.js';
 
 // A customer's macro/plan config on Matter changes on the order of days or
@@ -367,9 +368,7 @@ class MatterApiService {
     const matches = [];
     const failures = [];
 
-    for (let i = 0; i < candidates.length; i += CONCURRENCY) {
-      const batch = candidates.slice(i, i + CONCURRENCY);
-      const results = await Promise.all(batch.map(async (sub) => {
+    const results = await boundedMap(candidates, CONCURRENCY, async (sub) => {
         try {
           const detail = await this.getSubscription(sub.subscription_id);
           if (includeKitchenInputs && String(detail?.data?.subscription_id ?? '') !== String(sub.subscription_id)) throw new Error('Matter subscription identity could not be verified');
@@ -434,9 +433,8 @@ class MatterApiService {
           failures.push({ subscriptionId: String(sub.subscription_id), message: 'Unable to verify delivery schedule' });
           return [];
         }
-      }));
-      matches.push(...results.flat());
-    }
+    });
+    matches.push(...results.flat());
 
     if (failures.length) {
       const error = new Error(`Delivery roster is incomplete: ${failures.length} subscription lookup(s) failed. Retry before preparing kitchen quantities or importing deliveries.`);
