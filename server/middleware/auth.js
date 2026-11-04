@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import User from '../models/User.js';
+import User, { effectivePermissions } from '../models/User.js';
 import { assertCurrentStaffSession } from '../services/staffSessionService.js';
 
 // Shared by HTTP and Socket.IO. Never accept a built-in fallback signing key.
@@ -89,7 +89,7 @@ export const checkPermission = (permission) => {
       return next();
     }
 
-    if (!req.user.permissions || !req.user.permissions[permission]) {
+    if (effectivePermissions(req.user)[permission] !== true) {
       return res.status(403).json({ 
         message: `Not authorized to access ${permission}` 
       });

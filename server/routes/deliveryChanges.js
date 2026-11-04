@@ -388,7 +388,7 @@ export async function applyChangesToDelivery(delivery, changes) {
 
       await deliveryChange.save();
       await deliveryChange.populate([
-        { path: 'uploadedBy', select: 'profile firstName lastName email' },
+        { path: 'uploadedBy', select: 'profile.firstName profile.lastName email' },
         { path: 'appliedToDelivery', select: 'customerName scheduledTime status' }
       ]);
 
@@ -816,7 +816,7 @@ router.get('/', async (req, res) => {
     }
 
     const changes = await DeliveryChange.find(query)
-      .populate('uploadedBy', 'profile firstName lastName email')
+      .populate('uploadedBy', 'profile.firstName profile.lastName email')
       .populate('appliedToDelivery', 'customerName scheduledTime status')
       .sort({ createdAt: -1 })
       .limit(limit * 1)

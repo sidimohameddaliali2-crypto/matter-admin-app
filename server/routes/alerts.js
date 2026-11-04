@@ -85,8 +85,8 @@ router.get('/flagged/:key', protect, async (req, res) => {
       taskType: 'Bag Collection',
       $or: [ { customerId: normalized }, { customerName: { $regex: new RegExp(`^${normalized}$`, 'i') } } ]
     })
-    .populate('driver', 'profile email name')
-    .populate('bagAssignment.assignedBy', 'profile email name')
+    .populate('driver', 'profile.firstName profile.lastName profile.phone profile.colorCode email name')
+    .populate('bagAssignment.assignedBy', 'profile.firstName profile.lastName profile.phone profile.colorCode email name')
     .sort({ scheduledTime: -1 })
     .lean()
     .exec();

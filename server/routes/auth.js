@@ -4,6 +4,8 @@ import User, { effectivePermissions } from '../models/User.js';
 import { authenticate, admin } from '../middleware/auth.js';
 import { generateStaffToken, disconnectStaffSessions } from '../services/staffSessionService.js';
 
+import { staffResponse, requireStaffPermission } from '../services/staffAccessPolicy.js';
+
 const router = express.Router();
 
 // No `expiresIn`: drivers and dispatchers retain long-running sessions.
@@ -14,7 +16,7 @@ const router = express.Router();
 // @route   POST /api/auth/register
 // Staff accounts are provisioned by admins; public registration allowed role escalation.
 // @access  Admin
-router.post('/register', authenticate, admin, [
+router.post('/register', authenticate, admin, requireStaffPermission('users'), [
   body('email').isEmail().normalizeEmail(),
   body('password').isLength({ min: 6 }),
   body('firstName').notEmpty().trim(),
@@ -223,7 +225,7 @@ router.put('/profile', authenticate, async (req, res) => {
     res.json({
       success: true,
       message: 'Profile updated successfully',
-      data: { user }
+      data: { user: staffResponse(user) }
     });
   } catch (error) {
     console.error('Update profile error:', error);

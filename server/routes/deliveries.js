@@ -3268,7 +3268,7 @@ router.get('/complaints/all', protect, async (req, res) => {
         .sort(sortObj)
         .skip(skip)
         .limit(pageSize)
-        .populate('driver', 'profile email')
+        .populate('driver', 'profile.firstName profile.lastName profile.phone profile.colorCode email')
         .lean(),
       Delivery.countDocuments(query)
     ]);

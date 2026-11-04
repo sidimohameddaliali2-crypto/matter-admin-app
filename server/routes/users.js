@@ -1,18 +1,21 @@
 import express from 'express';
-import User, { getDefaultPermissions, effectivePermissions } from '../models/User.js';
-import { protect, authorize, admin, superAdmin } from '../middleware/auth.js';
+import User, { getDefaultPermissions, effectivePermissions, PERMISSION_KEYS } from '../models/User.js';
+import { protect, authorize, superAdmin } from '../middleware/auth.js';
 
-// Return a plain user object with `permissions` replaced by the effective set
-// the client should enforce (role defaults for unconfigured users, stored
-// values honoured — including explicit `false` — once configured).
-const withEffectivePermissions = (user) => {
-  if (!user) return user;
-  const obj = typeof user.toObject === 'function' ? user.toObject() : { ...user };
-  obj.permissions = effectivePermissions(obj);
-  return obj;
-};
+import { staffResponse as withEffectivePermissions, requireStaffPermission, canManageStaffTarget } from '../services/staffAccessPolicy.js';
 
 const router = express.Router();
+const validateAccountControls = (req, res, next) => {
+  const { role, permissions, isActive } = req.body;
+  const roles = ['super_admin', 'admin', 'manager', 'dispatcher', 'driver', 'store_keeper', 'viewer', 'yellowblock_user', 'kitchen'];
+  if ((role !== undefined && !roles.includes(role)) ||
+      (isActive !== undefined && typeof isActive !== 'boolean') ||
+      (permissions !== undefined && (!permissions || typeof permissions !== 'object' || Array.isArray(permissions) ||
+        Object.entries(permissions).some(([key, value]) => !PERMISSION_KEYS.includes(key) || typeof value !== 'boolean')))) {
+    return res.status(400).json({ message: 'Invalid account controls' });
+  }
+  next();
+};
 
 // Apply protect middleware to all routes
 router.use(protect);
@@ -58,7 +61,7 @@ router.put('/me/dashboard-layout', async (req, res) => {
 });
 
 // Get all users (admin and super_admin only)
-router.get('/', authorize(['super_admin', 'admin']), async (req, res) => {
+router.get('/', authorize(['super_admin', 'admin']), requireStaffPermission('users'), async (req, res) => {
   try {
     const { role, search, page = 1, limit = 10 } = req.query;
     
@@ -80,7 +83,7 @@ router.get('/', authorize(['super_admin', 'admin']), async (req, res) => {
 
     const users = await User.find(query)
       .select('-password')
-      .populate('createdBy', 'profile firstName lastName')
+      .populate('createdBy', 'profile.firstName profile.lastName')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
@@ -100,13 +103,18 @@ router.get('/', authorize(['super_admin', 'admin']), async (req, res) => {
   }
 });
 
-// Get drivers (accessible by all authenticated users)
 // Get user by ID (users can access their own profile, admins can access any)
 router.get('/:id', async (req, res) => {
+  const self = String(req.user._id || req.user.id) === req.params.id;
+  const administrator = ['admin', 'super_admin'].includes(req.user.role);
+  if (!self && (!administrator || !effectivePermissions(req.user).users)) {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+
   try {
     const user = await User.findById(req.params.id)
       .select('-password')
-      .populate('createdBy', 'profile firstName lastName');
+      .populate('createdBy', 'profile.firstName profile.lastName');
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
@@ -124,7 +132,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // Create new user (admin and super_admin only)
-router.post('/', authorize(['super_admin', 'admin']), async (req, res) => {
+router.post('/', authorize(['super_admin', 'admin']), requireStaffPermission('users'), validateAccountControls, async (req, res) => {
   try {
     const { 
       email, 
@@ -173,7 +181,7 @@ router.post('/', authorize(['super_admin', 'admin']), async (req, res) => {
     // Return user without password
     const userResponse = await User.findById(user._id)
       .select('-password')
-      .populate('createdBy', 'profile firstName lastName');
+      .populate('createdBy', 'profile.firstName profile.lastName');
 
     res.status(201).json(withEffectivePermissions(userResponse));
   } catch (error) {
@@ -183,7 +191,13 @@ router.post('/', authorize(['super_admin', 'admin']), async (req, res) => {
 });
 
 // Update user (users can update their own profile, admins can update any)
-router.put('/:id', async (req, res) => {
+router.put('/:id', validateAccountControls, async (req, res) => {
+  const self = String(req.user._id || req.user.id) === req.params.id;
+  const administrator = ['admin', 'super_admin'].includes(req.user.role);
+  if (!self && (!administrator || !effectivePermissions(req.user).users)) {
+    return res.status(403).json({ message: 'Access denied' });
+  }
+
   try {
     const { 
       firstName, 
@@ -204,6 +218,15 @@ router.put('/:id', async (req, res) => {
     // Check permissions
     if (req.user.role !== 'super_admin' && req.user.role !== 'admin' && req.user.id !== req.params.id) {
       return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const administrativeFields = ['role', 'permissions', 'isActive'];
+    if (administrativeFields.some(key => Object.hasOwn(req.body, key)) &&
+        (!administrator || !effectivePermissions(req.user).users)) {
+      return res.status(403).json({ message: 'Administrative changes require user-management permission' });
+    }
+    if (!self && !canManageStaffTarget(req.user, user)) {
+      return res.status(403).json({ message: 'Only super admin can edit super admin accounts' });
     }
 
     // Role change restrictions
@@ -241,7 +264,7 @@ router.put('/:id', async (req, res) => {
 
     const updatedUser = await User.findById(user._id)
       .select('-password')
-      .populate('createdBy', 'profile firstName lastName');
+      .populate('createdBy', 'profile.firstName profile.lastName');
 
     res.json(withEffectivePermissions(updatedUser));
   } catch (error) {
@@ -251,7 +274,7 @@ router.put('/:id', async (req, res) => {
 });
 
 // Delete user (super_admin only)
-router.delete('/:id', superAdmin, async (req, res) => {
+router.delete('/:id', superAdmin, requireStaffPermission('users'), async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
     
@@ -279,7 +302,7 @@ router.delete('/:id', superAdmin, async (req, res) => {
 });
 
 // Get user statistics (admin and super_admin only)
-router.get('/stats/overview', authorize(['super_admin', 'admin']), async (req, res) => {
+router.get('/stats/overview', authorize(['super_admin', 'admin']), requireStaffPermission('users'), async (req, res) => {
   try {
     const totalUsers = await User.countDocuments();
     const activeUsers = await User.countDocuments({ isActive: true });
@@ -296,13 +319,13 @@ router.get('/stats/overview', authorize(['super_admin', 'admin']), async (req, r
       .select('-password')
       .sort({ createdAt: -1 })
       .limit(5)
-      .populate('createdBy', 'profile firstName lastName');
+      .populate('createdBy', 'profile.firstName profile.lastName');
 
     res.json({
       totalUsers,
       activeUsers,
       usersByRole,
-      recentUsers
+      recentUsers: recentUsers.map(withEffectivePermissions)
     });
   } catch (error) {
     console.error('Get user stats error:', error);
