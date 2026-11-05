@@ -305,3 +305,39 @@ test.each([A, B])('saved expired dates can be removed with earliest date %s', as
     jest.useRealTimers();
   }
 });
+
+
+test.each([
+  ['dates', '', B],
+  ['dates', A, ''],
+  ['dates', A, '2099-05-05'],
+  ['days', '', B],
+  ['days', A, ''],
+  ['days', A, '2099-05-05'],
+  ['dates', B, A],
+  ['dates', '2099-02-30', '2099-03-01']
+])('legacy %s draft recovers invalid range %s through %s without losing meals', async (phase, from, to) => {
+  localStorage.setItem('partner-daily-plan:fixture', JSON.stringify({
+    version: 1, phase, from, to, index: 0,
+    days: [{date: A, items: {a: {id: 'a', name: 'Meal A', price: 20, quantity: 2}},
+      window: 'Morning · 5–6am', reviewed: false}]
+  }));
+  await render();
+  if (phase === 'days') await click('Change dates');
+  expect(button('Delivery ' + A).getAttribute('aria-pressed')).toBe('true');
+  await click('Delivery ' + B);
+  await click('Start daily orders');
+  expect(container.textContent).toContain('Day 1 of 2');
+  expect(container.querySelector('[aria-label="Quantity for Meal A"]').textContent).toBe('2');
+  expect(JSON.parse(localStorage.getItem('partner-daily-plan:fixture')).selectedDates).toEqual([A, B]);
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+test('a valid legacy range retains all selected delivery dates', async () => {
+  localStorage.setItem('partner-daily-plan:fixture', JSON.stringify({
+    version: 1, phase: 'dates', from: A, to: C, index: 0,
+    days: [{date: A, items: {}, window: 'Morning · 5–6am', reviewed: false}]
+  }));
+  await render();
+  for (const date of [A, B, C]) expect(button('Delivery ' + date).getAttribute('aria-pressed')).toBe('true');
+});

@@ -11,12 +11,28 @@ const fmt = date => new Date(date + 'T00:00:00Z').toLocaleDateString('en-GB', { 
 const money = value => Number(value || 0).toFixed(2);
 const initial = earliest => ({ version: 1, phase: 'dates', from: earliest, to: earliest, selectedDates: [earliest], days: [], index: 0 });
 
+const validDeliveryDate = date => {
+  try { return typeof date === 'string' && deliveryDays(date, date).length === 1; }
+  catch { return false; }
+};
+
 function restore(key, earliest) {
   try {
     const saved = JSON.parse(localStorage.getItem(key));
     if (saved?.version === 1 && ['dates', 'days', 'review'].includes(saved.phase) && Array.isArray(saved.days)
-      && saved.days.length > 0 && saved.days.length <= 90 && saved.days.every(d => /^\d{4}-\d{2}-\d{2}$/.test(d.date) && d.items && typeof d.items === 'object')
-      && Number.isInteger(saved.index) && saved.index >= 0 && saved.index < saved.days.length) return saved;
+      && saved.days.length > 0 && saved.days.length <= 90 && saved.days.every(d => d && validDeliveryDate(d.date) && d.items && typeof d.items === 'object')
+      && Number.isInteger(saved.index) && saved.index >= 0 && saved.index < saved.days.length) {
+      let selectedDates;
+      if (Array.isArray(saved.selectedDates) && saved.selectedDates.every(validDeliveryDate)) {
+        selectedDates = saved.selectedDates;
+      } else {
+        // Older drafts can contain an unfinished date-range edit. Recover the
+        // saved carts when that range is invalid, without evaluating it in JSX.
+        try { selectedDates = deliveryDays(saved.from, saved.to); }
+        catch { selectedDates = saved.days.map(day => day.date); }
+      }
+      return { ...saved, selectedDates: [...new Set(selectedDates)].sort() };
+    }
   } catch { /* A missing or corrupt local draft starts a new plan. */ }
   return initial(earliest);
 }
@@ -66,7 +82,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
   };
   const start = () => {
     try {
-      const dates = [...new Set(plan.selectedDates || deliveryDays(plan.from, plan.to))].sort();
+      const dates = [...new Set(plan.selectedDates)].sort();
       if (!dates.length) throw new Error('Choose at least one delivery day on the calendar.');
       deliveryDays(dates[0], dates[dates.length - 1]);
       const closed = dates.find(dateClosed);
@@ -162,7 +178,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
     {error && <p role="alert" className="rounded-xl border border-[#ff8a66] p-3 text-sm text-[#ff8a66]">{error}</p>}
     {plan.phase === 'dates' && <div className={box + ' space-y-4'}>
       <PartnerOrderCalendar earliestDate={earliestDate} orders={orders}
-        selectedDates={plan.selectedDates || deliveryDays(plan.from, plan.to)}
+        selectedDates={plan.selectedDates}
         onChange={selectedDates => { setError(''); setPlan(p => ({ ...p, selectedDates })); }} />
       <p className="text-sm text-[#a8ccf5]">Select your delivery days on the calendar, up to 90 calendar days apart. Confirm an order or explicitly skip each selected day.</p>
       <button type="button" className={primary} onClick={start}>Start daily orders</button>
