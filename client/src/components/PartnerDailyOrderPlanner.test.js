@@ -441,3 +441,54 @@ test('removing the final unplaced day finishes the plan while preserving the acc
   expect(api.post).not.toHaveBeenCalled();
   expect(localStorage.getItem('partner-daily-plan:fixture')).toBeNull();
 });
+
+
+test.each(['submitted', 'locked'])('removal retains an accepted %s order after its submission response is lost', async status => {
+  let accepted = false;
+  api.get.mockImplementation(async path => ({data: {success: true, data:
+    path === '/partner/orders' ? [] : path.startsWith('/partner/orders/') ? {
+      status: accepted ? status : 'draft', deliveryTime: 'Morning · 5–6am',
+      lines: [{menuItem: {_id: 'b'}, quantity: 1}]
+    } : menu(path.split('=')[1])
+  }}));
+  api.post.mockImplementation(async (path, body) => {
+    if (path === '/partner/orders/order-' + B + '/submit') {
+      accepted = true;
+      throw new Error('Response lost after acceptance');
+    }
+    return {data: {success: true, data: {_id: body ? 'order-' + body.deliveryDate : 'submitted'}}};
+  });
+  await render(); await begin(B);
+  await click('Add Meal A'); await click('Confirm day & continue');
+  await click('Add Meal B'); await click('Confirm day & continue');
+  await click('Place all daily orders');
+  const writes = api.post.mock.calls.length;
+  await act(async () => root.unmount()); root = createRoot(container); await render();
+  await click('Remove Tue 6 Jan');
+  expect(api.get).toHaveBeenCalledWith('/partner/orders/order-' + B);
+  expect(container.textContent).toContain('Your daily orders are placed');
+  expect(container.textContent).toContain('2 order(s) · AED 50.00 total');
+  expect(container.textContent).toContain('Tue 6 Jan · Morning · 5–6am · AED 30.00');
+  expect(api.post).toHaveBeenCalledTimes(writes);
+});
+
+test.each(['offline', 'unsuccessful', 'unknown', 'different accepted items'])('removal preserves recovery state when verification is %s', async scenario => {
+  localStorage.setItem('partner-daily-plan:fixture', JSON.stringify({
+    version: 1, phase: 'review', from: A, to: B, selectedDates: [A, B], index: 1,
+    days: [
+      {date: A, items: {a: {id: 'a', name: 'Meal A', price: 20, quantity: 1}}, window: 'Morning · 5–6am', reviewed: true, placed: true, orderId: 'accepted'},
+      {date: B, items: {b: {id: 'b', name: 'Meal B', price: 30, quantity: 1}}, window: 'Morning · 5–6am', reviewed: true, orderId: 'uncertain'}
+    ]
+  }));
+  api.get.mockImplementation(async () => {
+    if (scenario === 'offline') throw new Error('Offline');
+    if (scenario === 'unsuccessful') return {data: {success: false}};
+    return {data: {success: true, data: {status: scenario === 'unknown' ? 'unknown' : 'submitted', deliveryTime: 'Morning · 5–6am', lines: [{menuItem: 'b', quantity: 2}]}}};
+  });
+  await render(); await click('Remove Tue 6 Jan');
+  expect(container.textContent).not.toContain('Your daily orders are placed');
+  expect(container.textContent).toContain('Combined total AED 50.00');
+  expect(container.querySelector('[role="alert"]')).toBeTruthy();
+  expect(JSON.parse(localStorage.getItem('partner-daily-plan:fixture')).days.map(day => day.orderId)).toEqual(['accepted', 'uncertain']);
+  expect(api.post).not.toHaveBeenCalled();
+});

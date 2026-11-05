@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import partnerApi from '../utils/partnerApi';
 import PartnerOrderCalendar from './PartnerOrderCalendar';
 import PartnerDailyMenu from './PartnerDailyMenu';
-import { DELIVERY_WINDOWS, deliveryDays, makePlanDay, dayTotal, dayQuantity, assertDayReady, quotePlanDay, submitPlanDay, dateClosed } from '../utils/partnerDailyPlan';
+import { DELIVERY_WINDOWS, deliveryDays, makePlanDay, dayTotal, dayQuantity, assertDayReady, assertAcceptedPlanDayMatches, quotePlanDay, submitPlanDay, dateClosed } from '../utils/partnerDailyPlan';
 
 const heading = { fontFamily: "'Archivo Black', sans-serif" };
 const box = 'rounded-2xl border border-[#12275e] bg-[#051747] p-4';
@@ -44,6 +44,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
   const [menuState, setMenuState] = useState({ date: '', items: [], loading: false, error: '' });
   const [error, setError] = useState('');
   const [placing, setPlacing] = useState(false);
+  const [checkingRemoval, setCheckingRemoval] = useState(false);
   const [reload, setReload] = useState(0);
   const submitting = useRef(false);
   const minimum = Number(partner?.minimumOrder) || 0;
@@ -116,21 +117,47 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
     updateDay({ items });
   };
   const editDay = index => { setError(''); setPlan(p => ({ ...p, index, phase: 'days' })); };
-  const removeUnplacedDay = date => {
+  const removeUnplacedDay = async date => {
     if (submitting.current) return;
+    const target = plan.days.find(day => day.date === date);
+    if (!plan.days.some(day => day.placed) || !target || target.placed) return;
+    submitting.current = true;
+    setCheckingRemoval(true);
     setError('');
-    setPlan(p => {
-      const target = p.days.find(day => day.date === date);
-      if (!p.days.some(day => day.placed) || !target || target.placed) return p;
-      // Remove only the local pending day. Never cancel or rewrite an accepted
-      // order, or submit its saved draft while retrying the remaining plan.
-      const days = p.days.filter(day => day.date !== date);
-      const next = days.findIndex(day => !day.reviewed);
-      const complete = days.every(day => day.placed || day.skipped);
-      return { ...p, days, selectedDates: p.selectedDates.filter(day => day !== date),
-        index: next >= 0 ? next : Math.min(p.index, days.length - 1),
-        phase: complete ? 'complete' : next >= 0 ? 'days' : 'review' };
-    });
+    try {
+      let accepted = false;
+      if (target.orderId) {
+        const result = (await partnerApi.get('/partner/orders/' + target.orderId)).data;
+        if (!result?.success || !result.data) throw new Error('Could not verify the saved order. Nothing was removed. Please retry.');
+        const order = result.data;
+        if (['submitted', 'locked'].includes(order.status)) {
+          assertAcceptedPlanDayMatches(target, order);
+          accepted = true;
+        } else if (!['draft', 'cancelled'].includes(order.status)) {
+          throw new Error('Could not verify the saved order status. Nothing was removed. Review it in My Orders.');
+        }
+      }
+      setPlan(p => {
+        const current = p.days.find(day => day.date === date);
+        if (!current || current.placed || current.orderId !== target.orderId) return p;
+        // A lost submit response may hide an accepted order locally. Retain it
+        // in totals; only remove a verified draft/cancelled order or unsaved day.
+        const days = accepted
+          ? p.days.map(day => day.date === date ? { ...day, placed: true, reviewed: true, skipped: false, error: '' } : day)
+          : p.days.filter(day => day.date !== date);
+        const next = days.findIndex(day => !day.reviewed);
+        const complete = days.every(day => day.placed || day.skipped);
+        return { ...p, days, selectedDates: accepted ? p.selectedDates : p.selectedDates.filter(day => day !== date),
+          index: next >= 0 ? next : Math.min(p.index, days.length - 1),
+          phase: complete ? 'complete' : next >= 0 ? 'days' : 'review' };
+      });
+      if (accepted) setError('This order was already accepted and has been kept in your plan.');
+    } catch (err) {
+      setError(err.response?.data?.message || err.message || 'Could not verify the saved order. Nothing was removed.');
+    } finally {
+      submitting.current = false;
+      setCheckingRemoval(false);
+    }
   };
   const checkout = async () => {
     if (submitting.current) return;
@@ -189,8 +216,10 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
   };
 
   return <section aria-label="Daily order planner" className="space-y-4 text-[#ede5de]" style={{ fontFamily: "'Archivo', system-ui, sans-serif" }}>
+    <fieldset disabled={checkingRemoval} className="min-w-0 space-y-4">
     <h2 style={heading} className="text-2xl font-bold">Plan daily orders</h2>
     {plan.phase !== 'dates' && plan.phase !== 'complete' && !plan.days.some(d => d.placed) && <button type="button" className={secondary} disabled={placing} onClick={() => { setError(''); setPlan(p => ({ ...p, phase: 'dates' })); }}>Change dates</button>}
+    {checkingRemoval && <p role="status">Checking saved order…</p>}
     {error && <p role="alert" className="rounded-xl border border-[#ff8a66] p-3 text-sm text-[#ff8a66]">{error}</p>}
     {plan.phase === 'dates' && <div className={box + ' space-y-4'}>
       <PartnerOrderCalendar earliestDate={earliestDate} orders={orders}
@@ -248,5 +277,6 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
       <ul className="space-y-1 text-sm">{ordered.map(d => <li key={d.date}>{fmt(d.date)} · {d.window} · AED {money(dayTotal(d))}</li>)}</ul>
       <div className="flex flex-wrap gap-3"><button type="button" className={primary} onClick={onViewOrders}>View my orders</button><button type="button" className={secondary} onClick={() => { setPlan(initial(earliestDate)); setError(''); }}>Start another plan</button></div>
     </div>}
+    </fieldset>
   </section>;
 }

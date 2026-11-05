@@ -41,6 +41,17 @@ export function quotePlanDay(day, menu) {
   return { ...day, items };
 }
 
+// Share the same conservative comparison for retry and removal recovery. If
+// the cart was edited after an uncertain submission, keep the saved order and
+// direct the partner to My Orders rather than treating it as removable.
+export function assertAcceptedPlanDayMatches(day, order) {
+  const expected = Object.values(day.items).map(i => [i.id, i.quantity]).sort();
+  const actual = (order.lines || []).map(l => [String(l.menuItem?._id || l.menuItem), l.quantity]).sort();
+  if (JSON.stringify(expected) !== JSON.stringify(actual) || order.deliveryTime !== day.window) {
+    throw new Error('An accepted order for ' + day.date + ' has different items. Review it in My Orders.');
+  }
+}
+
 // A retry never rewrites an order that was accepted when its response was lost.
 export async function submitPlanDay(api, day, onDraftSaved) {
   const lines = Object.values(day.items).map(item => ({ menuItemId: item.id, quantity: item.quantity }));
@@ -48,11 +59,7 @@ export async function submitPlanDay(api, day, onDraftSaved) {
     const existing = (await api.get('/partner/orders/' + day.orderId)).data;
     if (!existing?.success) throw new Error('Could not verify the saved order for ' + day.date + '.');
     if (['submitted', 'locked'].includes(existing.data.status)) {
-      const expected = Object.values(day.items).map(i => [i.id, i.quantity]).sort();
-      const actual = (existing.data.lines || []).map(l => [String(l.menuItem?._id || l.menuItem), l.quantity]).sort();
-      if (JSON.stringify(expected) !== JSON.stringify(actual) || existing.data.deliveryTime !== day.window) {
-        throw new Error('An accepted order for ' + day.date + ' has different items. Review it in My Orders.');
-      }
+      assertAcceptedPlanDayMatches(day, existing.data);
       return day.orderId;
     }
     if (existing.data.status !== 'draft') throw new Error('The saved order for ' + day.date + ' can no longer be submitted.');
