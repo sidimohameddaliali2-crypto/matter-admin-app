@@ -1,3 +1,4 @@
+import { CUSTOMER_RADIUS_METRES } from '../../constants/customerGeofence';
 import React, { useEffect, useState } from 'react';
 import api from '../../utils/api';
 import { BUSINESS_TZ_OFFSET_MINUTES } from '../../utils/businessTime';
@@ -58,7 +59,7 @@ export default function TrackerVisitCard({ delivery }) {
       : 'border-gray-200 bg-gray-50 text-gray-700';
   return (
     <section aria-label="Tracker visit verification" className={`rounded-lg border p-3 text-xs ${style}`}>
-      <p className="font-semibold">Customer radius: {visit.radiusMetres || 50} m</p>
+      <p className="font-semibold">Customer radius: {visit.radiusMetres || CUSTOMER_RADIUS_METRES} m</p>
       <p className="mt-1 font-medium">{label}</p>
       {visit.errorCode && <p className="mt-1 opacity-80">Tracker check will retry automatically ({visit.errorCode}).</p>}
       <dl className="mt-2 space-y-1">

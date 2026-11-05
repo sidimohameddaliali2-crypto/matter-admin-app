@@ -1,3 +1,4 @@
+import { CUSTOMER_RADIUS_METRES } from '../services/truckoomVisitRules.js';
 import mongoose from 'mongoose';
 
 // One saved customer pin per Dubai business day. Keep this local record after
@@ -8,7 +9,7 @@ const schema = new mongoose.Schema({
   customerId: String,
   lat: Number,
   lng: Number,
-  radiusMetres: { type: Number, default: 50 },
+  radiusMetres: { type: Number, default: CUSTOMER_RADIUS_METRES },
   truckoomId: String,
   businessDate: { type: String, index: true },
   deletedAt: Date,

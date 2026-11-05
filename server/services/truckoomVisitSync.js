@@ -107,7 +107,7 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
               if (!id) {
                 if (created >= 100) continue; // bounded daily upload batches
                 await renew();
-                id = await truckoom.createCustomerGeofence(identity.name, pin);
+                id = await truckoom.createCustomerGeofence(identity.name, pin, CUSTOMER_RADIUS_METRES);
                 created++;
                 remoteFences.push({ 'Geofence name': identity.name, 'Geofence Id': id });
               }

@@ -23,3 +23,11 @@ test('an unfinished visit keeps its departure unknown and separate visits are pr
  assert.deepEqual(gpsVisitEvents([point(0),point(1)],pin).map(e=>e.flag),['entry']);
  assert.deepEqual(gpsVisitEvents([point(0),point(1,25.11),point(2),point(3,25.11)],pin).map(e=>e.flag),['entry','exit','entry','exit']);
 });
+
+
+test('the new 60 m default includes a 55 m point while saved 50 m visits keep their original boundary',()=>{
+ const north=metres=>pin.lat+metres/6371000*180/Math.PI;
+ const points=[point(0,north(70)),point(1,north(55)),point(2,north(65))];
+ assert.deepEqual(gpsVisitEvents(points,pin).map(e=>e.flag),['entry','exit']);
+ assert.deepEqual(gpsVisitEvents(points,pin,50),[]);
+});

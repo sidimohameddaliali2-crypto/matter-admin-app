@@ -1,6 +1,7 @@
+import { CUSTOMER_RADIUS_METRES } from './truckoomVisitRules.js';
 // Fallback evidence from real vehicle GPS, not the driver's phone or an
 // invented Truckoom alert. Times are first observed inside/outside the radius.
-export function gpsVisitEvents(points, pin, radiusMetres = 50) {
+export function gpsVisitEvents(points, pin, radiusMetres = CUSTOMER_RADIUS_METRES) {
   const coordinate = (lat, lng) => Number.isFinite(lat) && Number.isFinite(lng)
     && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && !(lat === 0 && lng === 0);
   if (!coordinate(pin?.lat, pin?.lng)) return [];

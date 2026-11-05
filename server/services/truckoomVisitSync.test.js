@@ -23,7 +23,7 @@ function setup(t, overrides = {}) {
     gpsLocation: { lat: 25.1, lng: 55.2 }, proof: { photoCapturedAt: photo, photoSource: 'camera', receivedAt: now },
     ...overrides };
   const identity = customerFenceIdentity(row, row.gpsLocation);
-  const fence = { ...identity, truckoomId: 'G1', lat: 25.1, lng: 55.2, radiusMetres: 50 };
+  const fence = { ...identity, truckoomId: 'G1', lat: 25.1, lng: 55.2, radiusMetres: 60 };
   const writes = [];
   const dates = [];
   t.mock.method(truckoom, 'isConfigured', () => true);
@@ -58,7 +58,7 @@ test('sync stores tracker, shutter and departure evidence and checks both UTC da
   assert.equal(+filter.updatedAt, +fixture.row.updatedAt);
   assert.equal(update.$set.trackerVisit.status, 'inside_window');
   assert.equal(update.$set.trackerVisit.vehicleNo, 'V1');
-  assert.equal(update.$set.trackerVisit.radiusMetres, 50);
+  assert.equal(update.$set.trackerVisit.radiusMetres, 60);
 });
 
 test('wrong vehicle or geofence alerts never verify a photo', async t => {
@@ -153,7 +153,8 @@ test('new saved customer pin creates one fence and persists its remote id', asyn
   const fixture = setup(t);
   t.mock.method(CustomerGeofence, 'findOne', () => ({ lean: async () => null }));
   t.mock.method(truckoom, 'getGeofences', async () => []);
-  t.mock.method(truckoom, 'createCustomerGeofence', async (name, pin) => {
+  t.mock.method(truckoom, 'createCustomerGeofence', async (name, pin, radius) => {
+    assert.equal(radius, 60);
     assert.equal(name, fixture.identity.name);
     assert.deepEqual(pin, { lat: 25.1, lng: 55.2 });
     return 'new-fence';
@@ -242,6 +243,7 @@ test('saved snapshot survives a later driver reassignment', async t => {
   fixture.row.driver = { _id: 'driver2', profile: { truckoomVehicleNo: 'V2' } };
   await syncCustomerTrackerVisits({ now: fixture.now });
   assert.equal(fixture.writes[0].update.$set.trackerVisit.vehicleNo, 'V1');
+  assert.equal(fixture.writes[0].update.$set.trackerVisit.radiusMetres, 50); // preserve the original proof snapshot
   assert.equal(fixture.writes[0].update.$set.trackerVisit.status, 'inside_window');
 });
 
@@ -273,7 +275,7 @@ test('vehicle GPS supplies labelled visit evidence when the vendor supplies no c
   assert.equal(fixture.row.status,undefined); // geofence evidence never marks delivery complete
 });
 
-test('token authentication, private list filtering and 50 m creation match the supplied API', async t => {
+test('token authentication, private list filtering and 60 m creation match the supplied API', async t => {
   const original = { username: truckoom.username, password: truckoom.password, companyName: truckoom.companyName,
     accessToken: truckoom.accessToken, accessTokenExpiresAt: truckoom.accessTokenExpiresAt };
   t.after(() => Object.assign(truckoom, original));
@@ -292,7 +294,7 @@ test('token authentication, private list filtering and 50 m creation match the s
   assert.equal(calls.length, 3);
   assert.equal(calls[1].options.headers['auth-code'], 'fixture-token');
   assert.deepEqual(calls[2].body.coordinates, [[25.1, 55.2]]);
-  assert.equal(calls[2].body.radius, '0.05');
+  assert.equal(calls[2].body.radius, '0.06');
   await truckoom.deleteCustomerGeofence('3');
   assert.ok(calls[3].url.endsWith('?token=deletGeofence'));
   assert.deepEqual(calls[3].body, { project_id: '49', geofence_id: '3' });

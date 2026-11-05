@@ -38,7 +38,7 @@ const server=http.createServer(async(req,res)=>{
       assert.equal(req.method,'POST');assert.equal(req.headers['auth-code'],token);
       assert.equal(body.project_id,'49');
       if(method==='createGeofence'){
-        assert.equal(body.geofence_name,fenceName);assert.equal(body.radius,'0.05');
+        assert.equal(body.geofence_name,fenceName);assert.equal(body.radius,'0.06');
         assert.deepEqual(body.coordinates,[[25.1124,55.2056]]);
         assert.equal(body.geofence_type,'circle');assert.equal(body.geo_shape,'circle');
         assert.equal(body.company_name,company);
@@ -71,11 +71,11 @@ try{
   Object.assign(service,{baseURL:`${origin}/webservice`,...credentials,companyName:company});
   const tokens=await Promise.all([service.getAccessToken(),service.getAccessToken()]);
   assert.deepEqual(tokens,[token,token]);assert.equal(state.tokenRequests,1);pass('token authentication and shared token request');
-  const id=await service.createCustomerGeofence(fenceName,{lat:25.1124,lng:55.2056},50);
+  const id=await service.createCustomerGeofence(fenceName,{lat:25.1124,lng:55.2056});
   const fences=await service.getGeofences();
-  assert.equal(fences.length,1);assert.equal(fences[0]['Geofence Id'],id);assert.equal(fences[0].Radius,0.05);
+  assert.equal(fences.length,1);assert.equal(fences[0]['Geofence Id'],id);assert.equal(fences[0].Radius,0.06);
   assert.equal(fences[0]['Geofence Group'],'--');
-  pass('50 m ungrouped circle creation, company filtering and listing');
+  pass('60 m ungrouped circle creation, company filtering and listing');
   assert.deepEqual(await service.getGeofenceAlerts('26-10-2026'),[]);
   pass('created circle alone does not imply alerts in the unlinked fixture');
   // Fixture setup only: this is NOT a made-up Truckoom vehicle-linking API.

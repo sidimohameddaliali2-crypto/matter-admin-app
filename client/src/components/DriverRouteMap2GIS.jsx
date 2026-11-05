@@ -1,3 +1,4 @@
+import { CUSTOMER_RADIUS_METRES } from '../constants/customerGeofence';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { load } from '@2gis/mapgl';
 import TrackerVisitCard from './deliveries/TrackerVisitCard';
@@ -1022,7 +1023,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
           const visit = stop.trackerVisit;
           markersRef.current.push(new mapgl.Circle(map, {
             coordinates: visit?.geofenceId ? [visit.lng, visit.lat] : toLngLat(stop.coords),
-            radius: visit?.radiusMetres || 50, color: '#6366f122',
+            radius: visit?.radiusMetres || CUSTOMER_RADIUS_METRES, color: '#6366f122',
             strokeColor: '#6366f1', strokeWidth: 2, interactive: false,
           }));
         }
