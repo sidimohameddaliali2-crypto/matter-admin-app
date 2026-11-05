@@ -116,6 +116,22 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
     updateDay({ items });
   };
   const editDay = index => { setError(''); setPlan(p => ({ ...p, index, phase: 'days' })); };
+  const removeUnplacedDay = date => {
+    if (submitting.current) return;
+    setError('');
+    setPlan(p => {
+      const target = p.days.find(day => day.date === date);
+      if (!p.days.some(day => day.placed) || !target || target.placed) return p;
+      // Remove only the local pending day. Never cancel or rewrite an accepted
+      // order, or submit its saved draft while retrying the remaining plan.
+      const days = p.days.filter(day => day.date !== date);
+      const next = days.findIndex(day => !day.reviewed);
+      const complete = days.every(day => day.placed || day.skipped);
+      return { ...p, days, selectedDates: p.selectedDates.filter(day => day !== date),
+        index: next >= 0 ? next : Math.min(p.index, days.length - 1),
+        phase: complete ? 'complete' : next >= 0 ? 'days' : 'review' };
+    });
+  };
   const checkout = async () => {
     if (submitting.current) return;
     if (!plan.days.every(d => d.reviewed)) { setError('Review every delivery day before checking out.'); return; }
@@ -210,6 +226,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
         {previousIndex >= 0 && <button type="button" className={secondary} onClick={() => editDay(previousIndex)}>Previous day</button>}
         {!existing && <button type="button" className={primary} disabled={!menuReady || active.placed} onClick={() => confirmDay(false)}>Confirm day &amp; continue</button>}
         {existing && <button type="button" className={secondary} disabled={active.placed} onClick={() => confirmDay(true)}>Keep existing order &amp; continue</button>}
+        {!active.placed && plan.days.some(day => day.placed) && <button type="button" className={secondary} disabled={placing} onClick={() => removeUnplacedDay(active.date)}>Remove this unplaced day</button>}
       </div>
       <p className="text-xs text-[#a8ccf5]">Nothing is submitted to the kitchen until final checkout.</p>
     </div>}
@@ -217,7 +234,8 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
       <h3 style={heading} className="text-xl font-bold">Final checkout</h3><p className="text-sm text-[#a8ccf5]">All {plan.days.length} delivery days reviewed. Check every daily order below.</p>
       {plan.days.map((day, index) => <article key={day.date} className={box}>
         <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="font-bold">{fmt(day.date)} — {day.placed ? 'Placed' : day.skipped ? 'No new order' : 'AED ' + money(dayTotal(day))}</h4>
-          {!day.placed && !placing && <button type="button" className={secondary} onClick={() => editDay(index)}>Edit {fmt(day.date)}</button>}</div>
+          {!day.placed && !placing && <button type="button" className={secondary} onClick={() => editDay(index)}>Edit {fmt(day.date)}</button>}
+          {!day.placed && plan.days.some(d => d.placed) && <button type="button" className={secondary} disabled={placing} onClick={() => removeUnplacedDay(day.date)}>Remove {fmt(day.date)}</button>}</div>
         {!day.skipped && <><p className="mt-1 text-sm text-[#a8ccf5]">{day.window}</p><ul className="mt-2 space-y-1 text-sm">{Object.values(day.items).map(item => <li key={item.id}>{item.quantity} × {item.name} · AED {money(item.quantity * item.price)}</li>)}</ul></>}
         {day.error && <p role="alert" className="mt-2 text-sm text-[#ff8a66]">{day.error}</p>}
       </article>)}

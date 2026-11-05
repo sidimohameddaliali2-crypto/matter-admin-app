@@ -379,3 +379,65 @@ test('daily menu restores category tags, protein groups and filters without losi
   expect(container.querySelector('[aria-label="Quantity for CHICKEN RICE"]').textContent).toBe('0');
   expect(button('Add BERRY OATS')).toBeTruthy();
 });
+
+
+test.each(['review', 'days'])('partial checkout recovers an expired unplaced day from %s after reload', async phase => {
+  jest.useFakeTimers();
+  jest.setSystemTime(new Date('2099-01-01T12:00:00Z'));
+  const failed = new Set();
+  api.post.mockImplementation(async (path, body) => {
+    if ([B, C].some(date => path === '/partner/orders/order-' + date + '/submit') && !failed.has(path)) {
+      failed.add(path);
+      throw new Error('Fixture failed');
+    }
+    return {data: {success: true, data: {_id: body ? 'order-' + body.deliveryDate : 'submitted'}}};
+  });
+  try {
+    await render(); await begin(C);
+    await click('Add Meal A'); await click('Confirm day & continue');
+    await click('Add Meal B'); await click('Confirm day & continue');
+    await click('Add Meal A'); await click('Confirm day & continue');
+    await click('Place all daily orders');
+    expect(button('Change dates')).toBeUndefined();
+    expect(button('Remove Mon 5 Jan')).toBeUndefined();
+    jest.setSystemTime(new Date('2099-01-04T12:00:00Z'));
+    await act(async () => root.unmount()); root = createRoot(container); await render();
+    if (phase === 'days') {
+      await click('Edit Tue 6 Jan');
+      await click('Confirm day & continue');
+      expect(container.textContent).toContain('cutoff has passed');
+      await click('Remove this unplaced day');
+    } else {
+      await click('Retry remaining orders');
+      expect(container.textContent).toContain('cutoff has passed');
+      await click('Remove Tue 6 Jan');
+    }
+    const saved = JSON.parse(localStorage.getItem('partner-daily-plan:fixture'));
+    expect(saved.days.map(day => day.date)).toEqual([A, C]);
+    expect(saved.selectedDates).toEqual([A, C]);
+    expect(saved.days[0]).toMatchObject({placed: true, orderId: 'order-' + A});
+    await act(async () => root.unmount()); root = createRoot(container); await render();
+    await click('Retry remaining orders');
+    expect(container.textContent).toContain('Your daily orders are placed');
+    expect(api.post.mock.calls.filter(([path]) => path === '/partner/orders/order-' + A + '/submit')).toHaveLength(1);
+    expect(api.post.mock.calls.filter(([path]) => path === '/partner/orders/order-' + B + '/submit')).toHaveLength(1);
+    expect(api.post.mock.calls.filter(([path]) => path === '/partner/orders/order-' + C + '/submit')).toHaveLength(2);
+  } finally { jest.useRealTimers(); }
+});
+
+test('removing the final unplaced day finishes the plan while preserving the accepted order', async () => {
+  localStorage.setItem('partner-daily-plan:fixture', JSON.stringify({
+    version: 1, phase: 'review', from: A, to: B, selectedDates: [A, B], index: 1,
+    days: [
+      {date: A, items: {a: {id: 'a', name: 'Meal A', price: 20, quantity: 1}}, window: 'Morning · 5–6am', reviewed: true, placed: true, orderId: 'accepted'},
+      {date: B, items: {}, window: 'Morning · 5–6am', reviewed: true, error: 'Failed'}
+    ]
+  }));
+  await render();
+  await click('Remove Tue 6 Jan');
+  expect(container.textContent).toContain('Your daily orders are placed');
+  expect(container.textContent).toContain('1 order(s) · AED 20.00 total');
+  expect(button('Start another plan')).toBeTruthy();
+  expect(api.post).not.toHaveBeenCalled();
+  expect(localStorage.getItem('partner-daily-plan:fixture')).toBeNull();
+});
