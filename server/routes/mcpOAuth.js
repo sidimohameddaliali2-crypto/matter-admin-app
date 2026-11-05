@@ -41,7 +41,7 @@ export function createMcpOAuthIntegration({ env = process.env, provider = create
   auth.get('/consent.js', (_req, res) => res.type('js').send(consentScript));
   auth.post('/consent', authenticate, async (req, res) => {
     if (req.headers.origin !== urls.origin) return res.status(403).json({ message: 'Invalid connection origin' });
-    const { requestId, csrf, allowWrites } = req.body || {};
+    const { requestId, csrf, allowWrites, allowDeletes } = req.body || {};
     if (typeof requestId !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(requestId)) {
       return res.status(400).json({ message: 'Invalid connection form' });
     }
@@ -49,7 +49,7 @@ export function createMcpOAuthIntegration({ env = process.env, provider = create
     const cookie = String(req.headers.cookie || '').split(';').map(value => value.trim())
       .find(value => value.startsWith(`${cookieName}=`))?.slice(cookieName.length + 1);
     try {
-      const redirect = await provider.approve({ requestId, csrf, cookie, userId: req.user._id, allowWrites });
+      const redirect = await provider.approve({ requestId, csrf, cookie, userId: req.user._id, allowWrites, allowDeletes });
       res.clearCookie(cookieName, { httpOnly: true, secure: urls.origin.startsWith('https:'), sameSite: 'lax', path: '/api/mcp/oauth' });
       res.json({ redirect });
     } catch (error) {

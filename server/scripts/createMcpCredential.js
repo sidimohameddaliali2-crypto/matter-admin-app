@@ -2,8 +2,9 @@ import { randomBytes } from 'node:crypto';
 import { hashMcpToken } from '../services/matterMcpAuth.js';
 
 const userId = process.argv[2];
-if (!/^[a-f0-9]{24}$/i.test(userId || '') || process.argv.slice(3).some(value => value !== '--allow-writes')) {
-  console.error('Usage: node scripts/createMcpCredential.js STAFF_USER_MONGODB_ID [--allow-writes]');
+if (!/^[a-f0-9]{24}$/i.test(userId || '') || process.argv.slice(3).some(value => !['--allow-writes', '--allow-deletes'].includes(value))
+  || (process.argv.includes('--allow-deletes') && !process.argv.includes('--allow-writes'))) {
+  console.error('Usage: node scripts/createMcpCredential.js STAFF_USER_MONGODB_ID [--allow-writes [--allow-deletes]]');
   process.exitCode = 1;
 } else {
   const token = `matter_mcp_${randomBytes(32).toString('base64url')}`;
@@ -11,5 +12,5 @@ if (!/^[a-f0-9]{24}$/i.test(userId || '') || process.argv.slice(3).some(value =>
   console.log(token);
   console.log('\nServer environment (only the hash is stored):');
   console.log('ENABLE_MATTER_MCP=true');
-  console.log(`MATTER_MCP_CREDENTIALS='${JSON.stringify([{ userId, sha256: hashMcpToken(token), allowWrites: process.argv.includes('--allow-writes') }])}'`);
+  console.log(`MATTER_MCP_CREDENTIALS='${JSON.stringify([{ userId, sha256: hashMcpToken(token), allowWrites: process.argv.includes('--allow-writes'), allowDeletes: process.argv.includes('--allow-deletes') }])}'`);
 }

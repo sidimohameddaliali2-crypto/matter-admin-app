@@ -5,7 +5,7 @@ import { hashMcpToken, mcpStaffContext } from './matterMcpAuth.js';
 import { createMcpOAuthStore } from './matterMcpOAuthStore.js';
 import { renderMcpConsent } from './matterMcpConsent.js';
 
-export const MCP_OAUTH_SCOPES = ['deliveries:read', 'deliveries:write'];
+export const MCP_OAUTH_SCOPES = ['deliveries:read', 'deliveries:write', 'deliveries:delete'];
 const opaque = prefix => `${prefix}${randomBytes(32).toString('base64url')}`;
 const validOpaque = value => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value);
 const ACCESS_MS = 15 * 60 * 1000;
@@ -36,7 +36,8 @@ export function createMatterOAuthProvider({ env = process.env, store = createMcp
     if (resource && String(resource) !== urls.resource) throw new InvalidRequestError('Invalid MCP resource');
   };
   const validateScopes = scopes => {
-    if (!scopes.includes('deliveries:read') || scopes.some(scope => !MCP_OAUTH_SCOPES.includes(scope))) {
+    if (!scopes.includes('deliveries:read') || scopes.some(scope => !MCP_OAUTH_SCOPES.includes(scope))
+      || (scopes.includes('deliveries:delete') && !scopes.includes('deliveries:write'))) {
       throw new InvalidScopeError('Unsupported MATTER scopes');
     }
     return [...new Set(scopes)];
@@ -97,7 +98,7 @@ export function createMatterOAuthProvider({ env = process.env, store = createMcp
       });
       renderMcpConsent({ requestId, csrf, clientName: client.client_name, redirectOrigin: new URL(params.redirectUri).origin, scopes, res });
     },
-    async approve({ requestId, csrf, cookie, userId, allowWrites }) {
+    async approve({ requestId, csrf, cookie, userId, allowWrites, allowDeletes }) {
       if (![requestId, csrf, cookie].every(validOpaque)) throw new InvalidRequestError('Invalid connection form');
       const key = hashMcpToken(requestId);
       const pending = await live('pending', key);
@@ -105,8 +106,11 @@ export function createMatterOAuthProvider({ env = process.env, store = createMcp
         throw new InvalidRequestError('Invalid connection form. Start again from ChatGPT.');
       }
       const context = await contextFor(userId);
-      const scopes = pending.scopes.filter(scope => scope !== 'deliveries:write' || allowWrites === true);
+      if (allowDeletes === true && allowWrites !== true) throw new InvalidScopeError('Deletion requires editing access');
+      const scopes = pending.scopes.filter(scope => (scope !== 'deliveries:write' || allowWrites === true)
+        && (scope !== 'deliveries:delete' || allowDeletes === true));
       if (scopes.includes('deliveries:write') && !context.allowWrites) throw new InvalidScopeError('Editing is not enabled for this staff account');
+      if (scopes.includes('deliveries:delete') && !context.allowDeletes) throw new InvalidScopeError('Deletion is not enabled for this admin account');
       if (!await clientsStore.getClient(pending.clientId)) throw new InvalidGrantError('OAuth client is unavailable');
       if (!await store.take('pending', key)) throw new InvalidGrantError('Connection form already used');
       const code = opaque('');
@@ -131,6 +135,7 @@ export function createMatterOAuthProvider({ env = process.env, store = createMcp
       }
       const context = await contextFor(grant.userId);
       if (grant.scopes.includes('deliveries:write') && !context.allowWrites) throw new InvalidGrantError('Editing permission was removed');
+      if (grant.scopes.includes('deliveries:delete') && !context.allowDeletes) throw new InvalidGrantError('Deletion permission was removed');
       if (!await store.take('code', key)) throw new InvalidGrantError('Authorization code already used');
       const pair = tokenPair(client.client_id, grant.userId, grant.scopes);
       await store.put('grant', opaque(''), pair.payload, new Date(pair.payload.deadline));
@@ -149,7 +154,8 @@ export function createMatterOAuthProvider({ env = process.env, store = createMcp
       const context = await contextFor(grant.payload.userId);
       const requested = validateScopes(scopes || grant.payload.scopes);
       if (requested.some(scope => !grant.payload.scopes.includes(scope))) throw new InvalidScopeError('Cannot expand granted scopes');
-      const granted = requested.filter(scope => scope !== 'deliveries:write' || context.allowWrites);
+      const granted = requested.filter(scope => (scope !== 'deliveries:write' || context.allowWrites)
+        && (scope !== 'deliveries:delete' || (context.allowWrites && context.allowDeletes)));
       const pair = tokenPair(client.client_id, grant.payload.userId, granted, grant.payload.deadline);
       pair.payload.usedRefreshHashes = [...(grant.payload.usedRefreshHashes || []), hash];
       if (!await store.rotate(grant.key, hash, pair.payload, new Date(pair.payload.deadline))) {
@@ -169,6 +175,8 @@ export function createMatterOAuthProvider({ env = process.env, store = createMcp
       try { context = await contextFor(grant.payload.userId); }
       catch { throw new InvalidTokenError('Staff MCP access was removed'); }
       return { ...context, allowWrites: context.allowWrites && grant.payload.scopes.includes('deliveries:write'),
+        allowDeletes: context.allowDeletes && context.allowWrites && grant.payload.scopes.includes('deliveries:delete')
+          && grant.payload.scopes.includes('deliveries:write'),
         clientId: grant.payload.clientId, scopes: grant.payload.scopes, resource: new URL(urls.resource),
         expiresAt: Math.floor(grant.payload.accessExpiresAt / 1000) };
     },

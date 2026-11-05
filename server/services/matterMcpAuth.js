@@ -13,7 +13,8 @@ export function parseMcpCredentials(credentialsJson) {
     for (const credential of credentials) {
       if (!credential || !/^[a-f0-9]{64}$/.test(credential.sha256)
         || !/^[a-f0-9]{24}$/i.test(credential.userId)
-        || (credential.allowWrites !== undefined && typeof credential.allowWrites !== 'boolean')) {
+        || (credential.allowWrites !== undefined && typeof credential.allowWrites !== 'boolean')
+        || (credential.allowDeletes !== undefined && typeof credential.allowDeletes !== 'boolean')) {
         throw new Error();
       }
     }
@@ -32,7 +33,9 @@ export async function mcpStaffContext(userId, { credentialsJson, findUser }) {
   if (!['super_admin', 'admin', 'manager', 'dispatcher'].includes(user.role) || !permissions.deliveries) {
     throw Object.assign(new Error('This staff account cannot access delivery tools'), { statusCode: 403 });
   }
-  return { user, permissions, allowWrites: entries.some(entry => entry.allowWrites === true) };
+  return { user, permissions, allowWrites: entries.some(entry => entry.allowWrites === true),
+    allowDeletes: ['admin', 'super_admin'].includes(user.role)
+      && entries.some(entry => entry.allowWrites === true && entry.allowDeletes === true) };
 }
 
 export async function authenticateMcpCredential(authorization, { credentialsJson, findUser }) {
@@ -45,5 +48,6 @@ export async function authenticateMcpCredential(authorization, { credentialsJson
   const credential = credentials.find(entry => timingSafeEqual(digest, Buffer.from(entry.sha256, 'hex')));
   if (!credential) throw unauthorized();
   const context = await mcpStaffContext(credential.userId, { credentialsJson, findUser });
-  return { ...context, allowWrites: credential.allowWrites === true };
+  return { ...context, allowWrites: credential.allowWrites === true,
+    allowDeletes: context.allowDeletes && credential.allowWrites === true && credential.allowDeletes === true };
 }

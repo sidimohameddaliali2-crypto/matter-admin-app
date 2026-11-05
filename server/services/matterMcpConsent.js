@@ -20,7 +20,8 @@ form.addEventListener('submit', async event => {
       method: 'POST', credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + account.data.token },
       body: JSON.stringify({ requestId: form.elements.requestId.value, csrf: form.elements.csrf.value,
-        allowWrites: form.elements.allowWrites?.checked === true })
+        allowWrites: form.elements.allowWrites?.checked === true,
+        allowDeletes: form.elements.allowDeletes?.checked === true })
     });
     const outcome = await result.json();
     if (!result.ok) throw new Error(outcome.message || 'Connection failed. Start again from ChatGPT.');
@@ -52,6 +53,7 @@ export function renderMcpConsent({ requestId, csrf, clientName, redirectOrigin, 
 <form method="post" action="/api/mcp/oauth/consent"><input type="hidden" name="requestId" value="${escapeHtml(requestId)}">
 <input type="hidden" name="csrf" value="${escapeHtml(csrf)}">
 ${scopes.includes('deliveries:write') ? '<label><input type="checkbox" name="allowWrites" checked> Also allow creating deliveries and editing delivery details</label>' : ''}
+${scopes.includes('deliveries:delete') ? '<label><input type="checkbox" name="allowDeletes"> Also allow permanently deleting individual deliveries (admin only)</label>' : ''}
 <label for="email">MATTER staff email</label><input id="email" name="email" type="email" autocomplete="username" required>
 <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password" required>
 <p role="alert"></p><button type="submit">Sign in and connect</button></form>
