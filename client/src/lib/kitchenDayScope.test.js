@@ -50,3 +50,40 @@ test('the day view removes other dates and their warnings without changing saved
   expect(JSON.stringify(entry)).toBe(before);
   expect(kitchenCustomerDay(entry, '2026-10-30').showMissingPlaceholder).toBe(true);
 });
+
+test.each([
+  ['one of two meals', [{ mealType: 'main' }], true],
+  ['snack only', [{ mealType: 'snack', quantity: 2 }], true],
+  ['one meal plus snack', [{ mealType: 'main' }, { mealType: 'snack' }], true],
+  ['two portions of the same meal', [{ mealType: 'main', quantity: 2 }], false],
+  ['breakfast replaces a standard meal slot', [{ mealType: 'main' }, { mealType: 'breakfast' }], false],
+])('Missing uses daily portions: %s', (_, meals, expected) => {
+  const date = '2026-11-04';
+  const entry = { selectedMeals: meals.map(meal => ({ ...meal, date })) };
+  const before = JSON.stringify(entry);
+  const result = kitchenCustomerDay(entry, date, { plan_name: 'Custom', meal_frequency: 2 });
+  expect(result.missingSelection).toBe(expected);
+  expect(result.showMissingPlaceholder).toBe(false);
+  expect(result.needsAttention).toBe(expected);
+  expect(JSON.stringify(entry)).toBe(before);
+});
+
+test.each(['2026-11-02', '2026-11-04'])('Core double-day mains and additional breakfast follow export entitlements on %s', date => {
+  const subscription = { plan_name: 'Matter Core', meal_frequency: 1, breakfast_included: true,
+    active_delivery_dates: [date], double_delivery_dates: [date] };
+  const entry = { selectedMeals: [{ date, mealType: 'main' }, { date, mealType: 'breakfast' }] };
+  expect(kitchenCustomerDay(entry, date, subscription).missingSelectionReason).toBe('1 of 2 main meal portion(s) selected.');
+  const complete = { ...entry, selectedMeals: [{ date, mealType: 'main', quantity: 2 }, { date, mealType: 'breakfast' }] };
+  expect(kitchenCustomerDay(complete, date, subscription).missingSelection).toBe(false);
+  expect(kitchenCustomerDay({ ...complete, selectedMeals: complete.selectedMeals.slice(0, 1) }, date, subscription).missingSelectionReason)
+    .toContain('included breakfast missing');
+  expect(kitchenCustomerDay(entry, date, { ...subscription, double_delivery_dates: [] }).missingSelection).toBe(false);
+});
+
+test('other dates do not fill today’s missing portions and a refreshed complete roster clears an old flag', () => {
+  const date = '2026-11-04';
+  const sub = { meal_frequency: 2 };
+  const entry = { missingSelection: true, selectedMeals: [{ date, mealType: 'main' }, { date: '2026-11-05', mealType: 'main' }] };
+  expect(kitchenCustomerDay(entry, date, sub).missingSelection).toBe(true);
+  expect(kitchenCustomerDay({ ...entry, selectedMeals: [{ date, mealType: 'main', quantity: 2 }] }, date, sub).missingSelection).toBe(false);
+});

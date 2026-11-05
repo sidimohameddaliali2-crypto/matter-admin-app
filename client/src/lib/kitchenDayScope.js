@@ -1,5 +1,5 @@
 import { getDateKey } from './kitchenData';
-import { hasKitchenDeliveryOnDate } from './kitchenSnapshot';
+import { hasKitchenDeliveryOnDate, requiredKitchenMeals } from './kitchenSnapshot';
 import { formatBusinessDateInput } from '../utils/businessTime';
 import { kitchenMealWarnings } from '../utils/kitchenIntegrity';
 
@@ -47,16 +47,28 @@ export const visibleKitchenCustomer = (entry, roster, date) => {
 
 // Project AFTER calculating the full saved record. This preserves per-day macro
 // rules, Core double days and stable override keys while displaying one day only.
-export const kitchenCustomerDay = (entry, date) => {
+export const kitchenCustomerDay = (entry, date, subscription = null) => {
   const selectedMeals = (entry.selectedMeals || []).filter(meal => getDateKey(meal.date) === date);
   const incomplete = entry.calculationStatus === 'incomplete';
-  const missing = selectedMeals.length === 0;
+  const empty = selectedMeals.length === 0;
+  // Visibility is read-only, including before the selection deadline. Count
+  // portions against the same roster entitlement used by export validation.
+  const core = String(subscription?.plan_name || '').trim().toLowerCase() === 'matter core';
+  const portions = selectedMeals.filter(meal => core ? meal.mealType === 'main' : meal.mealType !== 'snack')
+    .reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
+  const required = subscription && !entry.partner ? requiredKitchenMeals(subscription, entry, date) : null;
+  const missingBreakfast = required !== null && core && subscription.breakfast_included === true
+    && !selectedMeals.some(meal => meal.mealType === 'breakfast');
+  const missing = required !== null ? portions < required || missingBreakfast : empty || !!entry.missingSelection;
+  const missingSelectionReason = required !== null && missing
+    ? `${portions} of ${required} ${core ? 'main meal' : 'meal'} portion(s) selected${missingBreakfast ? '; included breakfast missing' : ''}.`
+    : '';
   return { ...entry, selectedMeals,
     mealsByDay: (entry.mealsByDay || []).filter(day => day.dateKey === date),
     totalWeight: incomplete ? null : selectedMeals.reduce((sum, meal) => sum + Number(meal.weight || 0) * (Number(meal.quantity) || 1), 0),
     totalCalories: incomplete ? null : selectedMeals.reduce((sum, meal) => sum + Number(meal.macros?.calories || 0) * (Number(meal.quantity) || 1), 0),
     mealCount: selectedMeals.filter(meal => meal.category === 'meal').reduce((sum, meal) => sum + (Number(meal.quantity) || 1), 0),
-    showMissingPlaceholder: missing, missingSelection: missing || entry.missingSelection,
+    showMissingPlaceholder: empty, missingSelection: missing, missingSelectionReason,
     missingSelectionDate: missing ? date : entry.missingSelectionDate,
     needsAttention: missing || incomplete || selectedMeals.some(meal => kitchenMealWarnings(meal).length > 0),
     hasMacroShortfall: selectedMeals.some(meal => meal.flags?.macroShortfall),
