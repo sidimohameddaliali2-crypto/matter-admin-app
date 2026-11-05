@@ -30,13 +30,11 @@ const click = label => act(async () => {
   button(label).click();
 });
 const begin = async end => {
-  await act(async () => {
-    const el = container.querySelector('[aria-label="Last delivery date"]');
-    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(el, end);
-    el.dispatchEvent(new Event('change', {
-      bubbles: true
-    }));
-  });
+  for (let time = Date.parse(A + 'T00:00:00Z'); time <= Date.parse(end + 'T00:00:00Z'); time += 86400000) {
+    const date = new Date(time).toISOString().slice(0, 10);
+    const cell = button('Delivery ' + date);
+    if (cell && !cell.disabled && cell.getAttribute('aria-pressed') !== 'true') await click('Delivery ' + date);
+  }
   await click('Start daily orders');
 };
 beforeEach(() => {
@@ -242,4 +240,35 @@ test('a selected dish removed from the menu can be explicitly removed when revis
   expect(container.textContent).toContain('Meal A is no longer available');
   await click('Remove unavailable Meal A'); await click('Add Replacement'); await click('Confirm day & continue');
   expect(container.textContent).toContain('Day 2 of 2');
+});
+
+test('calendar preserves individual date selection and requires review only for selected days', async () => {
+  await render();
+  expect(button('Delivery ' + A).getAttribute('aria-pressed')).toBe('true');
+  expect(button('Delivery 2099-01-04').disabled).toBe(true);
+  expect(button('Delivery 2099-01-11').disabled).toBe(true);
+  await click('Delivery ' + C);
+  await click('Start daily orders');
+  expect(container.textContent).toContain('Day 1 of 2');
+  await click('Add Meal A'); await click('Confirm day & continue');
+  expect(container.textContent).toContain('Day 2 of 2');
+  expect(api.get.mock.calls.some(([path]) => path.endsWith('date=' + B))).toBe(false);
+  await click('Add Meal A'); await click('Confirm day & continue');
+  await click('Place all daily orders');
+  expect(api.post.mock.calls.filter(([p]) => p === '/partner/orders').map(([, b]) => b.deliveryDate)).toEqual([A, C]);
+});
+
+test('calendar supports month navigation, toggling and existing order dots', async () => {
+  await render({orders: [{_id: 'old', deliveryDate: A, status: 'submitted'}]});
+  expect(button('Delivery ' + A).querySelector('[aria-label="Existing order"]')).toBeTruthy();
+  await click('Delivery ' + A);
+  await click('Start daily orders');
+  expect(container.textContent).toContain('Choose at least one delivery day');
+  await click('Next month');
+  expect(container.textContent).toContain('February 2099');
+  await click('Delivery 2099-02-02');
+  await click('Previous month');
+  expect(container.textContent).toContain('January 2099');
+  await click('Next month');
+  expect(button('Delivery 2099-02-02').getAttribute('aria-pressed')).toBe('true');
 });
