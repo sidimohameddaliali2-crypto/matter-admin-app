@@ -96,12 +96,15 @@ test('daily carts are separate, every day must be confirmed, and one checkout pl
   }]]);
   expect(container.textContent).toContain('Your daily orders are placed');
 });
-test('empty dates require an explicit skip', async () => {
+test('empty dates cannot be skipped and can be removed using Change dates', async () => {
   await render();
   await begin(B);
   await click('Confirm day & continue');
   expect(container.textContent).toContain('Add items for this day');
-  await click('Skip this day & continue');
+  expect(button('Skip this day & continue')).toBeUndefined();
+  await click('Change dates');
+  await click('Delivery ' + A);
+  await click('Start daily orders');
   await click('Add Meal B');
   await click('Confirm day & continue');
   await click('Place all daily orders');
@@ -129,13 +132,13 @@ test('going back preserves the previous day cart', async () => {
   await click('Previous day');
   expect(container.querySelector('[aria-label="Quantity for Meal A"]').textContent).toBe('1');
 });
-test('failed menu loading blocks confirmation and skipping', async () => {
+test('failed menu loading blocks confirmation and offers no skip button', async () => {
   api.get.mockRejectedValue(new Error('Fixture unavailable'));
   await render();
   await begin(B);
   expect(container.textContent).toContain('Fixture unavailable');
   expect(button('Confirm day & continue').disabled).toBe(true);
-  expect(button('Skip this day & continue').disabled).toBe(true);
+  expect(button('Skip this day & continue')).toBeUndefined();
 });
 test('partial checkout retries only the remaining date', async () => {
   let failed = false;
@@ -340,4 +343,152 @@ test('a valid legacy range retains all selected delivery dates', async () => {
   }));
   await render();
   for (const date of [A, B, C]) expect(button('Delivery ' + date).getAttribute('aria-pressed')).toBe('true');
+});
+
+
+test('daily menu restores category tags, protein groups and filters without losing cart quantities', async () => {
+  const dishes = [
+    {_id: 'chicken', name: 'CHICKEN RICE', mealType: 'main', category: 'Chicken', price: 28},
+    {_id: 'beef', name: 'BEEF BOWL', mealType: 'main', category: 'Beef', price: 32},
+    {_id: 'fish', name: 'FISH RICE', mealType: 'main', category: 'Fish', price: 32},
+    {_id: 'oats', name: 'BERRY OATS', mealType: 'oats', description: 'Fresh berries', price: 15},
+    {_id: 'unknown', name: 'EXTRA DISH', price: null}
+  ];
+  api.get.mockImplementation(async path => ({data: {success: true, data: path === '/partner/orders' ? [] : dishes}}));
+  await render(); await begin(B);
+  expect(container.querySelector('h2').style.fontFamily).toContain('Archivo Black');
+  await click('Morning · 7–10am');
+  expect(button('Morning · 7–10am').getAttribute('aria-pressed')).toBe('true');
+  expect(JSON.parse(localStorage.getItem('partner-daily-plan:fixture')).days[0].window).toBe('Morning · 7–10am');
+  for (const group of ['Main', 'Oats', 'Other']) expect(container.querySelector('[aria-label="' + group + ' meals"]')).toBeTruthy();
+  for (const protein of ['Chicken', 'Beef', 'Fish']) expect([...container.querySelectorAll('h5')].some(h => h.textContent === protein)).toBe(true);
+  expect(container.textContent).toContain('Chicken Rice');
+  expect(container.textContent).toContain('Fresh berries');
+  expect(container.textContent).toContain('Price TBD');
+  expect(button('Add EXTRA DISH').disabled).toBe(true);
+  await click('Add CHICKEN RICE');
+  await click('Filter Oats');
+  expect(button('Add CHICKEN RICE')).toBeUndefined();
+  expect(button('Add BERRY OATS')).toBeTruthy();
+  await click('Add BERRY OATS');
+  await click('Filter Main');
+  expect(container.querySelector('[aria-label="Quantity for CHICKEN RICE"]').textContent).toBe('1');
+  expect(container.textContent).toContain('Day total: AED 43.00');
+  await click('Confirm day & continue');
+  expect(button('Filter All').getAttribute('aria-pressed')).toBe('true');
+  expect(container.querySelector('[aria-label="Quantity for CHICKEN RICE"]').textContent).toBe('0');
+  expect(button('Add BERRY OATS')).toBeTruthy();
+});
+
+
+test.each(['review', 'days'])('partial checkout recovers an expired unplaced day from %s after reload', async phase => {
+  jest.useFakeTimers();
+  jest.setSystemTime(new Date('2099-01-01T12:00:00Z'));
+  const failed = new Set();
+  api.post.mockImplementation(async (path, body) => {
+    if ([B, C].some(date => path === '/partner/orders/order-' + date + '/submit') && !failed.has(path)) {
+      failed.add(path);
+      throw new Error('Fixture failed');
+    }
+    return {data: {success: true, data: {_id: body ? 'order-' + body.deliveryDate : 'submitted'}}};
+  });
+  try {
+    await render(); await begin(C);
+    await click('Add Meal A'); await click('Confirm day & continue');
+    await click('Add Meal B'); await click('Confirm day & continue');
+    await click('Add Meal A'); await click('Confirm day & continue');
+    await click('Place all daily orders');
+    expect(button('Change dates')).toBeUndefined();
+    expect(button('Remove Mon 5 Jan')).toBeUndefined();
+    jest.setSystemTime(new Date('2099-01-04T12:00:00Z'));
+    await act(async () => root.unmount()); root = createRoot(container); await render();
+    if (phase === 'days') {
+      await click('Edit Tue 6 Jan');
+      await click('Confirm day & continue');
+      expect(container.textContent).toContain('cutoff has passed');
+      await click('Remove this unplaced day');
+    } else {
+      await click('Retry remaining orders');
+      expect(container.textContent).toContain('cutoff has passed');
+      await click('Remove Tue 6 Jan');
+    }
+    const saved = JSON.parse(localStorage.getItem('partner-daily-plan:fixture'));
+    expect(saved.days.map(day => day.date)).toEqual([A, C]);
+    expect(saved.selectedDates).toEqual([A, C]);
+    expect(saved.days[0]).toMatchObject({placed: true, orderId: 'order-' + A});
+    await act(async () => root.unmount()); root = createRoot(container); await render();
+    await click('Retry remaining orders');
+    expect(container.textContent).toContain('Your daily orders are placed');
+    expect(api.post.mock.calls.filter(([path]) => path === '/partner/orders/order-' + A + '/submit')).toHaveLength(1);
+    expect(api.post.mock.calls.filter(([path]) => path === '/partner/orders/order-' + B + '/submit')).toHaveLength(1);
+    expect(api.post.mock.calls.filter(([path]) => path === '/partner/orders/order-' + C + '/submit')).toHaveLength(2);
+  } finally { jest.useRealTimers(); }
+});
+
+test('removing the final unplaced day finishes the plan while preserving the accepted order', async () => {
+  localStorage.setItem('partner-daily-plan:fixture', JSON.stringify({
+    version: 1, phase: 'review', from: A, to: B, selectedDates: [A, B], index: 1,
+    days: [
+      {date: A, items: {a: {id: 'a', name: 'Meal A', price: 20, quantity: 1}}, window: 'Morning · 5–6am', reviewed: true, placed: true, orderId: 'accepted'},
+      {date: B, items: {}, window: 'Morning · 5–6am', reviewed: true, error: 'Failed'}
+    ]
+  }));
+  await render();
+  await click('Remove Tue 6 Jan');
+  expect(container.textContent).toContain('Your daily orders are placed');
+  expect(container.textContent).toContain('1 order(s) · AED 20.00 total');
+  expect(button('Start another plan')).toBeTruthy();
+  expect(api.post).not.toHaveBeenCalled();
+  expect(localStorage.getItem('partner-daily-plan:fixture')).toBeNull();
+});
+
+
+test.each(['submitted', 'locked'])('removal retains an accepted %s order after its submission response is lost', async status => {
+  let accepted = false;
+  api.get.mockImplementation(async path => ({data: {success: true, data:
+    path === '/partner/orders' ? [] : path.startsWith('/partner/orders/') ? {
+      status: accepted ? status : 'draft', deliveryTime: 'Morning · 5–6am',
+      lines: [{menuItem: {_id: 'b'}, quantity: 1}]
+    } : menu(path.split('=')[1])
+  }}));
+  api.post.mockImplementation(async (path, body) => {
+    if (path === '/partner/orders/order-' + B + '/submit') {
+      accepted = true;
+      throw new Error('Response lost after acceptance');
+    }
+    return {data: {success: true, data: {_id: body ? 'order-' + body.deliveryDate : 'submitted'}}};
+  });
+  await render(); await begin(B);
+  await click('Add Meal A'); await click('Confirm day & continue');
+  await click('Add Meal B'); await click('Confirm day & continue');
+  await click('Place all daily orders');
+  const writes = api.post.mock.calls.length;
+  await act(async () => root.unmount()); root = createRoot(container); await render();
+  await click('Remove Tue 6 Jan');
+  expect(api.get).toHaveBeenCalledWith('/partner/orders/order-' + B);
+  expect(container.textContent).toContain('Your daily orders are placed');
+  expect(container.textContent).toContain('2 order(s) · AED 50.00 total');
+  expect(container.textContent).toContain('Tue 6 Jan · Morning · 5–6am · AED 30.00');
+  expect(api.post).toHaveBeenCalledTimes(writes);
+});
+
+test.each(['offline', 'unsuccessful', 'unknown', 'different accepted items'])('removal preserves recovery state when verification is %s', async scenario => {
+  localStorage.setItem('partner-daily-plan:fixture', JSON.stringify({
+    version: 1, phase: 'review', from: A, to: B, selectedDates: [A, B], index: 1,
+    days: [
+      {date: A, items: {a: {id: 'a', name: 'Meal A', price: 20, quantity: 1}}, window: 'Morning · 5–6am', reviewed: true, placed: true, orderId: 'accepted'},
+      {date: B, items: {b: {id: 'b', name: 'Meal B', price: 30, quantity: 1}}, window: 'Morning · 5–6am', reviewed: true, orderId: 'uncertain'}
+    ]
+  }));
+  api.get.mockImplementation(async () => {
+    if (scenario === 'offline') throw new Error('Offline');
+    if (scenario === 'unsuccessful') return {data: {success: false}};
+    return {data: {success: true, data: {status: scenario === 'unknown' ? 'unknown' : 'submitted', deliveryTime: 'Morning · 5–6am', lines: [{menuItem: 'b', quantity: 2}]}}};
+  });
+  await render(); await click('Remove Tue 6 Jan');
+  expect(container.textContent).not.toContain('Your daily orders are placed');
+  expect(container.textContent).toContain('Combined total AED 50.00');
+  expect(container.querySelector('[role="alert"]')).toBeTruthy();
+  expect(JSON.parse(localStorage.getItem('partner-daily-plan:fixture')).days.map(day => day.orderId)).toEqual(['accepted', 'uncertain']);
+  expect(api.post).not.toHaveBeenCalled();
 });
