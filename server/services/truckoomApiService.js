@@ -1,3 +1,4 @@
+import { CUSTOMER_RADIUS_METRES } from './truckoomVisitRules.js';
 import axios from 'axios';
 import dotenv from 'dotenv';
 import { cacheGet, cacheSet } from '../config/cache.js';
@@ -83,7 +84,7 @@ class TruckoomApiService {
     return data.filter(f => f['Company Name'] === this.companyName);
   }
 
-  async createCustomerGeofence(name, pin, radiusMetres = 50) {
+  async createCustomerGeofence(name, pin, radiusMetres = CUSTOMER_RADIUS_METRES) {
     // Owner (2026-10-30): omit group assignment, like the kitchen geofence.
     const data = await this.geofenceRequest('createGeofence', {
       project_id: '49', geofence_type: 'circle', geo_shape: 'circle',

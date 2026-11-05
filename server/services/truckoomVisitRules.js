@@ -1,6 +1,6 @@
 // Owner (2026-10-23): compare the photo shutter time with the tracker visit,
-// using a 50 m circle around the customer's saved pin. Never use upload time.
-export const CUSTOMER_RADIUS_METRES = 50;
+// using a 60 m circle around the customer's saved pin. Never use upload time.
+export const CUSTOMER_RADIUS_METRES = 60;
 
 export function parseTruckoomAlertTime(value) {
   const m = String(value || '').match(/^(\d{2})-(\d{2})-(\d{4}) (\d{2}):(\d{2}):(\d{2})$/);

@@ -1,3 +1,4 @@
+import { CUSTOMER_RADIUS_METRES } from '../constants/customerGeofence';
 import React, { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { Circle, GoogleMap, InfoWindow, OverlayView, Polyline, useLoadScript } from '@react-google-maps/api';
 import { RefreshCw, Truck, AlertTriangle } from 'lucide-react';
@@ -790,7 +791,7 @@ const LiveTracking = () => {
               {selectedDriver && route.pinned.filter(s => s._id === activeStopId && s.type === 'Delivery').map(s => (
                 <Circle key={`fence-${s._id}`}
                   center={s.trackerVisit?.geofenceId ? { lat: s.trackerVisit.lat, lng: s.trackerVisit.lng } : s.pin}
-                  radius={s.trackerVisit?.radiusMetres || 50}
+                  radius={s.trackerVisit?.radiusMetres || CUSTOMER_RADIUS_METRES}
                   options={{ fillColor: '#6366f1', fillOpacity: 0.12, strokeColor: '#6366f1', strokeWeight: 2, clickable: false }} />
               ))}
               {selectedDriver && selectedDriverSpot && (

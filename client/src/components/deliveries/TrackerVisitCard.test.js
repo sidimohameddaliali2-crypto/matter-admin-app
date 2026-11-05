@@ -63,3 +63,9 @@ test('an unavailable alert check is distinct from a successful check returning n
  expect(container.textContent).toContain('Truckoom alert verification could not be completed');
  expect(container.textContent).not.toContain('Truckoom returned no matching alert');
 });
+
+
+test('a new visit without a saved radius displays the 60 m default',async()=>{
+ await act(async()=>root.render(<TrackerVisitCard delivery={{_id:'new-radius',status:'assigned',trackerVisit:{status:'awaiting_events'}}}/>));
+ expect(container.textContent).toContain('Customer radius: 60 m');
+});
