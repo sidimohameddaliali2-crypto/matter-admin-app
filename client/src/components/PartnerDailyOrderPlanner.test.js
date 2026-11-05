@@ -96,12 +96,15 @@ test('daily carts are separate, every day must be confirmed, and one checkout pl
   }]]);
   expect(container.textContent).toContain('Your daily orders are placed');
 });
-test('empty dates require an explicit skip', async () => {
+test('empty dates cannot be skipped and can be removed using Change dates', async () => {
   await render();
   await begin(B);
   await click('Confirm day & continue');
   expect(container.textContent).toContain('Add items for this day');
-  await click('Skip this day & continue');
+  expect(button('Skip this day & continue')).toBeUndefined();
+  await click('Change dates');
+  await click('Delivery ' + A);
+  await click('Start daily orders');
   await click('Add Meal B');
   await click('Confirm day & continue');
   await click('Place all daily orders');
@@ -129,13 +132,13 @@ test('going back preserves the previous day cart', async () => {
   await click('Previous day');
   expect(container.querySelector('[aria-label="Quantity for Meal A"]').textContent).toBe('1');
 });
-test('failed menu loading blocks confirmation and skipping', async () => {
+test('failed menu loading blocks confirmation and offers no skip button', async () => {
   api.get.mockRejectedValue(new Error('Fixture unavailable'));
   await render();
   await begin(B);
   expect(container.textContent).toContain('Fixture unavailable');
   expect(button('Confirm day & continue').disabled).toBe(true);
-  expect(button('Skip this day & continue').disabled).toBe(true);
+  expect(button('Skip this day & continue')).toBeUndefined();
 });
 test('partial checkout retries only the remaining date', async () => {
   let failed = false;

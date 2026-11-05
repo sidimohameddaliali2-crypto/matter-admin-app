@@ -25,7 +25,7 @@ export const makePlanDay = date => ({ date, items: {}, window: DELIVERY_WINDOWS[
 export function assertDayReady(day, minimum) {
   if (day.placed || day.skipped) return;
   if (dateClosed(day.date)) throw new Error(day.date + ': the ordering cutoff has passed.');
-  if (!dayQuantity(day)) throw new Error('Add items for this day, or explicitly skip it.');
+  if (!dayQuantity(day)) throw new Error('Add items for this day before continuing.');
   if (dayTotal(day) < minimum) throw new Error('Minimum per delivery is AED ' + Number(minimum).toFixed(2) + '.');
 }
 

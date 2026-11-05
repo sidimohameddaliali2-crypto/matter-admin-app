@@ -174,14 +174,12 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
 
   return <section aria-label="Daily order planner" className="space-y-4 text-[#ede5de]" style={{ fontFamily: "'Archivo', system-ui, sans-serif" }}>
     <h2 style={heading} className="text-2xl font-bold">Plan daily orders</h2>
-    <p className="text-sm text-[#a8ccf5]">Choose your dates, review every delivery day, then check out once. Each day has its own items and delivery window. Sundays have no deliveries.</p>
     {plan.phase !== 'dates' && plan.phase !== 'complete' && !plan.days.some(d => d.placed) && <button type="button" className={secondary} disabled={placing} onClick={() => { setError(''); setPlan(p => ({ ...p, phase: 'dates' })); }}>Change dates</button>}
     {error && <p role="alert" className="rounded-xl border border-[#ff8a66] p-3 text-sm text-[#ff8a66]">{error}</p>}
     {plan.phase === 'dates' && <div className={box + ' space-y-4'}>
       <PartnerOrderCalendar earliestDate={earliestDate} orders={orders}
         selectedDates={plan.selectedDates}
         onChange={selectedDates => { setError(''); setPlan(p => ({ ...p, selectedDates })); }} />
-      <p className="text-sm text-[#a8ccf5]">Select your delivery days on the calendar, up to 90 calendar days apart. Confirm an order or explicitly skip each selected day.</p>
       <button type="button" className={primary} onClick={start}>Start daily orders</button>
     </div>}
     {plan.days.length > 0 && ['days', 'review'].includes(plan.phase) && <div className="flex flex-wrap gap-2" aria-label="Daily progress">{plan.days.map((d, i) => <span key={d.date} className={'rounded-full px-3 py-1 text-xs ' + (d.reviewed ? 'bg-[#bcf679] text-[#051747]' : 'bg-[#12275e] text-[#a8ccf5]')}>{i + 1}. {fmt(d.date)} · {d.placed ? 'Placed' : d.skipped ? 'Skipped' : d.reviewed ? 'Reviewed' : 'To review'}</span>)}</div>}
@@ -201,7 +199,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
       {!existing && <>
         {!menuReady && !menuState.error && <p role="status">Loading this day’s menu…</p>}
         {menuState.date === active.date && menuState.error && <div role="alert"><p>{menuState.error}</p><button type="button" className={secondary} onClick={() => setReload(n => n + 1)}>Retry menu</button></div>}
-        {menuReady && !currentMenu.length && <p>No items are available for this day. You can explicitly skip it.</p>}
+        {menuReady && !currentMenu.length && <p>No items are available for this day. Use Change dates to choose another delivery day.</p>}
         {menuReady && Object.values(active.items).filter(item => !currentMenu.some(m => m._id === item.id)).map(item => <div key={item.id} className={box}>
           <p className="text-sm text-[#ff8a66]">{item.name} is no longer available for this day.</p>
           <button type="button" className={secondary} onClick={() => changeQuantity({ _id: item.id }, -item.quantity)}>Remove unavailable {item.name}</button>
@@ -211,7 +209,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
       <div className="flex flex-wrap gap-3">
         {previousIndex >= 0 && <button type="button" className={secondary} onClick={() => editDay(previousIndex)}>Previous day</button>}
         {!existing && <button type="button" className={primary} disabled={!menuReady || active.placed} onClick={() => confirmDay(false)}>Confirm day &amp; continue</button>}
-        <button type="button" className={secondary} disabled={active.placed || (!existing && !menuReady)} onClick={() => confirmDay(true)}>{existing ? 'Keep existing order & continue' : 'Skip this day & continue'}</button>
+        {existing && <button type="button" className={secondary} disabled={active.placed} onClick={() => confirmDay(true)}>Keep existing order &amp; continue</button>}
       </div>
       <p className="text-xs text-[#a8ccf5]">Nothing is submitted to the kitchen until final checkout.</p>
     </div>}
