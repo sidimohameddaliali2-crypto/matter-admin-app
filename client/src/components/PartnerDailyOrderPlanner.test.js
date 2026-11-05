@@ -341,3 +341,38 @@ test('a valid legacy range retains all selected delivery dates', async () => {
   await render();
   for (const date of [A, B, C]) expect(button('Delivery ' + date).getAttribute('aria-pressed')).toBe('true');
 });
+
+
+test('daily menu restores category tags, protein groups and filters without losing cart quantities', async () => {
+  const dishes = [
+    {_id: 'chicken', name: 'CHICKEN RICE', mealType: 'main', category: 'Chicken', price: 28},
+    {_id: 'beef', name: 'BEEF BOWL', mealType: 'main', category: 'Beef', price: 32},
+    {_id: 'fish', name: 'FISH RICE', mealType: 'main', category: 'Fish', price: 32},
+    {_id: 'oats', name: 'BERRY OATS', mealType: 'oats', description: 'Fresh berries', price: 15},
+    {_id: 'unknown', name: 'EXTRA DISH', price: null}
+  ];
+  api.get.mockImplementation(async path => ({data: {success: true, data: path === '/partner/orders' ? [] : dishes}}));
+  await render(); await begin(B);
+  expect(container.querySelector('h2').style.fontFamily).toContain('Archivo Black');
+  await click('Morning · 7–10am');
+  expect(button('Morning · 7–10am').getAttribute('aria-pressed')).toBe('true');
+  expect(JSON.parse(localStorage.getItem('partner-daily-plan:fixture')).days[0].window).toBe('Morning · 7–10am');
+  for (const group of ['Main', 'Oats', 'Other']) expect(container.querySelector('[aria-label="' + group + ' meals"]')).toBeTruthy();
+  for (const protein of ['Chicken', 'Beef', 'Fish']) expect([...container.querySelectorAll('h5')].some(h => h.textContent === protein)).toBe(true);
+  expect(container.textContent).toContain('Chicken Rice');
+  expect(container.textContent).toContain('Fresh berries');
+  expect(container.textContent).toContain('Price TBD');
+  expect(button('Add EXTRA DISH').disabled).toBe(true);
+  await click('Add CHICKEN RICE');
+  await click('Filter Oats');
+  expect(button('Add CHICKEN RICE')).toBeUndefined();
+  expect(button('Add BERRY OATS')).toBeTruthy();
+  await click('Add BERRY OATS');
+  await click('Filter Main');
+  expect(container.querySelector('[aria-label="Quantity for CHICKEN RICE"]').textContent).toBe('1');
+  expect(container.textContent).toContain('Day total: AED 43.00');
+  await click('Confirm day & continue');
+  expect(button('Filter All').getAttribute('aria-pressed')).toBe('true');
+  expect(container.querySelector('[aria-label="Quantity for CHICKEN RICE"]').textContent).toBe('0');
+  expect(button('Add BERRY OATS')).toBeTruthy();
+});

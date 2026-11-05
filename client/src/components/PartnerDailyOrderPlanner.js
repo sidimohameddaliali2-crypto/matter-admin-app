@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import partnerApi from '../utils/partnerApi';
 import PartnerOrderCalendar from './PartnerOrderCalendar';
+import PartnerDailyMenu from './PartnerDailyMenu';
 import { DELIVERY_WINDOWS, deliveryDays, makePlanDay, dayTotal, dayQuantity, assertDayReady, quotePlanDay, submitPlanDay, dateClosed } from '../utils/partnerDailyPlan';
 
+const heading = { fontFamily: "'Archivo Black', sans-serif" };
 const box = 'rounded-2xl border border-[#12275e] bg-[#051747] p-4';
 const primary = 'rounded-full bg-[#bcf679] text-[#051747] px-5 py-3 font-bold disabled:opacity-40';
 const secondary = 'rounded-full border border-[#a8ccf5] px-4 py-2 text-sm disabled:opacity-40';
-const input = 'mt-1 w-full rounded-xl border border-[#12275e] bg-[#0a1230] p-3 text-[#ede5de]';
 const fmt = date => new Date(date + 'T00:00:00Z').toLocaleDateString('en-GB', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' });
 const money = value => Number(value || 0).toFixed(2);
 const initial = earliest => ({ version: 1, phase: 'dates', from: earliest, to: earliest, selectedDates: [earliest], days: [], index: 0 });
@@ -171,8 +172,8 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
     finally { submitting.current = false; setPlacing(false); }
   };
 
-  return <section aria-label="Daily order planner" className="space-y-4 text-[#ede5de]">
-    <h2 className="text-2xl font-bold">Plan daily orders</h2>
+  return <section aria-label="Daily order planner" className="space-y-4 text-[#ede5de]" style={{ fontFamily: "'Archivo', system-ui, sans-serif" }}>
+    <h2 style={heading} className="text-2xl font-bold">Plan daily orders</h2>
     <p className="text-sm text-[#a8ccf5]">Choose your dates, review every delivery day, then check out once. Each day has its own items and delivery window. Sundays have no deliveries.</p>
     {plan.phase !== 'dates' && plan.phase !== 'complete' && !plan.days.some(d => d.placed) && <button type="button" className={secondary} disabled={placing} onClick={() => { setError(''); setPlan(p => ({ ...p, phase: 'dates' })); }}>Change dates</button>}
     {error && <p role="alert" className="rounded-xl border border-[#ff8a66] p-3 text-sm text-[#ff8a66]">{error}</p>}
@@ -186,9 +187,15 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
     {plan.days.length > 0 && ['days', 'review'].includes(plan.phase) && <div className="flex flex-wrap gap-2" aria-label="Daily progress">{plan.days.map((d, i) => <span key={d.date} className={'rounded-full px-3 py-1 text-xs ' + (d.reviewed ? 'bg-[#bcf679] text-[#051747]' : 'bg-[#12275e] text-[#a8ccf5]')}>{i + 1}. {fmt(d.date)} · {d.placed ? 'Placed' : d.skipped ? 'Skipped' : d.reviewed ? 'Reviewed' : 'To review'}</span>)}</div>}
     {plan.phase === 'days' && active && <div className="space-y-4">
       <div className={box + ' space-y-3'}>
-        <h3 className="text-lg font-bold">Day {plan.index + 1} of {plan.days.length} — {fmt(active.date)}</h3>
+        <h3 style={heading} className="text-lg font-bold">Day {plan.index + 1} of {plan.days.length} — {fmt(active.date)}</h3>
         {existing && <p className="text-sm text-[#bcf679]">An order already exists for this day. Keep it below, or edit it in My Orders.</p>}
-        <label className="block">Delivery window<select className={input} aria-label="Delivery window" value={active.window} disabled={!!existing || active.placed} onChange={e => updateDay({ window: e.target.value })}>{DELIVERY_WINDOWS.map(w => <option key={w}>{w}</option>)}</select></label>
+        <div role="group" aria-label="Delivery window" className="max-w-lg">
+          <p className="text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5] mb-1.5">Delivery window</p>
+          <div className="flex gap-1.5">{DELIVERY_WINDOWS.map(window => <button key={window} type="button" aria-pressed={active.window === window}
+            disabled={!!existing || active.placed} onClick={() => updateDay({ window })}
+            className="flex-1 rounded-full px-3 py-2 text-[12px] font-bold border-[1.5px] transition-colors disabled:opacity-40"
+            style={{borderColor: active.window === window ? '#bcf679' : '#12275e', background: active.window === window ? '#bcf679' : '#0a1230', color: active.window === window ? '#051747' : '#ede5de'}}>{window}</button>)}</div>
+        </div>
         <p className="text-sm">Day total: <strong>AED {money(dayTotal(active))}</strong> · {dayQuantity(active)} item(s){minimum > 0 ? ' · Minimum AED ' + money(minimum) + ' per delivery' : ''}</p>
       </div>
       {!existing && <>
@@ -199,12 +206,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
           <p className="text-sm text-[#ff8a66]">{item.name} is no longer available for this day.</p>
           <button type="button" className={secondary} onClick={() => changeQuantity({ _id: item.id }, -item.quantity)}>Remove unavailable {item.name}</button>
         </div>)}
-        <div className="grid gap-3 sm:grid-cols-2">{currentMenu.map(item => <article className={box} key={item._id}>
-          <h4 className="font-bold">{item.name}</h4><p className="mt-1 text-sm text-[#a8ccf5]">{item.description}</p><p className="mt-2 text-sm">AED {money(item.price)}</p>
-          <div className="mt-3 flex items-center gap-3"><button type="button" className={secondary} aria-label={'Remove ' + item.name} disabled={!active.items[item._id]?.quantity || active.placed} onClick={() => changeQuantity(item, -1)}>−</button>
-            <span aria-label={'Quantity for ' + item.name}>{active.items[item._id]?.quantity || 0}</span>
-            <button type="button" className={secondary} aria-label={'Add ' + item.name} disabled={active.placed || item.price == null || !Number.isFinite(Number(item.price))} onClick={() => changeQuantity(item, 1)}>+</button></div>
-        </article>)}</div>
+        <PartnerDailyMenu key={active.date} items={currentMenu} cart={active.items} placed={active.placed} onQuantityChange={changeQuantity} />
       </>}
       <div className="flex flex-wrap gap-3">
         {previousIndex >= 0 && <button type="button" className={secondary} onClick={() => editDay(previousIndex)}>Previous day</button>}
@@ -214,7 +216,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
       <p className="text-xs text-[#a8ccf5]">Nothing is submitted to the kitchen until final checkout.</p>
     </div>}
     {plan.phase === 'review' && <div className="space-y-4">
-      <h3 className="text-xl font-bold">Final checkout</h3><p className="text-sm text-[#a8ccf5]">All {plan.days.length} delivery days reviewed. Check every daily order below.</p>
+      <h3 style={heading} className="text-xl font-bold">Final checkout</h3><p className="text-sm text-[#a8ccf5]">All {plan.days.length} delivery days reviewed. Check every daily order below.</p>
       {plan.days.map((day, index) => <article key={day.date} className={box}>
         <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="font-bold">{fmt(day.date)} — {day.placed ? 'Placed' : day.skipped ? 'No new order' : 'AED ' + money(dayTotal(day))}</h4>
           {!day.placed && !placing && <button type="button" className={secondary} onClick={() => editDay(index)}>Edit {fmt(day.date)}</button>}</div>
@@ -225,7 +227,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
         <button type="button" className={primary + ' mt-4'} disabled={placing || !ordered.length || !plan.days.every(d => d.reviewed)} onClick={checkout}>{placing ? 'Placing daily orders…' : plan.days.some(d => d.placed) ? 'Retry remaining orders' : 'Place all daily orders'}</button></div>
     </div>}
     {plan.phase === 'complete' && <div className={box + ' space-y-4'}>
-      <h3 className="text-xl font-bold">Your daily orders are placed</h3>
+      <h3 style={heading} className="text-xl font-bold">Your daily orders are placed</h3>
       <p>{ordered.length} order(s) · AED {money(total)} total</p>
       <ul className="space-y-1 text-sm">{ordered.map(d => <li key={d.date}>{fmt(d.date)} · {d.window} · AED {money(dayTotal(d))}</li>)}</ul>
       <div className="flex flex-wrap gap-3"><button type="button" className={primary} onClick={onViewOrders}>View my orders</button><button type="button" className={secondary} onClick={() => { setPlan(initial(earliestDate)); setError(''); }}>Start another plan</button></div>

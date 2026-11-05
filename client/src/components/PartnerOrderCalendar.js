@@ -18,7 +18,7 @@ export default function PartnerOrderCalendar({ earliestDate, selectedDates, orde
     <div className="flex items-center gap-2">
       <button type="button" onClick={() => moveMonth(-1)} aria-label="Previous month"
         className="w-9 h-9 rounded-full bg-[#0a1230] border-[1.5px] border-[#12275e] hover:border-[#bcf679]">‹</button>
-      <div className="flex-1 text-center text-[15px] font-bold" aria-live="polite">
+      <div className="flex-1 text-center text-[15px] font-bold" aria-live="polite" style={{ fontFamily: "'Archivo Black', sans-serif" }}>
         {first.toLocaleDateString('en-GB', { timeZone: 'UTC', month: 'long', year: 'numeric' })}
       </div>
       <button type="button" onClick={() => moveMonth(1)} aria-label="Next month"
