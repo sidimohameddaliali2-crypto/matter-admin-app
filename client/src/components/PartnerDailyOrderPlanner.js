@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import partnerApi from '../utils/partnerApi';
+import PartnerOrderCalendar from './PartnerOrderCalendar';
 import { DELIVERY_WINDOWS, deliveryDays, makePlanDay, dayTotal, dayQuantity, assertDayReady, quotePlanDay, submitPlanDay, dateClosed } from '../utils/partnerDailyPlan';
 
 const box = 'rounded-2xl border border-[#12275e] bg-[#051747] p-4';
@@ -8,14 +9,30 @@ const secondary = 'rounded-full border border-[#a8ccf5] px-4 py-2 text-sm disabl
 const input = 'mt-1 w-full rounded-xl border border-[#12275e] bg-[#0a1230] p-3 text-[#ede5de]';
 const fmt = date => new Date(date + 'T00:00:00Z').toLocaleDateString('en-GB', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' });
 const money = value => Number(value || 0).toFixed(2);
-const initial = earliest => ({ version: 1, phase: 'dates', from: earliest, to: earliest, days: [], index: 0 });
+const initial = earliest => ({ version: 1, phase: 'dates', from: earliest, to: earliest, selectedDates: [earliest], days: [], index: 0 });
+
+const validDeliveryDate = date => {
+  try { return typeof date === 'string' && deliveryDays(date, date).length === 1; }
+  catch { return false; }
+};
 
 function restore(key, earliest) {
   try {
     const saved = JSON.parse(localStorage.getItem(key));
     if (saved?.version === 1 && ['dates', 'days', 'review'].includes(saved.phase) && Array.isArray(saved.days)
-      && saved.days.length > 0 && saved.days.length <= 90 && saved.days.every(d => /^\d{4}-\d{2}-\d{2}$/.test(d.date) && d.items && typeof d.items === 'object')
-      && Number.isInteger(saved.index) && saved.index >= 0 && saved.index < saved.days.length) return saved;
+      && saved.days.length > 0 && saved.days.length <= 90 && saved.days.every(d => d && validDeliveryDate(d.date) && d.items && typeof d.items === 'object')
+      && Number.isInteger(saved.index) && saved.index >= 0 && saved.index < saved.days.length) {
+      let selectedDates;
+      if (Array.isArray(saved.selectedDates) && saved.selectedDates.every(validDeliveryDate)) {
+        selectedDates = saved.selectedDates;
+      } else {
+        // Older drafts can contain an unfinished date-range edit. Recover the
+        // saved carts when that range is invalid, without evaluating it in JSX.
+        try { selectedDates = deliveryDays(saved.from, saved.to); }
+        catch { selectedDates = saved.days.map(day => day.date); }
+      }
+      return { ...saved, selectedDates: [...new Set(selectedDates)].sort() };
+    }
   } catch { /* A missing or corrupt local draft starts a new plan. */ }
   return initial(earliest);
 }
@@ -65,7 +82,9 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
   };
   const start = () => {
     try {
-      const dates = deliveryDays(plan.from, plan.to);
+      const dates = [...new Set(plan.selectedDates)].sort();
+      if (!dates.length) throw new Error('Choose at least one delivery day on the calendar.');
+      deliveryDays(dates[0], dates[dates.length - 1]);
       const closed = dates.find(dateClosed);
       if (closed) throw new Error(fmt(closed) + ': cutoff has passed. Choose a later start date.');
       setPlan(p => {
@@ -158,11 +177,10 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
     {plan.phase !== 'dates' && plan.phase !== 'complete' && !plan.days.some(d => d.placed) && <button type="button" className={secondary} disabled={placing} onClick={() => { setError(''); setPlan(p => ({ ...p, phase: 'dates' })); }}>Change dates</button>}
     {error && <p role="alert" className="rounded-xl border border-[#ff8a66] p-3 text-sm text-[#ff8a66]">{error}</p>}
     {plan.phase === 'dates' && <div className={box + ' space-y-4'}>
-      <div className="grid gap-4 sm:grid-cols-2">
-        <label>First delivery date<input className={input} aria-label="First delivery date" type="date" min={earliestDate} value={plan.from} onChange={e => setPlan(p => ({ ...p, from: e.target.value, to: p.to < e.target.value ? e.target.value : p.to }))} /></label>
-        <label>Last delivery date<input className={input} aria-label="Last delivery date" type="date" min={plan.from} value={plan.to} onChange={e => setPlan(p => ({ ...p, to: e.target.value }))} /></label>
-      </div>
-      <p className="text-sm text-[#a8ccf5]">Choose up to 90 calendar days. Confirm an order or explicitly skip each delivery day.</p>
+      <PartnerOrderCalendar earliestDate={earliestDate} orders={orders}
+        selectedDates={plan.selectedDates}
+        onChange={selectedDates => { setError(''); setPlan(p => ({ ...p, selectedDates })); }} />
+      <p className="text-sm text-[#a8ccf5]">Select your delivery days on the calendar, up to 90 calendar days apart. Confirm an order or explicitly skip each selected day.</p>
       <button type="button" className={primary} onClick={start}>Start daily orders</button>
     </div>}
     {plan.days.length > 0 && ['days', 'review'].includes(plan.phase) && <div className="flex flex-wrap gap-2" aria-label="Daily progress">{plan.days.map((d, i) => <span key={d.date} className={'rounded-full px-3 py-1 text-xs ' + (d.reviewed ? 'bg-[#bcf679] text-[#051747]' : 'bg-[#12275e] text-[#a8ccf5]')}>{i + 1}. {fmt(d.date)} · {d.placed ? 'Placed' : d.skipped ? 'Skipped' : d.reviewed ? 'Reviewed' : 'To review'}</span>)}</div>}
