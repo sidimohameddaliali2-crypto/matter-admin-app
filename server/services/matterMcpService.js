@@ -61,13 +61,15 @@ export function createMatterApiClient({ baseUrl, token, fetchImpl = fetch }) {
   };
 }
 
-export function createMatterMcpServer({ request, permissions, allowWrites, offsetMinutes = 240 }) {
+export function createMatterMcpServer({ request, permissions, allowWrites, offsetMinutes = 240, oauth = false }) {
   const server = new McpServer({ name: 'matter-deliveries', version: '0.1.0' });
   const register = (name, description, inputSchema, handler, writes = false) => {
     server.registerTool(name, {
       description,
       inputSchema,
       annotations: { readOnlyHint: !writes, destructiveHint: writes, idempotentHint: !writes, openWorldHint: false },
+      ...(oauth ? { _meta: { securitySchemes: [{ type: 'oauth2', scopes: writes
+        ? ['deliveries:read', 'deliveries:write'] : ['deliveries:read'] }] } } : {}),
     }, async (input) => {
       try {
         const result = await handler(input);
