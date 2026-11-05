@@ -21,22 +21,22 @@ function captureCreate(t){
   return {service,calls};
 }
 
-test('daily fence creation sends the user-selected Truckoom Office group and retains 50 m geometry',async t=>{
+test('daily fence creation omits group assignment and retains 50 m geometry',async t=>{
   groupEnvironment(t,undefined);
   const {service,calls}=captureCreate(t);
   assert.equal(await service.createCustomerGeofence('MATTER-fixture',{lat:25.1124,lng:55.2056}), '123');
   const body=calls.find(call=>call.url.includes('createGeofence')).body;
-  assert.equal(body.geofence_group,'Truckoom Office');
+  assert.equal(Object.hasOwn(body,'geofence_group'),false);
   assert.equal(body.radius,'0.05');
   assert.deepEqual(body.coordinates,[[25.1124,55.2056]]);
   assert.equal(body.company_name,'Fixture Company');
 });
 
-test('a configured group overrides the approved default without changing request geometry',async t=>{
+test('a legacy group environment setting does not assign new circles to a group',async t=>{
   groupEnvironment(t,'  Customer Routes  ');
   const {service,calls}=captureCreate(t);
   await service.createCustomerGeofence('MATTER-fixture',{lat:25.1124,lng:55.2056});
   const body=calls.find(call=>call.url.includes('createGeofence')).body;
-  assert.equal(body.geofence_group,'Customer Routes');
+  assert.equal(Object.hasOwn(body,'geofence_group'),false);
   assert.equal(body.radius,'0.05');
 });

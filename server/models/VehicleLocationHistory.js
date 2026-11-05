@@ -2,8 +2,9 @@ import mongoose from 'mongoose';
 
 // Owner (2026-10-09): "I want to collect historical data... save the point
 // the driver are doing" — Truckoom's own API has no route-trail/playback
-// endpoint (confirmed by exhaustively checking their docs), so this app
-// builds its own history by sampling server/jobs/recordVehicleLocations.js
+// endpoint in the original docs; the 2026-10-22 contract now documents
+// getVehicleTrackLogs (cached separately in TruckoomTrackHistory). This app
+// originally built its own history by sampling server/jobs/recordVehicleLocations.js
 // every minute and keeping every point (no automatic purge — owner chose
 // "keep forever"). driver is a point-in-time snapshot of whichever User was
 // mapped to this vehicleNo at the moment it was recorded (via

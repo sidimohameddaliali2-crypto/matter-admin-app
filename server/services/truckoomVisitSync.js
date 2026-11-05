@@ -4,6 +4,7 @@ import CustomerGeofence from '../models/CustomerGeofence.js';
 import TrackerSyncLease from '../models/TrackerSyncLease.js';
 import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
 import { gpsVisitEvents } from './trackerGpsVisits.js';
+import truckoomHistory from './truckoomHistoryService.js';
 import truckoom from './truckoomApiService.js';
 import { resolveDeliveryCoordinatesCached } from './geocoding.js';
 import { getBusinessDayBounds, toBusinessDateKey } from '../utils/businessDate.js';
@@ -58,6 +59,7 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
     let checked = 0;
     const alerts = new Map();
     const gpsPaths = new Map();
+    const historicalPaths = new Map();
     const getDateAlerts = date => {
       if (!alerts.has(date)) alerts.set(date, (async () => {
         const events = normalizeGeofenceAlerts(await truckoom.getGeofenceAlerts(date));
@@ -148,8 +150,17 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
             }).select('latitude longitude gpsTime recordedAt driver').lean()));
             const path = (await gpsPaths.get(pathKey)).filter(p => String(p.driver || '') === String(visit.driverId || driverId)
               && +(new Date(p.gpsTime || p.recordedAt)) >= +start && +(new Date(p.gpsTime || p.recordedAt)) < +end);
-            matched = gpsVisitEvents(path, { lat: visit.lat, lng: visit.lng }, visit.radiusMetres || CUSTOMER_RADIUS_METRES);
-            if (path.length) { visit.evidenceSource = 'truckoom_gps_samples'; visit.gpsSampleCount = path.length; }
+            // Share one historical API result across every stop on this vehicle/day.
+            // Truckoom logs identify the vehicle, so use the delivery's frozen vehicle
+            // snapshot; do not rewrite local points or invent a driver association.
+            if (!historicalPaths.has(pathKey)) historicalPaths.set(pathKey,
+              truckoomHistory.getPoints(visit.vehicleNo, start, end, now).catch(() => []));
+            const historical = await historicalPaths.get(pathKey);
+            // Cached history may end before a recent stop. Keep fresh local
+            // samples too; gpsVisitEvents deduplicates and sorts actual GPS times.
+            const samples = [...historical, ...path];
+            matched = gpsVisitEvents(samples, { lat: visit.lat, lng: visit.lng }, visit.radiusMetres || CUSTOMER_RADIUS_METRES);
+            if (samples.length) { visit.evidenceSource = 'truckoom_gps_samples'; visit.gpsSampleCount = samples.length; }
           }
           visit = { ...visit, ...evaluateTrackerVisit({
             events: matched,
