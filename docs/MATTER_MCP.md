@@ -34,7 +34,10 @@ kitchen tools, or image inspection. Photo URLs are returned as data, not downloa
 
    Substitute the actual staff user ID. Omit `--allow-writes` for read-only access.
    This command prints a secret once and two server environment settings. Enter the
-   secret directly into the plugin's credential settings, never into an agent chat.
+   secret only into a client that supports fixed Bearer credentials, never into an
+   agent chat. ChatGPT's OAuth connection does not need this secret: it uses staff
+   sign-in. The generated configuration still controls which staff account can
+   connect and whether that account may grant editing access.
    Keep the generated environment settings in your existing secret environment
    configuration (`server/.env` or PM2 environment), not source control.
 4. Restart PM2 with the updated environment. In a multi-instance deployment, every
@@ -44,7 +47,7 @@ kitchen tools, or image inspection. Photo URLs are returned as data, not downloa
    routes. It needs POST, application/json, and application/json or text/event-stream
    in the client's Accept header. It does not need a separate process or port.
 
-The endpoint validates the credential, staff account activity, role, and effective
+The endpoint validates the credential or OAuth grant, staff account activity, role, and effective
 page permissions on every request. It creates a short-lived staff token internally
 and calls the existing API over loopback, so existing validation, change history,
 Socket.IO updates, and Slack/driver notifications still run. It does not forward
@@ -54,20 +57,77 @@ Calls without an Origin header (normal server-to-server calls) are supported.
 If a client sends an Origin header, explicitly allow its exact origin in the
 comma-separated `MATTER_MCP_ALLOWED_ORIGINS` environment setting. Do not use `*`.
 
-To revoke access, remove the credential's hash and restart all PM2 instances, or
-deactivate the staff account immediately. Keep the secret in your password manager.
+To revoke all MCP access for an account, remove its credential configuration and
+restart all PM2 instances, or deactivate the staff account immediately. Keep any
+fixed Bearer secret in your password manager. Removing editing permission also
+removes OAuth editing access on the next request.
 
 ## Connect your dot
 
 After deployment, verify the actual HTTPS MCP URL and discover its tools with an
 MCP client before distributing a plugin. This code has not connected your account.
 
-In ChatGPT, open Plugins, select the plus button, then **Add custom MCP server**.
-Use your actual delivery website's HTTPS URL followed by `/api/mcp`. Choose API-key
-authentication with the Bearer header scheme, and supply the generated secret in
-the private credential field. If this connection option is unavailable in your
-account or workspace, use its supported private plugin upload/configuration flow;
-do not choose unauthenticated access or paste the secret into a chat.
+### ChatGPT OAuth connection
+
+OAuth is available when `ENABLE_MATTER_MCP=true`, unless explicitly disabled with
+`ENABLE_MATTER_MCP_OAUTH=false`. For the current production website, no additional
+secret or client ID needs to be generated. The existing `MATTER_MCP_CREDENTIALS`
+entries identify the staff accounts allowed to connect; `allowWrites` remains the
+maximum editing permission for each account. Other staff accounts cannot connect.
+
+1. Deploy these OAuth changes and confirm the API is online.
+2. In ChatGPT, open Plugins, select the plus button, then **Add custom MCP server**.
+3. Enter `https://matterapp.online/api/mcp` and choose **OAuth**.
+4. Leave optional OAuth client ID and client secret fields empty. ChatGPT registers
+   a public OAuth client dynamically; the token endpoint uses PKCE and `none`
+   client authentication. This does not mean the MCP server is unauthenticated.
+5. Complete the connection. On the MATTER sign-in page, enter your MATTER staff
+   email and password. Choose whether to allow delivery creation and edits, then
+   select **Sign in and connect**. Passwords go only to MATTER's existing staff
+   login endpoint, not to the agent conversation or the OAuth client.
+6. Return to your dot using the same ChatGPT account, and start with a read-only
+   delivery lookup. Verify the expected customer/date before requesting a write.
+
+The canonical resource defaults to `https://matterapp.online/api/mcp`. If using a
+different delivery website, set `MATTER_MCP_PUBLIC_URL` to its exact HTTPS MCP URL
+before deployment. Discovery URLs are derived from this trusted setting, never
+from an incoming Host header. Keep the canonical URL stable across PM2 instances.
+
+The reverse proxy must pass `/api/mcp/oauth/*` and OAuth discovery paths to
+Express, rather than serving the SPA HTML:
+
+- `/api/mcp/oauth/resource` (also advertised in the 401 challenge).
+- `/.well-known/oauth-protected-resource/api/mcp`.
+- `/.well-known/oauth-authorization-server/api/mcp/oauth`.
+- `/api/mcp/oauth/.well-known/oauth-authorization-server` (discovery fallback).
+
+The issuer is `https://matterapp.online/api/mcp/oauth`; authorize, token,
+registration, and revocation endpoints are under that path. Only registered
+HTTPS OAuth callback routes on `chatgpt.com` or `chat.openai.com` are accepted,
+including the stable `/connector_platform_oauth_redirect` and per-connection
+`/connector/oauth/{callback_id}` routes. Other paths and query strings are rejected. Codes require
+S256 PKCE, expire in one minute, and are single-use. Consent is bound to a ten-minute
+HttpOnly browser cookie and a CSRF token; approval also requires an authenticated
+MATTER staff session and a same-origin request.
+
+Clients, temporary requests, hashed codes, and hashed access/refresh credentials
+are stored in the `McpOAuthRecord` Mongo collection, shared across PM2 instances.
+Registered clients are persistent and do not expire with their tokens.
+Mongo creates unique, lookup, and TTL indexes; the database user must be able to
+create them. Expiration is checked on reads, not just by asynchronous TTL cleanup.
+Access tokens last up to 15 minutes; refresh grants last 30 days from sign-in.
+Refresh rotates the credentials atomically and does not extend the 30-day deadline.
+Replaying a refresh token revokes its grant family, requiring a new connection.
+The revocation endpoint revokes only grants belonging to the authenticated client.
+OAuth tokens cannot be used as staff, member, partner, or external API credentials.
+
+No live ChatGPT connection is established by deploying the code. The sign-in and
+tool discovery must still be verified in your own account after deployment.
+
+### Optional plugin configuration
+
+Fixed Bearer authentication is retained for clients that support it. It is not
+offered by the ChatGPT form shown during setup; select OAuth there instead.
 
 The remote server entry in a portable private plugin's `mcp.json` is:
 
@@ -80,7 +140,7 @@ The remote server entry in a portable private plugin's `mcp.json` is:
       "url": "https://YOUR-DELIVERY-WEBSITE/api/mcp",
       "extensions": {
         "com.openai": {
-          "auth": { "type": "api_key", "headerScheme": "bearer" }
+          "auth": { "type": "oauth", "client": { "mode": "dcr" } }
         }
       }
     }
@@ -89,9 +149,10 @@ The remote server entry in a portable private plugin's `mcp.json` is:
 ```
 
 Replace the placeholder with the verified endpoint before installation. The
-configuration must not contain the secret. A fixed bearer credential is API-key
-authentication, not OAuth. This private connection is not a public directory
-submission; public distribution should use an appropriate per-user OAuth flow.
+configuration must not contain a secret. This example uses OAuth dynamic client
+registration. For a non-ChatGPT client that explicitly supports fixed Bearer keys,
+its auth declaration is `{ "type": "api_key", "headerScheme": "bearer" }` instead.
+This private connection is not a public directory submission.
 
 Install and connect the plugin for the same ChatGPT account as your dot. Then ask:
 
@@ -113,7 +174,7 @@ delivery before retrying. The MCP adapter never automatically retries writes.
 From `server/`, run:
 
 ```powershell
-node --test services/matterMcp.test.js
+node --test services/matterMcp.test.js services/matterMcpOAuth.test.js
 ```
 
 Tests use an in-memory MCP connection, fake staff users, and a local HTTP fixture;
@@ -121,4 +182,5 @@ they do not connect to MongoDB, production, or external notification services.
 
 Official setup references:
 - https://developers.openai.com/plugins/build/plugins
+- https://developers.openai.com/plugins/build/auth
 - https://learn.chatgpt.com/docs/dots/computers-and-apps
