@@ -272,3 +272,36 @@ test('calendar supports month navigation, toggling and existing order dots', asy
   await click('Next month');
   expect(button('Delivery 2099-02-02').getAttribute('aria-pressed')).toBe('true');
 });
+
+
+test.each([A, B])('saved expired dates can be removed with earliest date %s', async earliestDate => {
+  jest.useFakeTimers();
+  jest.setSystemTime(new Date('2099-01-03T12:00:00Z'));
+  try {
+    localStorage.setItem('partner-daily-plan:fixture', JSON.stringify({
+      version: 1, phase: 'days', from: A, to: A, selectedDates: [A], index: 0,
+      days: [{date: A, items: {}, window: 'Morning · 5–6am', reviewed: false}]
+    }));
+    await render({earliestDate});
+    await click('Change dates');
+    expect(button('Delivery ' + A).getAttribute('aria-pressed')).toBe('true');
+    expect(button('Delivery ' + A).disabled).toBe(false);
+    await click('Delivery ' + A);
+    expect(button('Delivery ' + A).disabled).toBe(true);
+    expect(button('Delivery ' + A).getAttribute('aria-pressed')).toBe('false');
+    await click('Delivery ' + B);
+    await click('Start daily orders');
+    expect(container.textContent).toContain('Day 1 of 1');
+    expect(container.textContent).not.toContain('cutoff has passed');
+    const saved = JSON.parse(localStorage.getItem('partner-daily-plan:fixture'));
+    expect(saved.days.map(day => day.date)).toEqual([B]);
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render({earliestDate});
+    expect(container.textContent).toContain('Day 1 of 1');
+    expect(JSON.parse(localStorage.getItem('partner-daily-plan:fixture')).selectedDates).toEqual([B]);
+    expect(api.post).not.toHaveBeenCalled();
+  } finally {
+    jest.useRealTimers();
+  }
+});

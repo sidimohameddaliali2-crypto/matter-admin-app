@@ -33,7 +33,9 @@ export default function PartnerOrderCalendar({ earliestDate, selectedDates, orde
         const number = i + 1;
         const date = month + '-' + String(number).padStart(2, '0');
         const selected = selectedDates.includes(date);
-        const disabled = new Date(date + 'T00:00:00Z').getUTCDay() === 0 || date < earliestDate || dateClosed(date);
+        // A saved selection may expire while the partner is away. Keep it
+        // removable; once removed it cannot be selected again after cutoff.
+        const disabled = !selected && (new Date(date + 'T00:00:00Z').getUTCDay() === 0 || date < earliestDate || dateClosed(date));
         const hasOrder = orders.some(order => String(order.deliveryDate).slice(0, 10) === date && order.status !== 'cancelled');
         return <button key={date} type="button" aria-label={'Delivery ' + date} aria-pressed={selected} disabled={disabled}
           onClick={() => onChange(selected ? selectedDates.filter(d => d !== date) : [...selectedDates, date].sort())}
