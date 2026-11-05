@@ -1,4 +1,7 @@
 import KitchenInputWarnings from '../components/KitchenInputWarnings';
+import KitchenSnackRuleEditor from '../components/KitchenSnackRuleEditor';
+import KitchenSnackRuleLookup from '../components/KitchenSnackRuleLookup';
+import { applyKitchenSnackRules, fetchKitchenSnackRules } from '../lib/kitchenSnackRules';
 import useKitchenSelectionWindow from '../lib/useKitchenSelectionWindow';
 import { KitchenWorkspaceHeader, KitchenEmptyState } from '../components/KitchenWorkspace';
 import KitchenCustomerBrowser from '../components/KitchenCustomerBrowser';
@@ -183,6 +186,7 @@ const parseBreakfastRow = (row) => {
 // "Needs attention only" filter and the explanation shown on each customer card.
 const getAttentionReasons = (meal) => {
   const reasons = [...(meal?.inputErrors || [])];
+  if (meal?.snackRuleConflict) reasons.push(meal.snackRuleConflict);
   if (meal?.remark) {
     reasons.push(`Flagged via Upload Meal Remarks: "${meal.remark}" — swap this before it goes out.`);
   }
@@ -485,7 +489,8 @@ const KitchenList = () => {
           const enrichedSelections = await enrichSelectionsWithNutrition(api, rawSelections, nutritionCacheRef, { extended: true, matterInputs: preparation.cached ? [] : preparation.data?.kitchenInputs,
             productionScope: { complete: true, date: missingCheckDate, roster } });
 
-          const keyedSelections = enrichedSelections.map((entry) => attachStableMealKeys(entry));
+          const rules = await fetchKitchenSnackRules(api, preparation.data?.kitchenSnackRules);
+          const keyedSelections = applyKitchenSnackRules(enrichedSelections, rules, snackState.presetsByName).map((entry) => attachStableMealKeys(entry));
           if (!current()) return [];
           preparedSnapshot.current = { menuId: selectedMenuId, date: missingCheckDate, receivedAt: Date.now(), checkedAt: preparation.preparedAt,
             snapshotId: preparation.snapshotId,
@@ -510,6 +515,12 @@ const KitchenList = () => {
   }, [selectedMenuId, missingCheckDate]);
 
   useEffect(() => { loadSelections(); return () => selectionRequests.current.cancel(); }, [loadSelections]);
+
+  const onSnackRuleSaved = useCallback((customerId, rule) => {
+    preparedSnapshot.current = null;
+    setMenuSelections(rows => rows.map(row => String(row.matterCustomerId) === customerId
+      ? applyKitchenSnackRules([row], [{ customerId, ...rule }], snackPreset.presetsByName)[0] : row));
+  }, [snackPreset]);
 
   // All four loaders below wait for BOTH a menu and a date to be picked —
   // selecting a menu alone (e.g. while still deciding which date to work on)
@@ -2707,6 +2718,7 @@ ${body}
                   </div>
                 </div></details>
 
+<KitchenSnackRuleLookup menuId={selectedMenuId} date={missingCheckDate} onSaved={onSnackRuleSaved} onReplaced={loadSelections} />
 <details className="kitchen-advanced"><summary>Breakfast & snack macro presets</summary>
             <div className="mt-6 pt-4 border-t border-slate-100">
               <button
@@ -2880,7 +2892,8 @@ ${body}
           </div>}
           onShowMore={() => setVisibleCustomers(count => count + 50)}
           renderCustomer={entry => <CustomerCard key={entry.email || entry.customerId} entry={entry} persistMealTypeOverride={persistMealTypeOverride}
-            saveMealRemark={saveMealRemark} savingOverrideKey={savingOverrideKey} saveDayNote={saveDayNote} savingDayNoteKey={savingDayNoteKey} snackPreset={snackPreset} />}
+            saveMealRemark={saveMealRemark} savingOverrideKey={savingOverrideKey} saveDayNote={saveDayNote} savingDayNoteKey={savingDayNoteKey} snackPreset={snackPreset}
+            menuId={selectedMenuId} date={missingCheckDate} onSnackRuleSaved={onSnackRuleSaved} reloadSelections={loadSelections} />}
         />
         </div>
 
@@ -2901,7 +2914,7 @@ ${body}
 // here (keyed by date only, since email is fixed per card instance) instead
 // of a shared object in the parent, which is what made every card re-render
 // together before.
-const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemark, savingOverrideKey, saveDayNote, savingDayNoteKey, snackPreset }) => {
+const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemark, savingOverrideKey, saveDayNote, savingDayNoteKey, snackPreset, menuId, date, onSnackRuleSaved, reloadSelections }) => {
   const [localDayNoteDrafts, setLocalDayNoteDrafts] = useState({});
   // Each day's full meal grid starts collapsed — with a realistic customer
   // count (hundreds), rendering every day's meal detail for every customer
@@ -2981,6 +2994,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
           </div>
         )}
       </div>
+      {!entry.partner && <KitchenSnackRuleEditor entry={entry} menuId={menuId} date={date} onSaved={onSnackRuleSaved} onReplaced={reloadSelections} />}
       {entry.calculationStatus === 'incomplete' && <div className="kitchen-customer-unavailable" role="note">
         {entry.kitchenProductionExcluded ? <><strong>No active delivery for {formatDateLabel(entry.kitchenExclusionDate)}.</strong><p>Saved choices are shown for reference. This customer is excluded from the kitchen paper and counting for this date.</p></> : <><strong>Weights cannot be calculated until these inputs are resolved:</strong><ul>{(entry.inputErrors || []).map(reason => <li key={reason}>{reason}</li>)}</ul></>}
       </div>}

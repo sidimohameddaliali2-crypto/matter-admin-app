@@ -43,6 +43,7 @@ export const kitchenInputErrors = (customer) => {
 };
 
 export const kitchenMealWarnings = (meal) => [
+  meal?.snackRuleConflict,
   ...(meal?.inputErrors || []),
   meal?.remark ? `Change ${meal.remark}` : '',
   meal?.exclusionConflict?.length ? `Contains ${meal.exclusionConflict.join(', ')} (excluded) - swap` : '',
@@ -56,18 +57,20 @@ export const kitchenMealWarnings = (meal) => [
 
 export const assertKitchenExportReady = (entries) => {
   const invalid = entries.filter((entry) => entry.calculationStatus === 'incomplete'
+    || (entry.selectedMeals || []).some(meal => meal.snackRuleConflict)
     || entry.hasMatterCoreLookupIssue || (entry.inputErrors || []).length);
   if (invalid.length) {
     const details = invalid.slice(0, 5).map(entry => {
       const name = entry.customerName || entry.matterName || entry.email || entry.customerId || 'Unknown customer';
       const reasons = [...(entry.inputErrors || [])];
+      reasons.push(...(entry.selectedMeals || []).filter(meal => meal.snackRuleConflict).map(meal => meal.snackRuleConflict));
       if (entry.hasMatterCoreLookupIssue) {
         const meal = (entry.selectedMeals || []).find(row => row.flags?.matterCoreLookupMissing);
         reasons.push(meal ? `unsupported Matter Core weights for ${meal.mealName || 'meal'} (P ${meal.proteinWeight}g / C ${meal.carbWeight}g)` : 'unsupported Matter Core weight combination');
       }
       return `${name}: ${reasons.join('; ') || 'required nutrition inputs are unresolved'}`;
     });
-    throw new Error(`Kitchen export blocked: ${invalid.length} customer(s) have unresolved inputs or Matter Core combinations. ${details.join(' | ')}${invalid.length > 5 ? ' | More customers require review.' : ''}`);
+    throw new Error(`Kitchen export blocked: ${invalid.length} customer(s) have unresolved inputs, snack rules or Matter Core combinations. ${details.join(' | ')}${invalid.length > 5 ? ' | More customers require review.' : ''}`);
   }
 };
 
