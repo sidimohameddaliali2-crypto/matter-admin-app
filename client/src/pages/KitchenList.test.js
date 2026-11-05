@@ -62,6 +62,26 @@ test('open date shows customer choices and deadline, disables auto assign and ma
   } finally { now.mockRestore(); }
 });
 
+test.each(['main', 'snack'])('open-date %s-only partial selection stays in Missing without assigning or hiding saved choices', async mealType => {
+  const originalGet = api.get.getMockImplementation();
+  const writes = api.post.mock.calls.length;
+  api.get.mockImplementation(async (path, options) => path.endsWith('/kitchen-state') ? { data: {
+    state: 'selection-open', data: { success: true, preparation: 'selection-open', data: {
+      kitchenSelections: [{ email, matterCustomerId: 'permanent', selectedMeals: [{ date: friday, mealType, mealName: 'Saved partial choice' }] }],
+      kitchenInputs: [{ ...input(), meal_frequency: 2 }], rosterComplete: true,
+      kitchenRoster: [{ customer_id: 'permanent', email, subscription_id: 'matter-current', meal_frequency: 2 }],
+    } },
+  } } : originalGet(path, options));
+  await select(dateSelect(), friday);
+  const filter = container.querySelector('[aria-label="Customer status filter"]');
+  await act(async () => [...filter.querySelectorAll('button')].find(button => button.textContent === 'Missing').click());
+  expect(container.querySelector('.kitchen-customer h2').textContent).toBe('Matter Fixture');
+  expect(container.textContent).toContain('Incomplete Meal Selection');
+  expect(container.textContent).toContain(`${mealType === 'main' ? 1 : 0} of 2 meal portion(s) selected.`);
+  expect(container.textContent).toContain('Saved partial choice');
+  expect(api.post).toHaveBeenCalledTimes(writes);
+});
+
 beforeEach(async () => {
   localStorage.clear();
   mockExcelRows.mockImplementation((rows) => rows);

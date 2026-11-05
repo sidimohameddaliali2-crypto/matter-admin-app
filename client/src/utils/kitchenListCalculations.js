@@ -602,6 +602,10 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
   // (never a fixed macro value — only the weight is fixed).
   const MEAL_PROTEIN_CAP = 65;
   const MEAL_CARB_CAP = 75;
+  // Owner (2026-11-05): split meal carbs/protein have a 5g macro floor.
+  // Apply after portion weights are calculated: this must not resize food
+  // or replace breakfast/snack presets or unresolved Matter Core lookups.
+  const SPLIT_MACRO_MINIMUM = 5;
   const LARGE_BREAKFAST_MULTIPLIER = 1.5;
   const scaleToLargeBreakfast = (macros) => ({
     C: (Number(macros?.C) || 0) * LARGE_BREAKFAST_MULTIPLIER,
@@ -892,6 +896,8 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
       };
       const fixedProteinWeight = getProteinMealWeight(fixedPlanMacros.P);
       const fixedCarbWeight = getCarbMealWeight(fixedPlanMacros.C);
+      fixedPlanMacros.C = Math.max(SPLIT_MACRO_MINIMUM, fixedPlanMacros.C);
+      fixedPlanMacros.P = Math.max(SPLIT_MACRO_MINIMUM, fixedPlanMacros.P);
       const fixedVegWeight = 80;
       return {
         ...meal,
@@ -995,8 +1001,8 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     const weight = proteinWeight + carbsWeight + vegWeight;
 
     const roundedMacros = {
-      C: carbsRounded,
-      P: proteinRounded,
+      C: Math.max(SPLIT_MACRO_MINIMUM, carbsRounded),
+      P: Math.max(SPLIT_MACRO_MINIMUM, proteinRounded),
       F: fatsRounded
     };
 

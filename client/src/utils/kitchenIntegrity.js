@@ -1,6 +1,6 @@
 import { loadPreparedKitchenState } from '../lib/kitchenPreparationState';
 
-export const KITCHEN_FORMULA_VERSION = 'main-kitchen-2026-10-20';
+export const KITCHEN_FORMULA_VERSION = 'main-kitchen-2026-11-05';
 
 export const kitchenMealChanges = meal => [
   meal?.remark ? `Change ${meal.remark}` : '',

@@ -24,6 +24,7 @@ import {
   toBreakfastPresetState,
   isRouteNotFound,
   getCustomerName,
+  matchesMatterSubscription,
   getDateKey,
   formatDateLabel,
   enrichSelectionsWithNutrition,
@@ -1164,7 +1165,8 @@ const KitchenList = () => {
   // Cheap: just filters the already-computed rows above. This is the only
   // part that re-runs while typing in the search box.
   const scheduledCustomerRows = useMemo(() => dayRoster?.scope === `${selectedMenuId}:${missingCheckDate}`
-    ? allComputedRows.filter(entry => visibleKitchenCustomer(entry, dayRoster.rows, missingCheckDate)).map(entry => kitchenCustomerDay(entry, missingCheckDate)) : [],
+    ? allComputedRows.filter(entry => visibleKitchenCustomer(entry, dayRoster.rows, missingCheckDate)).map(entry => kitchenCustomerDay(entry, missingCheckDate,
+      dayRoster.rows.find(sub => matchesMatterSubscription(entry, sub)))) : [],
   [allComputedRows, dayRoster, selectedMenuId, missingCheckDate]);
   const planOptions = useMemo(
     () => Array.from(new Set(scheduledCustomerRows.map((entry) => entry.planName).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
@@ -2928,7 +2930,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
             {entry.kitchenProductionExcluded && <span className="text-xs text-slate-500">Not scheduled for {formatDateLabel(entry.kitchenExclusionDate)}</span>}
             {entry.missingSelection && (
               <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
-                No Meal Selection — {formatDateLabel(entry.missingSelectionDate)}
+                {entry.showMissingPlaceholder ? 'No Meal Selection' : 'Incomplete Meal Selection'} — {formatDateLabel(entry.missingSelectionDate)}
               </span>
             )}
             {entry.noDeliveryDate && (
@@ -2992,7 +2994,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
       <div className="space-y-5 p-5">
         {entry.missingSelection && (
           <p className="text-sm text-amber-700">
-            Also has a delivery scheduled on {formatDateLabel(entry.missingSelectionDate)} with no meal selected yet.
+            {entry.missingSelectionReason || `No meal selected for ${formatDateLabel(entry.missingSelectionDate)} yet.`}
           </p>
         )}
         {(entry.mealsByDay || []).map((dayGroup) => {
