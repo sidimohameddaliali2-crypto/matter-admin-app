@@ -72,9 +72,9 @@ export const assertKitchenExportReady = (entries) => {
 };
 
 // Loading is explicit: GET /selections never launches unobservable writes.
-export const prepareKitchenSelections = async (api, menuId, dateKey, isCurrent = () => true) => {
+export const prepareKitchenSelections = async (api, menuId, dateKey, isCurrent = () => true, options = {}) => {
   if (api.get) {
-    const prepared = await loadPreparedKitchenState(api, menuId, dateKey, isCurrent);
+    const prepared = await loadPreparedKitchenState(api, menuId, dateKey, isCurrent, options);
     if (prepared) return prepared;
   }
   const deadline = Date.now() + 180000;

@@ -2102,7 +2102,7 @@ router.get('/:id/kitchen-state', protect, async (req, res) => {
 router.post('/:id/kitchen-state', protect, async (req, res) => {
   try {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(req.body.date || '') || toDateKey(req.body.date) !== req.body.date) return res.status(400).json({ success: false, message: 'Select a valid date.' });
-    const state = await beginKitchenState(req.params.id, req.body.date, () => runAutoPopulateMissing(req.params.id, req.body.date, { freshInputs: true }));
+    const state = await beginKitchenState(req.params.id, req.body.date, () => runAutoPopulateMissing(req.params.id, req.body.date, { freshInputs: true }), { refresh: req.body.refresh === true });
     return res.status(state.state === 'running' ? 202 : 200).json({ success: true, ...state });
   } catch (error) { return res.status(error.statusCode || 503).json({ success: false, message: error.message, code: error.code, selectionWindow: error.selectionWindow }); }
 });

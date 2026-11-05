@@ -5,7 +5,7 @@ import KitchenCustomerBrowser from '../components/KitchenCustomerBrowser';
 import { snackPresetChanges } from '../lib/kitchenSnackPresetChanges';
 import useKitchenCurrentScope from '../lib/useKitchenCurrentScope';
 import { formatKitchenDay, visibleKitchenCustomer, kitchenCustomerDay } from '../lib/kitchenDayScope';
-import { loadKitchenSnapshot, requiredKitchenMeals, verifiedKitchenRoster } from '../lib/kitchenSnapshot';
+import { loadKitchenSnapshot, verifiedKitchenRoster } from '../lib/kitchenSnapshot';
 import PartnerKitchenOrders from '../components/PartnerKitchenOrders';
 import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealChanges } from '../utils/kitchenIntegrity';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
@@ -336,12 +336,10 @@ const KitchenList = () => {
   const [missingSelectionEntries, setMissingSelectionEntries] = useState([]);
   const [showOnlyMissing, setShowOnlyMissing] = useState(false);
   const [planFilter, setPlanFilter] = useState('');
-  // Who Matter says has a delivery on the last-checked date (filled by
-  // "Check Missing Selections"): { dateKey, emails: Set, subscriptionIds: Set }.
+  // Verified delivery identities from the automatic preparation roster.
   const [deliveryCheck, setDeliveryCheck] = useState(null);
   const [showOnlyAttention, setShowOnlyAttention] = useState(false);
   const [missingCheckDate, setMissingCheckDate] = useState('');
-  const [checkingMissing, setCheckingMissing] = useState(false);
   const [mainMealOptionsByDate, setMainMealOptionsByDate] = useState({});
   const [savingMainMealOptions, setSavingMainMealOptions] = useState(false);
   const [breakfastOptionsByDate, setBreakfastOptionsByDate] = useState({});
@@ -364,8 +362,6 @@ const KitchenList = () => {
   const [loadedSelectionScope, setLoadedSelectionScope] = useState('');
   const [dayRoster, setDayRoster] = useState(null);
   const [savingSnackOptions, setSavingSnackOptions] = useState(false);
-  const [assigningAll, setAssigningAll] = useState(false);
-  const [autoAssignResult, setAutoAssignResult] = useState(null);
 
   useEffect(() => {
     const loadMenus = async () => {
@@ -424,7 +420,7 @@ const KitchenList = () => {
     onDate: changeKitchenDate,
   });
 
-  const loadSelections = useCallback(async () => {
+  const loadSelections = useCallback(async ({ refresh = false } = {}) => {
     // Selecting a menu alone must not trigger the nutrition-lookup-per-customer
     // fetch below — that only happens once a date is picked too.
     preparedSnapshot.current = null;
@@ -456,7 +452,7 @@ const KitchenList = () => {
         // its own failure handling: a snack-preset failure still falls back
         // silently (matches prior behavior), while a `/selections` failure
         // still throws to the outer catch below.
-        const preparation = await prepareKitchenSelections(api, selectedMenuId, missingCheckDate, current);
+        const preparation = await prepareKitchenSelections(api, selectedMenuId, missingCheckDate, current, { refresh });
         if (!current()) return [];
         const roster = preparation.data?.rosterComplete === true && Array.isArray(preparation.data.kitchenRoster)
           ? preparation.data.kitchenRoster
@@ -496,6 +492,10 @@ const KitchenList = () => {
             selections: keyedSelections, breakfastPreset: breakfastState, snackPreset: snackState };
           setMenuSelections(keyedSelections);
           setDayRoster({ scope, rows: roster });
+          setDeliveryCheck({ dateKey: missingCheckDate,
+            emails: new Set(roster.map(sub => String(sub.email || '').trim().toLowerCase()).filter(Boolean)),
+            subscriptionIds: new Set(roster.map(sub => String(sub.subscription_id ?? '')).filter(Boolean)),
+            customerIds: new Set(roster.map(sub => String(sub.customer_id ?? '')).filter(Boolean)) });
           setLoadedSelectionScope(scope);
           return keyedSelections;
         }
@@ -565,94 +565,6 @@ const KitchenList = () => {
     () => deriveDateKeys({ menuSelections, mainMealOptionsByDate, breakfastOptionsByDate, snackOptionsByDate, selectedMenu }),
     [menuSelections, mainMealOptionsByDate, breakfastOptionsByDate, snackOptionsByDate, selectedMenu]
   );
-
-  // On-demand only: checking delivery_schedule means a full-detail fetch per
-  // active subscription (hundreds of Matter API calls), so this never runs
-  // automatically — only when the user clicks "Check Missing Selections".
-  const checkMissingSelections = async (dateKey, selectionsOverride) => {
-    if (!dateKey) return;
-    setCheckingMissing(true);
-    setError('');
-    try {
-      const res = await api.get('/matter/subscriptions/delivery-on-date', {
-        params: { date: dateKey }
-      });
-      const subs = res.data?.data || [];
-      setDeliveryCheck({
-        dateKey,
-        emails: new Set(subs.map((sub) => String(sub.email || '').trim().toLowerCase()).filter(Boolean)),
-        subscriptionIds: new Set(subs.map((sub) => String(sub.subscription_id || '').trim()).filter(Boolean)),
-        customerIds: new Set(subs.map((sub) => String(sub.customer_id ?? '').trim()).filter(Boolean))
-      });
-
-      // Use freshly-fetched selections when passed in (e.g. right after an
-      // assignment) instead of `menuSelections`, which won't reflect a
-      // same-tick loadSelections() call until the next render.
-      const activeSelections = selectionsOverride || menuSelections;
-
-      // Some internal customers are linked to a Matter subscription whose
-      // email differs from theirs (Customer.matterSubscriptionId, set via
-      // Customer Management's "Internal Customer Match" panel). Resolve each
-      // Matter row back to that internal identity by subscription id first —
-      // otherwise a customer already covered for this date under their real
-      // (internal) email gets wrongly flagged missing under their Matter
-      // email, and assigning meals for them would create a stray duplicate
-      // MenuSelectionRecord keyed by the wrong email instead of updating
-      // their real one.
-      const internalBySubscriptionId = new Map();
-      activeSelections.forEach((entry) => {
-        const subId = String(entry?.matterSourceSubscriptionId || entry?.matterSubscriptionId || '').trim();
-        if (subId) internalBySubscriptionId.set(subId, entry);
-      });
-
-      const coveredEmails = new Set();
-      activeSelections.forEach((entry) => {
-        // A snack alone (snacks are topped up for everyone) isn't a selection.
-        const hasSelectionThatDay = (entry.selectedMeals || []).some((m) => getDateKey(m?.date) === dateKey && String(m?.mealType || '').toLowerCase() !== 'snack');
-        if (hasSelectionThatDay) coveredEmails.add(String(entry.email || '').trim().toLowerCase());
-      });
-
-      const missing = subs
-        .map((sub) => {
-        const matched = activeSelections.find(entry => String(entry.matterCustomerId || '') === String(sub.customer_id))
-          || internalBySubscriptionId.get(String(sub.subscription_id || '').trim());
-        const core = String(sub.plan_name || '').trim().toLowerCase() === 'matter core';
-        const portions = (matched?.selectedMeals || []).filter(meal => getDateKey(meal.date) === dateKey && (core ? meal.mealType === 'main' : meal.mealType !== 'snack'))
-          .reduce((sum, meal) => sum + Math.max(1, Number(meal.quantity) || 1), 0);
-        const covered = portions >= requiredKitchenMeals(sub, matched, dateKey);
-          return {
-            sub, covered,
-            resolvedEmail: matched?.email || sub.email || '',
-            resolvedCustomerId: matched?.customerId || String(sub.customer_id ?? sub.subscription_id),
-            resolvedName: getCustomerName({ matterName: sub.name })
-          };
-        })
-        .filter(({ covered }) => !covered)
-        .map(({ sub, resolvedEmail, resolvedCustomerId, resolvedName }) => ({
-          customerId: resolvedCustomerId,
-          customerName: resolvedName,
-          firstName: resolvedName,
-          lastName: '',
-          email: resolvedEmail,
-          selectedMeals: [],
-          _missingSelection: true,
-          _missingSelectionDate: dateKey,
-          _mealFrequency: sub.meal_frequency,
-          _planName: sub.plan_name || '',
-          _subscriptionId: sub.subscription_id,
-          _breakfastIncluded: typeof sub.breakfast_included === 'boolean' ? sub.breakfast_included : undefined,
-          _exclusions: sub.exclusions || [],
-          dietaryRestrictions: sub.exclusions || []
-        }));
-
-      setMissingSelectionEntries(missing);
-      setAutoAssignResult(null);
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to check missing selections');
-    } finally {
-      setCheckingMissing(false);
-    }
-  };
 
   const saveMainMealOptionsForDate = async (date, mainMeals, subMeals) => {
     if (!selectedMenuId || !date) return;
@@ -1121,114 +1033,6 @@ const KitchenList = () => {
         </div>
       </div>
     );
-  };
-
-  // One action instead of two: for every customer missing a selection on the
-  // checked date, fills their main meals (plus breakfast, if their profile
-  // has breakfastInclude on) via assign-main-meals, then fills their full
-  // snack count for that same date via assign-snacks scoped to just this
-  // date + these customers (not the old menu-wide, every-date behavior).
-  // Order doesn't affect the resulting macro math — that's recalculated from
-  // the final saved meals whenever the kitchen list weights are displayed —
-  // it just means one click covers everything a missing customer needs.
-  const runAutoAssign = async () => {
-    if (!selectedMenuId || !missingCheckDate) return;
-    if (!selectionWindow.canAutoAssign) { setError(selectionWindow.message); return; }
-    if (deliveryCheck?.dateKey !== missingCheckDate) {
-      setError('Run "Check Missing Selections" for this date first.');
-      return;
-    }
-    if (autoAssignBlockedByMacros) {
-      setError('Add macros for the flagged breakfast / snack options first — Auto-Assign is blocked until then.');
-      return;
-    }
-    setAssigningAll(true);
-    setError('');
-    try {
-      const toPayload = (entry) => ({
-        email: entry.email,
-        name: entry.customerName,
-        customerId: entry.customerId,
-        subscriptionId: entry._subscriptionId,
-        mealFrequency: entry._mealFrequency,
-        breakfastIncluded: entry._breakfastIncluded,
-        exclusions: entry._exclusions
-      });
-      const isMatterCore = (entry) => String(entry._planName || '').trim().toLowerCase() === 'matter core';
-      const customers = missingSelectionEntries.filter((e) => !isMatterCore(e)).map(toPayload);
-      // Matter Core has its own assignment (full meal_frequency main meals,
-      // breakfast on top, snacks included) — never the standard rotation,
-      // which counts breakfast as one of the meal_frequency slots.
-      const matterCoreCustomers = missingSelectionEntries.filter(isMatterCore).map(toPayload);
-
-      let mainMealsRes = null;
-      let snacksRes = null;
-      let matterCoreRes = null;
-      if (customers.length > 0) {
-        mainMealsRes = await api.post(`/menus/${selectedMenuId}/assign-main-meals`, {
-          date: missingCheckDate,
-          customers
-        });
-        snacksRes = await api.post(`/menus/${selectedMenuId}/assign-snacks`, {
-          date: missingCheckDate,
-          customers
-        });
-      }
-      if (matterCoreCustomers.length > 0) {
-        matterCoreRes = await api.post(`/menus/${selectedMenuId}/assign-matter-core-meals`, {
-          date: missingCheckDate,
-          customers: matterCoreCustomers
-        });
-      }
-
-      // Customers who picked their own meals never go through the "missing"
-      // path above, so their snacks (never customer-selectable) used to
-      // depend entirely on the background job. Top them up here too — only
-      // those Matter shows a delivery for on this date.
-      let selectedSnacksRes = null;
-      if (deliveryCheck?.dateKey === missingCheckDate) {
-        const withSelection = menuSelections.filter((entry) =>
-          (entry.selectedMeals || []).some((m) => getDateKey(m?.date) === missingCheckDate)
-          && hasDeliveryOnCheckedDate(entry, deliveryCheck));
-        const isCore = (entry) => String(entry.planName || '').trim().toLowerCase() === 'matter core';
-        const standard = withSelection.filter((e) => !isCore(e)).map((e) => ({ email: e.email }));
-        const core = withSelection.filter(isCore)
-          .map((e) => ({
-            email: e.email,
-            subscriptionId: e.matterSubscriptionId,
-            // Matter's own breakfast_included, so the Matter Core extra breakfast is topped up.
-            breakfastIncluded: typeof e.breakfastIncluded === 'boolean' ? e.breakfastIncluded : undefined
-          }));
-        if (standard.length > 0) {
-          selectedSnacksRes = await api.post(`/menus/${selectedMenuId}/assign-snacks`, {
-            date: missingCheckDate,
-            customers: standard
-          });
-        }
-        if (core.length > 0) {
-          await api.post(`/menus/${selectedMenuId}/assign-matter-core-meals`, {
-            date: missingCheckDate,
-            customers: core,
-            snackOnly: true,
-            includeBreakfast: true
-          });
-        }
-      }
-
-      setAutoAssignResult({
-        mainMeals: mainMealsRes?.data?.data || null,
-        snacks: snacksRes?.data?.data || null,
-        matterCore: matterCoreRes?.data?.data || null,
-        selectedSnacks: selectedSnacksRes?.data?.data || null
-      });
-
-      const freshSelections = await loadSelections();
-      await checkMissingSelections(missingCheckDate, freshSelections);
-    } catch (err) {
-      setError(err.response?.data?.message || 'Failed to auto-assign');
-    } finally {
-      setAssigningAll(false);
-    }
   };
 
   // No auto-select for the date pickers: the kitchen chooses a date explicitly.
@@ -2459,7 +2263,7 @@ ${body}
               <select id="kitchen-header-date" aria-label="Delivery date" value={missingCheckDate} disabled={!selectedMenuId} onChange={e => changeKitchenDate(e.target.value)}><option value="">Choose a date</option>{menuDateKeys.map(date => <option key={date} value={date}>{formatKitchenDay(date)}</option>)}</select>
             </div></div>
           </div>
-          <button type="button" title="Reload selections and re-fetch nutrition data from the website" className="kitchen-reload" disabled={!selectedMenuId || !missingCheckDate || loadingSelections} onClick={() => { nutritionCacheRef.current.clear(); setDeliveryCheck(null); loadSelections(); }}><RefreshCw size={16} className={loadingSelections ? 'animate-spin' : ''} /></button>
+          <button type="button" title="Reload selections and re-fetch nutrition data from the website" className="kitchen-reload" disabled={!selectedMenuId || !missingCheckDate || loadingSelections} onClick={() => { nutritionCacheRef.current.clear(); setDeliveryCheck(null); loadSelections({ refresh: true }); }}><RefreshCw size={16} className={loadingSelections ? 'animate-spin' : ''} /></button>
           <button type="button" className="kitchen-download-trigger" aria-expanded={downloadsOpen} aria-controls="kitchen-downloads" disabled={!menuDateKeys.length} onClick={() => setDownloadsOpen(open => !open)}><Download size={16} /> Kitchen Paper <ChevronDown size={14} /></button>
         </KitchenWorkspaceHeader>
         <p className="text-sm text-slate-600">{loadingMenus ? 'Loading active menu...' : automaticScope.message || (automaticScope.availableMenus.length > 1
@@ -2657,9 +2461,8 @@ ${body}
 
         {menuDateKeys.length > 0 && (
           <div className="kitchen-panel kitchen-setup-panel">
-            <div className="kitchen-setup-heading"><span>Auto-assign menu {missingCheckDate ? '· ' + formatDateLabel(missingCheckDate) : ''}</span>
+            <div className="kitchen-setup-heading"><span>Daily menu setup {missingCheckDate ? '· ' + formatDateLabel(missingCheckDate) : ''}</span>
               <button type="button" aria-expanded={setupOpen} aria-controls="kitchen-setup-content" onClick={() => setSetupOpen(open => !open)}>{setupOpen ? 'Hide setup' : 'Show setup'} {setupOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button>
-              <button type="button" className="kitchen-button-primary" onClick={runAutoAssign} disabled={!selectionWindow.canAutoAssign || assigningAll || deliveryCheck?.dateKey !== missingCheckDate || autoAssignBlockedByMacros}>{assigningAll ? 'Assigning...' : 'Auto-Assign'}</button>
             </div>
             <div id="kitchen-setup-content" hidden={!setupOpen}>
             <h3 className="sr-only"><ChefHat size={19} />Missing Meal Selections</h3>
@@ -2677,15 +2480,7 @@ ${body}
                   ))}
                 </select>
               </div>
-              <button
-                type="button"
-                onClick={() => checkMissingSelections(missingCheckDate)}
-                disabled={checkingMissing || !missingCheckDate}
-                className="kitchen-button-blue inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold disabled:opacity-50"
-              >
-                <Search size={14} className={checkingMissing ? 'animate-pulse' : ''} />
-                {checkingMissing ? 'Checking...' : 'Check Missing Selections'}
-              </button>
+
 
             </div>
             {missingSelectionEntries.length > 0 && (
@@ -3030,45 +2825,8 @@ ${body}
                 </div>
               )}
               <p className="mt-1 text-[11px] text-slate-400">
-                Fills main meals, breakfast (if the customer's profile has Breakfast Include on), and their full snack count — for every customer flagged missing on {formatDateLabel(missingCheckDate)} above. Everything stays within each option's own exclusion list.
+                Missing meals, included breakfasts and snacks are filled automatically after the delivery-date deadline. Use Refresh to recheck after subscription or selection changes.
               </p>
-              {deliveryCheck?.dateKey !== missingCheckDate && (
-                <p className="mt-1 text-[11px] text-slate-400">Run "Check Missing Selections" above first to load the customer list to assign.</p>
-              )}
-
-              {autoAssignResult && (
-                <div className="mt-2 text-xs space-y-1">
-                  {autoAssignResult.mainMeals && (
-                    <p className="text-emerald-700">
-                      Meals: assigned {autoAssignResult.mainMeals.assigned} main meal slot(s) and {autoAssignResult.mainMeals.assignedBreakfast || 0} breakfast(s) across {autoAssignResult.mainMeals.customersProcessed} customer(s).
-                      {autoAssignResult.mainMeals.repeatedDish > 0 && ` ${autoAssignResult.mainMeals.repeatedDish} slot(s) got a repeated dish — the customer needed more meals than there are different dishes they can eat that day.`}
-                      {autoAssignResult.mainMeals.assignedWithExclusionConflict > 0 && ` ${autoAssignResult.mainMeals.assignedWithExclusionConflict} slot(s) got a dish that clashes with the customer's exclusions (every dish that day did) — flagged "Needs attention", swap before it goes out.`}
-                      {autoAssignResult.mainMeals.skippedNoOption > 0 && ` ${autoAssignResult.mainMeals.skippedNoOption} slot(s) skipped — no dishes set up for this date${autoAssignResult.mainMeals.skippedCustomers?.length ? ` (${autoAssignResult.mainMeals.skippedCustomers.join(', ')})` : ''}.`}
-                      {autoAssignResult.mainMeals.skippedBreakfastNoOption > 0 && ` ${autoAssignResult.mainMeals.skippedBreakfastNoOption} breakfast(s) skipped — no eligible breakfast option (check exclusions).`}
-                      {autoAssignResult.mainMeals.skippedAlreadyAssigned > 0 && ` ${autoAssignResult.mainMeals.skippedAlreadyAssigned} customer(s) already had enough main meals.`}
-                    </p>
-                  )}
-                  {autoAssignResult.snacks && (
-                    <p className={autoAssignResult.snacks.assigned > 0 ? 'text-emerald-700' : 'text-amber-700'}>
-                      Snacks: assigned {autoAssignResult.snacks.assigned} snack slot(s) across {autoAssignResult.snacks.customersProcessed} customer(s) checked.
-                      {autoAssignResult.snacks.skippedNoSnacksNeeded > 0 && ` ${autoAssignResult.snacks.skippedNoSnacksNeeded} customer(s) skipped — no snacks in their website subscription.`}
-                      {autoAssignResult.snacks.skippedNoOptions > 0 && ` ${autoAssignResult.snacks.skippedNoOptions} slot(s) skipped — no eligible snack options for this date.`}
-                    </p>
-                  )}
-                  {autoAssignResult.selectedSnacks && (
-                    <p className="text-emerald-700">
-                      Customers with their own selection: added {autoAssignResult.selectedSnacks.assigned} missing snack(s) across {autoAssignResult.selectedSnacks.customersProcessed} customer(s) checked.
-                    </p>
-                  )}
-                  {autoAssignResult.matterCore && (
-                    <p className="text-emerald-700">
-                      Matter Core: assigned {autoAssignResult.matterCore.assignedMainMeals} main meal(s), {autoAssignResult.matterCore.assignedBreakfast || 0} breakfast(s) and {autoAssignResult.matterCore.assignedSnacks || 0} snack(s) across {autoAssignResult.matterCore.customersProcessed} customer(s).
-                      {autoAssignResult.matterCore.skippedNoOption > 0 && ` ${autoAssignResult.matterCore.skippedNoOption} meal slot(s) skipped — not enough Matter Core meals for this date.`}
-                      {autoAssignResult.matterCore.skippedBreakfastNoOption > 0 && ` ${autoAssignResult.matterCore.skippedBreakfastNoOption} breakfast(s) skipped — no breakfast option for this date.`}
-                    </p>
-                  )}
-                </div>
-              )}
             </div>
             </div>
           </div>

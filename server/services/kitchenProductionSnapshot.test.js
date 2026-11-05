@@ -44,6 +44,13 @@ test('background preparation publishes one source version and an input edit inva
   assert.equal(ready.state, 'ready');
   assert.equal(ready.data.snapshotId, String(job._id));
   assert.equal(preparations, 1);
+  const refresh = await beginKitchenState('menu', '2026-10-30', async () => { preparations++; return { data: { kitchenRoster: [], kitchenInputs: [], rosterComplete: true } }; }, { refresh: true });
+  assert.equal(refresh.state, 'running', 'explicit refresh bypasses the cached ready snapshot');
+  const joined = await beginKitchenState('menu', '2026-10-30', () => assert.fail('Do not duplicate the running preparation'), { refresh: true });
+  assert.equal(joined.jobId, refresh.jobId);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(preparations, 2);
+  assert.equal((await readKitchenState('menu', '2026-10-30')).state, 'ready');
   menu.updatedAt = new Date('2026-10-28T10:01:00Z');
   assert.equal((await readKitchenState('menu', '2026-10-30')).state, 'missing');
 });

@@ -74,4 +74,6 @@ test('open preview preserves saved choices, adds transient missing rows, and nev
   assert.equal(result.data.data.kitchenSelections.length, 2);
   assert.equal(JSON.stringify(saved), before);
   assert.deepEqual(result.data.data.kitchenSelections[1].selectedMeals, []);
+  const refreshed = await beginKitchenState('menu', '2099-11-02', () => assert.fail('Refresh must not assign before the deadline'), { refresh: true });
+  assert.equal(refreshed.state, 'selection-open');
 });
