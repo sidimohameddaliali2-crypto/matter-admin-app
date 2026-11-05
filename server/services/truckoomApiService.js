@@ -62,14 +62,15 @@ class TruckoomApiService {
     try { return await this.accessTokenPromise; } finally { this.accessTokenPromise = null; }
   }
 
-  async geofenceRequest(method, body, retry = true) {
+  async geofenceRequest(method, body, retry = true, beforeDispatch) {
     const token = await this.getAccessToken();
+    if (beforeDispatch) await beforeDispatch(body);
     const { data } = await axios.post(`${this.baseURL}?token=${method}`, body,
       { headers: { 'auth-code': token }, timeout: 15000 });
     if (Number(data?.result) !== 1) {
       if (retry && /token|auth-code/i.test(data?.message || '')) {
         this.accessToken = null;
-        return this.geofenceRequest(method, body, false);
+        return this.geofenceRequest(method, body, false, beforeDispatch);
       }
       throw new Error(`Truckoom ${method} failed`);
     }
@@ -109,10 +110,10 @@ class TruckoomApiService {
     }
   }
 
-  async getVehicleTrackLogs(vehicleNo, startDate, endDate) {
+  async getVehicleTrackLogs(vehicleNo, startDate, endDate, { beforeDispatch } = {}) {
     return this.geofenceRequest('getVehicleTrackLogs', {
       vehicle_no: String(vehicleNo), start_date: startDate, end_date: endDate,
-    }, false); // Historical calls must never retry inside the three-minute limit.
+    }, false, beforeDispatch); // Never retry inside the three-minute limit.
   }
 
   async deleteCustomerGeofence(id) {

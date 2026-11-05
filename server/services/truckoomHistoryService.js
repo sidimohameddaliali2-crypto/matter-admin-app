@@ -6,6 +6,7 @@ import { parseTruckoomAlertTime } from './truckoomVisitRules.js';
 
 const UAE_OFFSET = 4 * 60 * 60000;
 const REQUEST_INTERVAL = 3 * 60000;
+const REQUEST_LOCK = 5 * 60000;
 
 export function parseTrackLogTime(value) {
   // Verified live: dd-MM-yyyy hh:mm:ss AM/PM, in UAE time, unlike UTC alerts.
@@ -44,26 +45,51 @@ export async function getHistoryPoints(vehicleNo, start, end, now = new Date()) 
   const ttl = cached?.fetchedAt && +cached.fetchedAt >= +end ? 24 * 60 * 60000 : 60 * 60000;
   if (cached?.fetchedAt && +now - +cached.fetchedAt < ttl) return cached.points;
   const owner = randomUUID();
-  // Retain this reservation even after failure. All PM2 workers share the
-  // documented one track-log request per three minutes; never sleep in the job.
+  // Hold a longer lock during authentication/transport, then retain a full
+  // three-minute cooldown after completion, including failed attempts.
   const reservedAt = new Date(Date.now());
   try {
     const lease = await TrackerSyncLease.findOneAndUpdate({ _id: 'truckoom-track-logs',
       $or: [{ expiresAt: { $lte: reservedAt } }, { expiresAt: { $exists: false } }] },
-    { $set: { owner, expiresAt: new Date(+reservedAt + REQUEST_INTERVAL) } }, { upsert: true, new: true });
+    { $set: { owner, expiresAt: new Date(+reservedAt + REQUEST_LOCK) } }, { upsert: true, new: true });
     if (lease.owner !== owner) return cached?.points || [];
   } catch (error) {
     if (error.code === 11000) return cached?.points || [];
     throw error;
   }
+  let dispatchedAt;
   try {
-    const rows = await truckoom.getVehicleTrackLogs(vehicleNo, uaeDate(start), uaeDate(new Date(Math.min(+end - 1000, +reservedAt))));
+    const rows = await truckoom.getVehicleTrackLogs(vehicleNo, uaeDate(start), uaeDate(new Date(Math.min(+end - 1000, +reservedAt))), {
+      // The API invokes this after authentication and immediately before POST.
+      beforeDispatch: async body => {
+        const renewedAt = Date.now();
+        const expiresAt = new Date(renewedAt + REQUEST_LOCK);
+        const result = await TrackerSyncLease.updateOne({ _id: 'truckoom-track-logs', owner,
+          expiresAt: { $gt: new Date(renewedAt) } }, { $set: { expiresAt } });
+        dispatchedAt = new Date(Date.now());
+        // A slow DB operation or expired ownership must never permit a late
+        // request with less than three minutes left on its reservation.
+        if (!result.matchedCount || +expiresAt - +dispatchedAt < REQUEST_INTERVAL) {
+          throw new Error('History request reservation expired');
+        }
+        // Match cache completeness to the actual requested window, including
+        // authentication that crosses Dubai midnight.
+        body.end_date = uaeDate(new Date(Math.min(+end - 1000, +dispatchedAt)));
+      },
+    });
     const points = normalizeTrackLogs(rows, vehicleNo, start, end);
-    await TruckoomTrackHistory.updateOne({ _id: key }, { $set: { fetchedAt: reservedAt, points } }, { upsert: true });
+    await TruckoomTrackHistory.updateOne({ _id: key }, { $set: { fetchedAt: dispatchedAt, points } }, { upsert: true });
     return points;
   } catch {
     // A vendor failure must not erase the last usable GPS or block a delivery.
     return cached?.points || [];
+  } finally {
+    try {
+      await TrackerSyncLease.updateOne({ _id: 'truckoom-track-logs', owner },
+        { $set: { expiresAt: new Date(Date.now() + REQUEST_INTERVAL) } });
+    } catch {
+      // Keep the longer dispatch reservation if the cooldown write fails.
+    }
   }
 }
 
