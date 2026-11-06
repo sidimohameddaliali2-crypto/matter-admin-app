@@ -107,9 +107,12 @@ const Layout = ({ children }) => {
     navigate('/login');
   };
 
+  const isNavItemActive = (item) => item.href === location.pathname || (
+    item.group === 'Menu Creation' && location.pathname.startsWith(`${item.href}/`)
+  );
   const currentPageName = navigationGroups
     .flatMap((group) => group.items)
-    .find((item) => item.href === location.pathname)?.name;
+    .find(isNavItemActive)?.name;
   // The Dashboard is the delivery operations view, so its top-bar label is "Operations".
   const headerLabel = currentPageName === 'Dashboard' ? 'Operations' : currentPageName;
 
@@ -134,7 +137,7 @@ const Layout = ({ children }) => {
               <div className="mt-0.5 space-y-0.5">
                 {group.items.map((item) => {
                   const Icon = item.icon;
-                  const isActive = location.pathname === item.href;
+                  const isActive = isNavItemActive(item);
                   return (
                     <Link
                       key={item.name}
