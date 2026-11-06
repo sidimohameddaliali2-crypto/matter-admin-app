@@ -12,7 +12,8 @@ import { customerFenceIdentity, syncCustomerTrackerVisits } from './truckoomVisi
 import { getBusinessDayBounds } from '../utils/businessDate.js';
 
 function setup(t, overrides = {}) {
-  const now = new Date();
+  // Noon Dubai keeps the 05:00 entry and 05:10 exit in the past on every run.
+  const now = new Date('2026-11-06T08:00:00.000Z');
   const { startOfDay } = getBusinessDayBounds(now);
   const entry = new Date(+startOfDay + 5 * 60 * 60000);
   const exit = new Date(+entry + 10 * 60000);
