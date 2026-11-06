@@ -297,3 +297,31 @@ run('only the action owner acknowledges seen, and transfer resets prior acknowle
   const accepted = await updateServiceAction({ actor: other, id: action._id, version: checked.version, status: 'in_progress', note: 'New owner started', requestId: requestId() });
   assert.ok(accepted.seenAt);
 });
+run('readable customer text cannot turn unavailable staff audio into a handling grade', async () => {
+  await Review.updateMany({}, { $set: { status: 'skipped' } });
+  const f = await fixture();
+  await Message.updateOne({ _id: f.message._id }, { $set: { type: 'audio', text: '', mediaState: 'unavailable' } });
+  const active = await claim();
+  const args = submission(active, f.message, { evidenceMessageIds: [f.customerMessage._id, f.message._id] });
+  await assert.rejects(submitServiceReview(args), /available evidence.*assessed staff/i);
+  await assert.rejects(submitServiceReview({ ...args, verdict: 'good', requestId: requestId() }), /available evidence.*assessed staff/i);
+  assert.equal((await Review.findById(active._id)).revisions.length, 0);
+  assert.equal(await Command.countDocuments({ requestId: args.requestId }), 0);
+  const unknown = await submitServiceReview({ ...args, verdict: 'insufficient', outcome: 'unknown', note: 'The staff voice recording is unavailable', requestId: requestId() });
+  assert.equal(unknown.review.status, 'awaiting_evidence');
+});
+run('each assessed staff member needs their own readable text or verified available media', async () => {
+  await Review.updateMany({}, { $set: { status: 'skipped' } });
+  const f = await fixture(reviewer._id, { contributorIds: [supervisor._id, other._id] });
+  const missingVoice = await Message.create({ source: 'fixture', scope: 'isolated', externalMessageId: requestId(), conversationId: f.conversation._id, authorId: other._id, authorType: 'staff', sentAt: new Date(), type: 'audio', text: 'Audio file unavailable', mediaState: 'missing' });
+  const active = await claim();
+  const args = submission(active, f.message, { evidenceMessageIds: [f.customerMessage._id, f.message._id, missingVoice._id] });
+  await assert.rejects(submitServiceReview(args), /available evidence.*assessed staff/i);
+  assert.equal((await Review.findById(active._id)).revisions.length, 0);
+  // This test-owned update represents a subsequently verified media resource;
+  // normal imports cannot manufacture media availability from a placeholder.
+  await Message.updateOne({ _id: missingVoice._id }, { $set: { text: '', mediaState: 'available' } });
+  const saved = await submitServiceReview(args);
+  assert.deepEqual(saved.review.revisions.at(-1).assessedContributorIds.map(String).sort(), [supervisor._id, other._id].map(String).sort());
+  assert.equal(saved.review.status, 'submitted');
+});

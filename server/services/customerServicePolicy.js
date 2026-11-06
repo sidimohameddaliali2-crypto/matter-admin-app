@@ -37,7 +37,7 @@ export function allocateReviewBatch({ cases = [], staff = [], assignments = [], 
   for (const a of assignments) if (['assigned', 'pending'].includes(a.status) && pending.has(serviceId(a.reviewerId))) pending.set(serviceId(a.reviewerId), pending.get(serviceId(a.reviewerId)) + 1);
   const output = [], unassigned = [];
   let nextCursor = Number.isInteger(cursor) && cursor >= 0 ? cursor : 0;
-  for (const item of [...cases].sort((a, b) => (date(a.createdAt)?.getTime() || 0) - (date(b.createdAt)?.getTime() || 0) || serviceId(a._id).localeCompare(serviceId(b._id)))) {
+  for (const item of [...cases].sort((a, b) => Number(b.priority==='urgent')-Number(a.priority==='urgent')||(date(a.createdAt)?.getTime() || 0) - (date(b.createdAt)?.getTime() || 0) || serviceId(a._id).localeCompare(serviceId(b._id)))) {
     const excluded = new Set([...(item.contributorIds || []), ...(item.skippedBy || []), ...(item.excludedReviewerIds || [])].map(serviceId));
     const candidates = eligible.filter(p => !excluded.has(serviceId(p.userId)) && pending.get(serviceId(p.userId)) < limits.pendingCap);
     if (!candidates.length) { unassigned.push({ reviewId: serviceId(item._id), reason: 'no_eligible_capacity' }); continue; }

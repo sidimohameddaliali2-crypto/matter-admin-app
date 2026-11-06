@@ -23,7 +23,7 @@ export async function getServiceSnapshot({userId,supervise,filters={}}) {
     filter.$and=[{$or:[{episodeFrom:{$lt:range.to},episodeTo:{$gte:range.from}},{episodeFrom:null,conversationId:{$in:conversations}}]}];
   }
   if(!supervise) {
-    const ownReviews=await ServiceReview.find({reviewerId:userId}).select('issueId').limit(10001).lean();
+    const ownReviews=await ServiceReview.find({$or:[{reviewerId:userId},{'revisions.actorId':userId}]}).select('issueId').limit(10001).lean();
     const ownActions=await ServiceAction.find({ownerId:userId}).select('issueId').limit(10001).lean();
     filter._id={$in:[...ownReviews,...ownActions].map(r=>r.issueId)};
   }
@@ -31,12 +31,13 @@ export async function getServiceSnapshot({userId,supervise,filters={}}) {
   if(issues.length>5000) throw Object.assign(new Error('Report exceeds 5000 issues; narrow the date range'),{statusCode:422});
   const issueIds=issues.map(x=>x._id);
   const [reviews,actions,profiles,capture]=await Promise.all([
-    ServiceReview.find({issueId:{$in:issueIds},...(!supervise?{reviewerId:userId}:{})}).lean(),
+    ServiceReview.find({issueId:{$in:issueIds},...(!supervise?{$or:[{reviewerId:userId},{'revisions.actorId':userId}]}:{})}).lean(),
     ServiceAction.find({issueId:{$in:issueIds},...(!supervise?{ownerId:userId}:{})}).lean(),
     ServiceStaffProfile.find(supervise?{enabled:true}:{userId}).populate('userId','profile.firstName profile.lastName isActive').lean(),
     supervise?ServiceCaptureBatch.findOne({status:'completed'}).sort({createdAt:-1}).lean():null,
   ]);
-  return {issues,reviews,actions,profiles,capture,supervise,asOf:new Date().toISOString(),filters};
+  const scopedReviews=supervise?reviews:reviews.map(r=>({...r,draft:id(r.reviewerId)===id(userId)?r.draft:{},revisions:(r.revisions||[]).filter(rev=>id(rev.actorId||r.reviewerId)===id(userId))}));
+  return {issues,reviews:scopedReviews,actions,profiles,capture,supervise,asOf:new Date().toISOString(),filters};
 }
 export function summarizeServiceSnapshot(snapshot) {
   const {issues,reviews,actions,profiles,capture,asOf}=snapshot;
@@ -44,10 +45,11 @@ export function summarizeServiceSnapshot(snapshot) {
   const overdue=a=>[a.dueAt,a.promisedDueAt].filter(Boolean).some(d=>new Date(d)<new Date(asOf));
   const workload=profiles.map(p=>{
     const user=p.userId;const own=reviews.filter(r=>id(r.reviewerId)===id(user));
+    const submitted=reviews.map(r=>({r,revisions:(r.revisions||[]).filter(rev=>id(rev.actorId||r.reviewerId)===id(user))})).filter(item=>item.revisions.length);
     const name=p.displayName||`${user?.profile?.firstName||''} ${user?.profile?.lastName||''}`.trim()||'Staff';
     return {userId:id(user),displayName:name,availableMinutes:p.availableMinutes||0,assigned:own.length,
-      reviewed:own.filter(r=>r.revisions?.length).length,remaining:own.filter(r=>['pending','assigned','in_review'].includes(r.status)).length,
-      needsEvidence:own.filter(r=>r.status==='awaiting_evidence').length,historicalSubmissions:own.reduce((n,r)=>n+(r.revisions?.length||0),0),
+      reviewed:submitted.length,remaining:own.filter(r=>['pending','assigned','in_review'].includes(r.status)).length,
+      needsEvidence:own.filter(r=>r.status==='awaiting_evidence').length,historicalSubmissions:submitted.reduce((n,item)=>n+item.revisions.length,0),
       openActions:open.filter(a=>id(a.ownerId)===id(user)).length,overdueActions:open.filter(a=>id(a.ownerId)===id(user)&&overdue(a)).length};
   });
   const latest=r=>r.revisions?.[r.revisions.length-1]||{};
@@ -76,9 +78,9 @@ export async function buildServiceWorkbook(snapshot) {
     Summary:[{Metric:'Generated at',Value:report.asOf},{Metric:'Display timezone',Value:'Asia/Dubai; source timestamps exported as UTC ISO instants'},{Metric:'Taxonomy version',Value:SERVICE_TAXONOMY_VERSION},{Metric:'Scope',Value:snapshot.filters?.from?`${snapshot.filters.from} to ${snapshot.filters.to}`:'All captured dates'},{Metric:'Unique issues',Value:issues.length},{Metric:'Reviewed issues',Value:report.coverage.reviewed},{Metric:'Open actions',Value:report.actions.open},{Metric:'Overdue actions',Value:report.actions.overdue},{Metric:'Unassigned actions',Value:report.actions.unassigned},{Metric:'Capture',Value:report.capture.status}],
     Problems:issues.map(i=>({Issue:id(i),Customer:i.customerName,CustomerID:i.customerId,Categories:(i.categoryIds||[]).join('; '),Outcome:i.outcome,Summary:i.summary,OpenActions:actions.filter(a=>id(a.issueId)===id(i)&&a.status!=='completed').length,Actions:actions.filter(a=>id(a.issueId)===id(i)).map(a=>`${id(a)}: ${a.description} [${a.status}] Owner ${id(a.ownerId)||'Unassigned'} Due ${a.dueAt?new Date(a.dueAt).toISOString():'Not set'}`).join('\n')})),
     Customers:[...new Map(issues.map(i=>[i.customerId||id(i),{CustomerID:i.customerId,Customer:i.customerName}])).values()],
-    'Customer chats':messages.map(m=>({MessageID:m.externalMessageId,ConversationID:m.externalConversationId,SentAt:new Date(m.sentAt).toISOString(),Author:m.authorName,AuthorType:m.authorType,Type:m.type,Text:m.text,MediaState:m.mediaState})),
+    'Customer chats':messages.map(m=>({EvidenceMessageID:id(m),MessageID:m.externalMessageId,ConversationID:m.externalConversationId,SentAt:new Date(m.sentAt).toISOString(),Author:m.authorName,AuthorType:m.authorType,Type:m.type,Text:m.text,MediaState:m.mediaState})),
     'Review evidence':reviews.flatMap(r=>(r.revisions?.length?r.revisions:[{}]).map(revision=>({Review:id(r),Issue:id(r.issueId),Customer:issueMap.get(id(r.issueId))?.customerName,Reviewer:id(revision.actorId||r.reviewerId),Status:r.status,Verdict:revision.verdict,Stale:!!r.stale,Summary:revision.summary,EvidenceMessageIDs:(revision.evidenceMessageIds||[]).map(id).join('; '),ReviewedAt:revision.at?new Date(revision.at).toISOString():''}))),
-    'Action history':actions.flatMap(a=>(a.history?.length?a.history:[{}]).map(h=>({Action:id(a),Issue:id(a.issueId),Owner:id(h.ownerId||a.ownerId),Due:h.dueAt?new Date(h.dueAt).toISOString():'',PromisedDue:a.promisedDueAt?new Date(a.promisedDueAt).toISOString():'',Status:h.status||a.status,At:h.at?new Date(h.at).toISOString():'',Actor:id(h.actorId),Reason:h.reason,Note:h.note,Evidence:JSON.stringify(h.evidence||{})}))),
+    'Action history':actions.flatMap(a=>(a.history?.length?a.history:[{}]).map(h=>({Action:id(a),Issue:id(a.issueId),Owner:Object.hasOwn(h,'ownerId')?id(h.ownerId):a.history?.length?'':id(a.ownerId),Due:h.dueAt?new Date(h.dueAt).toISOString():'',PromisedDue:a.promisedDueAt?new Date(a.promisedDueAt).toISOString():'',Status:h.status||a.status,At:h.at?new Date(h.at).toISOString():'',Actor:id(h.actorId),Reason:h.reason,Note:h.note,Evidence:JSON.stringify(h.evidence||{})}))),
   };
   for(const [name,rows] of Object.entries(sheets)) XLSX.utils.book_append_sheet(book,XLSX.utils.json_to_sheet(clean(rows.length?rows:[{Status:'No records in this scope'}])),name);
   book.Workbook={Sheets:book.SheetNames.map((name,i)=>({name,Hidden:i<4?0:1}))};

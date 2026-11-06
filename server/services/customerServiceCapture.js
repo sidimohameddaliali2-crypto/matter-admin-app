@@ -92,7 +92,15 @@ export async function ingestServiceBatch({ messages, source='gallabox_export', s
             issue.sourceMetadata={...issue.sourceMetadata,unmappedStaff:bounded.some(m=>m.authorType==='staff'&&!m.authorId)};
             if((changedTimes.get(conversationId)||[]).some(t=>t>=issue.episodeFrom&&t<=issue.episodeTo)) {
               issue.sourceRevision+=1;if(issue.outcome==='resolved') issue.outcome='open';
-              await ServiceReview.updateMany({issueId:issue._id},{$set:{stale:true}},{session});
+              const savedReviews=await ServiceReview.find({issueId:issue._id}).session(session);
+              for(const r of savedReviews) {
+                r.stale=true;
+                if(r.sampleType!=='calibration'&&['submitted','awaiting_evidence'].includes(r.status)) {
+                  r.assignmentHistory.push({previousReviewerId:r.reviewerId,reviewerId:null,at:new Date(),reason:'Backfilled episode evidence requires fresh allocation'});
+                  r.status='pending';r.reviewerId=null;r.leaseUntil=null;
+                }
+                await r.save({session});
+              }
             }
             await issue.save({session});continue;
           }

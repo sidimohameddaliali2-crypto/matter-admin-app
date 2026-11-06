@@ -202,8 +202,9 @@ export async function submitServiceReview(input) {
     const assessed = [...new Set(evidence.filter(m => m.authorType === 'staff' && m.authorId).map(m => serviceId(m.authorId)))];
     if (submission.verdict !== 'insufficient') {
       if (issue.sourceMetadata?.unmappedStaff || !issue.contributorIds?.length) fail('Staff attribution is unresolved. Use Not enough information until source mapping is verified.', 400);
-      if (!evidence.length || evidence.every(m => !m.text?.trim() && m.mediaState !== 'available')) fail('Available supporting evidence is required for a handling grade.', 400);
       if (!assessed.length) fail('Select a verified human staff message to identify whose handling was assessed, or use Not enough information.', 400);
+      const availableStaff = new Set(evidence.filter(m => m.authorType === 'staff' && m.authorId && ((m.type === 'text' && m.text?.trim()) || m.mediaState === 'available')).map(m => serviceId(m.authorId)));
+      if (assessed.some(id => !availableStaff.has(id))) fail('Available evidence from each assessed staff member is required. Select their readable text or verified available media, or use Not enough information.', 400);
       if (issue.boundaryState === 'needs_review' && input.confirmIssueBoundary !== true) fail('Confirm the selected evidence describes one issue before grading.', 400);
     }
     if (review.sampleType === 'calibration' && input.action) fail('Record calibration independently; create any operational follow-up through the issue action queue.', 400);
@@ -314,14 +315,14 @@ export async function allocateServiceReviews({ actor, requestId = randomUUID(), 
     const reviews = await Review.find({ $or: [{ status: { $in: ['assigned', 'in_review'] } }, { 'assignmentHistory.dateKey': dateKey }] }).session(session).lean();
     const credit = {};
     for (const review of reviews) for (const event of review.assignmentHistory || []) if (event.dateKey === dateKey && event.reviewerId) credit[serviceId(event.reviewerId)] = (credit[serviceId(event.reviewerId)] || 0) + 1;
-    const queued = await Review.find({ status: 'pending', reviewerId: null }).sort({ createdAt: 1, _id: 1 }).limit(1000).session(session).lean();
+    const queued = await Review.find({ status: 'pending', reviewerId: null }).sort({ sampleType:-1,createdAt: 1, _id: 1 }).limit(1000).session(session).lean();
     const issues = await Issue.find({ _id: { $in: queued.map(r => r.issueId) } }).session(session).lean();
     const issueMap = new Map(issues.map(i => [serviceId(i._id), i]));
     const seed=`${dateKey}:${state.version}`;
     const slots=staff.filter(p=>p.enabled&&p.user?.isActive&&p.availableMinutes>0).length*SERVICE_POLICY.pendingCap;
     const cohort=selectReviewCohort({issues,seed,policy:{sampleSize:slots}});
     const cohortMap=new Map(cohort.map(i=>[serviceId(i._id),i]));
-    const result = allocateReviewBatch({ cases: queued.filter(r => issueMap.has(serviceId(r.issueId))&&(r.sampleType==='calibration'||cohortMap.has(serviceId(r.issueId)))).map(r => ({ ...r, contributorIds: issueMap.get(serviceId(r.issueId)).contributorIds })), staff, assignments: reviews, assignedCounts: credit, cursor: state.cursor });
+    const result = allocateReviewBatch({ cases: queued.filter(r => issueMap.has(serviceId(r.issueId))&&(['calibration','targeted'].includes(r.sampleType)||cohortMap.has(serviceId(r.issueId)))).map(r => ({ ...r,priority:r.sampleType==='targeted'?'urgent':issueMap.get(serviceId(r.issueId)).priority,contributorIds: issueMap.get(serviceId(r.issueId)).contributorIds })), staff, assignments: reviews, assignedCounts: credit, cursor: state.cursor });
     for (const assignment of result.assignments) {
       const original=queued.find(r=>serviceId(r._id)===assignment.reviewId);
       const selected=cohortMap.get(assignment.issueId);

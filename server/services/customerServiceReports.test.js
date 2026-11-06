@@ -8,6 +8,11 @@ const revision = (verdict, extra = {}) => ({
   at: '2026-11-06T07:00:00.000Z', sourceRevision: 2, verdict,
   summary: 'Evidence-backed judgment', provisional: false, ...extra,
 });
+test('reallocation never transfers historical review credit to the new assignee',()=>{
+ const snapshot={asOf,filters:{},issues:[{_id:'i'}],actions:[],capture:null,profiles:[{userId:'original',availableMinutes:60},{userId:'new',availableMinutes:60}],reviews:[{issueId:'i',reviewerId:'new',status:'assigned',stale:true,revisions:[{actorId:'original',verdict:'good',at:asOf}]}]};
+ const report=summarizeServiceSnapshot(snapshot);
+ assert.equal(report.reviewWorkload[0].reviewed,1);assert.equal(report.reviewWorkload[1].reviewed,0);assert.equal(report.reviewWorkload[1].remaining,1);
+});
 function reportFixture() {
   return {
     asOf, filters: { from: '2026-11-06', to: '2026-11-06' },

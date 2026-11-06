@@ -136,7 +136,7 @@ run('backfilled evidence inside a bounded secondary episode invalidates its save
  const review=await Review.create({issueId:issue._id,reviewerId:reviewer._id,status:'submitted',sourceRevision:1,revisions:[{verdict:'good',sourceRevision:1,summary:'Earlier snapshot',at:new Date()}]});
  await ingestServiceBatch({...args,requestId:requestId(),messages:[{...row,externalMessageId:requestId(),authorType:'staff',externalAuthorId:'unmapped-new-sender',sentAt:'2026-11-06T06:30:00Z'}]});
  const changed=await Issue.findById(issue._id).lean();const saved=await Review.findById(review._id).lean();
- assert.ok(changed.sourceRevision>1);assert.equal(changed.outcome,'open');assert.equal(changed.sourceMetadata.unmappedStaff,true);assert.equal(saved.stale,true);assert.equal(saved.revisions.length,1);
+ assert.ok(changed.sourceRevision>1);assert.equal(changed.outcome,'open');assert.equal(changed.sourceMetadata.unmappedStaff,true);assert.equal(saved.stale,true);assert.equal(saved.status,'pending');assert.equal(saved.revisions.length,1);
 });
 
 run('a date and confirmed episode export cannot disclose other messages in the same conversation',async()=>{
@@ -303,16 +303,16 @@ run('new source evidence marks submitted reviews stale while preserving revision
   await ingestServiceBatch(args);
   const conversation = await Conversation.findOne({ source: args.source, scope: args.scope });
   const issue = await Issue.findOne({ conversationId: conversation._id });
-  const review = await Review.create({
-    issueId: issue._id, reviewerId: reviewer._id, status: 'submitted', sourceRevision: issue.sourceRevision,
+  const review = await Review.findOneAndUpdate({issueId:issue._id,sampleKey:'primary'},{$set:{
+    reviewerId: reviewer._id, status: 'submitted', sourceRevision: issue.sourceRevision,
     revisions: [{ actorId: reviewer._id, at: new Date(), sourceRevision: issue.sourceRevision, verdict: 'insufficient', summary: 'Preserve the initial evidence judgment' }],
-  });
+  }},{new:true});
   const action = await Action.create({ issueId: issue._id, reviewId: review._id, description: 'Get missing source evidence', ownerId: reviewer._id, status: 'assigned' });
 
   await ingestServiceBatch({ ...args, requestId: requestId(), messages: [rawMessage({ externalConversationId: message.externalConversationId, sentAt: '2026-11-06T07:00:00Z' })] });
   const saved = await Review.findById(review._id).lean();
 
-  assert.equal(saved.status, 'submitted');
+  assert.equal(saved.status, 'pending');
   assert.equal(saved.stale, true);
   assert.equal(saved.revisions.length, 1);
   assert.equal(saved.revisions[0].summary, 'Preserve the initial evidence judgment');

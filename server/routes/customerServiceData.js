@@ -44,7 +44,8 @@ router.get('/customers/:id/context',wrap(async(req,res)=>{
  let subscription=null,sourceState='not_linked',message='No linked subscription';
  if(customer.matterSubscriptionId) {
    try {const result=await matterApi.getSubscription(customer.matterSubscriptionId);const raw=result?.data||result;
-     subscription={subscriptionId:raw.subscription_id,status:raw.status,startDate:raw.start_date,endDate:raw.end_date,planName:raw.plan?.name||raw.plan_name};sourceState='available';message='Current subscription context; historical status may differ';
+     if(!raw?.subscription_id||String(raw.subscription_id)!==String(customer.matterSubscriptionId)||(raw.customer_id&&customer.matterCustomerId&&String(raw.customer_id)!==String(customer.matterCustomerId))) throw new Error('Mismatched subscription context');
+     subscription={subscriptionId:raw.subscription_id,status:raw.subscription_status||raw.status,startDate:raw.cycle_start_date||raw.start_date,endDate:raw.cycle_end_date||raw.end_date,planName:raw.plan?.name||raw.plan_name};sourceState='available';message='Current subscription context; historical status may differ';
    }catch{sourceState='unavailable';message='Subscription context unavailable; no source records were changed';}
  }
  res.json({success:true,data:{customer:{customerId,name:`${customer.firstName||''} ${customer.lastName||''}`.trim()},subscription,sourceState,message,observedAt:new Date().toISOString()}});
