@@ -21,6 +21,7 @@ import CreateDriver from './pages/CreateDriver';
 import DriverMobile from './pages/DriverMobile';
 import Users from './pages/Users'
 import Employees from './pages/Employees'
+import CustomerService from './pages/customerService/CustomerService';
 import DeliveryChanges from './pages/DeliveryChanges';
 import AddDeliveryChange from './pages/AddDeliveryChange';
 import DispatcherMobile from './pages/DispatcherMobile';
@@ -431,6 +432,9 @@ function App() {
               </ProtectedRoute>
             } />
 
+            <Route path="/customer-service/*" element={
+              <ProtectedRoute><Layout><CustomerService /></Layout></ProtectedRoute>
+            } />
             <Route path="/complaints" element={
               <ProtectedRoute>
                 <PermissionBasedRoute permission="complaints">

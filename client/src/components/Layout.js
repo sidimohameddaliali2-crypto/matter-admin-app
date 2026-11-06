@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -30,6 +30,7 @@ import {
 } from 'lucide-react';
 import { logout } from '../store/slices/authSlice';
 import UserAvatar from './users/UserAvatar';
+import api from '../utils/api';
 import '../styles/matterChrome.css';
 
 const GROUP_ORDER = ['Overview', 'Operations', 'Customers', 'Kitchen & Menus', 'Partners', 'Admin', 'Store Keeper'];
@@ -48,6 +49,7 @@ const NAV_ITEMS = [
   { name: 'Complaints', href: '/complaints', icon: AlertTriangle, permission: 'complaints', group: 'Operations' },
 
   { name: 'Customers', href: '/customers', icon: User, permission: 'customers', group: 'Customers' },
+  { name: 'Customer service', href: '/customer-service/chats', icon: Users, permission: 'customer_service', group: 'Customers' },
   { name: 'Customer Management', href: '/website-subscriptions', icon: Globe, permission: 'website_subscriptions', group: 'Customers' },
   { name: 'Subscription & Sales', href: '/subscription', icon: CreditCard, permission: 'subscription', group: 'Customers' },
   { name: 'Customer Analytics', href: '/customer-analytics', icon: LineChart, permission: 'customer_analytics', group: 'Customers' },
@@ -73,12 +75,22 @@ const Layout = ({ children }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const { user } = useSelector(state => state.auth);
+  const [serviceAccess, setServiceAccess] = useState(false);
+  useEffect(() => {
+    let active = true;
+    api.get('/customer-service/me').then(response => {
+      const caps = response.data?.data?.capabilities;
+      if (active) setServiceAccess(Boolean(caps?.view || caps?.setup));
+    }).catch(() => { if (active) setServiceAccess(false); });
+    return () => { active = false; };
+  }, [user?._id]);
 
   // Check if a nav item should be visible for the current user.
   // Permission wins: a page keyed with `permission` shows iff that permission is
   // explicitly granted (server sends the effective set). Items with no permission
   // key (e.g. Store Keeper) fall back to their `roles` list.
   const isNavItemVisible = (item) => {
+    if (item.permission === 'customer_service') return serviceAccess;
     if (user?.role === 'super_admin') return true;
     if (item.permission) {
       if (user?.role === 'yellowblock_user' && item.permission === 'events') return true;

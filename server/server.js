@@ -33,6 +33,7 @@ import { startMoveUncollectedCollectionsJob } from './jobs/moveUncollectedCollec
 import { startRecalculateDriverKpisJob } from './jobs/recalculateDriverKpis.js';
 import { startImportMatterDeliveriesJob } from './jobs/importMatterDeliveries.js';
 import { startCaptureMatterSalesJob } from './jobs/captureMatterSales.js';
+import { startCustomerServiceSync } from './jobs/customerServiceSync.js';
 import { startRecordVehicleLocationsJob } from './jobs/recordVehicleLocations.js';
 import { startCustomerTrackerVisitsJob } from './jobs/syncCustomerTrackerVisits.js';
 import { authenticateSocket, registerStaffSocket } from './middleware/socketAuth.js';
@@ -90,7 +91,9 @@ app.set('io', io);
 // Middleware
 app.use(cors(corsOptions));
 app.use(compression());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '10mb', verify: (req, res, body) => {
+  if (req.originalUrl?.startsWith('/api/customer-service-capture/')) req.rawBody = Buffer.from(body);
+} }));
 app.use(express.urlencoded({ extended: true }));
 
 // Serve uploaded files
@@ -191,6 +194,9 @@ import yellowblockRoutes from './routes/yellowblock.js';
 import externalDeliveryApiRoutes from './routes/externalDeliveryApi.js';
 import externalDriverLocationApiRoutes from './routes/externalDriverLocationApi.js';
 import mobileUpdatesRoutes from './routes/mobileUpdates.js';
+import customerServiceRoutes from './routes/customerService.js';
+import customerServiceDataRoutes from './routes/customerServiceData.js';
+import customerServiceWebhookRoutes from './routes/customerServiceWebhook.js';
 import { createMcpRouter } from './routes/mcp.js';
 import { createMcpOAuthIntegration } from './routes/mcpOAuth.js';
 
@@ -203,6 +209,9 @@ app.use('/api/mobile', mobileUpdatesRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users/drivers', driverRoutes); // Allow driver routes under /api/users/drivers
 app.use('/api/users', userRoutes);
+app.use('/api/customer-service-capture', customerServiceWebhookRoutes);
+app.use('/api/customer-service', customerServiceDataRoutes);
+app.use('/api/customer-service', customerServiceRoutes);
 app.use('/api/deliveries', deliveryRoutes);
 const mcpOAuth = createMcpOAuthIntegration();
 app.use(mcpOAuth.router);
@@ -405,6 +414,7 @@ startMoveUncollectedCollectionsJob();
 startRecalculateDriverKpisJob();
 startImportMatterDeliveriesJob();
 startCaptureMatterSalesJob();
+startCustomerServiceSync();
 startRecordVehicleLocationsJob();
 startCustomerTrackerVisitsJob(io);
 
