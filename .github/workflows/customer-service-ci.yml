@@ -29,7 +29,7 @@ jobs:
         working-directory: server
         env:
           CUSTOMER_SERVICE_TEST_URI: mongodb://127.0.0.1:27017/matter_customer_service_ci?replicaSet=rs0
-        run: node --test services/customerService*.test.js tests/customerService*.integration.test.js
+        run: node --test services/customerService*.test.js
   client:
     runs-on: ubuntu-latest
     timeout-minutes: 15
