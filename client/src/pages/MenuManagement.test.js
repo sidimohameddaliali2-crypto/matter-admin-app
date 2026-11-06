@@ -7,8 +7,26 @@ jest.mock('../components/SupyRecipeSearch',()=>()=>null);
 jest.mock('../components/IngredientTagEditor',()=>()=>null);
 jest.mock('html2canvas',()=>jest.fn());
 jest.mock('jspdf',()=>jest.fn());
-jest.mock('xlsx-js-style',()=>({utils:{}}));
+const mockExcelRows = jest.fn();
+jest.mock('xlsx-js-style',()=>({utils:{ book_new: () => ({}), aoa_to_sheet: rows => { mockExcelRows(rows); return {}; }, book_append_sheet: () => {} }, writeFile: jest.fn()}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
+
+test('downloaded template includes a TRUE/FALSE Core Plan column and visible guidance', async () => {
+  api.get.mockResolvedValue({ data: { success: true, data: [] } });
+  mockExcelRows.mockClear();
+  const node = document.createElement('div'); document.body.appendChild(node); const root = createRoot(node);
+  try {
+    await act(async () => root.render(<MenuManagement />));
+    await act(async () => [...node.querySelectorAll('button')].find(button => button.textContent.trim() === 'New menu').click());
+    await act(async () => [...node.querySelectorAll('button')].find(button => button.textContent.trim() === 'Download Template').click());
+    const rows = mockExcelRows.mock.calls[0][0];
+    expect(rows[0][10]).toBe('CORE PLAN');
+    expect(rows[1][10]).toBe('TRUE');
+    expect(rows[2][10]).toBe('FALSE');
+    expect(rows[3][10]).toBe('FALSE');
+    expect(node.textContent).toContain('Older files without this column keep existing Core tags.');
+  } finally { await act(async () => root.unmount()); node.remove(); jest.clearAllMocks(); }
+});
 
 test.each([true,false])('deletion success=%s preserves other pending customers and failed selections remain openable',async success=>{
   let release;

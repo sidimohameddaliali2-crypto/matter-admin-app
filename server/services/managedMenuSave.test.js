@@ -26,6 +26,30 @@ test('an unchanged selected dish retains its ID and leaves quantity-two customer
   assert.equal(JSON.stringify(records), before);
 });
 
+test('Core eligibility alone can be toggled on a selected dish, keeping its ID and saved choices', () => {
+  for (const usedForCorePlan of [true, false]) {
+    const item = { ...existing(), usedForCorePlan: !usedForCorePlan };
+    const days = baseDays(); days[0].items[0].usedForCorePlan = usedForCorePlan;
+    const records = [selection()], before = JSON.stringify(records);
+    const result = plan({ days, existingItems: [item], selections: records });
+    assert.equal(String(result[0].existingId), itemId);
+    assert.equal(result[0].coreTagChanged, true);
+    assert.equal(result[0].fields.usedForCorePlan, usedForCorePlan);
+    assert.equal(JSON.stringify(records), before);
+  }
+});
+
+test('legacy uploads preserve Core tags and a combined recipe/tag change is still protected', () => {
+  const item = { ...existing(), usedForCorePlan: true };
+  const result = plan({ days: baseDays(), existingItems: [item], selections: [selection()] });
+  assert.equal(result[0].fields.usedForCorePlan, true);
+  assert.equal(result[0].coreTagChanged, false);
+  const days = baseDays(); days[0].items[0].usedForCorePlan = true; days[0].items[0].carbs = 'Potato';
+  assert.throws(() => plan({ days, existingItems: [existing()], selections: [selection()] }), /Existing customer selections are protected/);
+  days[0].items[0].usedForCorePlan = 'FALSE';
+  assert.throws(() => plan({ days, existingItems: [existing()] }), /true or false/);
+});
+
 test('selected dish rename, removal, ingredients, date, protein type and hidden tags are blocked with the affected customer', () => {
   const changes = [
     days => { days[0].items[0].mealName = 'Renamed'; },
@@ -69,7 +93,7 @@ const fixture = t => {
   const item = existing();
   const store = { menu: new Menu({ _id: menuId, title: 'Original', startDate, endDate, meals: [{ date: '2026-10-30', mealType: 'main', items: [item._id] }] }).toObject(), items: [item], selections: [], committed: false };
   let active, operations;
-  const writes = [], deleted = [];
+  const writes = [], deleted = [], tags = [];
   const query = value => ({ session() { return this; }, select() { return this; }, lean: async () => value });
   t.mock.method(mongoose.connection, 'transaction', async callback => {
     active = { transaction: true }; operations = []; store.committed = false;
@@ -83,6 +107,13 @@ const fixture = t => {
   t.mock.method(Selection, 'updateOne', () => assert.fail('Customer selections must not be written'));
   t.mock.method(Selection, 'findOneAndUpdate', () => assert.fail('Customer selections must not be replaced'));
   t.mock.method(Item, 'deleteMany', () => { deleted.push(true); assert.fail('Existing item references must not be deleted'); });
+  t.mock.method(Item, 'updateOne', async (filter, update, options) => {
+    assert.equal(options.session, active);
+    assert.deepEqual(Object.keys(update.$set), ['usedForCorePlan']);
+    tags.push({ filter, update });
+    operations.push(() => { store.items.find(item => String(item._id) === String(filter._id)).usedForCorePlan = update.$set.usedForCorePlan; });
+    return { matchedCount: 1, modifiedCount: 1 };
+  });
   t.mock.method(Item.prototype, 'save', async function (options) {
     assert.equal(options.session, active); const error = this.validateSync(); if (error) throw error;
     const row = this.toObject(); writes.push(row); operations.push(() => store.items.push(row)); return this;
@@ -91,8 +122,31 @@ const fixture = t => {
     assert.equal(options.session, active); const error = this.validateSync(); if (error) throw error;
     const row = this.toObject(); operations.push(() => { store.menu = row; }); return this;
   });
-  return { store, writes, deleted };
+  return { store, writes, deleted, tags };
 };
+
+test('tag-only saves update the existing item atomically without creating dishes or writing selections', async t => {
+  const { store, writes, tags } = fixture(t);
+  store.selections = [selection()];
+  const before = JSON.stringify(store.selections);
+  const days = baseDays(); days[0].items[0].usedForCorePlan = true;
+  await saveManagedMenu({ menuId, body: { days }, buildMealName, mergeUploadedSnackPools: () => {} });
+  assert.equal(tags.length, 1);
+  assert.equal(writes.length, 0);
+  assert.equal(store.items[0].usedForCorePlan, true);
+  assert.equal(String(store.menu.meals[0].items[0]), itemId);
+  assert.equal(JSON.stringify(store.selections), before);
+});
+
+test('a failed final menu save rolls back a Core tag update as well', async t => {
+  const { store } = fixture(t);
+  store.selections = [selection()];
+  const before = JSON.stringify(store.items);
+  t.mock.method(Menu.prototype, 'save', async () => { throw new Error('Final save failed'); });
+  const days = baseDays(); days[0].items[0].usedForCorePlan = true;
+  await assert.rejects(saveManagedMenu({ menuId, body: { days }, buildMealName, mergeUploadedSnackPools: () => {} }), /Final save failed/);
+  assert.equal(JSON.stringify(store.items), before);
+});
 
 test('a late menu-save failure rolls back staged new items, and a successful retry commits all dishes together', async (t) => {
   const { store, writes } = fixture(t);

@@ -58,13 +58,16 @@ export const planManagedMenu = ({ days, existingItems = [], selections = [], sta
       const mealName = buildMealName(input);
       if (!mealName || !['main', 'breakfast', 'snack'].includes(mealType)) fail(`A valid meal name and type are required on ${date}.`);
       if (published && !bodybuilder && mealType === 'main' && !['chicken', 'beef', 'fish'].includes(input.portionType)) fail(`Set the protein type for ${mealName} before publishing.`);
+      if (input.usedForCorePlan !== undefined && typeof input.usedForCorePlan !== 'boolean') fail(`Core Plan must be true or false for ${mealName}.`);
+      const original = byId.get(idOf(input.menuItemId)) || byKey.get(dishKey({ itemDate: date, mealType, mealName }));
       const fields = {
         itemDate: new Date(date), mealType, mealName, mealPlan: bodybuilder ? 'Bodybuilder' : 'Standard',
         ingredients: bodybuilder ? [['Protein', input.proteinSource], ['Vegetables', input.veg], ['Carbs', input.carbs], ['Sauces', input.sauce]].filter(([, value]) => String(value || '').trim()).map(([label, value]) => `${label}: ${String(value).trim()}`).join('; ') : input.ingredients || '',
         proteinSource: input.proteinSource || '', category: input.category || '', intolerances: input.intolerances || '',
         allergens: (Array.isArray(input.allergens) ? input.allergens : String(input.allergens || '').split(',')).map(value => String(value).trim()).filter(Boolean),
         garnish: input.garnish || '', carbs: input.carbs || '', veg: input.veg || '', sauce: input.sauce || '',
-        portionType: input.portionType || '', rotationCategory: input.rotationCategory || '', usedForCorePlan: !!input.usedForCorePlan,
+        portionType: input.portionType || '', rotationCategory: input.rotationCategory || '',
+        usedForCorePlan: input.usedForCorePlan === undefined ? !!original?.usedForCorePlan : input.usedForCorePlan,
         ...Object.fromEntries(['portionIngredients', 'carbIngredients', 'vegIngredients', 'sauceIngredients'].map(key => [key, Array.isArray(input[key]) ? input[key] : []])),
       };
       const key = dishKey(fields);
@@ -73,13 +76,17 @@ export const planManagedMenu = ({ days, existingItems = [], selections = [], sta
       const suppliedId = idOf(input.menuItemId);
       if (suppliedId && !byId.has(suppliedId)) fail(`Meal ${mealName} does not belong to this menu. Reload before saving.`, 409);
       const existing = suppliedId ? byId.get(suppliedId) : byKey.get(key);
-      const changed = existing && Object.entries(fields).some(([field, value]) => JSON.stringify(normalize(existing[field] ?? (Array.isArray(value) ? [] : typeof value === 'boolean' ? false : ''))) !== JSON.stringify(normalize(value)));
+      // Core eligibility is kitchen routing metadata, not a recipe change.
+      // Keep the same MenuItem ID and all customer choices for tag-only edits.
+      const changed = existing && Object.entries(fields).some(([field, value]) => field !== 'usedForCorePlan'
+        && JSON.stringify(normalize(existing[field] ?? (Array.isArray(value) ? [] : typeof value === 'boolean' ? false : ''))) !== JSON.stringify(normalize(value)));
       if (existing) {
         const customers = [...(selectedIds.get(idOf(existing)) || []), ...(selectedKeys.get(dishKey(existing)) || [])];
         if (changed && customers.length) addConflict(existing, customers, 'change');
         if (!changed) retained.add(idOf(existing));
       }
-      entries.push({ fields, existingId: existing && !changed ? existing._id : null, previous: existing || null });
+      entries.push({ fields, existingId: existing && !changed ? existing._id : null, previous: existing || null,
+        coreTagChanged: !!existing && !changed && !!existing.usedForCorePlan !== fields.usedForCorePlan });
       if (entries.length > 5000) fail('A menu may contain at most 5000 dishes.');
     }
   }
@@ -134,6 +141,10 @@ export const saveManagedMenu = async ({ menuId, body, userId, buildMealName, mer
       const grouped = new Map();
       for (const entry of entries) {
         let itemId = entry.existingId;
+        if (itemId && entry.coreTagChanged) {
+          const tagged = await Item.updateOne({ _id: itemId }, { $set: { usedForCorePlan: entry.fields.usedForCorePlan } }, { session });
+          if (!tagged.matchedCount) fail('This menu item changed during the Core tag update. Reload before saving.', 409);
+        }
         if (!itemId) {
           const fields = { ...entry.previous, ...entry.fields };
           for (const field of ['_id', '__v', 'createdAt', 'updatedAt']) delete fields[field];
