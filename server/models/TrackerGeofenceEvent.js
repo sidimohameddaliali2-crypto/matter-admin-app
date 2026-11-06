@@ -7,6 +7,8 @@ const schema = new mongoose.Schema({
   vehicleNo: { type: String, required: true },
   flag: { type: String, enum: ['entry', 'exit'], required: true },
   at: { type: Date, required: true },
+  source: String,
+  vendorTimestamp: String,
 });
 schema.index({ name: 1, at: 1 });
 export default mongoose.model('TrackerGeofenceEvent', schema);
