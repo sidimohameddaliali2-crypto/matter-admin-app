@@ -8,6 +8,10 @@ import MenuItem from '../models/MenuItem.js';
 import KitchenBreakfastPreset from '../models/KitchenBreakfastPreset.js';
 import KitchenSnackPreset from '../models/KitchenSnackPreset.js';
 import { snackPresetUpdate } from '../services/kitchenSnackPresets.js';
+import { loadSnackRules, saveSnackRule, readSnackCatalogue } from '../services/kitchenSnackRules.js';
+import { eligibleSnackPools, preferredSnackPool } from '../services/kitchenSnackPolicy.js';
+import KitchenSnackRule from '../models/KitchenSnackRule.js';
+import { replaceBlockedSnacks } from '../services/kitchenSnackReplacement.js';
 import WeeklyMenu from '../models/WeeklyMenu.js';
 import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import MenuSelectionArchive from '../models/MenuSelectionArchive.js';
@@ -40,6 +44,48 @@ import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, va
 
 
 const router = express.Router();
+
+const snackRuleAccess = (req, res, next) => {
+  const permissions = effectivePermissions(req.user);
+  if (!permissions.kitchen_list && !permissions.menus) return res.status(403).json({ success: false, message: 'Kitchen List or menu access is required.' });
+  if (!/^[1-9]\d*$/.test(req.params.customerId || '')) return res.status(400).json({ success: false, message: 'A permanent Matter customer ID is required.' });
+  next();
+};
+router.get('/kitchen-snack-rules/:customerId', protect, snackRuleAccess, async (req, res) => {
+  try {
+    const [rules, catalogue] = await Promise.all([loadSnackRules([req.params.customerId]), readSnackCatalogue()]);
+    const rule = rules.get(req.params.customerId);
+    res.json({ success: true, data: { blockedSnacks: rule?.blockedSnacks || [], version: rule?.version || 0, catalogue } });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
+});
+router.get('/kitchen-snack-rules', protect, (req, res, next) => {
+  const permissions = effectivePermissions(req.user);
+  if (!permissions.kitchen_list && !permissions.kitchen_counting && !permissions.menus) return res.status(403).json({ success: false, message: 'Kitchen access is required.' });
+  next();
+}, async (req, res) => {
+  try {
+    const rules = await KitchenSnackRule.find({}).select('_id blockedSnacks version').lean();
+    res.json({ success: true, data: { rules: rules.map(rule => ({ customerId: rule._id, blockedSnacks: rule.blockedSnacks, version: rule.version })) } });
+  } catch (error) { res.status(500).json({ success: false, message: 'Snack rules could not be verified. Retry before preparing.' }); }
+});
+router.put('/kitchen-snack-rules/:customerId', protect, snackRuleAccess, async (req, res) => {
+  try {
+    const nutrition = await matterApiService.getKitchenNutrition({ customerId: req.params.customerId });
+    if (String(nutrition?.customer_id) !== req.params.customerId) return res.status(409).json({ success: false, message: 'Matter customer identity could not be verified.' });
+    const presets = await KitchenSnackPreset.findOne({ key: 'global' }).lean();
+    const saved = await saveSnackRule({ customerId: req.params.customerId, keys: req.body.blockedSnackKeys,
+      version: req.body.version, actor: String(req.user._id), presets: presets?.presetsByName });
+    res.json({ success: true, data: { blockedSnacks: saved.blockedSnacks, version: saved.version } });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
+});
+router.post('/:id/kitchen-snack-rules/:customerId/replace', protect, snackRuleAccess, async (req, res) => {
+  try {
+    const data = await withKitchenPreparation(`menu:${req.params.id}:${req.body.date}`, () => replaceBlockedSnacks({
+      menuId: req.params.id, customerId: req.params.customerId, date: req.body.date, actor: String(req.user._id), version: req.body.version,
+    }));
+    res.json({ success: true, data });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.message }); }
+});
 
 // Read-only production feed for both Kitchen List and Kitchen Counting.
 router.get('/kitchen-partner-orders', protect, (req, res, next) => {
@@ -1474,14 +1520,19 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
     // Nutrition lookups (2 Matter API calls each) dominate runtime — run every
     // customer concurrently instead of one at a time.
     const ingredientReads = new Map();
-    const results = await mapWithConcurrency(records, 8, async (record) => {
-      const stats = { assigned: 0, skippedNoSnacksNeeded: 0, skippedNoOptions: 0, datesWithNoOptions: [] };
-
+    const nutritionByRecord = new Map(await mapWithConcurrency(records, 8, async record => {
       let nutrition = matterInputs.find((input) => record.matterCustomerId
         ? String(input.customer_id) === String(record.matterCustomerId)
         : normalizeMatterEmail(input.customer_email) === normalizeMatterEmail(record.matterEmail || record.email));
       if (!nutrition) nutrition = await matterApiService.getKitchenNutrition({ customerId: record.matterCustomerId, email: record.matterEmail || record.email, subscriptionId: record.matterSubscriptionId });
-
+      return [record, nutrition];
+    }));
+    const [rules, catalogue] = [...nutritionByRecord.values()].some(nutrition => Number(nutrition?.snacks_per_day) > 0) ? await Promise.all([
+      loadSnackRules([...nutritionByRecord.values()].map(nutrition => nutrition?.customer_id)), readSnackCatalogue(),
+    ]) : [new Map(), []];
+    const results = await mapWithConcurrency(records, 8, async (record) => {
+      const stats = { assigned: 0, skippedNoSnacksNeeded: 0, skippedNoOptions: 0, datesWithNoOptions: [], snackRuleFailures: [] };
+      const nutrition = nutritionByRecord.get(record);
       if (!nutrition || nutrition.snacks_per_day == null || !Number.isFinite(Number(nutrition.snacks_per_day))) {
         throw new Error('Snack entitlement is unresolved. Retry kitchen preparation.');
       }
@@ -1525,17 +1576,21 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
           _id: { $in: (menu.meals || []).flatMap(day => day.items || []) }, itemDate: new Date(dateKey), mealType: 'snack',
         }).lean().exec());
         const ingredients = await ingredientReads.get(dateKey);
-        const eligibleFirst = mergeKitchenMetadata(dayPools.first, ingredients).filter((opt) => !optionExcludedByCustomer(opt, exclusions));
-        const eligibleSecond = mergeKitchenMetadata(dayPools.second, ingredients).filter((opt) => !optionExcludedByCustomer(opt, exclusions));
+        const eligible = eligibleSnackPools({ first: mergeKitchenMetadata(dayPools.first, ingredients), second: mergeKitchenMetadata(dayPools.second, ingredients) }, {
+          rule: rules.get(String(nutrition.customer_id)), catalogue, excluded: option => optionExcludedByCustomer(option, exclusions),
+        });
+        const eligibleFirst = eligible.first, eligibleSecond = eligible.second;
 
         if (eligibleFirst.length === 0 && eligibleSecond.length === 0) {
           stats.skippedNoOptions += 1;
           stats.datesWithNoOptions.push(dateKey);
+          stats.snackRuleFailures.push({ customerId: nutrition.customer_id, name: nutrition.customer_name || record.email, date: dateKey,
+            reason: 'No snack passes the customer snack rules, dietary exclusions and saved macro checks. Add an eligible option or review the rule.' });
           continue;
         }
 
         for (let i = 0; i < slotsNeeded; i += 1) {
-          const overallSlotIndex = existingSnackCount + i;
+          const overallSlotIndex = existingSnackPortions + i;
           const preferFirst = overallSlotIndex % 2 === 0;
           let pool = preferFirst ? eligibleFirst : eligibleSecond;
           if (pool.length === 0) pool = preferFirst ? eligibleSecond : eligibleFirst;
@@ -1609,7 +1664,8 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
     const datesWithNoOptions = Array.from(new Set(results.flatMap((r) => r.datesWithNoOptions))).sort();
 
     return {
-      data: { assigned, skippedNoSnacksNeeded, skippedNoOptions, datesWithNoOptions, customersProcessed: records.length }
+      data: { assigned, skippedNoSnacksNeeded, skippedNoOptions, datesWithNoOptions, customersProcessed: records.length,
+        snackRuleFailures: results.flatMap(result => result.snackRuleFailures) }
     };
 }
 
@@ -1720,6 +1776,12 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     (a, b) => String(a.name || a.email || '').localeCompare(String(b.name || b.email || ''))
   );
 
+  const [snackRules, snackCatalogueRows, snackIngredients] = sortedCustomers.some(customer => Number(customer.nutrition?.snacks_per_day) > 0) ? await Promise.all([
+    loadSnackRules(sortedCustomers.map(customer => customer.nutrition?.customer_id || customer.matterCustomerId)), readSnackCatalogue(),
+    MenuItem.find({ _id: { $in: (menu.meals || []).flatMap(day => day.items || []) }, itemDate: new Date(dateKey), mealType: 'snack' }).lean(),
+  ]) : [new Map(), [], []];
+  const mergedSnackPools = { first: mergeKitchenMetadata(snackPools.first, snackIngredients), second: mergeKitchenMetadata(snackPools.second, snackIngredients) };
+
   // snacks_per_day lives on the Matter website subscription, not on the
   // caller-supplied customer shape — fetched here (bounded concurrency)
   // directly by subscription id, since these customers were already resolved
@@ -1750,6 +1812,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
   let skippedBreakfastNoOption = 0;
   let assignedSnacks = 0;
   let skippedSnackNoOption = 0;
+  const snackRuleFailures = [];
   let doubleDeliveryCustomers = 0;
 
   for (const customer of sortedCustomers) {
@@ -1766,9 +1829,10 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     const hasBreakfastAlready = (existingRecord?.selectedMeals || []).some(
       (m) => toDateKey(m.date) === dateKey && m.mealType === 'breakfast'
     );
-    const existingSnackCount = (existingRecord?.selectedMeals || []).filter(
+    const existingSnackMeals = (existingRecord?.selectedMeals || []).filter(
       (m) => m.mealType === 'snack' && toDateKey(m.date) === dateKey
-    ).length;
+    );
+    const existingSnackCount = existingSnackMeals.reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
 
     // Matter subscription's own breakfast_included wins; Customer profile is fallback.
     const breakfastInclude = typeof customer.breakfastIncluded === 'boolean'
@@ -1841,13 +1905,16 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
       : 0;
     const snackSlotsNeeded = snacksPerDay - existingSnackCount;
     if (snackSlotsNeeded > 0) {
+      const eligible = eligibleSnackPools(mergedSnackPools, { rule: snackRules.get(String(customer.nutrition?.customer_id)),
+        catalogue: snackCatalogueRows, excluded: option => optionExcludedByCustomer(option, exclusions) });
       for (let i = 0; i < snackSlotsNeeded; i += 1) {
         const overallSlotIndex = existingSnackCount + i;
-        const pool = (overallSlotIndex % 2 === 0 ? snackPools.first : snackPools.second)
-          .filter(option => !optionExcludedByCustomer(option, exclusions));
+        const pool = preferredSnackPool(eligible, overallSlotIndex);
         const choice = pool[0];
         if (!choice) {
           skippedSnackNoOption += 1;
+          snackRuleFailures.push({ customerId: customer.nutrition?.customer_id, name: customer.name || email, date: dateKey,
+            reason: 'No snack passes the customer snack rules, dietary exclusions and saved macro checks. Add an eligible option or review the rule.' });
           continue;
         }
         newMeals.push({
@@ -1893,6 +1960,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
       skippedBreakfastNoOption,
       assignedSnacks,
       skippedSnackNoOption,
+      snackRuleFailures,
       doubleDeliveryCustomers,
       customersProcessed: sortedCustomers.length
     }

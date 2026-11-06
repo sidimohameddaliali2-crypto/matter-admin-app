@@ -7,6 +7,9 @@ import Archive from '../models/MenuSelectionArchive.js';
 import MenuItem from '../models/MenuItem.js';
 import Breakfast from '../models/KitchenBreakfastPreset.js';
 import Snack from '../models/KitchenSnackPreset.js';
+import SnackRule from '../models/KitchenSnackRule.js';
+import { annotateSnackRules } from './kitchenSnackRules.js';
+import { snackCatalogue } from './kitchenSnackPolicy.js';
 import { excludeRecreatedArchivedAliases } from './archivedMenuAliases.js';
 import { assertPreparedCoverage } from './kitchenCoverage.js';
 import { readKitchenSelectionWindow } from './kitchenSelectionDeadline.js';
@@ -19,24 +22,27 @@ export const snapshotIsFresh = (snapshot, sourceVersion, now = Date.now()) => sn
 const sourceVersion = async menuId => {
   const menu = await Menu.findById(menuId).lean();
   if (!menu) throw Object.assign(new Error('Menu not found'), { statusCode: 404 });
-  const [records, breakfast, snack, items, archives] = await Promise.all([
+  const [records, breakfast, snack, items, archives, snackRules] = await Promise.all([
     Record.find({ weeklyMenuId: menuId }).select('_id updatedAt __v').sort({ _id: 1 }).lean(),
     Breakfast.findOne({ key: 'global' }).lean(), Snack.findOne({ key: 'global' }).lean(),
     MenuItem.find({ _id: { $in: (menu.meals || []).flatMap(day => day.items || []) } }).select('_id updatedAt __v').sort({ _id: 1 }).lean(),
     Archive.find({ 'original.weeklyMenuId': menuId }).select('_id createdAt updatedAt').sort({ _id: 1 }).lean(),
+    SnackRule.find({}).select('_id version updatedAt').sort({ _id: 1 }).lean(),
   ]);
-  return createHash('sha256').update(JSON.stringify(['tagged-core-only-v3', menu, records, breakfast, snack, items, archives])).digest('hex');
+  return createHash('sha256').update(JSON.stringify(['snack-rules-v1', menu, records, breakfast, snack, items, archives, snackRules])).digest('hex');
 };
 
 const capture = async menuId => {
-  const [records, breakfast, snack] = await Promise.all([
+  const [records, breakfast, snack, rules] = await Promise.all([
     Record.find({ weeklyMenuId: menuId }).populate('selectedMeals.menuItemId', '_id mealName mealType itemDate portionType rotationCategory usedForCorePlan').sort({ submittedAt: -1 }).lean(),
     Breakfast.findOne({ key: 'global' }).lean(), Snack.findOne({ key: 'global' }).lean(),
+    SnackRule.find({}).select('_id blockedSnacks version').lean(),
   ]);
   const aliases = records.filter(record => !record.matterCustomerId).map(record => record.email);
   const archives = aliases.length ? await Archive.find({ 'original.weeklyMenuId': menuId, 'original.email': { $in: aliases } }).lean() : [];
   return {
-    kitchenSelections: excludeRecreatedArchivedAliases(records, archives),
+    kitchenSelections: annotateSnackRules(excludeRecreatedArchivedAliases(records, archives), new Map(rules.map(rule => [rule._id, rule])), snackCatalogue(snack?.presetsByName)),
+    kitchenSnackRules: rules.map(rule => ({ customerId: rule._id, blockedSnacks: rule.blockedSnacks, version: rule.version })),
     kitchenBreakfastPreset: { ...breakfast?.breakfastPreset, presetsByName: breakfast?.presetsByName || {} },
     kitchenSnackPreset: { presetsByName: snack?.presetsByName || {} },
   };

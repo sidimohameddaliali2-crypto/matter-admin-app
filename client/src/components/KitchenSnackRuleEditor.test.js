@@ -1,0 +1,43 @@
+import React, { act } from 'react';
+import { createRoot } from 'react-dom/client';
+import api from '../utils/api';
+import KitchenSnackRuleEditor from './KitchenSnackRuleEditor';
+jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), put: jest.fn(), post: jest.fn() } }));
+global.IS_REACT_ACT_ENVIRONMENT = true;
+let container, root;
+const entry = { matterCustomerId: '42', selectedMeals: [] };
+const props = () => ({ entry, date: '2026-11-06', menuId: 'menu', onSaved: jest.fn(), onReplaced: jest.fn() });
+const button = text => [...container.querySelectorAll('button')].find(node => node.textContent.includes(text));
+beforeEach(() => {
+  jest.clearAllMocks(); container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
+  api.get.mockResolvedValue({ data: { success: true, data: { version: 0, blockedSnacks: [], catalogue: [{ key: 'muffin', name: 'Muffin', hasMacros: true }] } } });
+  api.put.mockResolvedValue({ data: { success: true, data: { version: 1, blockedSnacks: [{ key: 'muffin', name: 'Muffin' }] } } });
+});
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+test('editor loads only on demand and saving a rule does not rewrite assignments', async () => {
+  const p = props();
+  await act(async () => root.render(<KitchenSnackRuleEditor {...p} />));
+  expect(api.get).not.toHaveBeenCalled();
+  await act(async () => button('Blocked snacks').click());
+  await act(async () => container.querySelector('input[type="checkbox"]').click());
+  await act(async () => button('Save snack rules').click());
+  expect(api.put).toHaveBeenCalledWith('/menus/kitchen-snack-rules/42', { blockedSnackKeys: ['muffin'], version: 0 }, { timeout: 30000 });
+  expect(p.onSaved).toHaveBeenCalledWith('42', expect.objectContaining({ version: 1 }));
+  expect(api.post).not.toHaveBeenCalled();
+  expect(container.textContent).toContain('Existing assignments were kept');
+});
+test('explicit replacement is date scoped and a late response cannot update another customer', async () => {
+  const p = props(); p.entry = { ...entry, selectedMeals: [{ snackRuleConflict: 'Blocked snack' }] };
+  api.post.mockResolvedValue({ data: { success: true, data: { replaced: 1 } } });
+  await act(async () => root.render(<KitchenSnackRuleEditor {...p} />));
+  await act(async () => button('Blocked snacks').click());
+  await act(async () => button('Replace blocked').click());
+  expect(api.post).toHaveBeenCalledWith('/menus/menu/kitchen-snack-rules/42/replace', { date: p.date, version: 0 }, { timeout: 30000 });
+  expect(p.onReplaced).toHaveBeenCalledTimes(1);
+  let release; api.get.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+  await act(async () => button('Blocked snacks').click());
+  await act(async () => button('Blocked snacks').click());
+  await act(async () => root.render(<KitchenSnackRuleEditor {...p} entry={{ ...entry, matterCustomerId: '43' }} />));
+  await act(async () => release({ data: { success: true, data: { version: 10, blockedSnacks: [], catalogue: [{ key: 'old', name: 'Old response' }] } } }));
+  expect(container.textContent).not.toContain('Old response');
+});
