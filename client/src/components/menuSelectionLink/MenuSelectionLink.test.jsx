@@ -2,6 +2,7 @@ import { buildRealModel, expandSaturdaySkips } from './MenuSelectionLink';
 import { allergenMatchesAny } from '../../constants/exclusionList';
 
 jest.mock('../../utils/api', () => ({ get: jest.fn(), post: jest.fn() }));
+jest.mock('../../utils/menuCustomerApi', () => ({ get: jest.fn(), post: jest.fn() }));
 
 test('reopening the menu keeps saved Wednesday, Friday and Saturday skips visible alongside active deliveries', () => {
   const dates = ['2099-10-21', '2099-10-22', '2099-10-23', '2099-10-24'];

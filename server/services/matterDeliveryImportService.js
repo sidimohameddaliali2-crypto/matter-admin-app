@@ -2,11 +2,24 @@ import Delivery from '../models/Delivery.js';
 import matterApiService from './matterApiService.js';
 import { resolveCustomerMatch, createCustomerFromMatterSubscription } from './customerMatchService.js';
 import { detectAreaFromAddress } from '../config/areas.js';
-import { getBusinessDayBounds } from '../utils/businessDate.js';
+import { getBusinessDayBounds, isDateKey } from '../utils/businessDate.js';
 import { displayMatterName } from '../utils/matterName.js';
 import { resolveMatterDeliveryAddress } from './matterSubscriptionContract.js';
 import { compareMatterDelivery } from './matterDeliveryComparison.js';
 import { capturePendingMatterRevenue } from './matterSalesService.js';
+import { withScheduledWork } from './scheduledWork.js';
+
+export function matterImportKey(subscriptionId, dateKey) {
+  if (!isDateKey(dateKey) || subscriptionId == null || !String(subscriptionId).trim()) throw new Error('Invalid Matter import identity');
+  return JSON.stringify([String(subscriptionId), dateKey]);
+}
+
+async function ensureImportIndex() {
+  // Fail closed if the unique index cannot be established. No dependence on
+  // production autoIndex, and no backfill/deletion of legacy deliveries.
+  await Delivery.collection.createIndex({ matterImportKey: 1 }, { unique: true,
+    partialFilterExpression: { matterImportKey: { $type: 'string' } }, name: 'matter_import_identity_unique' });
+}
 
 // Only pending/assigned work today or later can receive a name refresh.
 const EDITABLE_STATUSES = new Set(['pending', 'assigned']);
@@ -148,114 +161,140 @@ export function buildMatterDeliverySnapshot(sub, dateKey, customer = null) {
  * a real duplicate driver stop, not just a harmless double DB row.
  */
 export async function importMatterDeliveriesForDate(dateKey) {
-  let matches;
-  try {
-    matches = await matterApiService.findSubscriptionsWithDeliveryOnDate(dateKey);
-  } catch (error) {
-    if (error.code !== 'INCOMPLETE_DELIVERY_ROSTER') throw error;
-    return { date: dateKey, complete: false, total: error.discovery.candidates, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, failed: error.discovery.failed, discoveryFailed: error.discovery.failed, writeFailed: 0, errors: error.discovery.errors };
-  }
-  const summary = { date: dateKey, complete: true, discoveryFailed: 0, writeFailed: 0, total: matches.length, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, noDeliveryWindow: 0, failed: 0, errors: [], comparisons: [] };
-
-  for (const sub of matches) {
+  if (!isDateKey(dateKey)) throw Object.assign(new Error('Invalid import date'), { statusCode: 400 });
+  const result = await withScheduledWork(`matter-delivery-import:${dateKey}`, async ({ assertOwned }) => {
+    let matches;
     try {
-      const subscriptionId = String(sub.subscription_id);
-      const { startOfDay, endOfDayExclusive } = getBusinessDayBounds(sub.delivery_date || dateKey);
+      matches = await matterApiService.findSubscriptionsWithDeliveryOnDate(dateKey);
+    } catch (error) {
+      if (error.code !== 'INCOMPLETE_DELIVERY_ROSTER') throw error;
+      return { date: dateKey, complete: false, total: error.discovery.candidates, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, failed: error.discovery.failed, discoveryFailed: error.discovery.failed, writeFailed: 0, errors: error.discovery.errors };
+    }
+    let indexReady = false;
+    const summary = { date: dateKey, complete: true, discoveryFailed: 0, writeFailed: 0, total: matches.length, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, noDeliveryWindow: 0, failed: 0, errors: [], comparisons: [] };
 
-      const existingFromThisImport = await Delivery.findOne({
-        matterSubscriptionId: subscriptionId,
-        scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive }
-      }).select('_id customerName status addressId address addressDetails zone gpsLocation scheduledTime');
-      if (existingFromThisImport) {
-        summary.alreadyExisted += 1;
-        const proposed = buildMatterDeliverySnapshot(sub, dateKey);
-        summary.comparisons.push(proposed
-          ? compareMatterDelivery(existingFromThisImport, proposed, { date: dateKey, fetchedAt: sub.source_fetched_at, addressResolution: resolveMatterDeliveryAddress(sub.customer_addresses) })
-          : { deliveryId: String(existingFromThisImport._id), action: 'review-only', effectiveState: 'UNKNOWN', addressResolution: resolveMatterDeliveryAddress(sub.customer_addresses) });
-        // A name changed (or was fixed) in Matter after the delivery was
-        // imported — keep the sheet in step, unless the delivery is finished.
-        const matterName = displayMatterName(sub.name);
-        if (matterName && existingFromThisImport.customerName !== matterName && EDITABLE_STATUSES.has(existingFromThisImport.status) && startOfDay >= getBusinessDayBounds(new Date()).startOfDay) {
-          await Delivery.updateOne({ _id: existingFromThisImport._id, status: { $in: ['pending', 'assigned'] } }, { $set: { customerName: matterName } });
-          summary.namesRefreshed = (summary.namesRefreshed || 0) + 1;
-        }
-        continue;
-      }
+    for (const sub of matches) {
+      try {
+        await assertOwned();
+        const subscriptionId = String(sub.subscription_id);
+        const serviceDate = sub.delivery_date || dateKey;
+        if (serviceDate !== dateKey) throw new Error('Subscription delivery date does not match import date');
+        const identity = matterImportKey(sub.subscription_id, serviceDate);
+        const { startOfDay, endOfDayExclusive } = getBusinessDayBounds(sub.delivery_date || dateKey);
 
-      // Owner (2026-10-11): "use only the location that have current from
-      // matter api." selectBestAddress (matterApiService.js) falls back to
-      // a "most complete"/primary address when no saved address is flagged
-      // current_delivery_address — fine for contact-list exports, not for
-      // where a driver actually goes, so address_detail alone isn't
-      // trusted here. BUT (owner, 2026-10-11, after Adoré Rossouw/Chris
-      // Shrubsole/Emily de Rooy's real Monday deliveries got silently
-      // skipped): requiring the flag outright turned out too strict —
-      // current_delivery_address just isn't reliably set in Matter even for
-      // ordinary active customers. The actual goal is "never guess between
-      // multiple candidates," not "require the flag" — so a subscription
-      // with exactly ONE active address is unambiguous and safe to use even
-      // unflagged; only skip when there's genuine ambiguity (0 or 2+ active
-      // addresses with none marked current). Checked before customer
-      // resolution so a skipped subscription doesn't still leave behind a
-      // newly-created Customer record.
-      const resolution = resolveMatterDeliveryAddress(sub.customer_addresses);
-      const useAddr = resolution.address;
-      if (!useAddr) {
-        summary.noCurrentAddress += 1;
-        summary.comparisons.push({ subscriptionId, serviceDate: dateKey, addressResolution: resolution, action: 'review-only', effectiveState: 'UNKNOWN' });
-        continue;
-      }
-
-      if (parseWindowHour(sub.delivery_window) == null) {
-        summary.noDeliveryWindow += 1;
-        summary.comparisons.push({ subscriptionId, serviceDate: dateKey, windowResolution: 'unresolved', action: 'review-only', effectiveState: 'UNKNOWN' });
-        continue;
-      }
-
-      let customer = (await resolveCustomerMatch({
-        email: sub.email,
-        phone: sub.phone,
-        name: sub.name,
-        subscriptionId: sub.subscription_id
-      })).customer;
-
-      if (!customer) {
-        customer = await createCustomerFromMatterSubscription(sub);
-        summary.customersCreated += 1;
-      } else {
-        // A pre-existing customer may already have today's delivery tracked
-        // the existing (non-Matter) way — skip rather than double it up.
-        const existingOtherDelivery = await Delivery.findOne({
-          customerId: customer.customerId,
-          type: 'Delivery',
-          scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive }
-        }).select('_id status addressId address addressDetails zone gpsLocation scheduledTime');
-        if (existingOtherDelivery) {
-          summary.alreadyHadOtherDelivery += 1;
-          summary.comparisons.push(compareMatterDelivery(existingOtherDelivery, buildMatterDeliverySnapshot(sub, dateKey), { date: dateKey, fetchedAt: sub.source_fetched_at, addressResolution: resolution }));
+        const existingFromThisImport = await Delivery.findOne({
+          $or: [{ matterImportKey: identity }, { matterSubscriptionId: subscriptionId,
+            scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive } }]
+        }).select('_id customerName status addressId address addressDetails zone gpsLocation scheduledTime');
+        if (existingFromThisImport) {
+          summary.alreadyExisted += 1;
+          const proposed = buildMatterDeliverySnapshot(sub, dateKey);
+          summary.comparisons.push(proposed
+            ? compareMatterDelivery(existingFromThisImport, proposed, { date: dateKey, fetchedAt: sub.source_fetched_at, addressResolution: resolveMatterDeliveryAddress(sub.customer_addresses) })
+            : { deliveryId: String(existingFromThisImport._id), action: 'review-only', effectiveState: 'UNKNOWN', addressResolution: resolveMatterDeliveryAddress(sub.customer_addresses) });
+          // A name changed (or was fixed) in Matter after the delivery was
+          // imported — keep the sheet in step, unless the delivery is finished.
+          const matterName = displayMatterName(sub.name);
+          if (matterName && existingFromThisImport.customerName !== matterName && EDITABLE_STATUSES.has(existingFromThisImport.status) && startOfDay >= getBusinessDayBounds(new Date()).startOfDay) {
+            await assertOwned();
+            await Delivery.updateOne({ _id: existingFromThisImport._id, status: { $in: ['pending', 'assigned'] } }, { $set: { customerName: matterName } });
+            summary.namesRefreshed = (summary.namesRefreshed || 0) + 1;
+          }
           continue;
         }
+
+        // Owner (2026-10-11): "use only the location that have current from
+        // matter api." selectBestAddress (matterApiService.js) falls back to
+        // a "most complete"/primary address when no saved address is flagged
+        // current_delivery_address — fine for contact-list exports, not for
+        // where a driver actually goes, so address_detail alone isn't
+        // trusted here. BUT (owner, 2026-10-11, after Adoré Rossouw/Chris
+        // Shrubsole/Emily de Rooy's real Monday deliveries got silently
+        // skipped): requiring the flag outright turned out too strict —
+        // current_delivery_address just isn't reliably set in Matter even for
+        // ordinary active customers. The actual goal is "never guess between
+        // multiple candidates," not "require the flag" — so a subscription
+        // with exactly ONE active address is unambiguous and safe to use even
+        // unflagged; only skip when there's genuine ambiguity (0 or 2+ active
+        // addresses with none marked current). Checked before customer
+        // resolution so a skipped subscription doesn't still leave behind a
+        // newly-created Customer record.
+        const resolution = resolveMatterDeliveryAddress(sub.customer_addresses);
+        const useAddr = resolution.address;
+        if (!useAddr) {
+          summary.noCurrentAddress += 1;
+          summary.comparisons.push({ subscriptionId, serviceDate: dateKey, addressResolution: resolution, action: 'review-only', effectiveState: 'UNKNOWN' });
+          continue;
+        }
+
+        if (parseWindowHour(sub.delivery_window) == null) {
+          summary.noDeliveryWindow += 1;
+          summary.comparisons.push({ subscriptionId, serviceDate: dateKey, windowResolution: 'unresolved', action: 'review-only', effectiveState: 'UNKNOWN' });
+          continue;
+        }
+
+        let customer = (await resolveCustomerMatch({
+          email: sub.email,
+          phone: sub.phone,
+          name: sub.name,
+          subscriptionId: sub.subscription_id
+        })).customer;
+
+        if (!customer) {
+          await assertOwned();
+          try { customer = await createCustomerFromMatterSubscription(sub); summary.customersCreated += 1; }
+          catch (error) {
+            if (error.code !== 11000) throw error;
+            customer = (await resolveCustomerMatch({ email: sub.email, phone: sub.phone, name: sub.name, subscriptionId: sub.subscription_id })).customer;
+            if (!customer) throw error;
+          }
+        } else {
+          // A pre-existing customer may already have today's delivery tracked
+          // the existing (non-Matter) way — skip rather than double it up.
+          const existingOtherDelivery = await Delivery.findOne({
+            customerId: customer.customerId,
+            type: 'Delivery',
+            scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive }
+          }).select('_id status addressId address addressDetails zone gpsLocation scheduledTime');
+          if (existingOtherDelivery) {
+            summary.alreadyHadOtherDelivery += 1;
+            summary.comparisons.push(compareMatterDelivery(existingOtherDelivery, buildMatterDeliverySnapshot(sub, dateKey), { date: dateKey, fetchedAt: sub.source_fetched_at, addressResolution: resolution }));
+            continue;
+          }
+        }
+
+        const snapshot = buildMatterDeliverySnapshot(sub, dateKey, customer);
+        snapshot.customerName = displayMatterName(sub.name)
+          || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || 'Matter Customer';
+        if (!indexReady) { await ensureImportIndex(); indexReady = true; }
+        await assertOwned();
+        try {
+          await Delivery.create({ ...snapshot, matterImportKey: identity });
+          summary.created += 1;
+        } catch (error) {
+          if (error.code !== 11000 || !(error.keyPattern?.matterImportKey || error.keyValue?.matterImportKey === identity)) throw error;
+          // A stale worker raced this one after an expiry: the database unique
+          // key still makes insertion safe. Unrelated duplicate errors are failures.
+          summary.alreadyExisted += 1;
+        }
+      } catch (err) {
+        if (err.code === 'WORK_LEASE_LOST') throw err;
+        summary.failed += 1;
+        summary.writeFailed += 1;
+        summary.complete = false;
+        summary.errors.push({ subscription_id: sub.subscription_id, message: err.message });
       }
-
-      const snapshot = buildMatterDeliverySnapshot(sub, dateKey, customer);
-      snapshot.customerName = displayMatterName(sub.name)
-        || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || 'Matter Customer';
-      await Delivery.create(snapshot);
-      summary.created += 1;
-    } catch (err) {
-      summary.failed += 1;
-      summary.writeFailed += 1;
-      summary.complete = false;
-      summary.errors.push({ subscription_id: sub.subscription_id, message: err.message });
     }
-  }
 
-  // Best effort from the already verified local Matter capture. Import and
-  // driver operation must never depend on financial API availability.
-  if (summary.created) {
-    try { await capturePendingMatterRevenue(); }
-    catch { summary.pricingCapturePending = true; }
-  }
-  summary.requiresReview = summary.noCurrentAddress > 0 || summary.noDeliveryWindow > 0 || summary.comparisons.some((item) => item.conflicts?.length || item.addressResolution?.status === 'unresolved');
-  return summary;
+    // Best effort from the already verified local Matter capture. Import and
+    // driver operation must never depend on financial API availability.
+    if (summary.created) {
+      try { await assertOwned(); await capturePendingMatterRevenue(undefined, new Date(), { assertOwned }); }
+      catch { summary.pricingCapturePending = true; }
+    }
+    summary.requiresReview = summary.noCurrentAddress > 0 || summary.noDeliveryWindow > 0 || summary.comparisons.some((item) => item.conflicts?.length || item.addressResolution?.status === 'unresolved');
+    return summary;
+  });
+  if (result?.skipped) throw Object.assign(new Error('Another worker is importing this business date; retry shortly'), { code: 'MATTER_IMPORT_BUSY', statusCode: 409 });
+  return result;
 }

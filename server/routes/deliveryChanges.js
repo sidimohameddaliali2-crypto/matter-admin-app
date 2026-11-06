@@ -3,15 +3,25 @@ import multer from 'multer';
 import csv from 'csv-parser';
 import mongoose from 'mongoose';
 import axios from 'axios';
+import { PassThrough } from 'node:stream';
 import DeliveryChange from '../models/DeliveryChange.js';
 import Delivery from '../models/Delivery.js';
-import User from '../models/User.js';
+import User, { effectivePermissions } from '../models/User.js';
 import { detectAreaFromAddress } from '../config/areas.js';
 import { protect, admin } from '../middleware/auth.js';
 import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 import { getBusinessDayBounds, setBusinessTimeOfDay, parseTimeOfDay } from '../utils/businessDate.js';
+import { DELIVERY_CHANGE_LIMITS, deliveryChangeInputError, deliveryChangeRange, validateDeliveryChangeInput, deliveryChangePagination } from '../services/deliveryChangeValidation.js';
 
 const router = express.Router();
+
+// All routes, including future diagnostics and multipart uploads, are staff
+// only and follow the Delivery Changes page's configured permission.
+router.use(protect, (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  if (!effectivePermissions(req.user).delivery_changes) return res.status(403).json({ success: false, message: 'Not permitted to manage delivery changes.' });
+  next();
+});
 
 // Slack notifier for delivery changes
 async function sendDeliveryChangeToSlack(changesPayload, meta = {}) {
@@ -110,27 +120,8 @@ async function sendDeliveryChangeToSlack(changesPayload, meta = {}) {
   }
 }
 
-// Test route to verify delivery-changes router is working
-router.get('/test', (req, res) => {
-  res.json({ 
-    success: true, 
-    message: 'Delivery Changes router is working!',
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Test POST route without authentication
-router.post('/test-post', (req, res) => {
-  res.json({ 
-    success: true, 
-    message: 'POST route is working!',
-    receivedBody: req.body,
-    timestamp: new Date().toISOString()
-  });
-});
-
 // DEBUG: Check status of specific delivery change
-router.get('/debug/:changeId', async (req, res) => {
+router.get('/debug/:changeId', admin, async (req, res) => {
   try {
     const change = await DeliveryChange.findById(req.params.changeId)
       .populate('appliedToDelivery', 'customerName scheduledTime address');
@@ -177,7 +168,7 @@ const upload = multer({
         file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
       cb(null, true);
     } else {
-      cb(new Error('Only CSV and Excel files are allowed'), false);
+      cb(deliveryChangeInputError('Only CSV and Excel files are allowed'), false);
     }
   }
 });
@@ -298,8 +289,8 @@ export async function applyChangesToDelivery(delivery, changes) {
     if (customerName) {
       const nameMatch = await User.findOne({
         $or: [
-          { 'profile.firstName': new RegExp(customerName, 'i') },
-          { 'profile.lastName': new RegExp(customerName, 'i') },
+          { 'profile.firstName': new RegExp(customerName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+          { 'profile.lastName': new RegExp(customerName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
           { 'profile.firstName': customerName }
         ]
       });
@@ -326,6 +317,7 @@ export async function applyChangesToDelivery(delivery, changes) {
     matchingFields = [],
     daysOfWeek = [] // optional: filter by weekdays (0=Sun..6=Sat)
   }) {
+    deliveryChangeRange(startDate, endDate);
     const normalizedStart = normalizeToUTCStart(startDate);
     const normalizedEnd = normalizeToUTCStart(endDate);
 
@@ -396,7 +388,7 @@ export async function applyChangesToDelivery(delivery, changes) {
 
       await deliveryChange.save();
       await deliveryChange.populate([
-        { path: 'uploadedBy', select: 'profile firstName lastName email' },
+        { path: 'uploadedBy', select: 'profile.firstName profile.lastName email' },
         { path: 'appliedToDelivery', select: 'customerName scheduledTime status' }
       ]);
 
@@ -408,11 +400,6 @@ export async function applyChangesToDelivery(delivery, changes) {
 
 // CREATE MANUAL DELIVERY CHANGE
 router.post('/manual', async (req, res) => {
-  console.log('=== MANUAL ROUTE HIT ===');
-  console.log('Method:', req.method);
-  console.log('URL:', req.url);
-  console.log('Headers:', req.headers);
-  console.log('Body:', req.body);
   
   try {
     const { 
@@ -426,7 +413,7 @@ router.post('/manual', async (req, res) => {
       daysOfWeek
     } = req.body;
 
-    console.log('Received manual delivery change request:', req.body);
+    validateDeliveryChangeInput(req.body);
 
     if (!customerId || !customerName || !scheduledDate) {
       return res.status(400).json({ 
@@ -474,7 +461,7 @@ router.post('/manual', async (req, res) => {
       endDate: effectiveEndDate,
       changes,
       reason,
-      uploadedBy: req.user?.id || null,
+      uploadedBy: req.user._id,
       fileReference: 'manual',
       matchConfidence,
       matchingFields,
@@ -502,7 +489,7 @@ router.post('/manual', async (req, res) => {
     });
   } catch (error) {
     console.error('Create manual delivery change error:', error);
-    const statusCode = error.message === 'End date cannot be earlier than start date' || error.message === 'Invalid date provided' ? 400 : 500;
+    const statusCode = error.statusCode || (error.message === 'End date cannot be earlier than start date' || error.message === 'Invalid date provided' ? 400 : 500);
     res.status(statusCode).json({ 
       success: false,
       message: statusCode === 400 ? error.message : 'Server error', 
@@ -513,7 +500,7 @@ router.post('/manual', async (req, res) => {
 
 // GET PENDING CHANGES FOR A SPECIFIC CUSTOMER AND DATE
 // Get pending changes for a specific customer and date
-router.get('/pending', protect, async (req, res) => {
+router.get('/pending', async (req, res) => {
   try {
     const { customerId, scheduledDate } = req.query;
     
@@ -595,10 +582,11 @@ router.get('/pending', protect, async (req, res) => {
 });
 
 // DEBUG ENDPOINT - Get all changes for a specific customer
-router.get('/debug/customer/:customerId', protect, async (req, res) => {
+router.get('/debug/customer/:customerId', admin, async (req, res) => {
   try {
     const changes = await DeliveryChange.find({ customerId: req.params.customerId })
       .sort({ createdAt: -1 })
+      .limit(DELIVERY_CHANGE_LIMITS.listPageSize)
       .populate('appliedToDelivery', 'customerName scheduledTime')
       .lean();
     
@@ -637,7 +625,7 @@ router.get('/debug/customer/:customerId', protect, async (req, res) => {
 });
 
 // APPLY A SPECIFIC CHANGE
-router.post('/:id/apply', protect, async (req, res) => {
+router.post('/:id/apply', async (req, res) => {
   console.log('=== MANUAL APPLY CHANGE REQUEST ===');
   console.log('Change ID:', req.params.id);
   
@@ -744,7 +732,7 @@ router.post('/:id/apply', protect, async (req, res) => {
   }
 });
 
-router.post('/apply/:changeId', protect, admin, async (req, res) => {
+router.post('/apply/:changeId', admin, async (req, res) => {
   try {
     const change = await DeliveryChange.findById(req.params.changeId);
     if (!change) {
@@ -806,16 +794,15 @@ router.post('/apply/:changeId', protect, admin, async (req, res) => {
 });
 
 // GET ALL DELIVERY CHANGES
-router.get('/', protect, admin, async (req, res) => {
+router.get('/', async (req, res) => {
   try {
     const { 
       status, 
       startDate, 
       endDate, 
       customerId, 
-      page = 1, 
-      limit = 50 
     } = req.query;
+    const { page, limit } = deliveryChangePagination(req.query.page, req.query.limit);
 
     const query = {};
     
@@ -829,7 +816,7 @@ router.get('/', protect, admin, async (req, res) => {
     }
 
     const changes = await DeliveryChange.find(query)
-      .populate('uploadedBy', 'profile firstName lastName email')
+      .populate('uploadedBy', 'profile.firstName profile.lastName email')
       .populate('appliedToDelivery', 'customerName scheduledTime status')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
@@ -846,16 +833,16 @@ router.get('/', protect, admin, async (req, res) => {
     });
   } catch (error) {
     console.error('Get delivery changes error:', error);
-    res.status(500).json({ 
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Server error', 
+      message: error.statusCode ? error.message : 'Server error',
       error: error.message 
     });
   }
 });
 
 // UPLOAD DELIVERY CHANGES VIA FILE
-router.post('/upload', protect, upload.single('file'), async (req, res) => {
+router.post('/upload', upload.single('file'), async (req, res) => {
   console.log('=== DELIVERY CHANGES UPLOAD STARTED ===');
   console.log('User:', req.user ? { id: req.user._id, role: req.user.role } : 'No user');
   console.log('File:', req.file ? req.file.originalname : 'No file');
@@ -876,13 +863,18 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
     // Parse CSV file
     const parseCSV = () => {
       return new Promise((resolve, reject) => {
-        const stream = require('stream');
-        const bufferStream = new stream.PassThrough();
+        const bufferStream = new PassThrough();
         bufferStream.end(fileBuffer);
+        let rowsRead = 0;
 
         bufferStream
-          .pipe(csv())
-          .on('data', (data) => {
+          .pipe(csv({ maxRowBytes: 64 * 1024 }))
+          .on('data', function (data) {
+            rowsRead++;
+            if (rowsRead > DELIVERY_CHANGE_LIMITS.csvRows) {
+              this.destroy(deliveryChangeInputError(`CSV uploads cannot exceed ${DELIVERY_CHANGE_LIMITS.csvRows} rows`));
+              return;
+            }
             // Validate required fields
             if (!data.customerId && !data.customerName) {
               errors.push({
@@ -959,11 +951,16 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
             });
           })
           .on('end', () => resolve())
-          .on('error', (error) => reject(error));
+          .on('error', error => reject(error.statusCode ? error : deliveryChangeInputError('Invalid CSV file or a row exceeds 64 KB')));
       });
     };
 
     await parseCSV();
+
+    // Validate the entire candidate batch before any matching query or write.
+    let expandedChanges = 0;
+    for (const row of results) expandedChanges += validateDeliveryChangeInput(row);
+    if (expandedChanges > DELIVERY_CHANGE_LIMITS.batchChanges) throw deliveryChangeInputError(`An upload cannot create more than ${DELIVERY_CHANGE_LIMITS.batchChanges} changes`);
 
     console.log(`Parsed ${results.length} change records from CSV`);
     console.log(`Found ${errors.length} parsing errors`);
@@ -990,7 +987,7 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
           endDate: changeData.endDate || changeData.scheduledDate,
           changes: changeData.changes,
           reason: changeData.reason || 'Bulk upload',
-          uploadedBy: req.user?.id || null,
+          uploadedBy: req.user._id,
           fileReference: fileName,
           matchConfidence,
           matchingFields
@@ -1016,12 +1013,19 @@ router.post('/upload', protect, upload.single('file'), async (req, res) => {
 
   } catch (error) {
     console.error('Upload delivery changes error:', error);
-    res.status(500).json({ 
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Server error', 
+      message: error.statusCode ? error.message : 'Server error',
       error: error.message 
     });
   }
+});
+
+router.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError || error.statusCode === 400) {
+    return res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ success: false, message: error.message });
+  }
+  next(error);
 });
 
 export default router;

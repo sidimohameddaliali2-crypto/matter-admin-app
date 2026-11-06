@@ -16,7 +16,7 @@ test('the menu profile restores a submission consisting entirely of skipped days
   t.mock.method(Customer, 'findById', async () => customer);
   t.mock.method(Customer, 'find', () => ({ select: () => ({ lean: async () => [{ ...customer, allergies: ['Milk'] }] }) }));
   t.mock.method(MenuSelectionRecord, 'findOne', () => ({ lean: async () => ({ selectedMeals: [], skippedDays }) }));
-  const handler = router.stack.find((layer) => layer.route?.path === '/customers/:email/subscription-profile').route.stack[0].handle;
+  const handler = router.stack.find((layer) => layer.route?.path === '/customers/:email/subscription-profile').route.stack.at(-1).handle;
   let response;
   const res = { json: (value) => { response = value; }, status: () => res };
   await handler({ params: { email: 'customer@example.com' }, query: { menuId: 'menu' } }, res);
@@ -40,7 +40,7 @@ test('an incomplete set of resume dates is rejected before saving meals or writi
   t.mock.method(MenuSelectionRecord, 'findOne', () => ({ select: () => ({ lean: async () => null }) }));
   const save = t.mock.method(MenuSelectionRecord, 'findOneAndUpdate', async () => ({}));
   const pause = t.mock.method(matter, 'createSubscriptionPause', async () => ({}));
-  const handler = router.stack.find((layer) => layer.route?.path === '/customers/:email/select-meals').route.stack[0].handle;
+  const handler = router.stack.find((layer) => layer.route?.path === '/customers/:email/select-meals').route.stack.at(-1).handle;
   let response;
   let status;
   const res = { json: (value) => { response = value; }, status: (value) => { status = value; return res; } };

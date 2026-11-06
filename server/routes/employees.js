@@ -3,9 +3,11 @@ import Employee from '../models/Employee.js';
 import LeaveRequest from '../models/LeaveRequest.js';
 import { protect, manager } from '../middleware/auth.js';
 
+import { requireStaffPermission } from '../services/staffAccessPolicy.js';
+
 const router = express.Router();
 
-router.use(protect, manager);
+router.use(protect, manager, requireStaffPermission('employees'));
 
 function countInclusiveDays(startDate, endDate) {
   const start = new Date(startDate);
@@ -32,7 +34,7 @@ router.get('/', async (req, res) => {
     }
 
     const employees = await Employee.find(query)
-      .populate('userId', 'email profile role')
+      .populate('userId', 'email profile.firstName profile.lastName role')
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
@@ -93,8 +95,8 @@ router.get('/leave-requests', async (req, res) => {
 
     const leaveRequests = await LeaveRequest.find(query)
       .populate('employee', 'firstName lastName department position')
-      .populate('requestedBy', 'email profile')
-      .populate('approvedBy', 'email profile')
+      .populate('requestedBy', 'email profile.firstName profile.lastName')
+      .populate('approvedBy', 'email profile.firstName profile.lastName')
       .sort({ createdAt: -1 })
       .lean();
 
@@ -185,16 +187,16 @@ router.delete('/leave-requests/:requestId', async (req, res) => {
 router.get('/:id', async (req, res) => {
   try {
     const employee = await Employee.findById(req.params.id)
-      .populate('userId', 'email profile role')
-      .populate('createdBy', 'email profile');
+      .populate('userId', 'email profile.firstName profile.lastName role')
+      .populate('createdBy', 'email profile.firstName profile.lastName');
 
     if (!employee) {
       return res.status(404).json({ message: 'Employee not found' });
     }
 
     const leaveRequests = await LeaveRequest.find({ employee: employee._id })
-      .populate('requestedBy', 'email profile')
-      .populate('approvedBy', 'email profile')
+      .populate('requestedBy', 'email profile.firstName profile.lastName')
+      .populate('approvedBy', 'email profile.firstName profile.lastName')
       .sort({ createdAt: -1 })
       .limit(50)
       .lean();
@@ -253,8 +255,8 @@ router.put('/:id', async (req, res) => {
 router.get('/:id/leave-requests', async (req, res) => {
   try {
     const leaveRequests = await LeaveRequest.find({ employee: req.params.id })
-      .populate('requestedBy', 'email profile')
-      .populate('approvedBy', 'email profile')
+      .populate('requestedBy', 'email profile.firstName profile.lastName')
+      .populate('approvedBy', 'email profile.firstName profile.lastName')
       .sort({ createdAt: -1 })
       .lean();
 

@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect, useImperativeHandle, forwardRef } from 'react';
 import api from '../utils/api';
+import { useSelector } from 'react-redux';
 import { X, Printer, Upload, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
@@ -12,6 +13,7 @@ const BagTagPrintModal = forwardRef(({
   initialGroupBy = null,
   initialPrintDate = null,
 }, ref) => {
+  const canSaveSharedLogo = useSelector(state => ['admin', 'super_admin'].includes(state.auth.user?.role));
   const [stickerSize, setStickerSize] = useState(() => (initialWidth || initialHeight) ? 'custom' : 'medium'); // 'small' | 'medium' | 'large' | 'custom'
   const [customWidth, setCustomWidth] = useState(() => initialWidth || 100);
   const [customHeight, setCustomHeight] = useState(() => initialHeight || 100);
@@ -734,13 +736,13 @@ const BagTagPrintModal = forwardRef(({
                       <Trash2 className="w-3 h-3" />
                       Remove
                     </button>
-                    <button
+                    {canSaveSharedLogo && <button
                       onClick={uploadLogoToServer}
                       disabled={!selectedLogoFile || savingLogo}
                       className="px-3 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 transition flex items-center gap-1 text-sm disabled:opacity-60"
                     >
                       {savingLogo ? 'Saving...' : 'Save for all users'}
-                    </button>
+                    </button>}
                   </>
                 )}
                 {!logoPreview && loadingLogo && (

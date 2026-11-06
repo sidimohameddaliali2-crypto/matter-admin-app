@@ -1,14 +1,12 @@
+import { scheduleWork } from '../services/scheduledWork.js';
 import { syncCustomerTrackerVisits } from '../services/truckoomVisitSync.js';
 
 export function startCustomerTrackerVisitsJob(io) {
-  let running = false;
-  const run = async () => {
-    if (running) return;
-    running = true;
-    try { await syncCustomerTrackerVisits({ io }); }
-    catch { console.warn('Customer tracker visit sync failed; retrying next cycle'); }
-    finally { running = false; }
-  };
-  run();
-  return setInterval(run, 2 * 60 * 1000);
+  // The sync service also retains its per-operation tracker lease.
+  return scheduleWork({ name: 'customer-tracker-visits', intervalMs: 120000,
+    run: async ({ assertOwned }) => {
+      await assertOwned();
+      const result = await syncCustomerTrackerVisits({ io });
+      return result?.busy ? { skipped: true, reason: 'busy' } : result;
+    } });
 }
