@@ -23,7 +23,7 @@ export async function getServiceSnapshot({userId,supervise,filters={}}) {
     filter.$and=[{$or:[{episodeFrom:{$lt:range.to},episodeTo:{$gte:range.from}},{episodeFrom:null,conversationId:{$in:conversations}}]}];
   }
   if(!supervise) {
-    const ownReviews=await ServiceReview.find({$or:[{reviewerId:userId},{'revisions.actorId':userId}]}).select('issueId').limit(10001).lean();
+    const ownReviews=await ServiceReview.find({reviewerId:userId}).select('issueId').limit(10001).lean();
     const ownActions=await ServiceAction.find({ownerId:userId}).select('issueId').limit(10001).lean();
     filter._id={$in:[...ownReviews,...ownActions].map(r=>r.issueId)};
   }
@@ -31,7 +31,7 @@ export async function getServiceSnapshot({userId,supervise,filters={}}) {
   if(issues.length>5000) throw Object.assign(new Error('Report exceeds 5000 issues; narrow the date range'),{statusCode:422});
   const issueIds=issues.map(x=>x._id);
   const [reviews,actions,profiles,capture]=await Promise.all([
-    ServiceReview.find({issueId:{$in:issueIds},...(!supervise?{$or:[{reviewerId:userId},{'revisions.actorId':userId}]}:{})}).lean(),
+    ServiceReview.find({issueId:{$in:issueIds},...(!supervise?{reviewerId:userId}:{})}).lean(),
     ServiceAction.find({issueId:{$in:issueIds},...(!supervise?{ownerId:userId}:{})}).lean(),
     ServiceStaffProfile.find(supervise?{enabled:true}:{userId}).populate('userId','profile.firstName profile.lastName isActive').lean(),
     supervise?ServiceCaptureBatch.findOne({status:'completed'}).sort({createdAt:-1}).lean():null,
