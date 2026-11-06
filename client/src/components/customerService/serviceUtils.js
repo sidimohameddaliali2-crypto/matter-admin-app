@@ -1,0 +1,51 @@
+import React, { useCallback, useEffect, useState } from 'react';
+import api from '../../utils/api';
+
+export const servicePath = '/customer-service';
+export const idOf = value => String(value?._id || value?.userId?._id || value?.userId || value || '');
+export const unpack = response => response?.data?.data;
+export const errorMessage = (error, fallback = 'This could not be loaded. Please try again.') => error?.response?.data?.message || error?.response?.data?.error || error?.message || fallback;
+export const newRequestId = () => globalThis.crypto?.randomUUID?.() || `cs-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+export const displayName = value => value?.displayName || value?.name || [value?.profile?.firstName, value?.profile?.lastName].filter(Boolean).join(' ') || 'Staff member';
+export const formatDubai = value => {
+  if (!value || Number.isNaN(new Date(value).getTime())) return 'Not recorded';
+  return new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Dubai', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }).format(new Date(value));
+};
+export const toDubaiInput = value => {
+  if (!value || Number.isNaN(new Date(value).getTime())) return '';
+  return new Date(new Date(value).getTime() + 4 * 60 * 60 * 1000).toISOString().slice(0, 16);
+};
+export const fromDubaiInput = value => value ? new Date(`${value}:00+04:00`).toISOString() : null;
+export const prettyStatus = value => String(value || 'unknown').replace(/_/g, ' ');
+export const categoryLabels = (ids = [], categories = []) => ids.map(id => categories.find(category => category.id === id)?.label || id).join(' · ') || 'Not determined';
+export const filterParams = filters => Object.fromEntries(Object.entries({ from: filters.from, to: filters.to, categoryId: filters.categoryId, q: filters.search }).filter(([, value]) => value));
+export const matchesIssue = (issue, filters = {}) => {
+  const text = [issue.customerName, issue.customerId, issue.summary].join(' ').toLowerCase();
+  if (filters.search && !text.includes(filters.search.toLowerCase())) return false;
+  if (filters.categoryId && !(issue.categoryIds || []).includes(filters.categoryId)) return false;
+  return true;
+};
+
+// Each page keeps its last successful response visible on a failed refresh.
+export function useServiceResource(path, params = {}, epoch = 0) {
+  const [state, setState] = useState({ data: null, loading: Boolean(path), error: '' });
+  const [revision, setRevision] = useState(0);
+  const paramsKey = JSON.stringify(params);
+  useEffect(() => {
+    if (!path) return undefined;
+    let live = true;
+    setState(previous => ({ ...previous, loading: true, error: '' }));
+    api.get(`${servicePath}${path}`, { params: JSON.parse(paramsKey) }).then(response => {
+      if (live) setState({ data: unpack(response), loading: false, error: '' });
+    }).catch(error => {
+      if (live) setState(previous => ({ ...previous, loading: false, error: errorMessage(error) }));
+    });
+    return () => { live = false; };
+  }, [path, paramsKey, epoch, revision]);
+  const refresh = useCallback(() => setRevision(value => value + 1), []);
+  return { ...state, refresh };
+}
+
+export function ResourceState({ loading, error, children }) {
+  return <>{error && <div className="cs-alert" role="alert">{error} Any previously loaded information is retained.</div>}{loading && <p className="cs-muted" role="status">Loading saved information…</p>}{children}</>;
+}

@@ -29,6 +29,7 @@ export const PERMISSION_GROUPS = [
     label: 'Customers',
     items: [
       { key: 'customers', label: 'Customers', description: 'Customer records and delivery history' },
+      { key: 'customer_service', label: 'Customer service', description: 'Service workspace entry; explicit service membership controls review and supervision' },
       { key: 'website_subscriptions', label: 'Customer Management', description: 'Matter website subscriptions' },
       { key: 'subscription', label: 'Subscription & Sales', description: 'Subscription and sales dashboard' },
       { key: 'customer_analytics', label: 'Customer Analytics', description: 'Customer analytics reports' },

@@ -42,3 +42,17 @@ test('new evidence warns and blocks submission until the issue is reloaded', asy
   expect(container.textContent).toContain('New evidence');
   expect(button('Save review & next').disabled).toBe(true);
 });
+test('unmapped source staff allow an insufficient evidence judgment and never a negative grade', async () => {
+  await act(async () => root.render(<ReviewPanel review={review} detail={{ ...detail, issue: { ...detail.issue, sourceMetadata: { unmappedStaff: true } } }} categories={[{ id: 'renewal', label: 'Renewal' }]} owners={[]} capabilities={{ review: true }} currentUserId="me" />));
+  expect(container.querySelector('input[value="good"]').disabled).toBe(true);
+  expect(container.querySelector('input[value="needs_work"]').disabled).toBe(true);
+  expect(container.querySelector('input[value="insufficient"]').disabled).toBe(false);
+  expect(button('Save review & next').disabled).toBe(true);
+});
+test('a captured thread needs a confirmed issue span before a handling grade', async () => {
+  await act(async () => root.render(<ReviewPanel review={review} detail={{ ...detail, issue: { ...detail.issue, boundaryState: 'needs_review' } }} categories={[{ id: 'renewal', label: 'Renewal' }]} owners={[]} capabilities={{ review: true }} currentUserId="me"/>));
+  expect(button('Save review & next').disabled).toBe(true);
+  const confirmation = [...container.querySelectorAll('label')].find(label => label.textContent.includes('The selected messages define this issue episode'));
+  await act(async () => confirmation.querySelector('input').click());
+  expect(button('Save review & next').disabled).toBe(false);
+});

@@ -1,18 +1,23 @@
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import { MemoryRouter } from 'react-router-dom';
 import { Provider } from 'react-redux';
 import { configureStore } from '@reduxjs/toolkit';
 import CustomerService from './CustomerService';
 import api from '../../utils/api';
 
 jest.mock('../../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn(), put: jest.fn(), patch: jest.fn() } }));
+let mockPathname = '/customer-service/chats';
+jest.mock('react-router-dom', () => {
+  const React = require('react');
+  return { Link: ({ to, children, ...props }) => <a href={to} {...props}>{children}</a>, useLocation: () => ({ pathname: mockPathname, search: '' }) };
+}, { virtual: true });
 global.IS_REACT_ACT_ENVIRONMENT = true;
 let root, container;
 const button = text => [...container.querySelectorAll('button')].find(node => node.textContent.trim() === text);
 async function render(user = { _id: 'reviewer', role: 'admin' }, route = '/customer-service/chats') {
+  mockPathname = route;
   const store = configureStore({ reducer: { auth: () => ({ user }) } });
-  await act(async () => root.render(<Provider store={store}><MemoryRouter initialEntries={[route]}><CustomerService /></MemoryRouter></Provider>));
+  await act(async () => root.render(<Provider store={store}><CustomerService /></Provider>));
 }
 beforeEach(() => {
   jest.clearAllMocks();
