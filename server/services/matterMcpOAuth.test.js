@@ -92,8 +92,8 @@ async function fixture() {
     headers: { Authorization: 'Bearer fixture-staff-session', Origin: provider.urls.origin, Cookie: pending.cookie, ...headers },
     body: { requestId: pending.requestId, csrf: pending.csrf, allowWrites: true, ...extras },
   });
-  const issueCode = async (client, extras = {}) => {
-    const pending = await start(client);
+  const issueCode = async (client, extras = {}, parameters = {}) => {
+    const pending = await start(client, parameters);
     const response = await approve(pending, extras);
     const result = await response.json();
     assert.equal(response.status, 200, JSON.stringify(result));
@@ -275,4 +275,45 @@ test('Mongo OAuth adapter filters expired records and uses atomic refresh and si
   await store.rotate('grant', 'old-refresh-hash', { scopes: ['deliveries:read'] }, new Date());
   assert.ok(calls.every(filter => filter.expiresAt.$gt instanceof Date));
   assert.equal(calls[2]['payload.refreshHash'], 'old-refresh-hash');
+});
+
+test('deletion requires new consent, an opted-in admin policy, and a separate non-escalating OAuth scope', async () => {
+  const setup = await fixture();
+  try {
+    const client = await setup.register();
+    const existing = await (await setup.exchange(client, await setup.issueCode(client))).json();
+    assert.equal((await setup.provider.verifyAccessToken(existing.access_token)).allowDeletes, false);
+    const fullScope = `${scope} deliveries:delete`;
+    const fullParameters = { scope: fullScope };
+    const unauthorized = await setup.start(client, fullParameters);
+    assert.equal((await setup.approve(unauthorized, { allowDeletes: true })).status, 400);
+    const entries = JSON.parse(setup.env.MATTER_MCP_CREDENTIALS);
+    entries[0].allowDeletes = true;
+    setup.env.MATTER_MCP_CREDENTIALS = JSON.stringify(entries);
+    assert.equal((await setup.provider.verifyAccessToken(existing.access_token)).allowDeletes, false);
+    await assert.rejects(setup.provider.exchangeRefreshToken(client, existing.refresh_token, fullScope.split(' ')), /expand/);
+    const unchecked = await (await setup.exchange(client, await setup.issueCode(client, {}, fullParameters))).json();
+    assert.equal(unchecked.scope, scope);
+    assert.equal((await setup.provider.verifyAccessToken(unchecked.access_token)).allowDeletes, false);
+    assert.equal((await setup.approve(unauthorized, { allowDeletes: true, allowWrites: false })).status, 400);
+    setup.changeUser({ _id: staffId, role: 'manager', isActive: true });
+    assert.equal((await setup.approve(unauthorized, { allowDeletes: true })).status, 400);
+    setup.changeUser({ _id: staffId, role: 'admin', isActive: true });
+    const tokens = await (await setup.exchange(client, await setup.issueCode(client, { allowDeletes: true }, fullParameters))).json();
+    assert.equal(tokens.scope, fullScope);
+    assert.equal((await setup.provider.verifyAccessToken(tokens.access_token)).allowDeletes, true);
+    const mcp = new Client({ name: 'delete-scope-test', version: '1.0.0' });
+    try {
+      await mcp.connect(new StreamableHTTPClientTransport(new URL(`${setup.base}/api/mcp`), { requestInit: {
+        headers: { Authorization: `Bearer ${tokens.access_token}` },
+      } }));
+      assert.ok((await mcp.listTools()).tools.some(tool => tool.name === 'matter_delete_delivery'));
+      entries[0].allowDeletes = false;
+      setup.env.MATTER_MCP_CREDENTIALS = JSON.stringify(entries);
+      assert.ok(!(await mcp.listTools()).tools.some(tool => tool.name === 'matter_delete_delivery'));
+    } finally { await mcp.close(); }
+    assert.equal((await setup.provider.verifyAccessToken(tokens.access_token)).allowDeletes, false);
+    const refreshed = await setup.provider.exchangeRefreshToken(client, tokens.refresh_token);
+    assert.equal(refreshed.scope, scope);
+  } finally { await setup.close(); }
 });

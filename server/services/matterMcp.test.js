@@ -133,9 +133,124 @@ test('API bridge never follows redirects or retries uncertain writes', async () 
     } });
   await assert.rejects(request('POST', '/deliveries', { body: {} }), /look up|Look up/);
   assert.equal(attempts, 1);
+  await assert.rejects(request('DELETE', '/deliveries', { body: {} }), /may already have been deleted/);
+  assert.equal(attempts, 2);
   const failure = createMatterApiClient({ baseUrl: 'http://127.0.0.1:5000/api', token: 'fixture-token',
     fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({ message: 'Server error' }) }) });
   await assert.rejects(failure('PUT', `/deliveries/${recordId}`, { body: {} }), /may have been saved/);
+});
+
+test('deletion is opt-in for admin credentials and accepts exactly one versioned delivery', async () => {
+  assert.equal((await authenticateMcpCredential(`Bearer ${credential}`, {
+    credentialsJson, findUser: async () => ({ ...staff, role: 'admin' }),
+  })).allowDeletes, false);
+  const config = allowWrites => JSON.stringify([{ userId, sha256: hashMcpToken(credential), allowWrites, allowDeletes: true }]);
+  for (const role of ['admin', 'super_admin', 'manager', 'dispatcher']) {
+    const context = await authenticateMcpCredential(`Bearer ${credential}`, {
+      credentialsJson: config(true), findUser: async () => ({ ...staff, role }),
+    });
+    assert.equal(context.allowDeletes, ['admin', 'super_admin'].includes(role));
+  }
+  const readOnly = await authenticateMcpCredential(`Bearer ${credential}`, {
+    credentialsJson: config(false), findUser: async () => ({ ...staff, role: 'admin' }),
+  });
+  assert.equal(readOnly.allowDeletes, false);
+  for (const policy of [{ allowWrites: true }, { allowWrites: false, allowDeletes: true }]) {
+    const fixture = await connectFixture({ permissions: { deliveries: true }, ...policy }, async () => assert.fail('No delete request expected'));
+    try {
+      assert.ok(!(await fixture.client.listTools()).tools.some(tool => tool.name === 'matter_delete_delivery'));
+      assert.equal((await fixture.client.callTool({ name: 'matter_delete_delivery', arguments: {} })).isError, true);
+    } finally { await fixture.close(); }
+  }
+  const calls = [];
+  const fixture = await connectFixture({ permissions: { deliveries: true }, allowWrites: true, allowDeletes: true, oauth: true },
+    async (...args) => { calls.push(args); return { success: true, data: { deletedCount: 1 } }; });
+  try {
+    const tool = (await fixture.client.listTools()).tools.find(entry => entry.name === 'matter_delete_delivery');
+    assert.equal(tool.annotations.destructiveHint, true);
+    assert.deepEqual(tool._meta.securitySchemes[0].scopes, ['deliveries:read', 'deliveries:write', 'deliveries:delete']);
+    const argumentsForDelete = { deliveryId: recordId, customerId: 'CUSTOMER-123',
+      scheduledTime: '2026-11-08T08:00:00+04:00', updatedAt: '2026-11-05T08:00:00.000Z' };
+    const deleted = await fixture.client.callTool({ name: 'matter_delete_delivery', arguments: argumentsForDelete });
+    assert.ok(!deleted.isError);
+    assert.deepEqual(calls[0], ['DELETE', '/deliveries/by-ids', { body: { deliveryIds: [recordId],
+      expectedDelivery: { customerId: argumentsForDelete.customerId, scheduledTime: argumentsForDelete.scheduledTime,
+        updatedAt: argumentsForDelete.updatedAt } } }]);
+    for (const invalid of [{ ...argumentsForDelete, deliveryId: [recordId] }, { ...argumentsForDelete, updatedAt: undefined },
+      { ...argumentsForDelete, deliveryId: '../bulk-delete' }]) {
+      assert.equal((await fixture.client.callTool({ name: 'matter_delete_delivery', arguments: invalid })).isError, true);
+    }
+    assert.equal(calls.length, 1);
+  } finally { await fixture.close(); }
+});
+
+test('guarded deletion checks admin rights and atomically refuses stale or wrong records without removal events', async (context) => {
+  const { default: deliveriesRouter } = await import('../routes/deliveries.js');
+  const previousSecret = process.env.JWT_SECRET;
+  const previousSlack = process.env.ENABLE_SLACK_NOTIFICATIONS;
+  process.env.JWT_SECRET = 'delete-test-fixture-secret';
+  process.env.ENABLE_SLACK_NOTIFICATIONS = '0';
+  const otherId = '444444444444444444444444';
+  const managerId = '555555555555555555555555';
+  const record = { _id: recordId, customerId: 'CUSTOMER-123', scheduledTime: '2026-11-08T04:00:00.000Z', updatedAt: '2026-11-05T08:00:00.000Z' };
+  const records = new Map([[recordId, record], [otherId, { ...record, _id: otherId, customerId: 'OTHER' }]]);
+  const matches = (entry, filter) => filter._id.$in.includes(entry._id)
+    && (!filter.customerId || entry.customerId === filter.customerId)
+    && (!filter.scheduledTime || +new Date(entry.scheduledTime) === +filter.scheduledTime)
+    && (!filter.updatedAt || +new Date(entry.updatedAt) === +filter.updatedAt);
+  let race = false;
+  const events = [];
+  context.mock.method(User, 'findById', identifier => ({ select: async () => ({ _id: identifier,
+    role: identifier === managerId ? 'manager' : 'admin', isActive: true }) }));
+  context.mock.method(Delivery, 'find', filter => ({ lean: async () => {
+    const snapshot = [...records.values()].filter(entry => matches(entry, filter)).map(entry => ({ ...entry }));
+    if (race) { record.updatedAt = '2026-11-05T08:00:01.000Z'; race = false; }
+    return snapshot;
+  } }));
+  context.mock.method(Delivery, 'deleteMany', async filter => {
+    const targets = [...records.values()].filter(entry => matches(entry, filter));
+    for (const target of targets) records.delete(target._id);
+    return { deletedCount: targets.length };
+  });
+  const app = express();
+  app.use(express.json());
+  app.set('io', { emit: (...args) => events.push(args) });
+  app.use('/api/deliveries', deliveriesRouter);
+  const listener = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => listener.once('listening', resolve));
+  const remove = (body, identifier = userId) => fetch(`http://127.0.0.1:${listener.address().port}/api/deliveries/by-ids`, {
+    method: 'DELETE', headers: { 'Content-Type': 'application/json', ...(identifier
+      ? { Authorization: `Bearer ${jwt.sign({ id: identifier }, process.env.JWT_SECRET)}` } : {}) }, body: JSON.stringify(body),
+  });
+  const expectedDelivery = { customerId: record.customerId, scheduledTime: record.scheduledTime, updatedAt: record.updatedAt };
+  try {
+    const body = { deliveryIds: [recordId], expectedDelivery };
+    assert.equal((await remove(body, null)).status, 401);
+    assert.equal((await remove(body, managerId)).status, 403);
+    assert.equal((await remove({ ...body, deliveryIds: [recordId, otherId] })).status, 400);
+    for (const changed of [{ customerId: 'WRONG' }, { scheduledTime: '2026-11-09T04:00:00.000Z' },
+      { updatedAt: '2026-11-05T07:59:59.000Z' }]) {
+      assert.equal((await remove({ ...body, expectedDelivery: { ...expectedDelivery, ...changed } })).status, 409);
+    }
+    race = true;
+    assert.equal((await remove(body)).status, 409);
+    assert.equal(records.size, 2);
+    assert.equal(events.length, 0);
+    const success = await remove({ ...body, expectedDelivery: { ...expectedDelivery, updatedAt: record.updatedAt } });
+    assert.equal(success.status, 200);
+    assert.equal((await success.json()).data.deletedCount, 1);
+    assert.equal(records.has(otherId), true);
+    assert.deepEqual(events, [['deliveries:deleted', { count: 1, ids: [recordId] }]]);
+    assert.equal((await remove(body)).status, 409);
+    assert.equal(events.length, 1);
+    assert.equal((await remove({ deliveryIds: [otherId] })).status, 200);
+    assert.equal(records.size, 0);
+  } finally {
+    listener.closeAllConnections();
+    await new Promise(resolve => listener.close(resolve));
+    if (previousSecret === undefined) delete process.env.JWT_SECRET; else process.env.JWT_SECRET = previousSecret;
+    if (previousSlack === undefined) delete process.env.ENABLE_SLACK_NOTIFICATIONS; else process.env.ENABLE_SLACK_NOTIFICATIONS = previousSlack;
+  }
 });
 
 test('MCP lookup finds a booked Sunday hidden by dispatch combining without carrying Sundays into Saturday', async (context) => {

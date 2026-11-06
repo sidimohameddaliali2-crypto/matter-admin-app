@@ -2839,7 +2839,7 @@ router.patch('/:id/status', async (req, res) => {
 // @access  Private/Admin
 router.delete('/by-ids', authorize(['admin', 'super_admin']), async (req, res) => {
   try {
-    const { deliveryIds } = req.body;
+    const { deliveryIds, expectedDelivery } = req.body;
 
     if (!Array.isArray(deliveryIds) || deliveryIds.length === 0) {
       return res.status(400).json({ success: false, message: 'deliveryIds array is required' });
@@ -2851,10 +2851,25 @@ router.delete('/by-ids', authorize(['admin', 'super_admin']), async (req, res) =
       return res.status(400).json({ success: false, message: `Invalid delivery id: ${invalidId}` });
     }
 
+    const deleteQuery = { _id: { $in: deliveryIds } };
+    if (expectedDelivery !== undefined) {
+      const validDate = value => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(value) && Number.isFinite(Date.parse(value));
+      if (deliveryIds.length !== 1 || !expectedDelivery || typeof expectedDelivery.customerId !== 'string'
+        || !expectedDelivery.customerId.trim() || !validDate(expectedDelivery.scheduledTime) || !validDate(expectedDelivery.updatedAt)) {
+        return res.status(400).json({ success: false, message: 'A single delivery and its current customerId, scheduledTime, and updatedAt are required' });
+      }
+      deleteQuery.customerId = expectedDelivery.customerId;
+      deleteQuery.scheduledTime = new Date(expectedDelivery.scheduledTime);
+      deleteQuery.updatedAt = new Date(expectedDelivery.updatedAt);
+    }
+
     // Fetch deliveries before deletion for Slack notification
-    const deliveriesToDelete = await Delivery.find({ _id: { $in: deliveryIds } }).lean();
+    const deliveriesToDelete = await Delivery.find(deleteQuery).lean();
     
-    const result = await Delivery.deleteMany({ _id: { $in: deliveryIds } });
+    const result = await Delivery.deleteMany(deleteQuery);
+    if (expectedDelivery !== undefined && result.deletedCount !== 1) {
+      return res.status(409).json({ success: false, message: 'Delivery changed or no longer exists. Read it again before requesting deletion.' });
+    }
 
     // Send Slack notification
     const deletedByName = req.user?.profile?.firstName

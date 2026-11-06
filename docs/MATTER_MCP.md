@@ -8,6 +8,7 @@ It is disabled until explicitly enabled in the server environment. It provides:
 - `matter_search_customers`: customer lookup, only with the customers permission.
 - `matter_create_delivery`: create a delivery, collection, or task.
 - `matter_update_delivery`: change address, schedule, notes, company, or zone.
+- `matter_delete_delivery`: permanently remove one version-checked delivery, when separately enabled for an admin.
 
 Create/update tools only appear for credentials with `allowWrites: true`.
 Delivery lookups use `GET /api/deliveries?view=records`, which includes Sunday
@@ -15,7 +16,7 @@ bookings even when the normal dispatch list combines them into Saturday. It does
 not carry Sunday-only bookings into Saturday search results. Dates and pagination
 therefore describe stored bookings, not physical dispatch trips. Normal delivery
 lists retain their existing weekend combining and staff/driver access restrictions.
-The endpoint does not provide driver assignment, completion, deletion, bag custody,
+The endpoint does not provide driver assignment, completion, bulk deletion, bag custody,
 kitchen tools, or image inspection. Photo URLs are returned as data, not downloaded.
 
 ## Enable on the server
@@ -120,6 +121,43 @@ Refresh rotates the credentials atomically and does not extend the 30-day deadli
 Replaying a refresh token revokes its grant family, requiring a new connection.
 The revocation endpoint revokes only grants belonging to the authenticated client.
 OAuth tokens cannot be used as staff, member, partner, or external API credentials.
+
+### Enable single-delivery deletion
+
+Deletion is permanent, matching the website's existing admin Delete action. It
+does not cancel a delivery or provide an undo operation. No live records are
+removed merely by deploying or enabling this feature.
+
+1. Deploy the delete-tool changes.
+2. In the chosen account's existing `MATTER_MCP_CREDENTIALS` JSON entry in
+   `server/.env`, keep its `userId` and `sha256` unchanged and set both
+   `"allowWrites":true` and `"allowDeletes":true`. The staff account must be
+   `admin` or `super_admin` with delivery access. The new flag defaults to false;
+   dispatchers and managers cannot gain delete access through it.
+3. Restart PM2 with `pm2 restart matter-delivery-api --update-env`.
+4. Reconnect the private MATTER plugin in ChatGPT and approve the new
+   `deliveries:delete` scope. On MATTER's consent page, keep editing enabled and
+   explicitly check **Also allow permanently deleting individual deliveries**.
+   This box is unchecked by default. Existing read/write grants do not gain this
+   permission, and a refresh token cannot expand its scopes.
+5. Have the dot read the exact delivery and show its customer and date before
+   acting on an explicit deletion request. The delete tool requires the delivery
+   ID, customer ID, scheduled time, and `updatedAt` revision copied from that read.
+
+The tool sends only one ID to the existing admin deletion endpoint, together with
+the expected customer/date/revision. Those fields are included in the Mongo delete
+filter, so concurrent edits or a mismatched record return 409 instead of deleting
+it. Existing Slack removal notices and `deliveries:deleted` Socket.IO events run
+on a successful deletion. Requests without these optional guards, as used by the
+existing website, keep their previous behavior. Failed or uncertain deletes are
+not automatically retried.
+
+To disable deletion, set `allowDeletes` to false and restart all API instances.
+The tool disappears on the next request, even for a previously consented grant.
+Other write access can remain enabled. New credentials can also be generated with
+`node scripts/createMcpCredential.js STAFF_USER_MONGODB_ID --allow-writes --allow-deletes`;
+that command rotates the fixed Bearer secret, so do not run it merely to add this
+flag to an existing account.
 
 No live ChatGPT connection is established by deploying the code. The sign-in and
 tool discovery must still be verified in your own account after deployment.

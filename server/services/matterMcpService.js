@@ -40,6 +40,7 @@ export function createMatterApiClient({ baseUrl, token, fetchImpl = fetch }) {
         redirect: 'error',
       });
     } catch {
+      if (method === 'DELETE') throw new Error('The deletion result is unknown. Look up the delivery before retrying; it may already have been deleted.');
       throw new Error(method === 'GET'
         ? 'MATTER could not be reached. Try a lookup again later.'
         : 'The write result is unknown. Look up the delivery before retrying; it may already have been saved.');
@@ -48,6 +49,7 @@ export function createMatterApiClient({ baseUrl, token, fetchImpl = fetch }) {
     try {
       result = await response.json();
     } catch {
+      if (method === 'DELETE') throw new Error('The deletion response is unreadable. Look up the delivery before retrying; it may already have been deleted.');
       throw new Error(method === 'GET'
         ? 'MATTER returned an unreadable response.'
         : 'The write response is unreadable. Look up the delivery before retrying; it may already have been saved.');
@@ -55,21 +57,22 @@ export function createMatterApiClient({ baseUrl, token, fetchImpl = fetch }) {
     if (!response.ok || result.success === false) {
       const detail = typeof result.message === 'string' ? result.message : 'Request failed';
       throw new Error(`MATTER API ${response.status}: ${detail}${method !== 'GET' && response.status >= 500
-        ? '. The write may have been saved; look it up before retrying.' : ''}`);
+        ? (method === 'DELETE' ? '. Deletion may have completed; look it up before retrying.'
+          : '. The write may have been saved; look it up before retrying.') : ''}`);
     }
     return result;
   };
 }
 
-export function createMatterMcpServer({ request, permissions, allowWrites, offsetMinutes = 240, oauth = false }) {
+export function createMatterMcpServer({ request, permissions, allowWrites, allowDeletes = false, offsetMinutes = 240, oauth = false }) {
   const server = new McpServer({ name: 'matter-deliveries', version: '0.1.0' });
-  const register = (name, description, inputSchema, handler, writes = false) => {
+  const register = (name, description, inputSchema, handler, writes = false, requiredScopes) => {
     server.registerTool(name, {
       description,
       inputSchema,
       annotations: { readOnlyHint: !writes, destructiveHint: writes, idempotentHint: !writes, openWorldHint: false },
-      ...(oauth ? { _meta: { securitySchemes: [{ type: 'oauth2', scopes: writes
-        ? ['deliveries:read', 'deliveries:write'] : ['deliveries:read'] }] } } : {}),
+      ...(oauth ? { _meta: { securitySchemes: [{ type: 'oauth2', scopes: requiredScopes || (writes
+        ? ['deliveries:read', 'deliveries:write'] : ['deliveries:read']) }] } } : {}),
     }, async (input) => {
       try {
         const result = await handler(input);
@@ -133,6 +136,14 @@ export function createMatterMcpServer({ request, permissions, allowWrites, offse
       ({ deliveryId: identifier, changes, changeReason }) => request('PUT', `/deliveries/${identifier}`, {
         body: { ...changes, changeReason },
       }), true);
+  }
+  if (allowWrites && allowDeletes) {
+    register('matter_delete_delivery',
+      'Permanently delete exactly one delivery, task, or collection only when explicitly requested by the user. First read the exact delivery, show the customer and scheduled date, and obtain confirmation of that target. Copy customerId, scheduledTime, and updatedAt exactly from that lookup. Deletion is not cancellation and cannot be undone. It can send existing MATTER removal notifications. If the record changed or a response is uncertain, look it up again; never automatically retry.',
+      { deliveryId, customerId: text, scheduledTime, updatedAt: z.string().datetime({ offset: true }) },
+      ({ deliveryId: identifier, customerId, scheduledTime: scheduled, updatedAt }) => request('DELETE', '/deliveries/by-ids', {
+        body: { deliveryIds: [identifier], expectedDelivery: { customerId, scheduledTime: scheduled, updatedAt } },
+      }), true, ['deliveries:read', 'deliveries:write', 'deliveries:delete']);
   }
   return server;
 }
