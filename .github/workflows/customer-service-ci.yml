@@ -1,0 +1,54 @@
+name: Customer service checks
+on:
+  pull_request:
+    paths: ['server/**', 'client/**', '.github/workflows/customer-service-ci.yml']
+  push:
+    branches: ['codex/customer-service-review-workflow']
+permissions:
+  contents: read
+jobs:
+  service:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+        working-directory: server
+      - name: Isolated replica-set database
+        run: |
+          docker run -d --name service-mongo -p 27017:27017 mongo:7 --replSet rs0 --bind_ip_all
+          for n in $(seq 1 30); do docker exec service-mongo mongosh --quiet --eval 'db.runCommand({ping:1})' && break || sleep 2; done
+          docker exec service-mongo mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+          for n in $(seq 1 30); do docker exec service-mongo mongosh --quiet --eval 'if(!db.hello().isWritablePrimary)quit(1)' && break || sleep 1; done
+      - name: Focused service tests
+        working-directory: server
+        env:
+          CUSTOMER_SERVICE_TEST_URI: mongodb://127.0.0.1:27017/matter_customer_service_ci?replicaSet=rs0
+        run: node --test services/customerService*.test.js tests/customerService*.integration.test.js
+  client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci
+        working-directory: client
+      - name: Service interaction tests
+        working-directory: client
+        env:
+          CI: true
+        run: npm test -- --watchAll=false --runInBand --passWithNoTests --testPathPattern=customerService
+      - name: Production client build
+        working-directory: client
+        env:
+          CI: false
+        run: npm run build
