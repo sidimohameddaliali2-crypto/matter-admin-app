@@ -45,6 +45,7 @@ import api from '../utils/api';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
 import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
 import { copyManagedMenuItem, managedMenuPayload } from '../utils/managedMenuItems';
+import { MENU_EXCEL_HEADERS, parseCorePlanFlag, corePlanExcelValue } from '../utils/menuExcelCore';
 import SupyRecipeSearch from '../components/SupyRecipeSearch';
 import IngredientTagEditor from '../components/IngredientTagEditor';
 import { toSentenceCase } from '../utils/textFormat';
@@ -443,9 +444,6 @@ const MenuManagement = () => {
   // selection screen only uses them to flag a swap to the kitchen (see
   // needsSauceChange/needsGarnishChange, surfaced on Kitchen List as "Change
   // sauce"/"Change garnish") when they hit a customer's exclusion.
-  const MENU_EXCEL_HEADERS = [
-    'MEAL TYPE', 'INTOLERANCES', 'DAY', 'MEAL NAME', 'CARB', 'VEG', 'SLOT', 'PROTEIN TYPE', 'SAUCE', 'GARNISH'
-  ];
   const SLOT_VALUES = ['main', 'sub'];
   const PROTEIN_TYPE_VALUES = ['chicken', 'beef', 'fish'];
   const normalizeSlot = (value) => {
@@ -467,9 +465,9 @@ const MenuManagement = () => {
   const handleDownloadMenuTemplate = () => {
     writeMenuExcel(
       [
-        ['main', 'nuts, dairy', 1, 'Chicken Bowl', 'rice', 'broccoli', 'main', 'chicken', 'teriyaki sauce', 'sesame seeds'],
-        ['main', 'gluten', 2, 'Beef Stew', 'quinoa', 'spinach', 'sub', 'beef', 'tomato sauce', 'parsley'],
-        ['snack', '', 1, 'Mixed Nuts Pack', '', '', '', '', '', '']
+        ['main', 'nuts, dairy', 1, 'Chicken Bowl', 'rice', 'broccoli', 'main', 'chicken', 'teriyaki sauce', 'sesame seeds', 'TRUE'],
+        ['main', 'gluten', 2, 'Beef Stew', 'quinoa', 'spinach', 'sub', 'beef', 'tomato sauce', 'parsley', 'FALSE'],
+        ['snack', '', 1, 'Mixed Nuts Pack', '', '', '', '', '', '', 'FALSE']
       ],
       'menu_upload_template.xlsx'
     );
@@ -506,7 +504,8 @@ const MenuManagement = () => {
             normalizeSlot(item.rotationCategory),
             normalizeProteinType(item.portionType),
             item.sauce,
-            item.garnish
+            item.garnish,
+            corePlanExcelValue(item.usedForCorePlan)
           ]);
         });
       });
@@ -559,7 +558,8 @@ const MenuManagement = () => {
         slot: getHeaderIndex(headerRow, ['SLOT']),
         proteinType: getHeaderIndex(headerRow, ['PROTEIN TYPE', 'PROTEIN', 'PORTION TYPE']),
         sauce: getHeaderIndex(headerRow, ['SAUCE']),
-        garnish: getHeaderIndex(headerRow, ['GARNISH'])
+        garnish: getHeaderIndex(headerRow, ['GARNISH']),
+        corePlan: getHeaderIndex(headerRow, ['CORE PLAN', 'MATTER CORE', 'USED FOR CORE PLAN', 'USEDFORCOREPLAN'])
       };
 
       const useFallbackOrder =
@@ -624,7 +624,8 @@ const MenuManagement = () => {
           rotationCategory: isSnack ? '' : normalizeSlot(slot),
           portionType: isSnack ? '' : normalizeProteinType(proteinType),
           sauce: String(sauce || '').trim(),
-          garnish: String(garnish || '').trim()
+          garnish: String(garnish || '').trim(),
+          usedForCorePlan: parseCorePlanFlag(headerIndexes.corePlan !== -1 ? values[headerIndexes.corePlan] : undefined)
         });
       });
 
@@ -1732,8 +1733,9 @@ const MenuManagement = () => {
                   <div>
                     <p className="font-semibold text-matter-navy">Upload Menu (Excel)</p>
                     <p className="text-xs text-matter-neutral-600">
-                      Columns: CATEGORY, INTOLERANCES, DAY (1/2/3), GARNISH, MEAL NAME, CARB, VEG, SAUCE.
+                      Columns: MEAL TYPE, INTOLERANCES, DAY (1/2/3), MEAL NAME, CARB, VEG, SLOT, PROTEIN TYPE, SAUCE, GARNISH, CORE PLAN (TRUE/FALSE).
                     </p>
+                    <p className="text-xs text-matter-neutral-600">Set CORE PLAN to TRUE for main dishes available to Matter Core, or FALSE for other dishes. Older files without this column keep existing Core tags.</p>
                   </div>
                   <div className="flex gap-2">
                     <button
