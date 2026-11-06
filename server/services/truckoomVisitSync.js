@@ -9,7 +9,8 @@ import truckoom from './truckoomApiService.js';
 import { resolveDeliveryCoordinatesCached } from './geocoding.js';
 import { getBusinessDayBounds, toBusinessDateKey } from '../utils/businessDate.js';
 import { archiveTrackerEvents, archivedTrackerEvents, removeExpiredCustomerGeofences } from './truckoomGeofenceLifecycle.js';
-import { CUSTOMER_RADIUS_METRES, alertDateKeys, normalizeGeofenceAlerts, evaluateTrackerVisit } from './truckoomVisitRules.js';
+import { CUSTOMER_RADIUS_METRES, alertDateKeys, parseTruckoomAlertTime, evaluateTrackerVisit } from './truckoomVisitRules.js';
+import { normalizeAlertData } from './truckoomAlertData.js';
 
 const DAY = 86400000;
 const LEASE_MS = 5 * 60 * 1000;
@@ -62,7 +63,13 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
     const historicalPaths = new Map();
     const getDateAlerts = date => {
       if (!alerts.has(date)) alerts.set(date, (async () => {
-        const events = normalizeGeofenceAlerts(await truckoom.getGeofenceAlerts(date));
+        // Retain UTC-day archive keys while requesting epoch-millisecond windows.
+        // The new endpoint returns Dubai wall-clock timestamps, normalized to UTC.
+        const start = parseTruckoomAlertTime(`${date} 00:00:00`);
+        const end = new Date(Math.min(+start + DAY, +now));
+        if (end <= start) return [];
+        const rows = await truckoom.getAlertData(+start, +end - 1);
+        const events = normalizeAlertData(rows, { companyName: truckoom.companyName, start, end });
         try { await archiveTrackerEvents(events); }
         catch { throw Object.assign(new Error('Tracker alert archive write failed'), { code: 'ARCHIVE_WRITE_FAILED' }); }
         return events;
@@ -85,10 +92,8 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
           // reassignment/pin edits must follow the new destination and driver.
           let fenceId = previous.geofenceId;
           stage = 'geofence_setup';
-          let deletedFence = false;
           if (fenceId && delivery.proof?.receivedAt) {
             const savedFence = await CustomerGeofence.findOne({ truckoomId: fenceId }).lean();
-            deletedFence = Boolean(savedFence?.deletedAt);
             if (!visit.businessDate && savedFence?.businessDate) visit.businessDate = savedFence.businessDate;
           }
           if (!fenceId || !delivery.proof?.receivedAt) {
@@ -117,7 +122,6 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
               } }, { upsert: true, new: true }).lean();
             }
             fenceId = fence.truckoomId;
-            deletedFence = Boolean(fence.deletedAt);
             visit = { geofenceId: fenceId, geofenceName: fence.name, businessDate: fence.businessDate,
               vehicleNo: delivery.driver?.profile?.truckoomVehicleNo, driverId,
               lat: fence.lat, lng: fence.lng, radiusMetres: fence.radiusMetres,
@@ -130,7 +134,9 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
           // Fetch the two UTC dates covering the whole Dubai calendar day.
           let alertsUnavailable = false;
           let alertErrorCode = null;
-          if (!deletedFence) for (const date of alertDateKeys(start, end)) {
+          // Alert history remains useful after the remote circle is removed;
+          // re-poll old visits to reconcile late alerts and offline proofs.
+          for (const date of alertDateKeys(start, end)) {
             try { events.push(...await getDateAlerts(date)); }
             catch (error) {
               alertsUnavailable = true;

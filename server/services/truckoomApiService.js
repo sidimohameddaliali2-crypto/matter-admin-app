@@ -3,6 +3,7 @@ import axios from 'axios';
 import dotenv from 'dotenv';
 import { cacheGet, cacheSet } from '../config/cache.js';
 import { createTruckoomLiveCache, normalizeTruckoomLiveData } from './truckoomLiveData.js';
+import { alertDataRows } from './truckoomAlertData.js';
 
 dotenv.config();
 
@@ -96,6 +97,7 @@ class TruckoomApiService {
     return String(data.geofenceId);
   }
 
+  // Legacy endpoint retained for diagnostics; customer visits use getAlertData.
   async getGeofenceAlerts(date, retry = true) {
     this.assertConfigured();
     try {
@@ -109,6 +111,26 @@ class TruckoomApiService {
       if (retry && (!status || status === 408 || status >= 500)) return this.getGeofenceAlerts(date, false);
       throw error;
     }
+  }
+
+  async getAlertData(from, to, retry = true) {
+    this.assertConfigured();
+    // Epoch milliseconds, inclusive endpoints, maximum 24 hours per request.
+    if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || to < from || to - from > 86400000) {
+      throw new RangeError('Alert data requires an explicit range of at most 24 hours');
+    }
+    const token = await this.getAccessToken();
+    const { data } = await axios.post(`${this.baseURL}?token=getAlertData`, {
+      access_token: token, username: this.username, password: this.password,
+      format: 'json', from, to,
+    }, { timeout: 25000 });
+    const envelopes = Array.isArray(data) ? data : [data];
+    if (retry && envelopes.some(item => Number(item?.result ?? item?.status) === 0
+      && /token.*(?:invalid|expired)|(?:invalid|expired).*token/i.test(item?.message || ''))) {
+      this.accessToken = null;
+      return this.getAlertData(from, to, false);
+    }
+    return alertDataRows(data);
   }
 
   async getVehicleTrackLogs(vehicleNo, startDate, endDate, { beforeDispatch } = {}) {

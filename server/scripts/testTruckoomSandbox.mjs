@@ -6,12 +6,13 @@ import http from 'node:http';
 import axios from 'axios';
 import truckoom from '../services/truckoomApiService.js';
 import Delivery from '../models/Delivery.js';
-import {normalizeGeofenceAlerts,evaluateTrackerVisit,recordProofReceipt} from '../services/truckoomVisitRules.js';
+import {normalizeAlertData} from '../services/truckoomAlertData.js';
+import {evaluateTrackerVisit,recordProofReceipt} from '../services/truckoomVisitRules.js';
 
 const company='MATTER Sandbox';
 const credentials={username:'sandbox-user',password:'sandbox-password'};
 const token='sandbox-token';
-const fenceName='SANDBOX-CUSTOMER';
+const fenceName=`MATTER-20261027-${'a'.repeat(24)}`;
 const vehicle='SANDBOX-VEHICLE';
 const state={fences:new Map(),linked:false,tokenRequests:0,requests:0};
 const server=http.createServer(async(req,res)=>{
@@ -26,14 +27,17 @@ const server=http.createServer(async(req,res)=>{
     if(method==='generateAccessToken'){
       assert.equal(req.method,'POST');assert.deepEqual(body,credentials);state.tokenRequests++;
       response={result:1,data:{token}};
-    }else if(method==='getGeofenceAlerts'){
-      assert.equal(req.method,'GET');assert.equal(url.searchParams.get('user'),credentials.username);
-      assert.equal(url.searchParams.get('pass'),credentials.password);
-      response=state.linked&&state.fences.size&&url.searchParams.get('Date')==='26-10-2026'
-        ?[{vehicle_no:vehicle,geofence_data:[
-          {geofence_name:fenceName,geofence_alarm_time:'26-10-2026 21:26:14',geofence_entry_exit_flag:'entry'},
-          {geofence_name:fenceName,geofence_alarm_time:'26-10-2026 21:40:44',geofence_entry_exit_flag:'exit'},
-        ]}]:[];
+    }else if(method==='getAlertData'){
+      assert.equal(req.method,'POST');assert.equal(body.access_token,token);
+      assert.equal(body.username,credentials.username);assert.equal(body.password,credentials.password);
+      assert.equal(body.format,'json');assert.ok(Number.isSafeInteger(body.from)&&Number.isSafeInteger(body.to));
+      assert.ok(body.to>=body.from&&body.to-body.from<=86400000);
+      const events=state.linked&&state.fences.size&&body.from===Date.parse('2026-10-26T20:00:00Z')
+        ?[
+          {company,vehicle_no:vehicle,alert_info:`Enter In Geofence - ${fenceName}`,alert_generation:'27-10-2026 01:26:14 AM',alert_type:'Enter In Geofence'},
+          {company,vehicle_no:vehicle,alert_info:`Out Of Geofence - ${fenceName}`,alert_generation:'27-10-2026 01:40:44 AM',alert_type:'Out Of Geofence'},
+        ]:[];
+      response={result:1,data:events};
     }else{
       assert.equal(req.method,'POST');assert.equal(req.headers['auth-code'],token);
       assert.equal(body.project_id,'49');
@@ -76,18 +80,18 @@ try{
   assert.equal(fences.length,1);assert.equal(fences[0]['Geofence Id'],id);assert.equal(fences[0].Radius,0.06);
   assert.equal(fences[0]['Geofence Group'],'--');
   pass('60 m ungrouped circle creation, company filtering and listing');
-  assert.deepEqual(await service.getGeofenceAlerts('26-10-2026'),[]);
-  pass('created circle alone does not imply alerts in the unlinked fixture');
-  // Fixture setup only: this is NOT a made-up Truckoom vehicle-linking API.
-  // Real linking/alert configuration must be confirmed with Truckoom.
-  state.linked=true;
-  const events=normalizeGeofenceAlerts(await service.getGeofenceAlerts('26-10-2026'));
-  assert.equal(events.length,2);assert.equal(events[0].at.toISOString(),'2026-10-26T21:26:14.000Z');
-  assert.deepEqual(await service.getGeofenceAlerts('27-10-2026'),[]);
-  assert.deepEqual(await service.getGeofenceAlerts('2026-10-26'),[]);
-  pass('linked fixture entry/exit parsing and UTC date selection');
-
   const start=new Date('2026-10-26T20:00:00Z'),end=new Date('2026-10-27T20:00:00Z');
+  assert.deepEqual(await service.getAlertData(+start,+end-1),[]);
+  pass('created circle alone does not imply alerts in the unlinked fixture');
+  // Fixture setup only, not a Truckoom vehicle-linking API.
+  state.linked=true;
+  const events=normalizeAlertData(await service.getAlertData(+start,+end-1),{companyName:company,start,end});
+  assert.equal(events.length,2);assert.equal(events[0].at.toISOString(),'2026-10-26T21:26:14.000Z');
+  assert.equal(events[0].source,'truckoom_alert_data');
+  assert.deepEqual(await service.getAlertData(+end,+end+86400000-1),[]);
+  await assert.rejects(()=>service.getAlertData(+start,+end+1),RangeError);
+  pass('getAlertData JSON ranges and Dubai event times normalize to UTC');
+
   const captured='2026-10-26T21:33:00.000Z';
   const proof={photoUrl:'https://sandbox.invalid/photo.jpg',photoCapturedAt:captured,photoSource:'camera'};
   const delivery=new Delivery({proof});
