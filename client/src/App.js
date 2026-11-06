@@ -54,6 +54,9 @@ import Renewal from './pages/Renewal';
 import Layout from './components/Layout';
 import { SocketProvider } from './contexts/SocketContext';
 
+const AdminMealSelectionV2 = React.lazy(() => import('./pages/adminMealSelectionV2/AdminMealSelectionV2'));
+
+
 // Protected Route Component
 const AccessDenied = ({ 
   redirectPath = '/driver-mobile',
@@ -551,6 +554,14 @@ function App() {
                   <Layout>
                     <AddDeliveryChange />
                   </Layout>
+                </PermissionBasedRoute>
+              </ProtectedRoute>
+            } />
+
+            <Route path="/admin/meal-selection-v2/*" element={
+              <ProtectedRoute>
+                <PermissionBasedRoute permission="menus">
+                  <React.Suspense fallback={<div role="status" className="p-6 text-gray-600">Loading menu creation…</div>}><AdminMealSelectionV2 /></React.Suspense>
                 </PermissionBasedRoute>
               </ProtectedRoute>
             } />
