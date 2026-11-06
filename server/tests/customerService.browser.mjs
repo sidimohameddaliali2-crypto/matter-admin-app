@@ -84,9 +84,10 @@ try {
   await adrien.screenshot({path:'/tmp/service-evidence/adrien-summary.png',fullPage:true});
   await adrien.getByRole('navigation',{name:'Customer service pages'}).getByRole('link',{name:'Problems',exact:true}).click();
   await adrien.getByRole('button',{name:'Manage action',exact:true}).first().click();
-  await adrien.getByLabel('Action owner',{exact:true}).selectOption(String(users[0]._id));
-  await adrien.getByLabel('Action update reason',{exact:true}).fill('Share the follow-up with the available team member.');
-  await adrien.getByRole('button',{name:'Save action update',exact:true}).click();
+  const editor=adrien.getByRole('region',{name:'Manage customer follow-up'});
+  await editor.getByLabel('Action owner',{exact:true}).selectOption(String(users[0]._id));
+  await editor.getByLabel('Action update reason',{exact:true}).fill('Share the follow-up with the available team member.');
+  await editor.getByRole('button',{name:'Save action update',exact:true}).click();
   await adrien.getByText(/Action update saved/).waitFor();
   assert.equal(await Action.countDocuments({ownerId:users[0]._id}),1);
   await adrien.reload();await adrien.getByRole('button',{name:'Manage action',exact:true}).first().waitFor();
