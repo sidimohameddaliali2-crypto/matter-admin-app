@@ -35,5 +35,8 @@
 
 .av2 .av2-menu-toggle{width:100%;border:0;background:transparent;text-align:left;font-size:12px;margin-top:12px}.av2 .av2-menu-toggle:hover{background:#1d2544}.av2-menu-toggle>svg:last-child{transition:transform .15s}.av2-menu-collapsed>svg:last-child{transform:rotate(-90deg)}.av2-nav-children{margin:0 0 12px 11px;padding-left:7px;border-left:1px solid #343b58}.av2-sidebar nav .av2-nav-children a{padding-left:10px;gap:9px}
 
+/* Page content lives inside the existing admin Layout, with one shared shell. */
+.av2.av2-integrated{min-height:100%;background:#f2f0e9}.av2-integrated .av2-page-body{padding:28px 32px;max-width:1800px;margin:0 auto}.av2-integrated .av2-panel,.av2-integrated .av2-table-scroll,.av2-integrated .av2-library{background:#fff}@media(max-width:700px){.av2-integrated .av2-page-body{padding:20px 14px}}
+
 
 .av2-weekly-board .av2-board.av2-full-week{grid-template-columns:repeat(7,minmax(135px,1fr))}.av2-weekly-board .av2-library{max-height:950px;overflow:auto}.av2-weekly-board .av2-library select{width:100%;min-width:0;font-size:10px;margin-top:8px}.av2-weekly-board .av2-library>small{margin-top:8px}.av2-weekend-toggle{display:flex;align-items:center;gap:7px;color:var(--av2-muted)}.av2-weekend-toggle input{accent-color:#9dd456}.av2-board-empty{padding:8px 2px;font-size:9px!important}.av2-weekly-board .av2-meal-card a{color:inherit;text-decoration:none}.av2-weekly-board .av2-meal-card a:hover{text-decoration:underline}@media(max-width:1100px){.av2-weekly-board .av2-library{display:block;max-height:450px}.av2-weekly-board .av2-library-card{min-width:0}}

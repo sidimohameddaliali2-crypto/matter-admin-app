@@ -561,7 +561,9 @@ function App() {
             <Route path="/admin/meal-selection-v2/*" element={
               <ProtectedRoute>
                 <PermissionBasedRoute permission="menus">
-                  <React.Suspense fallback={<div role="status" className="p-6 text-gray-600">Loading menu creation…</div>}><AdminMealSelectionV2 /></React.Suspense>
+                  <Layout>
+                    <React.Suspense fallback={<div role="status" className="p-6 text-gray-600">Loading menu creation…</div>}><AdminMealSelectionV2 /></React.Suspense>
+                  </Layout>
                 </PermissionBasedRoute>
               </ProtectedRoute>
             } />

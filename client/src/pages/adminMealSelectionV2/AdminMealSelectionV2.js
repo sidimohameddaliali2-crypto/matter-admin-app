@@ -1,7 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, Navigate, useLocation, useNavigate } from 'react-router-dom';
-import { useSelector } from 'react-redux';
-import { LayoutDashboard, Package, ChefHat, Menu, Calendar, Layers, CreditCard, Users, BarChart3, Briefcase, ChevronDown, ArrowLeft, Eye, Pencil, RefreshCw, Download, Lock, X, SlidersHorizontal } from 'lucide-react';
+import { Calendar, ArrowLeft, Eye, Pencil, RefreshCw, Download, Lock, X, SlidersHorizontal } from 'lucide-react';
 import { ingredients as initialIngredients, recipes, meals as initialMeals, kitchenRows, counts } from './data';
 import aprilCycle from './aprilCycle.json';
 import { parseMealWorkbook } from './workbookMeals';
@@ -11,8 +10,7 @@ import '../../styles/matterChrome.css';
 import './adminMealSelectionV2.css';
 const BASE = '/admin/meal-selection-v2';
 const INITIAL_CYCLE = { meals: parseMealWorkbook(aprilCycle.sheets), source: aprilCycle.source };
-const NAV = [['ingredients', 'Ingredients', Package], ['recipes', 'Recipes', ChefHat], ['meals', 'Meals', Menu], ['weekly-menu', 'Cycle Menu', Calendar], ['kitchen', 'Kitchen Dashboard', ChefHat], ['subscriptions', 'Subscriptions', CreditCard]];
-const MENU_CREATION = ['meals', 'weekly-menu', 'recipes'].map(path => NAV.find(item => item[0] === path));
+const PAGES = ['ingredients', 'recipes', 'meals', 'weekly-menu', 'kitchen', 'subscriptions'];
 const status = s => <Badge tone={s === 'Published' ? 'green' : 'grey'}>{s}</Badge>;
 const matches = (value, query) => String(value || '').toLowerCase().includes(query.toLowerCase());
 const titleCell = (name, sub) => <><strong>{name}</strong>{sub && <small>{sub}</small>}</>;
@@ -37,33 +35,17 @@ function usePreviewState(key, initial) {
 export default function AdminMealSelectionV2() {
   const location = useLocation(),
     navigate = useNavigate();
-  const user = useSelector(s => s.auth.user);
-  useEffect(() => { window.scrollTo(0, 0); }, [location.pathname]);
-  const [sidebar, setSidebar] = useState(false);
-  const [menuCreationOpen, setMenuCreationOpen] = useState(true);
+  const contentRef = useRef(null);
+  useEffect(() => { contentRef.current?.closest('main')?.scrollTo(0, 0); }, [location.pathname]);
   const [ingredients, setIngredients] = usePreviewState('ingredients', initialIngredients);
   const [cycle, setCycle] = usePreviewState('workbook-cycle-v1', INITIAL_CYCLE);
   const [message, setMessage] = useState('');
   const route = location.pathname.slice(BASE.length).split('/').filter(Boolean);
   const page = route[0] || 'meals';
-  useEffect(() => {
-    if (MENU_CREATION.some(([path]) => path === page)) setMenuCreationOpen(true);
-  }, [location.pathname, page]);
-  if (!NAV.some(n => n[0] === page)) return <Navigate to={`${BASE}/meals`} replace />;
+  if (!PAGES.includes(page)) return <Navigate to={`${BASE}/meals`} replace />;
   const explainSync = () => setMessage('This is a design preview. Supy sync is available on the existing live pages; no live data has been changed.');
-  return <div className="av2">
-    <aside className={`av2-sidebar ${sidebar ? 'av2-sidebar-open' : ''}`}><div className="av2-brand"><img src="/images/matter-logo24-white.png" alt="MATTER" /><button aria-label="Close navigation" onClick={() => setSidebar(false)}><X size={16} /></button></div>
-      <nav aria-label="Admin v2 navigation"><Link to="/dashboard"><LayoutDashboard size={16} />Dashboard</Link><div className="av2-nav-group"><ChefHat size={16} />Operations<ChevronDown size={13} /></div>{NAV.filter(([path]) => ['ingredients', 'kitchen'].includes(path)).map(([path, label, Icon]) => <Link key={path} onClick={() => setSidebar(false)} className={page === path ? 'active' : ''} to={`${BASE}/${path}`}><Icon size={16} />{label}</Link>)}
-        <Link to="/matter-core"><Layers size={16} />Matter Core</Link><Link className={page === 'subscriptions' ? 'active' : ''} to={`${BASE}/subscriptions`}><CreditCard size={16} />Subscriptions</Link>
-        <button type="button" className={`av2-nav-group av2-menu-toggle ${menuCreationOpen ? '' : 'av2-menu-collapsed'}`} aria-expanded={menuCreationOpen} aria-controls="av2-menu-creation-links" onClick={() => setMenuCreationOpen(open => !open)}><Menu size={16}/>Menu Creation<ChevronDown size={13}/></button>
-        <div id="av2-menu-creation-links" className="av2-nav-children" hidden={!menuCreationOpen}>
-          {MENU_CREATION.map(([path, label, Icon]) => <Link key={path} onClick={() => setSidebar(false)} className={page === path ? 'active' : ''} aria-current={page === path ? 'page' : undefined} to={`${BASE}/${path}`}><Icon size={16}/>{label}</Link>)}
-        </div>
-        <Link to="/customers"><Users size={16} />Customers</Link><Link to="/reports"><BarChart3 size={16} />Reports</Link><Link to="/users"><Briefcase size={16} />Administration</Link>
-      </nav><div className="av2-sidebar-bottom"><Badge tone="blue">Design preview</Badge><Link to="/menus"><ArrowLeft size={15} />Return to current app</Link></div>
-    </aside>
-    <div className="av2-workspace"><header className="av2-topbar"><button className="av2-mobile-menu" aria-label="Open navigation" onClick={() => setSidebar(true)}><Menu size={20} /></button><span>Admin · Meal Selection v2 <Badge>Local preview</Badge></span><span>Hello, <strong>{user?.name?.split(' ')[0] || 'Admin'}</strong></span></header>
-      <main>{message && <div className="av2-feedback" role="status">{message}<button aria-label="Dismiss message" onClick={() => setMessage('')}><X size={16} /></button></div>}
+  return <div className="av2 av2-integrated" ref={contentRef}>
+    <div className="av2-page-body">{message && <div className="av2-feedback" role="status">{message}<button aria-label="Dismiss message" onClick={() => setMessage('')}><X size={16} /></button></div>}
         {page === 'ingredients' && <Ingredients items={ingredients} onSave={item => setIngredients(items => items.map(i => i.id === item.id ? item : i))} onSync={explainSync} />}
         {page === 'recipes' && (route[1] ? <RecipeDetail recipe={recipes.find(r => r.id === route[1])} /> : <Recipes onSync={explainSync} />)}
         {page === 'meals' && (route[1] ? <MealComposer key={route[1]} meal={cycle.meals.find(m => m.id === route[1])} isNew={route[1] === 'new'} onSave={meal => {
@@ -74,7 +56,6 @@ export default function AdminMealSelectionV2() {
         {page === 'weekly-menu' && <CyclePlanner meals={cycle.meals} source={cycle.source} onImport={setCycle} />}
         {page === 'kitchen' && <Kitchen />}
         {page === 'subscriptions' && <Subscription meals={initialMeals} />}
-      </main>
     </div>
   </div>;
 }
