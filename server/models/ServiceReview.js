@@ -12,6 +12,7 @@ const schema = new Schema({
   leaseUntil: { type: Date, default: null }, claimedAt: Date, assignedAt: Date, submittedAt: Date, seenAt: Date,
   stale: { type: Boolean, default: false }, draft: { type: Schema.Types.Mixed, default: {} },
   skippedBy: [{ type: Schema.Types.ObjectId, ref: 'User' }],
+  excludedReviewerIds: [{ type: Schema.Types.ObjectId, ref: 'User' }],
   allocationReason: String,
   assignmentHistory: [{ _id: false, actorId: { type: Schema.Types.ObjectId, ref: 'User' }, reviewerId: { type: Schema.Types.ObjectId, ref: 'User' }, previousReviewerId: { type: Schema.Types.ObjectId, ref: 'User' }, at: Date, reason: String, dateKey: String, policyVersion: String }],
   revisions: [{ _id: false, actorId: { type: Schema.Types.ObjectId, ref: 'User' }, at: Date, sourceRevision: Number, verdict: { type: String, enum: ['good', 'needs_work', 'insufficient'] }, summary: String, note: String, categoryIds: [String], outcome: String, evidenceMessageIds: [{ type: Schema.Types.ObjectId, ref: 'ServiceMessage' }], assessedContributorIds: [{ type: Schema.Types.ObjectId, ref: 'User' }], provisional: Boolean, rubricVersion: { type: String, default: SERVICE_RUBRIC_VERSION }, taxonomyVersion: { type: String, default: SERVICE_TAXONOMY_VERSION } }],

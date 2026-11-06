@@ -10,7 +10,7 @@ import Command from '../models/ServiceCommand.js';
 import Allocation from '../models/ServiceAllocationState.js';
 import { SERVICE_CATEGORY_IDS, SERVICE_RUBRIC_VERSION, SERVICE_TAXONOMY_VERSION } from '../config/customerServiceCategories.js';
 import { getServiceSnapshot } from './customerServiceReports.js';
-import { SERVICE_POLICY, serviceId, serviceError, getServiceCapabilities, assertServiceRecordAccess, allocateReviewBatch, validateReviewSubmission, validateActionUpdate } from './customerServicePolicy.js';
+import { SERVICE_POLICY, SERVICE_STAFF_ROLES, serviceId, serviceError, getServiceCapabilities, assertServiceRecordAccess, allocateReviewBatch, selectReviewCohort, validateReviewSubmission, validateActionUpdate } from './customerServicePolicy.js';
 
 const fail = (message, code = 409) => { throw serviceError(message, code); };
 const oid = value => /^[a-f\d]{24}$/i.test(serviceId(value));
@@ -97,6 +97,9 @@ function ownReview(ctx, review) { assertServiceRecordAccess({ ...ctx, record: re
 function noSelfReview(actor, issue) {
   if ((issue.contributorIds || []).some(id => serviceId(id) === serviceId(actor._id))) fail('Self-review is not allowed: this staff member contributed to the conversation.', 403);
 }
+function independentReviewer(review, reviewerId) {
+  if ((review.excludedReviewerIds || []).some(id => serviceId(id) === serviceId(reviewerId))) fail('Independent calibration cannot be assigned to an original reviewer.', 403);
+}
 function currentReview(review, version, now) {
   validVersion(version);
   if (review.version !== version) fail('The review changed. Reload it before saving.');
@@ -109,6 +112,10 @@ async function eligibleOwner(ownerId, session) {
   const profile = await Staff.findOne({ userId: ownerId }).session(session).lean();
   if (!getServiceCapabilities(user, profile).workActions) fail('Choose an active customer-service owner.', 400);
   return profile;
+}
+function reviewAvailability(profile, now = new Date()) {
+  if (profile.availableMinutes <= 0) fail('Choose a reviewer with declared review capacity.', 400);
+  if (profile.availabilityDate && profile.availabilityDate !== serviceDateKey(now)) fail('The reviewer availability is for another service date.', 400);
 }
 async function evidenceForIssue(ids, issue, session) {
   if (!Array.isArray(ids) || ids.length > 100 || ids.some(id => !oid(id))) fail('Use valid evidence message IDs.', 400);
@@ -135,6 +142,7 @@ export async function claimNextReview({ actor, requestId = randomUUID(), now = n
     let review = await Review.findOne({ reviewerId: actor._id, status: 'in_review' }).sort({ claimedAt: 1, _id: 1 }).session(session);
     if (!review) review = await Review.findOne({ reviewerId: actor._id, status: 'assigned' }).sort({ assignedAt: 1, createdAt: 1, _id: 1 }).session(session);
     if (!review) return null;
+    independentReviewer(review, actor._id);
     const issue = await Issue.findById(review.issueId).session(session);
     if (!issue) fail('The assigned issue is unavailable.', 404);
     noSelfReview(ctx.actor, issue);
@@ -153,6 +161,7 @@ export async function saveReviewDraft({ reviewId, version, draft, actor, now = n
   const saved = Object.fromEntries(allowed.filter(key => draft[key] !== undefined).map(key => [key, draft[key]]));
   return mutate({ actor, kind: 'draft', payload: { reviewId, version, draft: saved } }, async (ctx, session) => {
     const review = await getReview(reviewId, session); ownReview(ctx, review); currentReview(review, version, now);
+    independentReviewer(review, actor._id);
     review.draft = saved; review.version++; review.leaseUntil = new Date(now.getTime() + SERVICE_POLICY.leaseMs);
     await review.save({ session });
     return reviewWithIssue(review, session);
@@ -173,6 +182,10 @@ async function addAction({ issue, reviewId = null, input, ctx, session, now }) {
   const status = ownerId ? 'assigned' : 'unassigned';
   if (input.note !== undefined && (typeof input.note !== 'string' || input.note.length > 4000)) fail('Use an action note up to 4000 characters.', 400);
   const [action] = await Action.create([{ issueId: issue._id, reviewId, customerName: issue.customerName, description: input.description.trim(), ownerId, dueAt, promisedDueAt, promiseMessageId: input.promiseMessageId || null, status, history: [{ actorId: ctx.actor._id, at: now, event: 'created', status, ownerId, dueAt, promisedDueAt, note: input.note || '' }] }], { session });
+  if (issue.outcome !== 'open') {
+    await Issue.updateOne({ _id: issue._id }, { $set: { outcome: 'open' }, $inc: { version: 1 } }, { session });
+    issue.outcome = 'open'; issue.version = (issue.version || 1) + 1;
+  }
   return action.toObject();
 }
 export async function submitServiceReview(input) {
@@ -180,14 +193,17 @@ export async function submitServiceReview(input) {
   const submission = validateReviewSubmission(input);
   return mutate({ actor, requestId, kind: 'submit', payload: { reviewId, version, sourceRevision, ...submission, action: input.action, confirmIssueBoundary: input.confirmIssueBoundary } }, async (ctx, session) => {
     const review = await getReview(reviewId, session); ownReview(ctx, review); currentReview(review, version, now);
+    independentReviewer(review, actor._id);
     const issue = await Issue.findById(review.issueId).session(session);
     if (!issue) fail('Issue not found.', 404);
     noSelfReview(ctx.actor, issue);
     if (!Number.isInteger(sourceRevision) || sourceRevision !== issue.sourceRevision || review.sourceRevision !== sourceRevision || review.stale) fail('Source evidence changed. Reload the review before submitting.');
     const evidence = await evidenceForIssue(submission.evidenceMessageIds, issue, session);
+    const assessed = [...new Set(evidence.filter(m => m.authorType === 'staff' && m.authorId).map(m => serviceId(m.authorId)))];
     if (submission.verdict !== 'insufficient') {
       if (issue.sourceMetadata?.unmappedStaff || !issue.contributorIds?.length) fail('Staff attribution is unresolved. Use Not enough information until source mapping is verified.', 400);
       if (!evidence.length || evidence.every(m => !m.text?.trim() && m.mediaState !== 'available')) fail('Available supporting evidence is required for a handling grade.', 400);
+      if (!assessed.length) fail('Select a verified human staff message to identify whose handling was assessed, or use Not enough information.', 400);
       if (issue.boundaryState === 'needs_review' && input.confirmIssueBoundary !== true) fail('Confirm the selected evidence describes one issue before grading.', 400);
     }
     if (review.sampleType === 'calibration' && input.action) fail('Record calibration independently; create any operational follow-up through the issue action queue.', 400);
@@ -195,8 +211,7 @@ export async function submitServiceReview(input) {
       if (!text(submission.note) || !evidence.length) fail('Resolution requires evidence and a note confirming the actual requested effect.', 400);
       if (input.action || await Action.exists({ issueId: issue._id, status: { $ne: 'completed' } }).session(session)) fail('Open customer actions prevent confirmed issue resolution.');
     }
-    const assessed = [...new Set(evidence.filter(m => m.authorType === 'staff' && m.authorId).map(m => serviceId(m.authorId)))];
-    review.revisions.push({ actorId: actor._id, at: now, sourceRevision, ...submission, assessedContributorIds: assessed.length ? assessed : issue.contributorIds, provisional: submission.outcome !== 'resolved', rubricVersion: SERVICE_RUBRIC_VERSION, taxonomyVersion: SERVICE_TAXONOMY_VERSION });
+    review.revisions.push({ actorId: actor._id, at: now, sourceRevision, ...submission, assessedContributorIds: assessed, provisional: submission.outcome !== 'resolved', rubricVersion: SERVICE_RUBRIC_VERSION, taxonomyVersion: SERVICE_TAXONOMY_VERSION });
     review.status = submission.verdict === 'insufficient' ? 'awaiting_evidence' : 'submitted';
     review.sourceRevision = sourceRevision; review.stale = false; review.submittedAt = now; review.leaseUntil = null; review.version++;
     await review.save({ session });
@@ -233,9 +248,10 @@ export async function reassignServiceReview({ reviewId, ownerId, reason, version
     supervisor(ctx);
     const review = await getReview(reviewId, session);
     if (review.version !== version) fail('Review changed. Reload before reassigning.');
+    independentReviewer(review, ownerId);
     if (['submitted', 'awaiting_evidence'].includes(review.status)) fail('Submitted reviews remain historical. Request correction or calibration instead.');
     const owner = await eligibleOwner(ownerId, session);
-    if (owner.availableMinutes <= 0) fail('The selected reviewer has no available review capacity.', 400);
+    reviewAvailability(owner, now);
     const issue = await Issue.findById(review.issueId).session(session).lean();
     noSelfReview({ _id: ownerId }, issue);
     if (await Review.countDocuments({ reviewerId: ownerId, status: 'assigned', _id: { $ne: review._id } }).session(session) >= SERVICE_POLICY.pendingCap) fail('The selected reviewer already has the maximum pending work.');
@@ -276,7 +292,9 @@ export async function updateServiceAction(input) {
     action.waitingReason = update.status === 'waiting' ? update.reason : '';
     if (update.status === 'completed') { action.completedAt = now; action.completionEvidence = update.evidence; }
     else action.completedAt = null;
-    action.seenAt ||= now; action.version++;
+    if (serviceId(previousOwnerId) !== serviceId(ownerId)) action.seenAt = null;
+    if (ownerId && serviceId(actor._id) === serviceId(ownerId)) action.seenAt ||= now;
+    action.version++;
     action.history.push({ actorId: actor._id, at: now, event: update.status === 'completed' ? 'completed' : 'updated', status: update.status, ownerId, previousOwnerId, dueAt: action.dueAt, promisedDueAt: action.promisedDueAt, nextCheckAt: action.nextCheckAt, reason: update.reason, note: update.note, evidence: update.evidence });
     await action.save({ session });
     // Reopening an obligation also reopens attention on the linked issue.
@@ -290,7 +308,7 @@ export async function allocateServiceReviews({ actor, requestId = randomUUID(), 
     supervisor(ctx);
     const dateKey = serviceDateKey(now);
     const profiles = await Staff.find({ enabled: true }).session(session).lean();
-    const users = await User.find({ _id: { $in: profiles.map(p => p.userId) } }).select('isActive').session(session).lean();
+    const users = await User.find({ _id: { $in: profiles.map(p => p.userId) } }).select('isActive role').session(session).lean();
     const userMap = new Map(users.map(u => [serviceId(u._id), u]));
     const staff = profiles.map(p => ({ ...p, availableMinutes: p.availabilityDate && p.availabilityDate !== dateKey ? 0 : p.availableMinutes, user: userMap.get(serviceId(p.userId)) }));
     const reviews = await Review.find({ $or: [{ status: { $in: ['assigned', 'in_review'] } }, { 'assignmentHistory.dateKey': dateKey }] }).session(session).lean();
@@ -299,9 +317,16 @@ export async function allocateServiceReviews({ actor, requestId = randomUUID(), 
     const queued = await Review.find({ status: 'pending', reviewerId: null }).sort({ createdAt: 1, _id: 1 }).limit(1000).session(session).lean();
     const issues = await Issue.find({ _id: { $in: queued.map(r => r.issueId) } }).session(session).lean();
     const issueMap = new Map(issues.map(i => [serviceId(i._id), i]));
-    const result = allocateReviewBatch({ cases: queued.filter(r => issueMap.has(serviceId(r.issueId))).map(r => ({ ...r, contributorIds: issueMap.get(serviceId(r.issueId)).contributorIds })), staff, assignments: reviews, assignedCounts: credit, cursor: state.cursor });
+    const seed=`${dateKey}:${state.version}`;
+    const slots=staff.filter(p=>p.enabled&&p.user?.isActive&&p.availableMinutes>0).length*SERVICE_POLICY.pendingCap;
+    const cohort=selectReviewCohort({issues,seed,policy:{sampleSize:slots}});
+    const cohortMap=new Map(cohort.map(i=>[serviceId(i._id),i]));
+    const result = allocateReviewBatch({ cases: queued.filter(r => issueMap.has(serviceId(r.issueId))&&(r.sampleType==='calibration'||cohortMap.has(serviceId(r.issueId)))).map(r => ({ ...r, contributorIds: issueMap.get(serviceId(r.issueId)).contributorIds })), staff, assignments: reviews, assignedCounts: credit, cursor: state.cursor });
     for (const assignment of result.assignments) {
-      const updated = await Review.updateOne({ _id: assignment.reviewId, status: 'pending', reviewerId: null }, { $set: { reviewerId: assignment.reviewerId, status: 'assigned', assignedAt: now, allocationReason: assignment.reason }, $inc: { version: 1 }, $push: { assignmentHistory: { actorId: actor._id, reviewerId: assignment.reviewerId, at: now, reason: assignment.reason, dateKey, policyVersion: SERVICE_POLICY.version } } }, { session });
+      const original=queued.find(r=>serviceId(r._id)===assignment.reviewId);
+      const selected=cohortMap.get(assignment.issueId);
+      const sample=original?.sampleType==='calibration'?{}:{sampleType:original?.sampleType==='targeted'?'targeted':selected?.sampleType||'baseline',sampleSeed:seed,eligibleDenominator:issues.length,policyVersion:SERVICE_POLICY.version};
+      const updated = await Review.updateOne({ _id: assignment.reviewId, status: 'pending', reviewerId: null }, { $set: { ...sample,reviewerId: assignment.reviewerId, status: 'assigned', assignedAt: now, allocationReason: assignment.reason }, $inc: { version: 1 }, $push: { assignmentHistory: { actorId: actor._id, reviewerId: assignment.reviewerId, at: now, reason: assignment.reason, dateKey, policyVersion: SERVICE_POLICY.version } } }, { session });
       if (updated.modifiedCount !== 1) fail('Concurrent queue change. No allocation was committed.');
     }
     await Allocation.updateOne({ _id: 'global' }, { $set: { cursor: result.nextCursor } }, { session });
@@ -312,18 +337,19 @@ export async function allocateServiceReviews({ actor, requestId = randomUUID(), 
 export async function configureServiceStaff({ actor, userId, mode = 'reviewer', enabled, availableMinutes = 0, displayName = '', externalAuthorIds, availabilityDate, reason = '', requestId = randomUUID() }) {
   validId(userId, 'staff');
   if (!['reviewer', 'supervisor'].includes(mode) || typeof enabled !== 'boolean' || !Number.isInteger(availableMinutes) || availableMinutes < 0 || availableMinutes > 1440 || typeof displayName !== 'string' || displayName.length > 160) fail('Choose a service role, enabled state, display label and 0–1440 planned minutes.', 400);
-  if (availabilityDate && !/^\d{4}-\d{2}-\d{2}$/.test(availabilityDate)) fail('Use a valid availability service date.', 400);
+  if (availabilityDate !== undefined && availabilityDate !== null && (typeof availabilityDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(availabilityDate) || !asDate(`${availabilityDate}T00:00:00Z`) || asDate(`${availabilityDate}T00:00:00Z`).toISOString().slice(0, 10) !== availabilityDate)) fail('Use a real availability service date.', 400);
   if (externalAuthorIds !== undefined && (!Array.isArray(externalAuthorIds) || externalAuthorIds.length > 50 || externalAuthorIds.some(id => typeof id !== 'string' || !/^[^:]+:[^:]+:.{1,250}$/.test(id) || id.length > 500))) fail('Source author mappings must include source:account:sender.', 400);
   return mutate({ actor, requestId, kind: 'team', payload: { userId, mode, enabled, availableMinutes, displayName, externalAuthorIds, availabilityDate, reason }, setup: true }, async (ctx, session) => {
     const existing = await Staff.findOne({ userId }).session(session);
     if (mode === 'supervisor' || existing?.mode === 'supervisor') {
       if (!ctx.capabilities.setup) fail('Only an authorized super administrator can configure supervisors.', 403);
     } else if (!ctx.capabilities.supervise && !ctx.capabilities.setup) fail('A customer-service supervisor must configure reviewer membership.', 403);
-    const target = await User.findById(userId).select('isActive').session(session).lean();
+    const target = await User.findById(userId).select('isActive role').session(session).lean();
     if (!target || enabled && !target.isActive) fail('Choose an existing active staff account.', 400);
+    if (!SERVICE_STAFF_ROLES.includes(target.role)) fail('Choose an internal staff role; driver and portal accounts are not eligible.', 400);
     const mappings = externalAuthorIds === undefined ? existing?.externalAuthorIds || [] : [...new Set(externalAuthorIds)];
-    if (enabled && mappings.length && await Staff.exists({ userId: { $ne: userId }, enabled: true, externalAuthorIds: { $in: mappings } }).session(session)) fail('A source sender is already mapped to another enabled staff member.');
-    const values = { mode, enabled, availableMinutes, displayName: displayName.trim(), externalAuthorIds: mappings, availabilityDate: availabilityDate || null };
+    if (mappings.length && await Staff.exists({ userId: { $ne: userId }, externalAuthorIds: { $in: mappings } }).session(session)) fail('A source sender is already mapped to another staff identity.');
+    const values = { mode, enabled, availableMinutes, displayName: displayName.trim(), externalAuthorIds: mappings, availabilityDate: availabilityDate === undefined ? existing?.availabilityDate || null : availabilityDate };
     const history = { actorId: actor._id, at: new Date(), before: existing ? { mode: existing.mode, enabled: existing.enabled, availableMinutes: existing.availableMinutes, displayName: existing.displayName, externalAuthorIds: existing.externalAuthorIds, availabilityDate: existing.availabilityDate } : null, after: values, reason };
     if (existing) { Object.assign(existing, values); existing.history.push(history); await existing.save({ session }); return existing.toObject(); }
     const [profile] = await Staff.create([{ userId, ...values, history: [history] }], { session });
@@ -334,15 +360,15 @@ export async function configureServiceStaff({ actor, userId, mode = 'reviewer', 
 export async function getServiceTeam({ actor, profile }) {
   const caps = getServiceCapabilities(actor, profile);
   if (!caps.supervise && !caps.setup) fail('Supervisor or initial setup access required.', 403);
-  const users = await User.find({ role: { $ne: 'driver' } }).select('_id profile.firstName profile.lastName isActive').sort({ 'profile.firstName': 1 }).lean();
+  const users = await User.find({ role: { $in: SERVICE_STAFF_ROLES } }).select('_id profile.firstName profile.lastName isActive').sort({ 'profile.firstName': 1 }).lean();
   const members = await Staff.find({}).populate('userId', '_id profile.firstName profile.lastName isActive').lean();
   return { members: caps.supervise ? members : members.map(p => ({ _id: p._id, userId: p.userId, mode: p.mode, enabled: p.enabled, displayName: p.displayName })), candidates: users.map(u => ({ _id: u._id, displayName: name(u), isActive: u.isActive })) };
 }
 export async function getServiceOwners() {
-  const profiles = await Staff.find({ enabled: true }).populate('userId', '_id isActive profile.firstName profile.lastName').lean();
+  const profiles = await Staff.find({ enabled: true }).populate('userId', '_id isActive role profile.firstName profile.lastName').lean();
   const counts = await Action.aggregate([{ $match: { status: { $ne: 'completed' }, ownerId: { $ne: null } } }, { $group: { _id: '$ownerId', count: { $sum: 1 } } }]);
   const workloads = new Map(counts.map(c => [serviceId(c._id), c.count]));
-  return profiles.filter(p => p.userId?.isActive).map(p => ({ _id: p.userId._id, userId: p.userId._id, displayName: p.displayName || name(p.userId), name: p.displayName || name(p.userId), availableMinutes: p.availableMinutes, openActions: workloads.get(serviceId(p.userId)) || 0 }));
+  return profiles.filter(p => p.userId?.isActive && SERVICE_STAFF_ROLES.includes(p.userId.role)).map(p => ({ _id: p.userId._id, userId: p.userId._id, displayName: p.displayName || name(p.userId), name: p.displayName || name(p.userId), availableMinutes: p.availableMinutes, openActions: workloads.get(serviceId(p.userId)) || 0 }));
 }
 
 const blindIssue = issue => issue ? { ...issue, summary: '', categoryIds: [], outcome: 'unknown', independentCalibration: true } : null;
@@ -387,14 +413,15 @@ export async function createServiceCalibration({ actor, reviewId, ownerId, reque
   validId(ownerId, 'reviewer');
   return mutate({ actor, requestId, kind: 'calibration', payload: { reviewId, ownerId } }, async (ctx, session) => {
     supervisor(ctx); const original = await getReview(reviewId, session);
-    if (serviceId(original.reviewerId) === serviceId(ownerId)) fail('Choose an independent second reviewer.', 400);
+    const excludedReviewerIds = [...new Set([original.reviewerId, ...(original.revisions || []).map(r => r.actorId), ...(original.assignmentHistory || []).map(h => h.reviewerId), ...(original.excludedReviewerIds || [])].filter(Boolean).map(serviceId))];
+    if (excludedReviewerIds.includes(serviceId(ownerId))) fail('Choose an independent second reviewer who was not an original reviewer.', 400);
     const owner = await eligibleOwner(ownerId, session);
-    if (owner.availableMinutes <= 0) fail('Choose a reviewer with declared review capacity.', 400);
+    reviewAvailability(owner);
     const issue = await Issue.findById(original.issueId).session(session).lean(); noSelfReview({ _id: ownerId }, issue);
     if (await Review.countDocuments({ reviewerId: ownerId, status: 'assigned' }).session(session) >= SERVICE_POLICY.pendingCap) fail('This reviewer has reached the pending limit.');
     const existing = await Review.findOne({ issueId: issue._id, sampleKey: `calibration:${serviceId(original._id)}:${serviceId(ownerId)}` }).session(session);
     if (existing) return reviewWithIssue(existing, session);
-    const [review] = await Review.create([{ issueId: issue._id, sampleKey: `calibration:${serviceId(original._id)}:${serviceId(ownerId)}`, sampleType: 'calibration', reviewerId: ownerId, status: 'assigned', assignedAt: new Date(), sourceRevision: issue.sourceRevision, allocationReason: 'independent_calibration', assignmentHistory: [{ actorId: actor._id, reviewerId: ownerId, at: new Date(), reason: 'Independent calibration', dateKey: serviceDateKey() }] }], { session });
+    const [review] = await Review.create([{ issueId: issue._id, sampleKey: `calibration:${serviceId(original._id)}:${serviceId(ownerId)}`, sampleType: 'calibration', reviewerId: ownerId, excludedReviewerIds, status: 'assigned', assignedAt: new Date(), sourceRevision: issue.sourceRevision, allocationReason: 'independent_calibration', assignmentHistory: [{ actorId: actor._id, reviewerId: ownerId, at: new Date(), reason: 'Independent calibration', dateKey: serviceDateKey() }] }], { session });
     return reviewWithIssue(review, session);
   });
 }
@@ -410,8 +437,9 @@ export async function resolveServiceCorrection({ actor, reviewId, index, version
     if (!request || request.status !== 'open') fail('This correction request is no longer open.');
     if (decision === 'rework') {
       const target = ownerId || review.reviewerId;
+      independentReviewer(review, target);
       const owner = await eligibleOwner(target, session);
-      if (owner.availableMinutes <= 0) fail('Choose a reviewer with declared review capacity.', 400);
+      reviewAvailability(owner);
       const issue = await Issue.findById(review.issueId).session(session).lean();
       noSelfReview({ _id: target }, issue);
       if (await Review.countDocuments({ _id: { $ne: review._id }, reviewerId: target, status: 'assigned' }).session(session) >= SERVICE_POLICY.pendingCap) fail('This reviewer has reached the pending limit.');

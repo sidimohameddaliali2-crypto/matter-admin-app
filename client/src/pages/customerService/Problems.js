@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import api from '../../utils/api';
 import ActionEditor from '../../components/customerService/ActionEditor';
 import OwnerSelector from '../../components/customerService/OwnerSelector';
-import { categoryLabels, errorMessage, filterParams, formatDubai, fromDubaiInput, idOf, matchesIssue, newRequestId, prettyStatus, ResourceState, servicePath, useServiceResource } from '../../components/customerService/serviceUtils';
+import { categoryLabels, errorMessage, filterParams, formatDubai, fromDubaiInput, idOf, isActionOverdue, matchesIssue, newRequestId, prettyStatus, ResourceState, servicePath, useServiceResource } from '../../components/customerService/serviceUtils';
 
 function NewAction({ issues, owners, capabilities, currentUserId, onCreated }) {
   const [issueId, setIssueId] = useState('');
@@ -35,7 +35,7 @@ export default function Problems({ me, user, capabilities, categories, filters, 
   const issues = (records.data?.issues || []).filter(issue => matchesIssue(issue, filters));
   const visibleIssueIds = new Set(issues.map(idOf));
   const all = (records.data?.actions || []).filter(action => visibleIssueIds.has(idOf(action.issueId)));
-  const rows = all.filter(action => filter === 'mine' ? idOf(action.ownerId) === currentUserId : filter === 'unassigned' ? !action.ownerId && action.status !== 'completed' : filter === 'overdue' ? action.dueAt && new Date(action.dueAt) < new Date() && action.status !== 'completed' : true);
+  const rows = all.filter(action => filter === 'mine' ? idOf(action.ownerId) === currentUserId : filter === 'unassigned' ? !action.ownerId && action.status !== 'completed' : filter === 'overdue' ? isActionOverdue(action) : true);
   const owners = ownerList.data?.owners || [];
   const chosen = selected ? all.find(action => idOf(action) === selected) : null;
   const saveDone = () => { setNotice('Action update saved with its history. No customer message was sent.'); setSelected(null); records.refresh(); onRefresh(); };
@@ -43,7 +43,7 @@ export default function Problems({ me, user, capabilities, categories, filters, 
     <div className={chosen ? 'cs-grid' : ''}><section className="cs-card"><div className="cs-toolbar"><div className="cs-chip-row" role="group" aria-label="Follow-up queue filter">{[['mine', 'My actions'], ...(capabilities.supervise ? [['team', 'Team actions'], ['unassigned', 'Unassigned'], ['overdue', 'Overdue']] : [['overdue', 'My overdue']])].map(([key, label]) => <button key={key} className={filter === key ? 'active' : ''} aria-pressed={filter === key} onClick={() => setFilter(key)}>{label}</button>)}</div><span className="cs-badge">{records.data ? `${rows.length} actions` : 'Loading'}</span></div><div className="cs-table-wrap"><table><thead><tr><th>Customer / action</th><th>Owner</th><th>Due · Dubai</th><th>Status</th><th/></tr></thead><tbody>{rows.map(action => {
       const issue = issues.find(item => idOf(item) === idOf(action.issueId));
       const owner = owners.find(item => idOf(item.userId || item) === idOf(action.ownerId));
-      const overdue = action.dueAt && new Date(action.dueAt) < new Date() && action.status !== 'completed';
+      const overdue = isActionOverdue(action);
       const canEdit = capabilities.supervise || (capabilities.workActions && idOf(action.ownerId) === currentUserId);
       return <tr key={idOf(action)}><td><strong>{action.customerName || issue?.customerName || 'Customer'}</strong><p style={{ margin: '4px 0' }}>{action.description}</p><span className="cs-muted">{categoryLabels(issue?.categoryIds, categories)}</span></td><td>{owner?.displayName || (action.ownerId ? idOf(action.ownerId) === currentUserId ? 'Me' : 'Recorded owner' : <span className="cs-badge amber">Unassigned</span>)}</td><td>{formatDubai(action.dueAt)}{overdue && <div><span className="cs-badge amber">Overdue</span></div>}{action.status === 'waiting' && <p className="cs-muted">Next check: {formatDubai(action.nextCheckAt)}</p>}</td><td><span className={`cs-badge ${action.status === 'completed' ? 'green' : 'blue'}`}>{prettyStatus(action.status)}</span>{action.seenAt == null && action.ownerId && action.status !== 'completed' && <p className="cs-muted">Not yet seen</p>}</td><td><button onClick={() => setSelected(idOf(action))}>{canEdit ? 'Manage action' : 'View history'}</button></td></tr>;
     })}</tbody></table></div>{records.data && !rows.length && <div className="cs-empty"><h3>No actions in this queue</h3><p>Adjust the filters or add a necessary follow-up to a captured issue.</p></div>}

@@ -33,13 +33,16 @@ before(async () => {
   if (!enabled) return;
   assert.match(dbName, /^matter_service_test_[a-f0-9]{32}$/);
   assert.equal(mongoose.connection.readyState, 0, 'Do not take over another runtime connection');
-  await mongoose.connect(uri, { dbName, serverSelectionTimeoutMS: 5000 });
+  await mongoose.connect(uri, { dbName, serverSelectionTimeoutMS: 5000, autoIndex: false });
   assert.equal(mongoose.connection.name, dbName);
   const identity = await mongoose.connection.db.admin().command({ hello: 1 });
   assert.ok(identity.setName, 'Capture transactions require an explicitly isolated replica set');
   databaseVerified = true;
 
   await Promise.all([User, Customer, Staff, Conversation, Message, Issue, Review, Action, CaptureBatch].map(model => model.init()));
+  // The existing Customer schema declares conflicting legacy email indexes.
+  // Exercise the new unique indexes without altering that unrelated schema.
+  await Promise.all([User, Staff, Conversation, Message, Issue, Review, Action, CaptureBatch].map(model => model.createIndexes()));
   [supervisor, reviewer, other, ungranted] = await User.create(['supervisor', 'reviewer', 'other', 'ungranted'].map(name => ({
     email: `${name}@fixture.invalid`, password: randomUUID(), role: 'admin', isActive: true,
     profile: { firstName: `Private-${name}`, lastName: 'Fixture-personnel' },
@@ -125,6 +128,25 @@ async function issueFixture({ owner = reviewer, name = 'Scoped customer', sentAt
 }
 function workbookRows(book, name) { return XLSX.utils.sheet_to_json(book.Sheets[name], { defval: '' }); }
 function visibleNames(book) { return book.SheetNames.filter((name, index) => !book.Workbook?.Sheets?.[index]?.Hidden); }
+
+run('backfilled evidence inside a bounded secondary episode invalidates its saved judgment',async()=>{
+ const row=rawMessage({sentAt:'2026-11-06T06:00:00Z'});const args=batch([row]);await ingestServiceBatch(args);
+ const conversation=await Conversation.findOne({scope:args.scope}).lean();
+ const issue=await Issue.create({conversationId:conversation._id,episodeKey:'secondary',sourceRevision:1,episodeFrom:new Date('2026-11-06T05:00:00Z'),episodeTo:new Date('2026-11-06T07:00:00Z'),boundaryState:'confirmed',outcome:'resolved'});
+ const review=await Review.create({issueId:issue._id,reviewerId:reviewer._id,status:'submitted',sourceRevision:1,revisions:[{verdict:'good',sourceRevision:1,summary:'Earlier snapshot',at:new Date()}]});
+ await ingestServiceBatch({...args,requestId:requestId(),messages:[{...row,externalMessageId:requestId(),authorType:'staff',externalAuthorId:'unmapped-new-sender',sentAt:'2026-11-06T06:30:00Z'}]});
+ const changed=await Issue.findById(issue._id).lean();const saved=await Review.findById(review._id).lean();
+ assert.ok(changed.sourceRevision>1);assert.equal(changed.outcome,'open');assert.equal(changed.sourceMetadata.unmappedStaff,true);assert.equal(saved.stale,true);assert.equal(saved.revisions.length,1);
+});
+
+run('a date and confirmed episode export cannot disclose other messages in the same conversation',async()=>{
+ const f=await issueFixture();
+ await Issue.updateOne({_id:f.issue._id},{$set:{episodeFrom:new Date('2026-11-06T05:00:00Z'),episodeTo:new Date('2026-11-06T07:00:00Z')}});
+ await Message.create({source:f.conversation.source,scope:f.conversation.scope,externalMessageId:requestId(),conversationId:f.conversation._id,sentAt:new Date('2026-11-07T06:00:00Z'),authorType:'customer',type:'text',text:'OUT-OF-SCOPE SECRET'});
+ const snapshot=await getServiceSnapshot({userId:supervisor._id,supervise:true,filters:{from:'2026-11-06',to:'2026-11-06',q:'Scoped customer'}});
+ const book=XLSX.read(await buildServiceWorkbook(snapshot),{type:'buffer'});
+ assert.ok(!workbookRows(book,'Customer chats').some(m=>m.Text==='OUT-OF-SCOPE SECRET'));
+});
 
 run('out-of-order capture sorts chronology and duplicate evidence does not create issues or revisions', async () => {
   const thread = requestId();

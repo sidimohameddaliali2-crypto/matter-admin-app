@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { allocateReviewBatch, selectReviewCohort, classifyServiceTiming, validateReviewSubmission, validateActionUpdate } from './customerServicePolicy.js';
 import { SERVICE_CATEGORIES } from '../config/customerServiceCategories.js';
-const staff = (id, minutes = 60) => ({ userId: id, enabled: true, mode: 'reviewer', availableMinutes: minutes, user: { isActive: true } });
+const staff = (id, minutes = 60) => ({ userId: id, enabled: true, mode: 'reviewer', availableMinutes: minutes, user: { isActive: true, role: 'admin' } });
 const cases = (n) => Array.from({ length: n }, (_, i) => ({ _id: String(i), contributorIds: [], createdAt: new Date(i) }));
 test('taxonomy preserves ordering, renewal, coupons, meals and nutrition as separate categories', () => {
   const ids = SERVICE_CATEGORIES.map(c => c.id);
@@ -26,8 +26,12 @@ test('completed and skipped allocation credit is retained so skipping never earn
   const result = allocateReviewBatch({ cases: cases(1), staff: [staff('a'), staff('b')], assignedCounts: { a: 8, b: 1 } });
   assert.equal(result.assignments[0].reviewerId, 'b');
 });
+test('skipped independent calibration never returns to an original reviewer', () => {
+  const result = allocateReviewBatch({ cases: [{ _id: 'independent', contributorIds: [], skippedBy: ['b'], excludedReviewerIds: ['a'] }], staff: [staff('a'), staff('b'), staff('c')] });
+  assert.equal(result.assignments[0].reviewerId, 'c');
+});
 test('sampling is reproducible, keeps targeted separate and records the eligible denominator', () => {
-  const issues = cases(8).map((c, i) => ({ ...c, priority: i === 0 ? 'urgent' : 'normal' }));
+  const issues = cases(8).map((c, i) => ({ ...c, priority: i < 4 ? 'urgent' : 'normal' }));
   const first = selectReviewCohort({ issues, seed: 'fixed', policy: { sampleSize: 3 } });
   assert.deepEqual(first, selectReviewCohort({ issues, seed: 'fixed', policy: { sampleSize: 3 } }));
   assert.equal(first.filter(c => c.sampleType === 'baseline').length, 3);

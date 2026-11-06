@@ -17,6 +17,7 @@ export const toDubaiInput = value => {
 };
 export const fromDubaiInput = value => value ? new Date(`${value}:00+04:00`).toISOString() : null;
 export const prettyStatus = value => String(value || 'unknown').replace(/_/g, ' ');
+export const isActionOverdue = (action, now = new Date()) => action.status !== 'completed' && [action.dueAt, action.promisedDueAt].filter(Boolean).some(value => new Date(value) < now);
 export const categoryLabels = (ids = [], categories = []) => ids.map(id => categories.find(category => category.id === id)?.label || id).join(' · ') || 'Not determined';
 export const filterParams = filters => Object.fromEntries(Object.entries({ from: filters.from, to: filters.to, categoryId: filters.categoryId, q: filters.search }).filter(([, value]) => value));
 export const matchesIssue = (issue, filters = {}) => {
@@ -28,22 +29,26 @@ export const matchesIssue = (issue, filters = {}) => {
 
 // Each page keeps its last successful response visible on a failed refresh.
 export function useServiceResource(path, params = {}, epoch = 0) {
-  const [state, setState] = useState({ data: null, loading: Boolean(path), error: '' });
-  const [revision, setRevision] = useState(0);
   const paramsKey = JSON.stringify(params);
+  const identity = `${path || ''}:${paramsKey}`;
+  const [state, setState] = useState({ identity, data: null, loading: Boolean(path), error: '' });
+  const [revision, setRevision] = useState(0);
   useEffect(() => {
     if (!path) return undefined;
     let live = true;
-    setState(previous => ({ ...previous, loading: true, error: '' }));
+    setState(previous => ({ identity, data: previous.identity === identity ? previous.data : null, loading: true, error: '' }));
     api.get(`${servicePath}${path}`, { params: JSON.parse(paramsKey) }).then(response => {
-      if (live) setState({ data: unpack(response), loading: false, error: '' });
+      if (live) setState({ identity, data: unpack(response), loading: false, error: '' });
     }).catch(error => {
-      if (live) setState(previous => ({ ...previous, loading: false, error: errorMessage(error) }));
+      if (live) setState(previous => ({ identity, data: previous.identity === identity ? previous.data : null, loading: false, error: errorMessage(error) }));
     });
     return () => { live = false; };
-  }, [path, paramsKey, epoch, revision]);
+  }, [path, paramsKey, identity, epoch, revision]);
   const refresh = useCallback(() => setRevision(value => value + 1), []);
-  return { ...state, refresh };
+  // Effects run after render. Guard synchronously so a newly selected case can
+  // never be paired with the previous customer's payload, even for one frame.
+  const current = Boolean(path) && state.identity === identity;
+  return { data: current ? state.data : null, loading: Boolean(path) && (!current || state.loading), error: current ? state.error : '', refresh };
 }
 
 export function ResourceState({ loading, error, children }) {

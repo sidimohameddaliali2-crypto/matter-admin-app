@@ -2,6 +2,7 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import Conversation from './Conversation';
 import OwnerSelector from './OwnerSelector';
+jest.mock('../../utils/api', () => ({ __esModule: true, default: { get: jest.fn() } }));
 global.IS_REACT_ACT_ENVIRONMENT = true;
 let root, container;
 beforeEach(() => { container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container); });

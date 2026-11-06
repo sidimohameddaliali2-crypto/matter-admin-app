@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Download, ArrowRight, Upload } from 'lucide-react';
 import api from '../../utils/api';
-import { displayName, errorMessage, filterParams, formatDubai, idOf, newRequestId, ResourceState, servicePath, unpack, useServiceResource } from '../../components/customerService/serviceUtils';
+import { displayName, errorMessage, filterParams, formatDubai, idOf, newRequestId, ResourceState, servicePath, toDubaiInput, unpack, useServiceResource } from '../../components/customerService/serviceUtils';
 
 function ImportCapture({ onImported }) {
   const [messages, setMessages] = useState(null);
@@ -52,6 +52,7 @@ function TeamControls({ epoch, onChanged, canSetup }) {
   const [enabled, setEnabled] = useState(true);
   const [label, setLabel] = useState('');
   const [externalAuthors, setExternalAuthors] = useState('');
+  const [availabilityDate, setAvailabilityDate] = useState(toDubaiInput(new Date()).slice(0, 10));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -63,18 +64,19 @@ function TeamControls({ epoch, onChanged, canSetup }) {
     setMinutes(member?.availableMinutes == null ? '' : String(member.availableMinutes));
     setEnabled(member?.enabled !== false); setLabel(member?.displayName || '');
     setExternalAuthors((member?.externalAuthorIds || []).join('\n'));
+    setAvailabilityDate(member?.availabilityDate || toDubaiInput(new Date()).slice(0, 10));
   }
   async function save(event) {
     event.preventDefault(); if (busy || !selected) return;
     setBusy(true); setError(''); setNotice('');
     try {
-      await api.put(`${servicePath}/team`, { userId: selected, mode: 'reviewer', enabled, availableMinutes: Number(minutes), displayName: label.trim() || displayName(candidates.find(item => idOf(item) === selected)), externalAuthorIds: externalAuthors.split(/[\n,]/).map(value => value.trim()).filter(Boolean) });
+      await api.put(`${servicePath}/team`, { userId: selected, mode: 'reviewer', enabled, availableMinutes: Number(minutes), availabilityDate, displayName: label.trim() || displayName(candidates.find(item => idOf(item) === selected)), externalAuthorIds: externalAuthors.split(/[\n,]/).map(value => value.trim()).filter(Boolean) });
       team.refresh(); onChanged(); setNotice('Review availability saved. Active reviews keep their owners.');
     } catch (failure) { setError(errorMessage(failure)); }
     finally { setBusy(false); }
   }
   return <details><summary>Configure reviewer availability</summary><ResourceState loading={team.loading} error={team.error} />{error && <div className="cs-alert" role="alert">{error}</div>}{notice && <div className="cs-success" role="status">{notice}</div>}
-    <form className="cs-form-stack" onSubmit={save} style={{ marginTop: 14 }}><label>Existing staff account<select value={selected} onChange={event => choose(event.target.value)} required><option value="">Select a reviewer</option>{candidates.filter(candidate => !members.some(member => idOf(member.userId) === idOf(candidate) && member.mode === 'supervisor')).map(candidate => <option key={idOf(candidate)} value={idOf(candidate)}>{displayName(candidate)}</option>)}</select></label><div className="cs-form-grid"><label>Display name<input value={label} maxLength={100} onChange={event => setLabel(event.target.value)} /></label><label>Available review minutes<input type="number" min="0" max="1440" required value={minutes} onChange={event => setMinutes(event.target.value)} /></label></div><label className="cs-checkbox"><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)} />Available for new reviews</label><label>Verified source author IDs (one scoped ID per line)<textarea value={externalAuthors} onChange={event => setExternalAuthors(event.target.value)} placeholder="source:account-scope:author-id" maxLength={4000} /></label><p className="cs-muted">Map only verified source sender IDs to this staff account. Unmapped staff evidence cannot receive a handling grade. Enter agreed review time allowing for other duties and leave; zero minutes prevents new allocation.</p><button type="submit" disabled={busy || !selected || minutes === ''}>{busy ? 'Saving…' : 'Save reviewer availability'}</button></form>
+    <form className="cs-form-stack" onSubmit={save} style={{ marginTop: 14 }}><label>Existing staff account<select aria-label="Reviewer account" value={selected} onChange={event => choose(event.target.value)} required><option value="">Select a reviewer</option>{candidates.filter(candidate => !members.some(member => idOf(member.userId) === idOf(candidate) && member.mode === 'supervisor')).map(candidate => <option key={idOf(candidate)} value={idOf(candidate)}>{displayName(candidate)}</option>)}</select></label><div className="cs-form-grid"><label>Display name<input value={label} maxLength={100} onChange={event => setLabel(event.target.value)} /></label><label>Available review minutes<input type="number" min="0" max="1440" required value={minutes} onChange={event => setMinutes(event.target.value)} /></label><label>Service date · Dubai<input type="date" aria-label="Review availability service date" value={availabilityDate} onChange={event => setAvailabilityDate(event.target.value)} required/></label></div><label className="cs-checkbox"><input type="checkbox" checked={enabled} onChange={event => setEnabled(event.target.checked)} />Available for new reviews</label><label>Verified source author IDs (one scoped ID per line)<textarea value={externalAuthors} onChange={event => setExternalAuthors(event.target.value)} placeholder="source:account-scope:author-id" maxLength={4000} /></label><p className="cs-muted">Map only verified source sender IDs to this staff account. Unmapped staff evidence cannot receive a handling grade. Enter agreed review time for the selected service date allowing for other duties and leave; zero minutes prevents new allocation.</p><button type="submit" disabled={busy || !selected || minutes === '' || !availabilityDate}>{busy ? 'Saving…' : 'Save reviewer availability'}</button></form>
     {canSetup && <p className="cs-muted" style={{ marginTop: 10 }}>Supervisor grants use the separate administrator setup path.</p>}</details>;
 }
 

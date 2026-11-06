@@ -24,3 +24,6 @@ test('supervisors inspect team work, while super_admin setup does not imply data
   assert.equal(caps.setup, true);
   assert.equal(caps.view, false);
 });
+test('driver and portal identities cannot become service members through a forged profile', () => {
+  for (const role of ['driver', 'partner', 'member', 'yellowblock_user']) assert.equal(getServiceCapabilities({ ...user, role }, profile).view, false);
+});

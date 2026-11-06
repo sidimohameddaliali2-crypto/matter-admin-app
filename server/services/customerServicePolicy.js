@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { SERVICE_CATEGORY_IDS } from '../config/customerServiceCategories.js';
 
 export const SERVICE_POLICY = Object.freeze({ pendingCap: 2, activeCap: 1, leaseMs: 15 * 60 * 1000, version: '2026-11-06.1' });
+export const SERVICE_STAFF_ROLES = Object.freeze(['super_admin', 'admin', 'manager', 'dispatcher', 'store_keeper', 'viewer', 'kitchen']);
 export const serviceId = value => String(value?._id ?? value ?? '');
 export const serviceError = (message, statusCode = 409) => Object.assign(new Error(message), { statusCode });
 const fail = (message, statusCode = 400) => { throw serviceError(message, statusCode); };
@@ -11,7 +12,7 @@ const date = value => value && Number.isFinite(new Date(value).getTime()) ? new 
 // Membership is a separate explicit grant. Generic page and administrator
 // permissions never manufacture service membership or supervision.
 export function getServiceCapabilities(user, profile) {
-  const active = user?.isActive === true;
+  const active = user?.isActive === true && SERVICE_STAFF_ROLES.includes(user.role);
   const member = active && profile?.enabled === true && serviceId(profile.userId) === serviceId(user._id) && ['reviewer', 'supervisor'].includes(profile.mode);
   return { view: Boolean(member), review: Boolean(member), supervise: Boolean(member && profile.mode === 'supervisor'), workActions: Boolean(member), setup: Boolean(active && user.role === 'super_admin') };
 }
@@ -30,14 +31,14 @@ export function assertServiceRecordAccess({ actor, profile, record, operation = 
 
 export function allocateReviewBatch({ cases = [], staff = [], assignments = [], assignedCounts = {}, cursor = 0, policy = {} }) {
   const limits = { ...SERVICE_POLICY, ...policy };
-  const eligible = staff.filter(p => p.enabled === true && ['reviewer', 'supervisor'].includes(p.mode) && p.user?.isActive === true && Number.isFinite(p.availableMinutes) && p.availableMinutes > 0).sort((a, b) => serviceId(a.userId).localeCompare(serviceId(b.userId)));
+  const eligible = staff.filter(p => p.enabled === true && ['reviewer', 'supervisor'].includes(p.mode) && p.user?.isActive === true && SERVICE_STAFF_ROLES.includes(p.user.role) && Number.isFinite(p.availableMinutes) && p.availableMinutes > 0).sort((a, b) => serviceId(a.userId).localeCompare(serviceId(b.userId)));
   const pending = new Map(), credit = new Map();
   for (const p of eligible) { const id = serviceId(p.userId); pending.set(id, 0); credit.set(id, Number(assignedCounts[id]) || 0); }
   for (const a of assignments) if (['assigned', 'pending'].includes(a.status) && pending.has(serviceId(a.reviewerId))) pending.set(serviceId(a.reviewerId), pending.get(serviceId(a.reviewerId)) + 1);
   const output = [], unassigned = [];
   let nextCursor = Number.isInteger(cursor) && cursor >= 0 ? cursor : 0;
   for (const item of [...cases].sort((a, b) => (date(a.createdAt)?.getTime() || 0) - (date(b.createdAt)?.getTime() || 0) || serviceId(a._id).localeCompare(serviceId(b._id)))) {
-    const excluded = new Set([...(item.contributorIds || []), ...(item.skippedBy || [])].map(serviceId));
+    const excluded = new Set([...(item.contributorIds || []), ...(item.skippedBy || []), ...(item.excludedReviewerIds || [])].map(serviceId));
     const candidates = eligible.filter(p => !excluded.has(serviceId(p.userId)) && pending.get(serviceId(p.userId)) < limits.pendingCap);
     if (!candidates.length) { unassigned.push({ reviewId: serviceId(item._id), reason: 'no_eligible_capacity' }); continue; }
     candidates.sort((a, b) => {
@@ -65,9 +66,11 @@ export function selectReviewCohort({ issues = [], seed, policy = {} }) {
     if (!strata.has(key)) strata.set(key, []);
     strata.get(key).push(issue);
   }
-  const queues = [...strata].sort(([a], [b]) => a.localeCompare(b)).map(([, group]) => group.sort((a, b) => hash(a).localeCompare(hash(b))));
-  const baseline = [];
-  while (baseline.length < Math.min(size, issues.length)) for (const group of queues) if (group.length && baseline.length < size) baseline.push(group.shift());
+  const limit=Math.min(size,issues.length);
+  const queues=[...strata].map(([key,group])=>({key,group:group.sort((a,b)=>hash(a).localeCompare(hash(b))),quota:Math.floor(limit*group.length/issues.length),fraction:(limit*group.length/issues.length)%1}));
+  let left=limit-queues.reduce((n,q)=>n+q.quota,0);
+  for(const queue of [...queues].sort((a,b)=>b.fraction-a.fraction||a.key.localeCompare(b.key))) if(left-->0) queue.quota++;
+  const baseline=queues.flatMap(q=>q.group.slice(0,q.quota));
   const metadata = { seed, policyVersion: SERVICE_POLICY.version, eligibleDenominator: issues.length };
   const selected = new Set(baseline.map(i => serviceId(i._id)));
   return [...baseline.map(i => ({ ...i, ...metadata, sampleType: 'baseline' })), ...issues.filter(i => !selected.has(serviceId(i._id)) && (i.priority === 'urgent' || i.repeatIssue === true || i.unanswered === true)).map(i => ({ ...i, ...metadata, sampleType: 'targeted' }))];

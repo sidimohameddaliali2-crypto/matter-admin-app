@@ -13,12 +13,14 @@ function ReviewControl({ review, capabilities, owners, onChanged }) {
   async function command(kind) {
     if (lock.current) return;
     lock.current = true; setBusy(kind); setError(''); setNotice('');
-    const payload = kind === 'calibration' ? { ownerId: owner } : kind === 'reassign' ? { ownerId: owner, reason: reason.trim(), version: review.version } : { reason: reason.trim(), version: review.version };
+    const resolve = kind.startsWith('resolve:');
+    const [, index, decision] = kind.split(':');
+    const payload = resolve ? { version: review.version, decision, resolution: reason.trim(), ...(owner ? { ownerId: owner } : {}) } : kind === 'calibration' ? { ownerId: owner } : kind === 'reassign' ? { ownerId: owner, reason: reason.trim(), version: review.version } : { reason: reason.trim(), version: review.version };
     const signature = JSON.stringify([kind, payload]);
     if (request.current?.signature !== signature) request.current = { signature, id: newRequestId() };
     try {
-      await api.post(`${servicePath}/reviews/${encodeURIComponent(idOf(review))}/${kind}`, { ...payload, requestId: request.current.id });
-      request.current = null; setNotice(kind === 'corrections' ? 'Correction request recorded. The original review is retained.' : kind === 'calibration' ? 'Independent calibration review created. Original revisions are retained.' : 'Review reassigned with the reason and original ownership retained.');
+      await api.post(`${servicePath}/reviews/${encodeURIComponent(idOf(review))}/${resolve ? `corrections/${index}/resolve` : kind}`, { ...payload, requestId: request.current.id });
+      request.current = null; setNotice(resolve ? 'Correction decision recorded with the original review retained.' : kind === 'corrections' ? 'Correction request recorded. The original review is retained.' : kind === 'calibration' ? 'Independent calibration review created. Original revisions are retained.' : 'Review reassigned with the reason and original ownership retained.');
       setReason(''); onChanged();
     } catch (failure) { setError(errorMessage(failure)); }
     finally { lock.current = false; setBusy(''); }
@@ -27,6 +29,7 @@ function ReviewControl({ review, capabilities, owners, onChanged }) {
     {(submitted || capabilities.supervise) && <label>{submitted ? 'Correction / oversight reason' : 'Reassignment reason'}<textarea aria-label="Review oversight reason" value={reason} maxLength={2000} onChange={event => setReason(event.target.value)} /></label>}
     {submitted && <button onClick={() => command('corrections')} disabled={Boolean(busy) || !reason.trim()}>{busy === 'corrections' ? 'Saving request…' : 'Request review correction'}</button>}
     {capabilities.supervise && <><label>{submitted ? 'Independent reviewer' : 'New reviewer'}<select aria-label="Review oversight owner" value={owner} onChange={event => setOwner(event.target.value)}><option value="">Select an eligible reviewer</option>{owners.filter(item => idOf(item.userId || item) !== idOf(review.reviewerId) && item.availableMinutes > 0).map(item => <option key={idOf(item.userId || item)} value={idOf(item.userId || item)}>{item.displayName} · {item.availableMinutes} planned min</option>)}</select></label>{submitted ? <button onClick={() => command('calibration')} disabled={Boolean(busy) || !owner}>{busy === 'calibration' ? 'Creating…' : 'Create independent calibration'}</button> : <button onClick={() => command('reassign')} disabled={Boolean(busy) || !owner || !reason.trim()}>{busy === 'reassign' ? 'Reassigning…' : 'Reassign review with reason'}</button>}</>}
+    {capabilities.supervise && (review.correctionRequests || []).map((item, index) => item.status === 'open' && <div key={index}><p className="cs-muted">Open correction: {item.reason}</p><div className="cs-form-actions"><button disabled={Boolean(busy) || !reason.trim()} onClick={() => command(`resolve:${index}:uphold`)}>Uphold review with explanation</button><button disabled={Boolean(busy) || !reason.trim() || !owner} onClick={() => command(`resolve:${index}:rework`)}>Return for review with explanation</button></div></div>)}
   </div>;
 }
 

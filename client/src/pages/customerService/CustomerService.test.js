@@ -46,3 +46,14 @@ test('setup-only super admin receives an existing-staff setup form', async () =>
   expect(container.querySelector('select[aria-label="Supervisor account"]')).toBeTruthy();
   expect(container.textContent).toContain('Existing staff');
 });
+test('review capacity retains the selected service date when editing a reviewer', async () => {
+  const original = api.get.getMockImplementation();
+  api.get.mockImplementation(async url => url.endsWith('/me') ? { data: { data: { capabilities: { review: true, supervise: true, workActions: true }, profile: { displayName: 'Supervisor', userId: 'supervisor' } } } } : url.endsWith('/team') ? { data: { data: { candidates: [{ _id: 'candidate', displayName: 'Existing staff' }], members: [{ userId: 'candidate', mode: 'reviewer', availableMinutes: 90, availabilityDate: '2026-11-07', enabled: true }] } } } : original(url));
+  api.put.mockResolvedValue({ data: { data: { profile: {} } } });
+  await render({ _id: 'supervisor', role: 'admin' }, '/customer-service/summary');
+  const select = container.querySelector('select[aria-label="Reviewer account"]');
+  await act(async () => { Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set.call(select, 'candidate'); select.dispatchEvent(new Event('change', { bubbles: true })); });
+  expect(container.querySelector('[aria-label="Review availability service date"]').value).toBe('2026-11-07');
+  await act(async () => button('Save reviewer availability').click());
+  expect(api.put).toHaveBeenCalledWith('/customer-service/team', expect.objectContaining({ userId: 'candidate', availableMinutes: 90, availabilityDate: '2026-11-07' }));
+});
