@@ -1,3 +1,4 @@
+import { partnerMenuNameKey, partnerMenuNamePattern } from './partnerMenuCatalog.js';
 import PartnerMenuItem from '../models/PartnerMenuItem.js';
 import MenuItem from '../models/MenuItem.js';
 import { assignItemToAllActivePartners } from './partnerMenuAssignment.js';
@@ -25,8 +26,8 @@ const PROTEIN_PRICING = {
  * never repeats keeps a single-day window and simply stops being orderable
  * once that day passes — nothing deletes it, the date just expires.
  *
- * Matching is by exact mealName (the kitchen types these consistently in
- * caps), scoped to mealType 'main' — deliberately simple, not fuzzy.
+ * Match dish names without casing/spacing differences, scoped to synced
+ * main meals and protein category. Manual menu items keep their own identity.
  *
  * Every item this creates/updates is also assigned to every active partner
  * (SpaceMenu), so it's immediately orderable without a manual Space Setup
@@ -52,7 +53,7 @@ export const syncMenuSelectionMainMealsToPartnerMenu = async (weeklyMenu) => {
   items.forEach((item) => {
     const name = (item.mealName || '').trim();
     if (!name) return;
-    const key = name.toLowerCase();
+    const key = partnerMenuNameKey(name) + '|' + item.portionType;
     if (!byName.has(key)) byName.set(key, { name, portionType: item.portionType, dates: [] });
     byName.get(key).dates.push(item.itemDate);
   });
@@ -69,7 +70,7 @@ export const syncMenuSelectionMainMealsToPartnerMenu = async (weeklyMenu) => {
     // as a category to filter/group by alongside mealType.
     const category = portionType.charAt(0).toUpperCase() + portionType.slice(1);
 
-    const existing = await PartnerMenuItem.findOne({ name, mealType: 'main' });
+    const existing = await PartnerMenuItem.findOne({ name: partnerMenuNamePattern(name), mealType: 'main', source: 'menu-selection', category }).sort({ _id: 1 });
     let itemId;
     if (existing) {
       // Widen the window — never narrow it, in case this save only touched

@@ -1,3 +1,5 @@
+import PartnerMenuItem from '../models/PartnerMenuItem.js';
+import Partner from '../models/Partner.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import axios from 'axios';
@@ -26,7 +28,7 @@ const DAY = '2099-01-05';
 const doc = (fields) => ({ ...fields, toObject() { return { ...this }; } });
 const query = (value) => ({
   then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); },
-  populate() { return this; }, sort() { return this; }, select() { return this; }
+  populate() { return this; }, sort() { return this; }, select() { return this; }, lean() { return this; }
 });
 async function call(router, method, path, request = {}) {
   const route = router.stack.find(s => s.route?.path === path && s.route.methods[method]).route;
@@ -150,6 +152,7 @@ test('bad quantities, malformed IDs and duplicate entries are rejected before wr
 
 test('missing, unassigned, disabled and out-of-season items cannot be saved or submitted', async t => {
   const f = fixtures(t, 'draft');
+  f.item.source = 'menu-selection';
   for (const state of ['missing', 'disabled', 'future', 'expired']) {
     f.item.isAvailable = state !== 'disabled';
     f.item.availableFrom = state === 'future' ? new Date('2099-02-01') : null;
@@ -179,6 +182,7 @@ test('base, selling and custom prices agree between menu and order validation, i
 
 test('valid drafts submit using the base price and inclusive menu availability dates', async t => {
   const f = fixtures(t, 'draft');
+  f.item.source = 'menu-selection';
   f.item.availableFrom = new Date(DAY);
   f.item.availableTo = new Date(DAY);
   const response = await call(partnerRouter, 'post', '/orders/:id/submit');
@@ -322,4 +326,92 @@ test('partner and per-space reports filter invoices and order counts by the same
   assert.equal((await call(adminRouter, 'get', '/reports/space/:spaceId', { query: range, params: { spaceId: SPACE } })).code, 200);
   for (const filter of invoiceFilters) assert.deepEqual(filter.order, { $in: [ORDER] });
   assert.equal(countsMatch.deliveryDate.$gte.toISOString(), '2026-01-01T00:00:00.000Z');
+});
+
+
+test('manual and legacy menu items ignore date windows in the menu and checkout', async t => {
+  const f = fixtures(t, 'draft');
+  for (const source of ['manual', undefined]) {
+    f.item.source = source;
+    for (const bounds of [{availableFrom: new Date('2099-02-01'), availableTo: null}, {availableFrom: null, availableTo: new Date('2000-01-01')}]) {
+      Object.assign(f.item, bounds);
+      const menu = await call(partnerRouter, 'get', '/menu', {query: {date: DAY}});
+      assert.equal(menu.body.data.length, 1);
+      assert.equal(menu.body.data[0].availableFrom, null);
+      assert.equal(menu.body.data[0].availableTo, null);
+      assert.equal((await validatePartnerOrder({spaceId: SPACE, deliveryDate: DAY, lines: [{menuItemId: ITEM, quantity: 5}]})).totalAmount, 100);
+    }
+  }
+  assert.equal((await call(partnerRouter, 'post', '/orders/:id/submit')).code, 200);
+  f.item.isAvailable = false;
+  assert.equal((await call(partnerRouter, 'get', '/menu', {query: {date: DAY}})).body.data.length, 0);
+  await assert.rejects(validatePartnerOrder({spaceId: SPACE, deliveryDate: DAY, lines: [{menuItemId: ITEM, quantity: 1}]}), /unavailable/);
+});
+
+test('menu shows one synced main dish across casing and whitespace variants after date filtering', async t => {
+  fixtures(t);
+  const base = {_id: ITEM, name: 'CHICKEN  QUINOA', mealType: 'main', category: 'Chicken', source: 'menu-selection', isAvailable: true, price: 28};
+  const copy = {...base, _id: 'dddddddddddddddddddddddd', name: 'Chicken Quinoa'};
+  const manual = {...copy, _id: 'eeeeeeeeeeeeeeeeeeeeeeee', name: 'Always available', source: 'manual'};
+  Menu.find.mock.mockImplementation(() => query([copy, manual, base, base].map(item => ({menuItem: doc(item)}))));
+  let menu = await call(partnerRouter, 'get', '/menu', {query: {date: DAY}});
+  assert.deepEqual(menu.body.data.map(item => String(item._id)), [ITEM, manual._id]);
+  base.availableTo = new Date('2000-01-01');
+  menu = await call(partnerRouter, 'get', '/menu', {query: {date: DAY}});
+  assert.deepEqual(menu.body.data.map(item => String(item._id)), [copy._id, manual._id]);
+});
+
+test('admin creates and edits manual items without date windows and retains synced windows', async t => {
+  let saved;
+  t.mock.method(Partner, 'find', () => query([]));
+  t.mock.method(PartnerMenuItem, 'create', async fields => {saved = fields; return doc({_id: ITEM, ...fields});});
+  let response = await call(adminRouter, 'post', '/menu', {body: {name: 'Snack', mealType: 'snack', price: 10, availableFrom: DAY, availableTo: DAY}});
+  assert.equal(response.code, 201);
+  assert.equal(saved.availableFrom, null);
+  assert.equal(saved.availableTo, null);
+  let source = 'manual';
+  t.mock.method(PartnerMenuItem, 'findById', async () => ({source}));
+  t.mock.method(PartnerMenuItem, 'findByIdAndUpdate', async (id, update) => {saved = update.$set; return doc({_id: id, source, ...saved});});
+  response = await call(adminRouter, 'patch', '/menu/:itemId', {params: {itemId: ITEM}, body: {availableFrom: DAY, availableTo: DAY}});
+  assert.equal(response.code, 200);
+  assert.equal(saved.availableFrom, null);
+  assert.equal(saved.availableTo, null);
+  source = 'menu-selection';
+  await call(adminRouter, 'patch', '/menu/:itemId', {params: {itemId: ITEM}, body: {availableFrom: DAY, availableTo: DAY}});
+  assert.equal(saved.availableFrom, DAY);
+  assert.equal(saved.availableTo, DAY);
+});
+
+
+test('editing keeps referenced duplicate IDs and prices, and explicit removal deletes the original line', async t => {
+  const f = fixtures(t);
+  Object.assign(f.item, {name: 'Chicken Quinoa', source: 'menu-selection', mealType: 'main', category: 'Chicken'});
+  const canonical = doc({...f.item, _id: '111111111111111111111111', name: 'CHICKEN QUINOA'});
+  const other = doc({_id: 'dddddddddddddddddddddddd', name: 'Snack', mealType: 'snack', source: 'manual', price: 20, isAvailable: true});
+  Menu.find.mock.mockImplementation(() => query([{menuItem: canonical}, {menuItem: f.item}, {menuItem: other}]));
+  Price.aggregate.mock.mockImplementation(async () => [{_id: ITEM, price: 40}]);
+  const normal = await call(partnerRouter, 'get', '/menu', {query: {date: DAY}});
+  assert.equal(normal.body.data.some(item => String(item._id) === ITEM), false);
+  const editor = await call(partnerRouter, 'get', '/menu', {query: {date: DAY, orderId: ORDER}});
+  assert.equal(editor.code, 200);
+  assert.deepEqual(editor.body.data.filter(item => item.mealType === 'main').map(item => String(item._id)), [ITEM]);
+  assert.equal(editor.body.data.find(item => String(item._id) === ITEM).price, 40);
+  let response = await call(partnerRouter, 'post', '/orders', {body: {deliveryDate: DAY, lines: [{menuItemId: ITEM, quantity: 3}]}});
+  assert.equal(response.code, 200);
+  assert.equal(f.lines().find(line => line.menuItem === ITEM).quantity, 3);
+  response = await call(partnerRouter, 'post', '/orders', {body: {deliveryDate: DAY, lines: [{menuItemId: ITEM, quantity: 0}, {menuItemId: other._id, quantity: 5}]}});
+  assert.equal(response.code, 200);
+  assert.deepEqual(f.lines().map(line => [line.menuItem, line.quantity]), [[other._id, 5]]);
+  // Orders that already contain both copies must expose both independently.
+  Line.find.mock.mockImplementation(() => query([{menuItem: ITEM}, {menuItem: canonical._id}]));
+  const both = await call(partnerRouter, 'get', '/menu', {query: {date: DAY, orderId: ORDER}});
+  assert.deepEqual(both.body.data.filter(item => item.mealType === 'main').map(item => String(item._id)), [canonical._id, ITEM]);
+});
+
+test('an edit menu validates order ownership and matching delivery date', async t => {
+  const f = fixtures(t);
+  Order.findOne.mock.mockImplementation(filter => query(filter._id === ORDER && filter.space === SPACE ? f.order : null));
+  assert.equal((await call(partnerRouter, 'get', '/menu', {query: {date: DAY, orderId: ORDER}, partner: {_id: 'eeeeeeeeeeeeeeeeeeeeeeee'}})).code, 404);
+  assert.equal((await call(partnerRouter, 'get', '/menu', {query: {date: '2099-01-06', orderId: ORDER}})).code, 400);
+  assert.equal((await call(partnerRouter, 'get', '/menu', {query: {date: DAY, orderId: 'bad'}})).code, 400);
 });

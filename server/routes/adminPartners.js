@@ -1,3 +1,4 @@
+import { partnerMenuView } from '../services/partnerMenuCatalog.js';
 import express from 'express';
 import mongoose from 'mongoose';
 import multer from 'multer';
@@ -39,7 +40,7 @@ router.use(protect, adminOrKitchen);
 router.get('/menu', async (req, res) => {
   try {
     const items = await PartnerMenuItem.find().sort({ mealType: 1, sortOrder: 1, createdAt: 1 });
-    res.json({ success: true, data: items });
+    res.json({ success: true, data: items.map(partnerMenuView) });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -47,11 +48,11 @@ router.get('/menu', async (req, res) => {
 
 router.post('/menu', async (req, res) => {
   try {
-    const { name, mealType, description, price, sellingPrice, isAvailable, category, sortOrder, availableFrom, availableTo, ingredients } = req.body;
+    const { name, mealType, description, price, sellingPrice, isAvailable, category, sortOrder, ingredients } = req.body;
     if (!name || !mealType || price === undefined) {
       return res.status(400).json({ success: false, message: 'name, mealType and price are required' });
     }
-    const item = await PartnerMenuItem.create({ name, mealType, description, price, sellingPrice: sellingPrice === '' || sellingPrice == null ? null : Number(sellingPrice), isAvailable, category, sortOrder, availableFrom: availableFrom || null, availableTo: availableTo || null, ingredients: Array.isArray(ingredients) ? ingredients : [] });
+    const item = await PartnerMenuItem.create({ name, mealType, description, price, sellingPrice: sellingPrice === '' || sellingPrice == null ? null : Number(sellingPrice), isAvailable, category, sortOrder, availableFrom: null, availableTo: null, ingredients: Array.isArray(ingredients) ? ingredients : [] });
     // Owner (2026-10-23): every master-menu item is available to every
     // partner by default — no manual Space Setup step needed anymore.
     await assignItemToAllActivePartners(item._id);
@@ -66,6 +67,9 @@ router.patch('/menu/:itemId', admin, async (req, res) => {
     const allowed = ['name', 'mealType', 'description', 'price', 'sellingPrice', 'isAvailable', 'category', 'sortOrder', 'availableFrom', 'availableTo', 'ingredients'];
     const updates = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
+    const current = await PartnerMenuItem.findById(req.params.itemId);
+    if (!current) return res.status(404).json({ success: false, message: 'Item not found' });
+    if (current.source !== 'menu-selection') Object.assign(updates, { availableFrom: null, availableTo: null });
     const item = await PartnerMenuItem.findByIdAndUpdate(req.params.itemId, { $set: updates }, { new: true, runValidators: true });
     if (!item) return res.status(404).json({ success: false, message: 'Item not found' });
     res.json({ success: true, data: item });

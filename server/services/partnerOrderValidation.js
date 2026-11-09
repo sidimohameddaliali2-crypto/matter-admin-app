@@ -25,6 +25,7 @@ export const normalizePartnerLines = (lines) => {
 // Delivery dates and item availability are calendar dates stored at UTC midnight.
 export const isPartnerItemAvailable = (item, deliveryDate) => {
   if (!item || item.isAvailable === false) return false;
+  if (item.source !== 'menu-selection') return true;
   const day = new Date(deliveryDate).setUTCHours(0, 0, 0, 0);
   if (item.availableFrom && day < new Date(item.availableFrom).setUTCHours(0, 0, 0, 0)) return false;
   if (item.availableTo && day > new Date(item.availableTo).setUTCHours(0, 0, 0, 0)) return false;

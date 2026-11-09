@@ -1,3 +1,4 @@
+import { partnerMenuView, uniquePartnerMenuItems } from '../services/partnerMenuCatalog.js';
 import express from 'express';
 import crypto from 'crypto';
 import PartnerMenuItem from '../models/PartnerMenuItem.js';
@@ -158,14 +159,25 @@ router.get('/menu', async (req, res) => {
     const checkDate = req.query.date ? new Date(req.query.date) : null;
     if (checkDate) checkDate.setUTCHours(0, 0, 0, 0);
 
-    const items = assignments
+    let referencedIds = [];
+    if (req.query.orderId) {
+      if (!/^[a-f\d]{24}$/i.test(req.query.orderId)) return res.status(400).json({ success: false, message: 'Invalid order ID' });
+      const order = await SpaceOrder.findOne({ _id: req.query.orderId, space: spaceId });
+      if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+      if (!checkDate || !Number.isFinite(checkDate.getTime()) || new Date(order.deliveryDate).toISOString().slice(0, 10) !== checkDate.toISOString().slice(0, 10)) {
+        return res.status(400).json({ success: false, message: 'Menu date must match the order delivery date' });
+      }
+      const lines = await OrderLine.find({ order: order._id });
+      referencedIds = lines.map(line => String(line.menuItem?._id || line.menuItem));
+    }
+    const items = uniquePartnerMenuItems(assignments
       .filter(a => {
         return checkDate ? isPartnerItemAvailable(a.menuItem, checkDate) : a.menuItem && a.menuItem.isAvailable !== false;
       })
       .map(a => ({
-        ...a.menuItem.toObject(),
+        ...partnerMenuView(a.menuItem),
         price: partnerUnitPrice(a.menuItem, priceMap[String(a.menuItem._id)])
-      }));
+      })), referencedIds);
 
     res.json({ success: true, data: items });
   } catch (err) {

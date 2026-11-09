@@ -492,3 +492,24 @@ test.each(['offline', 'unsuccessful', 'unknown', 'different accepted items'])('r
   expect(JSON.parse(localStorage.getItem('partner-daily-plan:fixture')).days.map(day => day.orderId)).toEqual(['accepted', 'uncertain']);
   expect(api.post).not.toHaveBeenCalled();
 });
+
+
+test('continuing to the next day clears unfinished choices while confirmed days stay in checkout', async () => {
+  api.get.mockImplementation(async path => ({data: {success: true, data: path === '/partner/orders' ? [] : menu(A)}}));
+  await render(); await begin(C);
+  await click('Add Meal A'); await click('Confirm day & continue');
+  expect(container.querySelector('[aria-label="Quantity for Meal A"]').textContent).toBe('0');
+  await click('Add Meal A'); await click('Add Meal A');
+  await click('Previous day');
+  expect(container.querySelector('[aria-label="Quantity for Meal A"]').textContent).toBe('1');
+  await click('Confirm day & continue');
+  expect(container.textContent).toContain('Day 2 of 3');
+  expect(container.querySelector('[aria-label="Quantity for Meal A"]').textContent).toBe('0');
+  expect(JSON.parse(localStorage.getItem('partner-daily-plan:fixture')).days[1].items).toEqual({});
+  await click('Add Meal A'); await click('Confirm day & continue');
+  expect(container.querySelector('[aria-label="Quantity for Meal A"]').textContent).toBe('0');
+  await click('Add Meal A'); await click('Confirm day & continue');
+  expect(container.textContent).toContain('Combined total AED 60.00');
+  await click('Place all daily orders');
+  expect(api.post.mock.calls.filter(([path]) => path === '/partner/orders').map(([, body]) => ({date: body.deliveryDate, lines: body.lines}))).toEqual([A, B, C].map(date => ({date, lines: [{menuItemId: 'a', quantity: 1}]})));
+});
