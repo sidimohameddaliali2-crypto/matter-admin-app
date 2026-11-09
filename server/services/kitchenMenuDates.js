@@ -3,6 +3,8 @@ const dateKey = value => {
   return value && !Number.isNaN(date.getTime()) ? date.toISOString().slice(0, 10) : null;
 };
 
+export { dateKey as menuDateKey };
+
 // Same date discovery as the client, without transferring customer records.
 export const kitchenMenuDates = (menu, selectedDates = [], uploadedDates = []) => {
   const keys = new Set([...selectedDates, ...uploadedDates].map(dateKey).filter(Boolean));

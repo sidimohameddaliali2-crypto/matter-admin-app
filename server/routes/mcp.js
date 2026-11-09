@@ -55,6 +55,7 @@ export function createMcpRouter({
       server = createMatterMcpServer({
         request, permissions, allowWrites,
         allowDeletes: req.mcpContext.allowDeletes === true && ['admin', 'super_admin'].includes(user.role),
+        allowMealReads: !req.mcpContext.scopes || req.mcpContext.scopes.includes('meals:read'),
         offsetMinutes: businessOffsetMs(env) / 60000,
         oauth: Boolean(req.mcpContext.scopes),
       });
