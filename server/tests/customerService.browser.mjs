@@ -122,7 +122,10 @@ try {
   await koko.getByLabel('Review summary',{exact:true}).waitFor();
   assert.equal(await koko.getByLabel('Review summary',{exact:true}).inputValue(),'Clear response; pause confirmation remains open.');
   await koko.screenshot({path:'/tmp/service-evidence/koko-review.png',fullPage:true});
+  const submittedReview = koko.waitForResponse(response => response.url().includes('/submit') && response.request().method() === 'POST');
   await koko.getByRole('button',{name:'Save review & next',exact:true}).click();
+  const submitResponse = await submittedReview;
+  assert.equal(submitResponse.status(),200, await submitResponse.text());
   await koko.getByText(/Review saved/).waitFor();
   assert.equal(await Action.countDocuments({ownerId:users[1]._id}),1);
   const adrien=await open(users[2],'summary');
