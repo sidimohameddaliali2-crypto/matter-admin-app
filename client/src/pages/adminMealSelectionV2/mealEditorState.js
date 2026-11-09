@@ -14,5 +14,9 @@ export function editorComponents(meal, kind, isSaladBase) {
       return components.filter(c => !['Vegetable', 'Salad'].includes(c.type)).map(c => c.type === 'Sauce 2' ? { ...c, saladComponentId: salad.id } : c).concat(salad);
     }
   }
-  return components.map(c => c.type === 'Breakfast' ? { ...c, type: 'Protein' } : c);
+  return components.map(c => {
+    // Breakfast has no salad section: retain legacy Sauce 2 in its editable extras.
+    if (kind === 'Breakfast' && c.type === 'Sauce 2') return { ...c, type: 'Extra sauce / topping' };
+    return c.type === 'Breakfast' ? { ...c, type: 'Protein' } : c;
+  });
 }

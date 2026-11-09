@@ -110,3 +110,37 @@ test('an existing breakfast extra is removed only by its explicit remove control
   expect(saved.components.some(c => c.id === 'nuts')).toBe(false);
   expect(saved.components.find(c => c.id === 'sauce')).toMatchObject({ name: 'Yoghurt sauce', exclusions: ['Dairy'] });
 });
+
+
+function breakfastWithSecondSauce() {
+  return { id: 'breakfast-sauce-2', name: 'Breakfast with second sauce', category: "MAIN B'FAST", temperature: 'WARM', components: [
+    component('base', 'Breakfast', 'Eggs', ['Egg']),
+    { ...component('second-sauce', 'Sauce 2', 'Nut sauce', ['Nuts', 'Dairy'], 'Serve sauce separately'), sourceCell: 'J12', originalText: 'Original sauce instructions' },
+  ] };
+}
+
+test('renaming breakfast migrates Sauce 2 to an editable extra without losing its data', () => {
+  const meal = breakfastWithSecondSauce(); const before = JSON.parse(JSON.stringify(meal));
+  const onSave = render(meal);
+  expect([...host.querySelectorAll('input')].some(input => input.value === 'Nut sauce')).toBe(true);
+  expect(host.textContent).toContain('Nuts');
+  setInput(inputFor('Meal name'), 'Renamed breakfast');
+  click('Save preview draft');
+  expect(onSave).toHaveBeenCalledTimes(1);
+  const saved = onSave.mock.calls[0][0];
+  expect(saved.components.find(c => c.id === 'second-sauce')).toEqual({ ...before.components[1], type: 'Extra sauce / topping' });
+  expect(saved.isSaladBase).toBe(false);
+  expect(meal).toEqual(before);
+});
+
+test('a migrated breakfast Sauce 2 remains editable and can be explicitly removed', () => {
+  const onSave = render(breakfastWithSecondSauce());
+  const sauceInput = [...host.querySelectorAll('input')].find(input => input.value === 'Nut sauce');
+  expect(sauceInput).toBeDefined();
+  setInput(sauceInput, 'Updated sauce');
+  click('Save preview draft');
+  expect(onSave.mock.calls[0][0].components.find(c => c.id === 'second-sauce')).toMatchObject({ name: 'Updated sauce', exclusions: ['Nuts', 'Dairy'], notes: 'Serve sauce separately' });
+  act(() => host.querySelector('button[aria-label="Remove Extra sauce / topping component"]').click());
+  click('Save preview draft');
+  expect(onSave.mock.calls[1][0].components.some(c => c.id === 'second-sauce')).toBe(false);
+});
