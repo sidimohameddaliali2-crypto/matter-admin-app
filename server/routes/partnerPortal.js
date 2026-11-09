@@ -1,3 +1,4 @@
+import { partnerMenuView, uniquePartnerMenuItems } from '../services/partnerMenuCatalog.js';
 import express from 'express';
 import crypto from 'crypto';
 import PartnerMenuItem from '../models/PartnerMenuItem.js';
@@ -158,14 +159,14 @@ router.get('/menu', async (req, res) => {
     const checkDate = req.query.date ? new Date(req.query.date) : null;
     if (checkDate) checkDate.setUTCHours(0, 0, 0, 0);
 
-    const items = assignments
+    const items = uniquePartnerMenuItems(assignments
       .filter(a => {
         return checkDate ? isPartnerItemAvailable(a.menuItem, checkDate) : a.menuItem && a.menuItem.isAvailable !== false;
       })
       .map(a => ({
-        ...a.menuItem.toObject(),
+        ...partnerMenuView(a.menuItem),
         price: partnerUnitPrice(a.menuItem, priceMap[String(a.menuItem._id)])
-      }));
+      })));
 
     res.json({ success: true, data: items });
   } catch (err) {

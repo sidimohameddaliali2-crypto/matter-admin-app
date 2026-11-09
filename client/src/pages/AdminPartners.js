@@ -244,8 +244,8 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
         ...form,
         price: Number(form.price),
         sellingPrice: form.sellingPrice === '' ? null : Number(form.sellingPrice),
-        availableFrom: form.availableFrom || null,
-        availableTo: form.availableTo || null,
+        availableFrom: initial?.source === 'menu-selection' ? form.availableFrom || null : null,
+        availableTo: initial?.source === 'menu-selection' ? form.availableTo || null : null,
         ingredients: form.ingredients ? form.ingredients.split(',').map((s) => s.trim()).filter(Boolean) : [],
       };
       const res = isEdit
@@ -284,7 +284,7 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
           <textarea name="description" rows={2} value={form.description} onChange={set} className="w-full border-[1.5px] border-[#e3d9ca] rounded-2xl px-3.5 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#bcf679]" /></div>
         <div><label className="block text-sm font-medium text-[#0b1a3f] mb-1">Ingredients <span className="text-[#c9bfae] font-normal">(comma-separated)</span></label>
           <textarea name="ingredients" rows={2} value={form.ingredients} onChange={set} className="w-full border-[1.5px] border-[#e3d9ca] rounded-2xl px-3.5 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#bcf679]" placeholder="Chicken, Rice, Olive Oil, Garlic…" /></div>
-        <div>
+        {initial?.source === 'menu-selection' ? <div>
           <label className="block text-sm font-medium text-[#0b1a3f] mb-1">Availability Window <span className="text-[#c9bfae] font-normal">(optional)</span></label>
           <div className="grid grid-cols-2 gap-3">
             <div><label className="block text-xs text-[#6b7894] mb-1">From</label>
@@ -292,7 +292,7 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
             <div><label className="block text-xs text-[#6b7894] mb-1">To</label>
               <input name="availableTo" type="date" value={form.availableTo} onChange={set} className={inputCls} /></div>
           </div>
-        </div>
+        </div> : <p className="text-sm text-[#6b7894]">Available on every delivery day.</p>}
         <label className="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" name="isAvailable" checked={form.isAvailable} onChange={set} className="w-4 h-4 accent-[#3f8500] rounded" />
           <span className="text-sm text-[#0b1a3f]">Available for ordering</span>
