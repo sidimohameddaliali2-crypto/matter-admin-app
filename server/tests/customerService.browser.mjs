@@ -53,7 +53,7 @@ try {
     assert.equal(options.method,'GET','Native integration never sends provider writes');
     if(providerDown)return Response.json({error:'Fictional provider outage'},{status:503});
     if(url.endsWith('/users'))return Response.json([{id:'original-agent',name:'Original responder',accounts:[{accountId:'fixture-account',channelIds:['fixture-channel']}]}]);
-    if(new URL(url).pathname.endsWith('/conversations'))return Response.json(Array.from({length:conversationCount},(_,i)=>({id:'thread-'+i,accountId:'fixture-account',channelId:'fixture-channel',contactId:'contact-'+i,contact:{name:'Example customer '+i}})));
+    if(new URL(url).pathname.endsWith('/conversations'))return Response.json(Array.from({length:conversationCount},(_,i)=>({status:'OPEN',id:'thread-'+i,accountId:'fixture-account',channelId:'fixture-channel',contactId:'contact-'+i,contact:{name:'Example customer '+i}})));
     if(Number(new URL(url).searchParams.get('page')||1)>1)return Response.json([]);
     const contact=new URL(url).searchParams.get('contactId');const i=Number(contact.split('-').at(-1));
     return Response.json(nativeFixture.messages.filter(m=>m.externalConversationId==='thread-'+i).map(m=>({id:m.externalMessageId,accountId:'fixture-account',channelId:'fixture-channel',contactId:contact,conversationId:m.externalConversationId,sender:m.authorType==='customer'?contact:'original-agent',...(m.authorType==='staff'?{userId:'original-agent'}:{}),whatsapp:{...(m.authorType==='customer'?{from:'fixture'}:{to:'fixture'}),time:m.sentAt,type:'text',text:{body:m.text}}})));
