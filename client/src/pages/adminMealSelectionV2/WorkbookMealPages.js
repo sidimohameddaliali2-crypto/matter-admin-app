@@ -6,6 +6,7 @@ import { CYCLE_DAYS, MEAL_TYPES, mealType, mealFormat, dietaryFlags, componentNa
 
 import WeeklyCycleBoard from './WeeklyCycleBoard';
 import ComponentExclusions from './ComponentExclusions';
+import { editorComponents } from './mealEditorState';
 
 const BASE = '/admin/meal-selection-v2';
 const componentLabel = type => type === 'Sauce 2' ? 'Salad dressing (optional)' : type;
@@ -80,7 +81,9 @@ export function ComponentLibrary({ meals }) {
 export function MealComposer({ meal, isNew, onSave }) {
   const [form, setForm] = useState(() => {
     const initial = meal ? JSON.parse(JSON.stringify(meal)) : { id: `PREVIEW-${Date.now()}`, name: '', day: '', category: '', temperature: 'WARM', tags: '', carbCombined: 'No', notes: '', components: [] };
-    return { ...initial, mealKind: meal ? kindOf(meal) : 'Main meal', mealType: meal ? mealType(meal) : '', isOatmeal: meal?.isOatmeal ?? meal?.category === 'OATS', isSaladBase: meal?.isSaladBase ?? Boolean(meal?.components.some(c => c.type === 'Sauce 2' || c.type === 'Salad') || /SALAD BASE/i.test(meal?.tags || '')), components: initial.components.map(c => c.type === 'Breakfast' ? { ...c, type: 'Protein' } : c) };
+    const mealKind = meal ? kindOf(meal) : 'Main meal';
+    const isSaladBase = mealKind === 'Main meal' && (meal?.isSaladBase ?? Boolean(initial.components.some(c => c.type === 'Sauce 2' || c.type === 'Salad') || /SALAD BASE/i.test(initial.tags || '')));
+    return { ...initial, mealKind, mealType: meal ? mealType(meal) : '', isOatmeal: meal?.isOatmeal ?? meal?.category === 'OATS', isSaladBase, components: editorComponents(initial, mealKind, isSaladBase) };
   });
   const [error, setError] = useState('');
   const [adding, setAdding] = useState(false);
