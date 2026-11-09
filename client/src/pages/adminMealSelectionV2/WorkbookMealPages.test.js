@@ -75,3 +75,38 @@ test('deliberately removing a snack exclusion does not re-add it on save', () =>
   click('Save preview draft');
   expect(onSave.mock.calls[0][0].components[0].exclusions).toEqual(['Nuts']);
 });
+
+
+function breakfastWithExtras() {
+  return { id: 'breakfast-extra', name: 'Breakfast with topping', category: 'OATS', temperature: 'COLD', components: [
+    component('base', 'Breakfast', 'Oats', ['Gluten']),
+    { ...component('nuts', 'Extra sauce / topping', 'Nut topping', ['Nuts'], 'Serve separately'), attachedComponentId: 'base' },
+    component('sauce', 'Extra sauce / topping', 'Yoghurt sauce', ['Dairy']),
+  ] };
+}
+
+test('renaming an existing breakfast retains editable extras and all dietary exclusions', () => {
+  const meal = breakfastWithExtras();
+  const before = JSON.parse(JSON.stringify(meal));
+  const onSave = render(meal);
+  expect([...host.querySelectorAll('input')].some(input => input.value === 'Nut topping')).toBe(true);
+  expect([...host.querySelectorAll('input')].some(input => input.value === 'Yoghurt sauce')).toBe(true);
+  setInput(inputFor('Meal name'), 'Renamed breakfast');
+  click('Save preview draft');
+  expect(onSave).toHaveBeenCalledTimes(1);
+  const saved = onSave.mock.calls[0][0];
+  expect(saved.components.filter(c => c.type === 'Extra sauce / topping')).toEqual(before.components.filter(c => c.type === 'Extra sauce / topping'));
+  expect(saved.components.flatMap(c => c.exclusions)).toEqual(['Gluten', 'Nuts', 'Dairy']);
+  expect(meal).toEqual(before);
+});
+
+test('an existing breakfast extra is removed only by its explicit remove control', () => {
+  const onSave = render(breakfastWithExtras());
+  const remove = host.querySelector('button[aria-label="Remove Extra sauce / topping component"]');
+  expect(remove).not.toBeNull();
+  act(() => remove.click());
+  click('Save preview draft');
+  const saved = onSave.mock.calls[0][0];
+  expect(saved.components.some(c => c.id === 'nuts')).toBe(false);
+  expect(saved.components.find(c => c.id === 'sauce')).toMatchObject({ name: 'Yoghurt sauce', exclusions: ['Dairy'] });
+});

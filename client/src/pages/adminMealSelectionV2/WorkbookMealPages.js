@@ -92,12 +92,14 @@ export function MealComposer({ meal, isNew, onSave }) {
   const componentField = (id, key, value) => setForm(f => ({ ...f, components: f.components.map(c => c.id === id ? { ...c, [key]: value } : c) }));
   const isSnack = form.mealKind === 'Snack', isBreakfast = form.mealKind === 'Breakfast';
   const allowed = ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish'].filter(type => type !== 'Vegetable' || isBreakfast || !form.isSaladBase);
+  // Existing extras remain editable for both main meals and breakfasts.
+  const editableComponents = form.components.filter(c => allowed.includes(c.type) || c.type === 'Extra sauce / topping');
   const salad = form.components.find(c => c.type === 'Salad');
   const dressing = form.components.find(c => c.type === 'Sauce 2');
   const snack = form.components.find(c => c.type === 'Snack');
   const changeKind = kind => {
     setError(''); setAdding(false);
-    setForm(f => ({ ...f, mealKind: kind, components: kind === 'Snack' ? [{ ...newComponent('Snack'), name: f.name, exclusions: [...new Set(f.components.flatMap(c => c.exclusions || []))] }] : f.components.filter(c => (kind === 'Breakfast' ? ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish'] : ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish', 'Salad', 'Sauce 2', 'Extra sauce / topping']).includes(c.type)), isSaladBase: kind === 'Main meal' && f.isSaladBase }));
+    setForm(f => ({ ...f, mealKind: kind, components: kind === 'Snack' ? [{ ...newComponent('Snack'), name: f.name, exclusions: [...new Set(f.components.flatMap(c => c.exclusions || []))] }] : f.components.filter(c => (kind === 'Breakfast' ? ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish', 'Extra sauce / topping'] : ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish', 'Salad', 'Sauce 2', 'Extra sauce / topping']).includes(c.type)), isSaladBase: kind === 'Main meal' && f.isSaladBase }));
   };
   const toggleSalad = checked => setForm(f => {
     if (!checked) return { ...f, isSaladBase: false, components: f.components.filter(c => c.type !== 'Sauce 2').map(c => c.type === 'Salad' ? { ...c, type: 'Vegetable' } : c) };
@@ -109,7 +111,7 @@ export function MealComposer({ meal, isNew, onSave }) {
     if (!form.name.trim()) return setError(`Enter a ${isSnack ? 'snack' : 'meal'} name.`);
     if (form.mealKind === 'Main meal' && form.isSaladBase && !salad?.name.trim()) return setError('Enter the salad name or uncheck Includes a salad base.');
     if (form.mealKind === 'Main meal' && !MEAL_TYPES.includes(form.mealType)) return setError('Choose Chicken, Beef or Fish for a main meal.');
-    let components = isSnack ? [{ ...(snack || newComponent('Snack')), name: form.name.trim() }] : form.components.filter(c => allowed.includes(c.type) || (form.mealKind === 'Main meal' && c.type === 'Extra sauce / topping') || (form.isSaladBase && ['Salad', 'Sauce 2'].includes(c.type)));
+    let components = isSnack ? [{ ...(snack || newComponent('Snack')), name: form.name.trim() }] : form.components.filter(c => allowed.includes(c.type) || c.type === 'Extra sauce / topping' || (form.isSaladBase && ['Salad', 'Sauce 2'].includes(c.type)));
     components = components.filter(c => c.type !== 'Sauce 2' || c.name.trim());
     if (!components.length || components.some(c => !c.name.trim())) return setError('Add a name for each component, including the salad when selected.');
     onSave({ ...form, name: form.name.trim(), mealFormat: isBreakfast ? 'Breakfast' : isSnack ? 'Snack' : 'Main', mealType: form.mealKind === 'Main meal' ? form.mealType : '', isOatmeal: isBreakfast && form.isOatmeal, isSaladBase: form.mealKind === 'Main meal' && form.isSaladBase, status: 'Draft', components: components.map(({ relationship, ...c }) => c.type === 'Sauce 2' ? { ...c, saladComponentId: salad?.id || '' } : c) });
@@ -141,7 +143,7 @@ export function MealComposer({ meal, isNew, onSave }) {
         <ComponentExclusions values={dressing?.exclusions || []} componentName={dressing?.name || 'salad sauce'} onChange={values => dressing ? componentField(dressing.id, 'exclusions', values) : field('components', [...form.components, { ...newComponent('Sauce 2'), exclusions: values }])}/>
       </Panel>}
       <div className="av2-heading"><div><h2>{isBreakfast ? 'Breakfast components' : 'Meal components'}</h2><p>{isBreakfast ? 'Add protein, carb, vegetables, sauce and garnish.' : 'Add the meal components. A salad base replaces the vegetable component; its sauce is optional.'}</p></div><Action icon={Plus} onClick={() => setAdding(true)}>Add component</Action></div>
-      {form.components.filter(c => allowed.includes(c.type) || (!isBreakfast && c.type === 'Extra sauce / topping')).map(renderComponent)}
+      {editableComponents.map(renderComponent)}
       {adding && <Modal title="Add meal component" onClose={() => setAdding(false)} footer={<Action onClick={() => setAdding(false)}>Cancel</Action>}><div className="av2-choice-chips">{allowed.map(type => <button key={type} onClick={() => { field('components', [...form.components, newComponent(type)]); setAdding(false); }}>{type}</button>)}</div></Modal>}
       <Panel title="Dietary flags across all components"><Chips values={dietaryFlags(form).filter(Boolean)} tone="amber"/></Panel>
     </>}
