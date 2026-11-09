@@ -127,7 +127,7 @@ try {
   const submitResponse = await submittedReview;
   assert.equal(submitResponse.status(),200, await submitResponse.text());
   await koko.getByText(/Review saved/).waitFor();
-  assert.equal(await Action.countDocuments({ownerId:users[1]._id}),1);
+  assert.equal(await Action.countDocuments({ownerId:null,status:'unassigned'}),1);
   const adrien=await open(users[2],'summary');
   await adrien.locator('summary').filter({hasText:'Internal quality reviews'}).click();
   await adrien.getByRole('button',{name:'Balance new reviews',exact:true}).waitFor();
