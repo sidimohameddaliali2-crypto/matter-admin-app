@@ -1,3 +1,5 @@
+import {publishCloudInbox,cloudInbox} from './customerServiceCloudStore.js';
+import {isServiceStaffReply} from './customerServiceMessageEvidence.js';
 import mongoose from 'mongoose';
 import { createHash } from 'node:crypto';
 import ServiceConversation from '../models/ServiceConversation.js';
@@ -7,9 +9,12 @@ import ServiceReview from '../models/ServiceReview.js';
 import ServiceStaffProfile from '../models/ServiceStaffProfile.js';
 import ServiceCaptureBatch from '../models/ServiceCaptureBatch.js';
 import Customer from '../models/Customer.js';
+import ServiceCustomer from '../models/ServiceCustomer.js';
+import ServiceSourceContact from '../models/ServiceSourceContact.js';
 import { normalizeServiceMessage } from './customerServiceCaptureFormat.js';
 
 export async function ingestServiceBatch({ messages, source='gallabox_export', scope, requestId, from, to, actor }) {
+  if (cloudInbox()?.hosted) throw Object.assign(new Error('Source capture runs in Supabase. Local imports are disabled.'), {statusCode:409});
   if (!Array.isArray(messages) || !messages.length || messages.length > 500) throw Object.assign(new Error('Provide 1–500 normalized messages'), {statusCode:400});
   if (typeof requestId !== 'string' || !/^[a-zA-Z0-9:_-]{8,180}$/.test(requestId)) throw Object.assign(new Error('A stable requestId is required'), {statusCode:400});
   const normalized=messages.map(m=>normalizeServiceMessage(m,{source,scope}));
@@ -39,7 +44,7 @@ export async function ingestServiceBatch({ messages, source='gallabox_export', s
       if(existing&&!sameRequest(existing)) throw Object.assign(new Error('Request ID conflict'),{statusCode:409});
       if(existing?.status==='completed') { result={...existing.counts,duplicate:true}; return; }
       if(existing) throw Object.assign(new Error('Import is already being processed'),{statusCode:409});
-      const [batch]=await ServiceCaptureBatch.create([{...key,status:'processing',from,to,createdBy:actor?._id,coverage:{fingerprint},counts:{received:normalized.length}}],{session});
+      const [batch]=await ServiceCaptureBatch.create([{...key,status:'processing',from,to,createdBy:actor?._id,coverage:{fingerprint,conversationIds:[...new Set(normalized.map(message=>message.externalConversationId))]},counts:{received:normalized.length}}],{session});
       const counts={received:normalized.length,inserted:0,duplicates:0,unlinked:0};
       const affected=new Set();
       const changedTimes=new Map();
@@ -48,26 +53,59 @@ export async function ingestServiceBatch({ messages, source='gallabox_export', s
         if(time) changedTimes.set(cid,[...(changedTimes.get(cid)||[]),time]);
       };
       for(const m of normalized) {
-        const customer=m.customerId?await Customer.findOne({customerId:m.customerId}).select('customerId firstName lastName').session(session).lean():null;
+        const externalContactId=m.sourceMetadata?.externalContactId;
+        const contact=!m.customerId&&source==='gallabox'&&externalContactId?await ServiceSourceContact.findOne({scope,externalContactId,matchState:'matched'}).session(session).lean():null;
+        const directoryId=m.customerId||contact?.customerId;
+        let customer=directoryId?await ServiceCustomer.findOne({customerId:directoryId,active:true}).select('customerId name').session(session).lean():null;
+        if(!customer&&m.customerId)customer=await Customer.findOne({customerId:m.customerId}).select('customerId firstName lastName').session(session).lean();
         const customerId=customer?.customerId||'';
-        const customerName=customer ? `${customer.firstName||''} ${customer.lastName||''}`.trim() : m.customerName;
+        const customerName=customer ? customer.name||`${customer.firstName||''} ${customer.lastName||''}`.trim() : m.customerName;
         if(!customer) counts.unlinked++;
         let conversation=await ServiceConversation.findOne({source,scope,externalConversationId:m.externalConversationId}).session(session);
         if(!conversation) [conversation]=await ServiceConversation.create([{source,scope,externalConversationId:m.externalConversationId,customerId,customerName,sourceRevision:1,coverageStatus:'partial'}],{session});
-        if(conversation.customerId&&customerId&&conversation.customerId!==customerId) throw Object.assign(new Error('Conversation has conflicting customer IDs'),{statusCode:409});
+        if(externalContactId){
+          const old=conversation.sourceMetadata?.externalContactId;
+          if(old&&old!==externalContactId)throw Object.assign(new Error('Conversation has conflicting native contact IDs'),{statusCode:409});
+          if(!old){conversation.sourceMetadata={...conversation.sourceMetadata,externalContactId};await conversation.save({session});}
+        }
+        if(conversation.customerId&&customerId&&conversation.customerId!==customerId) {
+          if(source!=='gallabox'||m.customerId||!externalContactId) throw Object.assign(new Error('Conversation has conflicting customer IDs'),{statusCode:409});
+          // Native conversation/contact IDs establish the message's source
+          // thread, not its Matter customer. Retain the old association for
+          // review provenance and expose the conflict rather than blocking
+          // source capture or choosing either customer automatically.
+          const conflict={savedCustomerId:conversation.customerId,candidateCustomerId:customerId,sourceName:m.customerName||''};
+          if(JSON.stringify(conversation.sourceMetadata?.captureIdentityConflict)!==JSON.stringify(conflict)) {
+            conversation.sourceMetadata={...conversation.sourceMetadata,captureIdentityConflict:conflict};
+            await conversation.save({session});
+          }
+        }
         if(!conversation.customerId&&customerId) {
           conversation.customerId=customerId;conversation.customerName=customerName;
-          conversation.sourceRevision+=1;await conversation.save({session});changed(conversation);
+          await conversation.save({session});
+          // Directory identity enrichment does not alter captured evidence or reviews.
+          await ServiceIssue.updateMany({conversationId:conversation._id},{$set:{customerId,customerName}},{session});
         }
         const identity={source,scope,externalMessageId:m.externalMessageId};
         const authorId=mapped.get(`${source}:${scope}:${m.externalAuthorId}`)||null;
         const prior=await ServiceMessage.findOne(identity).session(session).lean();
         if(prior) {
+          if(externalContactId&&prior.sourceMetadata?.externalContactId&&prior.sourceMetadata.externalContactId!==externalContactId)throw Object.assign(new Error('Source message has conflicting native contact IDs'),{statusCode:409});
           if(String(prior.conversationId)!==String(conversation._id)||prior.text!==m.text||+prior.sentAt!==+m.sentAt||['type','authorType','externalAuthorId','authorName'].some(k=>(prior[k]||'')!==(m[k]||''))) throw Object.assign(new Error('Source message ID conflicts with saved evidence'),{statusCode:409});
+          if(externalContactId&&!prior.sourceMetadata?.externalContactId)await ServiceMessage.updateOne({_id:prior._id},{$set:{'sourceMetadata.externalContactId':externalContactId}},{session});
           if(!prior.authorId&&authorId) {
             await ServiceMessage.updateOne({_id:prior._id,authorId:null},{$set:{authorId}},{session});
-            conversation.sourceRevision+=1;await conversation.save({session});changed(conversation,m.sentAt);
+            if(!m.internalNote){conversation.sourceRevision+=1;await conversation.save({session});changed(conversation,m.sentAt);}
           } else if(prior.authorId&&authorId&&String(prior.authorId)!==String(authorId)) throw Object.assign(new Error('Staff attribution conflicts with existing evidence'),{statusCode:409});
+          if(m.internalNote&&(!prior.internalNote||!prior.sourceMetadata?.nativeEvent))await ServiceMessage.updateOne({_id:prior._id},{$set:{internalNote:true,'sourceMetadata.nativeEvent':m.sourceMetadata.nativeEvent}},{session});
+          for(const field of ['nativeContent','direction','nativeMessageId'])if(m.sourceMetadata?.[field]&&JSON.stringify(prior.sourceMetadata?.[field])!==JSON.stringify(m.sourceMetadata[field]))await ServiceMessage.updateOne({_id:prior._id},{$set:{['sourceMetadata.'+field]:m.sourceMetadata[field]}},{session});
+          if(m.sourceMetadata?.location&&JSON.stringify(prior.sourceMetadata?.location)!==JSON.stringify(m.sourceMetadata.location))await ServiceMessage.updateOne({_id:prior._id},{$set:{'sourceMetadata.location':m.sourceMetadata.location}},{session});
+          if(m.sourceMetadata?.replyContext&&JSON.stringify(prior.sourceMetadata?.replyContext)!==JSON.stringify(m.sourceMetadata.replyContext))await ServiceMessage.updateOne({_id:prior._id},{$set:{'sourceMetadata.replyContext':m.sourceMetadata.replyContext}},{session});
+          if(m.sourceMetadata?.systemEvent&&JSON.stringify(prior.sourceMetadata?.systemEvent)!==JSON.stringify(m.sourceMetadata.systemEvent))await ServiceMessage.updateOne({_id:prior._id},{$set:{'sourceMetadata.systemEvent':m.sourceMetadata.systemEvent}},{session});
+          // Refresh access metadata only; immutable source evidence and review revisions stay intact.
+          if(m.sourceMetadata?.media && JSON.stringify(prior.sourceMetadata?.media)!==JSON.stringify(m.sourceMetadata.media)) {
+            await ServiceMessage.updateOne({_id:prior._id},{$set:{'sourceMetadata.media':m.sourceMetadata.media,mediaState:'available'}},{session});
+          }
           counts.duplicates++; continue;
         }
         await ServiceMessage.create([{...m,customerId:undefined,customerName:undefined,conversationId:conversation._id,authorId,importId:String(batch._id)}],{session});
@@ -80,16 +118,16 @@ export async function ingestServiceBatch({ messages, source='gallabox_export', s
       for(const conversationId of affected) {
         const conversation=await ServiceConversation.findById(conversationId).session(session).lean();
         const all=await ServiceMessage.find({conversationId}).session(session).lean();
-        const contributors=[...new Set(all.filter(m=>m.authorType==='staff'&&m.authorId).map(m=>String(m.authorId)))];
-        const unmappedStaff=all.some(m=>m.authorType==='staff'&&!m.authorId);
+        const contributors=[...new Set(all.filter(m=>isServiceStaffReply(m)&&m.authorId).map(m=>String(m.authorId)))];
+        const unmappedStaff=all.some(m=>isServiceStaffReply(m)&&!m.authorId);
         let issues=await ServiceIssue.find({conversationId}).session(session);
         if(!issues.length) issues=await ServiceIssue.create([{conversationId,episodeKey:'primary',customerId:conversation.customerId||'',customerName:conversation.customerName||'Unknown customer',sourceRevision:conversation.sourceRevision,contributorIds:contributors,boundaryState:'needs_review',sourceMetadata:{unmappedStaff}}],{session});
         for(const issue of issues) {
           if(conversation.customerId) {issue.customerId=conversation.customerId;issue.customerName=conversation.customerName;}
           if(issue.episodeKey!=='primary'&&issue.episodeFrom&&issue.episodeTo) {
             const bounded=all.filter(m=>m.sentAt>=issue.episodeFrom&&m.sentAt<=issue.episodeTo);
-            issue.contributorIds=[...new Set(bounded.filter(m=>m.authorId&&m.authorType==='staff').map(m=>String(m.authorId)))];
-            issue.sourceMetadata={...issue.sourceMetadata,unmappedStaff:bounded.some(m=>m.authorType==='staff'&&!m.authorId)};
+            issue.contributorIds=[...new Set(bounded.filter(m=>m.authorId&&isServiceStaffReply(m)).map(m=>String(m.authorId)))];
+            issue.sourceMetadata={...issue.sourceMetadata,unmappedStaff:bounded.some(m=>isServiceStaffReply(m)&&!m.authorId)};
             if((changedTimes.get(conversationId)||[]).some(t=>t>=issue.episodeFrom&&t<=issue.episodeTo)) {
               issue.sourceRevision+=1;if(issue.outcome==='resolved') issue.outcome='open';
               const savedReviews=await ServiceReview.find({issueId:issue._id}).session(session);
@@ -126,6 +164,7 @@ export async function ingestServiceBatch({ messages, source='gallabox_export', s
       }
       batch.status='completed';batch.counts=counts;await batch.save({session});result=counts;
     });
+    await publishCloudInbox();
     return result;
   } catch(error) {
     if(error.code===11000) {

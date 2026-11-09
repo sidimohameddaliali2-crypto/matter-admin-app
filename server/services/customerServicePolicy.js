@@ -14,7 +14,7 @@ const date = value => value && Number.isFinite(new Date(value).getTime()) ? new 
 export function getServiceCapabilities(user, profile) {
   const active = user?.isActive === true && SERVICE_STAFF_ROLES.includes(user.role);
   const member = active && profile?.enabled === true && serviceId(profile.userId) === serviceId(user._id) && ['reviewer', 'supervisor'].includes(profile.mode);
-  return { view: Boolean(member), review: Boolean(member), supervise: Boolean(member && profile.mode === 'supervisor'), workActions: Boolean(member), setup: Boolean(active && user.role === 'super_admin') };
+  return { assignRequests: Boolean(member && (profile.mode === 'supervisor' || profile.grants?.includes('assignRequests'))), approveExceptions: Boolean(member && profile.grants?.includes('approveExceptions')), closeSensitive: Boolean(member && profile.grants?.includes('closeSensitive')), managePolicies: Boolean(member && profile.grants?.includes('managePolicies')), view: Boolean(member), review: Boolean(member), supervise: Boolean(member && profile.mode === 'supervisor'), workActions: Boolean(member), setup: Boolean(active && user.role === 'super_admin') };
 }
 export function assertServiceRecordAccess({ actor, profile, record, operation = 'read' }) {
   const caps = getServiceCapabilities(actor, profile);

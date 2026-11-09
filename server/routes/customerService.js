@@ -1,13 +1,18 @@
+import {listRequestFollowups,requestDefinitions,listRequests,commandRequest,configureRequestRule,configureRequestGrants} from '../services/customerServiceRequests.js';
+import {cloudInbox} from '../services/customerServiceCloudStore.js';
+import {cloudFollowups,cloudIssueOptions} from '../services/customerServiceCloudLists.js';
 import express from 'express';
-import { protect } from '../middleware/auth.js';
+import {protectService as protect} from '../services/customerServiceStaffAuth.js';
 import { loadServiceAccess } from '../middleware/serviceAccess.js';
 import { SERVICE_CATEGORIES, SERVICE_TAXONOMY_VERSION, SERVICE_RUBRIC_VERSION } from '../config/customerServiceCategories.js';
 import {
   claimNextReview, saveReviewDraft, submitServiceReview, skipServiceReview, reassignServiceReview,
   createServiceAction, updateServiceAction, allocateServiceReviews, configureServiceStaff,
-  getServiceTeam, getServiceOwners, getScopedServiceData, getServiceIssueDetail,
+  getServiceTeam, getServiceOwners, getOwnServiceReviews, getScopedServiceData, getServiceIssueDetail,
   requestServiceCorrection, createServiceCalibration, resolveServiceCorrection, createServiceEpisode,
 } from '../services/customerServiceWorkflow.js';
+
+import {listServiceConversations,getServiceConversationDetail} from '../services/customerServiceInbox.js';
 
 const router = express.Router();
 const endpoint = handler => async (req, res) => {
@@ -28,11 +33,22 @@ router.get('/team', endpoint(req => getServiceTeam(actor(req))));
 router.put('/team', endpoint(async req => ({ profile: await configureServiceStaff({ ...fields(req, staffFields), actor: req.user }) })));
 router.post('/setup', endpoint(async req => ({ profile: await configureServiceStaff({ ...fields(req, staffFields), mode: 'supervisor', actor: req.user }) })));
 router.use((req, res, next) => req.serviceCapabilities.view ? next() : res.status(403).json({ success: false, message: 'Active customer-service membership required.' }));
+router.get('/conversations', endpoint(req => listServiceConversations({...actor(req),filters:req.query})));
+router.get('/conversations/:id', endpoint(req => getServiceConversationDetail({...actor(req),conversationId:req.params.id,filters:req.query})));
+router.get('/request-follow-ups',endpoint(req=>listRequestFollowups({...actor(req),filters:req.query})));
+router.get('/requests/definitions',endpoint(()=>requestDefinitions()));
+router.get('/requests',endpoint(req=>listRequests({...actor(req),filters:req.query})));
+router.post('/requests',endpoint(req=>commandRequest({...req.body,operation:'create',actor:req.user})));
+router.post('/requests/:id/commands',endpoint(req=>commandRequest({...req.body,id:req.params.id,actor:req.user})));
+router.put('/request-rules',endpoint(req=>configureRequestRule({...req.body,actor:req.user})));
+router.put('/request-grants',endpoint(req=>configureRequestGrants({...req.body,actor:req.user})));
 router.get('/categories', endpoint(() => SERVICE_CATEGORIES));
 router.get('/policy', endpoint(() => ({ taxonomyVersion: SERVICE_TAXONOMY_VERSION, rubricVersion: SERVICE_RUBRIC_VERSION, pendingCap: 2, activeCap: 1, leaseMinutes: 15 })));
 router.get('/owners', endpoint(async () => ({ owners: await getServiceOwners() })));
-router.get('/reviews', endpoint(async req => ({ reviews: (await getScopedServiceData({ ...actor(req), filters: req.query })).reviews })));
-router.post('/reviews/next', endpoint(async req => ({ review: await claimNextReview({ actor: req.user, requestId: req.body?.requestId }) })));
+router.get('/follow-ups',endpoint(req=>cloudInbox()?.workflow?cloudFollowups({userId:req.user._id,supervise:req.serviceCapabilities.supervise,filters:req.query}):getScopedServiceData({...actor(req),filters:req.query})));
+router.get('/issue-options',endpoint(req=>cloudInbox()?.workflow?cloudIssueOptions({userId:req.user._id,supervise:req.serviceCapabilities.supervise,filters:req.query}):getScopedServiceData({...actor(req),filters:req.query})));
+router.get('/reviews', endpoint(async req => ({ reviews: await getOwnServiceReviews({ ...actor(req), filters: req.query }) })));
+router.post('/reviews/next', endpoint(async req => ({ review: await claimNextReview({ actor: req.user, requestId: req.body?.requestId, filters:req.body?.filters!==undefined?req.body.filters:fields(req,['from','to','categoryId','q']) }) })));
 router.put('/reviews/:id/draft', endpoint(async req => ({ review: await saveReviewDraft({ reviewId: req.params.id, version: req.body?.version, draft: req.body?.draft, actor: req.user }) })));
 router.post('/reviews/:id/submit', endpoint(req => submitServiceReview({ ...fields(req, ['version', 'sourceRevision', 'verdict', 'summary', 'categoryIds', 'outcome', 'note', 'evidenceMessageIds', 'action', 'requestId', 'confirmIssueBoundary']), reviewId: req.params.id, actor: req.user })));
 router.post('/reviews/:id/skip', endpoint(async req => ({ review: await skipServiceReview({ ...fields(req, ['version', 'reason', 'requestId']), reviewId: req.params.id, actor: req.user }) })));

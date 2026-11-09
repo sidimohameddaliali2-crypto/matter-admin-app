@@ -33,6 +33,9 @@ import { startMoveUncollectedCollectionsJob } from './jobs/moveUncollectedCollec
 import { startRecalculateDriverKpisJob } from './jobs/recalculateDriverKpis.js';
 import { startImportMatterDeliveriesJob } from './jobs/importMatterDeliveries.js';
 import { startCaptureMatterSalesJob } from './jobs/captureMatterSales.js';
+import customerServiceCustomers from './routes/customerServiceCustomers.js';
+import customerServiceMedia from './routes/customerServiceMedia.js';
+import {startGallaboxSync} from './services/customerServiceGallaboxSync.js';
 import { startCustomerServiceSync } from './jobs/customerServiceSync.js';
 import { startRecordVehicleLocationsJob } from './jobs/recordVehicleLocations.js';
 import { startCustomerTrackerVisitsJob } from './jobs/syncCustomerTrackerVisits.js';
@@ -195,6 +198,7 @@ import externalDeliveryApiRoutes from './routes/externalDeliveryApi.js';
 import externalDriverLocationApiRoutes from './routes/externalDriverLocationApi.js';
 import mobileUpdatesRoutes from './routes/mobileUpdates.js';
 import customerServiceRoutes from './routes/customerService.js';
+import customerServiceGallaboxRoutes from './routes/customerServiceGallabox.js';
 import customerServiceDataRoutes from './routes/customerServiceData.js';
 import customerServiceWebhookRoutes from './routes/customerServiceWebhook.js';
 import { createMcpRouter } from './routes/mcp.js';
@@ -210,6 +214,9 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users/drivers', driverRoutes); // Allow driver routes under /api/users/drivers
 app.use('/api/users', userRoutes);
 app.use('/api/customer-service-capture', customerServiceWebhookRoutes);
+app.use('/api/customer-service',customerServiceMedia);
+app.use('/api/customer-service/gallabox', customerServiceGallaboxRoutes);
+app.use('/api/customer-service',customerServiceCustomers);
 app.use('/api/customer-service', customerServiceDataRoutes);
 app.use('/api/customer-service', customerServiceRoutes);
 app.use('/api/deliveries', deliveryRoutes);
@@ -415,6 +422,7 @@ startRecalculateDriverKpisJob();
 startImportMatterDeliveriesJob();
 startCaptureMatterSalesJob();
 startCustomerServiceSync();
+startGallaboxSync();
 startRecordVehicleLocationsJob();
 startCustomerTrackerVisitsJob(io);
 

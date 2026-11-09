@@ -1,3 +1,4 @@
+import {cloudWorkflowModel} from '../services/customerServiceCloudWorkflow.js';
 import mongoose from 'mongoose';
 const { Schema } = mongoose;
 const schema = new Schema({
@@ -6,4 +7,4 @@ const schema = new Schema({
   kind: { type: String, required: true }, fingerprint: { type: String, required: true },
   result: { type: Schema.Types.Mixed, default: null },
 }, { timestamps: true });
-export default mongoose.models.ServiceCommand || mongoose.model('ServiceCommand', schema);
+export default cloudWorkflowModel(mongoose.models.ServiceCommand || mongoose.model('ServiceCommand', schema));

@@ -1,5 +1,8 @@
+import {cloudInbox} from '../services/customerServiceCloudStore.js';
+import {cloudSummarySnapshot} from '../services/customerServiceCloudLists.js';
+import {getServiceMetrics} from '../services/customerServiceMetrics.js';
 import express from 'express';
-import { protect } from '../middleware/auth.js';
+import {protectService as protect} from '../services/customerServiceStaffAuth.js';
 import { requireServiceAccess } from '../middleware/serviceAccess.js';
 import ServiceIssue from '../models/ServiceIssue.js';
 import ServiceReview from '../models/ServiceReview.js';
@@ -11,7 +14,7 @@ import { getServiceSnapshot,summarizeServiceSnapshot,buildServiceWorkbook } from
 import { captureRange } from '../services/customerServiceCaptureFormat.js';
 
 const router=express.Router();
-router.use((req,res,next)=>/^\/(summary|export\.xlsx|import|customers\/[^/]+\/context)\/?$/.test(req.path)?next():next('router'));
+router.use((req,res,next)=>/^\/(metrics|summary|export\.xlsx|import|customers\/[^/]+\/context)\/?$/.test(req.path)?next():next('router'));
 router.use(protect,requireServiceAccess);
 router.use((req,res,next)=>{res.set('Cache-Control','no-store');next();});
 const wrap=fn=>async(req,res)=>{try{await fn(req,res);}catch(e){res.status(e.statusCode||400).json({success:false,message:e.statusCode?e.message:'Unable to complete customer service request. Refresh and retry.'});}};
@@ -23,7 +26,8 @@ const independent=async(req,res,next)=>{
   } catch {res.status(503).json({success:false,message:'Unable to verify independent review state'});}
 };
 const input=req=>({userId:req.user._id,supervise:req.serviceCapabilities.supervise,filters:{from:req.query.from,to:req.query.to,categoryId:req.query.categoryId,q:req.query.q}});
-router.get('/summary',independent,wrap(async(req,res)=>res.json({success:true,data:summarizeServiceSnapshot(await getServiceSnapshot(input(req)))})));
+router.get('/metrics',supervisor,independent,wrap(async(req,res)=>res.json({success:true,data:await getServiceMetrics(input(req).filters)})));
+router.get('/summary',independent,wrap(async(req,res)=>res.json({success:true,data:summarizeServiceSnapshot(await (cloudInbox()?.workflow?cloudSummarySnapshot(input(req)):getServiceSnapshot(input(req))))})));
 router.get('/export.xlsx',supervisor,independent,wrap(async(req,res)=>{
  const file=await buildServiceWorkbook(await getServiceSnapshot(input(req)));
  res.set('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');res.set('Content-Disposition','attachment; filename="Matter_Customer_Service.xlsx"');res.send(file);

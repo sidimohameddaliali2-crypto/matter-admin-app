@@ -1,65 +1,135 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { ArrowRight } from 'lucide-react';
+import RequestWork,{RequestQueues} from '../../components/customerService/RequestWork';
+import React, {useEffect, useLayoutEffect, useRef, useState} from 'react';
+import {useLocation, useNavigate} from 'react-router-dom';
 import api from '../../utils/api';
-import ReviewPanel from '../../components/customerService/ReviewPanel';
 import Conversation from '../../components/customerService/Conversation';
 import CustomerContextDrawer from '../../components/customerService/CustomerContext';
-import { categoryLabels, errorMessage, filterParams, idOf, matchesIssue, newRequestId, prettyStatus, ResourceState, servicePath, unpack, useServiceResource } from '../../components/customerService/serviceUtils';
+import ActionEditor from '../../components/customerService/ActionEditor';
+import {categoryLabels, errorMessage, filterParams, formatDubai, idOf, prettyStatus, ResourceState, serviceFilterSearch, servicePath, unpack, useServiceResource} from '../../components/customerService/serviceUtils';
 
-export default function CustomerChats({ me, user, capabilities, categories, filters, epoch, onRefresh }) {
-  const list = useServiceResource('/reviews', filterParams(filters), epoch);
-  const issueList = useServiceResource(!capabilities.review ? '/issues' : null, filterParams(filters), epoch);
-  const ownerList = useServiceResource(capabilities.review ? '/owners' : null, {}, epoch);
-  const [active, setActive] = useState(null);
-  const [readOnlyIssue, setReadOnlyIssue] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
-  const [context, setContext] = useState(false);
-  const currentUserId = idOf(me.profile?.userId || user?._id);
-  const issueId = idOf(active?.issueId) || readOnlyIssue;
-  const detail = useServiceResource(issueId ? `/issues/${encodeURIComponent(issueId)}` : null, {}, epoch);
-  const lock = useRef(false);
-  const request = useRef(null);
-  const resumed = useRef(false);
-  const issueForReview = review => typeof review?.issueId === 'object' ? review.issueId : review?.issue || {};
-  const reviews = (list.data?.reviews || []).filter(review => idOf(review.reviewerId) === currentUserId);
-  const visible = reviews.filter(review => matchesIssue(issueForReview(review), filters));
-  const pending = visible.filter(review => ['assigned', 'in_review', 'pending'].includes(review.status));
-  const reviewed = visible.filter(review => ['submitted', 'awaiting_evidence'].includes(review.status));
-  useEffect(() => {
-    if (resumed.current || !list.data) return;
-    resumed.current = true;
-    const unfinished = (list.data.reviews || []).find(review => idOf(review.reviewerId) === currentUserId && review.status === 'in_review');
-    if (unfinished) setActive(unfinished);
-  }, [list.data, currentUserId]);
-  async function next({ saved = false } = {}) {
-    if (lock.current) return; lock.current = true; setBusy(true); setError('');
-    if (!request.current) request.current = newRequestId();
-    try {
-      const data = unpack(await api.post(`${servicePath}/reviews/next`, { requestId: request.current }));
-      setActive(data?.review || null); setReadOnlyIssue(''); request.current = null;
-      if (!data?.review) setNotice(saved ? 'Review saved. No next review is currently available.' : 'No next review is available for your current eligibility and review capacity.');
-      else setNotice(saved ? 'Review saved. Your next case is ready.' : '');
-      list.refresh(); if (idOf(data?.review?.issueId) === issueId) detail.refresh();
-    } catch (failure) { setError(errorMessage(failure, 'The next review could not be loaded. Saved work is retained.')); }
-    finally { lock.current = false; setBusy(false); }
+// Polling merges by source message identity; opening another contact invalidates
+// every pending response. Older loaded pages keep their own pagination cursor.
+function useInboxPages(path, params, field, epoch) {
+  const paramsKey=JSON.stringify(params), identity=`${path}:${paramsKey}`;
+  const [state,setState]=useState({identity,rows:[],data:null,loading:!!path,error:'',hasMore:false,nextCursor:null});
+  const more=useRef(()=>{}), reload=useRef(()=>{});
+  useEffect(()=>{
+    if(!path)return undefined;
+    let live=true,busy=false,hasLoaded=false,loadedOlder=false,cursor=null,latestSignature=null,queuedOlder=false;
+    const controller=new AbortController();
+    setState(previous=>previous.identity===identity?{...previous,error:''}:{identity,rows:[],data:null,loading:true,error:'',hasMore:false,nextCursor:null});
+    async function load(older=false){
+      if(!live||(older&&!cursor))return;
+      if(busy){if(older)queuedOlder=true;return;}
+      busy=true;
+      if(!hasLoaded||older)setState(previous=>({...previous,loading:!hasLoaded,loadingMore:older}));
+      try{
+        const data=unpack(await api.get(`${servicePath}${path}`,{params:{...JSON.parse(paramsKey),...(older?{cursor}:{})},signal:controller.signal}))||{};
+        if(!live)return;
+        // Compare the full latest payload, including permissions and recovered
+        // context. Unchanged polls must not rebuild the loaded transcript.
+        if(!older){
+          const signature=JSON.stringify(data);
+          if(hasLoaded&&signature===latestSignature){
+            setState(previous=>previous.error?{...previous,error:'',loading:false,loadingMore:false}:previous);
+            return;
+          }
+          latestSignature=signature;
+        }
+        if(older)loadedOlder=true;
+        if(!hasLoaded||older||!loadedOlder)cursor=data.nextCursor||null;
+        setState(previous=>{
+          const keepRows=previous.identity===identity&&!(field==='conversations'&&!older&&!loadedOlder);
+          const map=new Map((keepRows?previous.rows:[]).map(row=>[idOf(row),row]));
+          (data[field]||[]).forEach(row=>map.set(idOf(row),row));
+          const time=row=>new Date(field==='messages'?row.sentAt:row.lastMessageAt).getTime()||0;
+          const rows=[...map.values()].sort((a,b)=>(field==='messages'?1:-1)*(time(a)-time(b))||idOf(a).localeCompare(idOf(b)));
+          return {identity,rows,data:older?previous.data:data,loading:false,loadingMore:false,error:'',nextCursor:cursor,hasMore:older||!loadedOlder?!!data.hasMore:previous.hasMore};
+        });
+        hasLoaded=true;
+      }catch(failure){if(live)setState(previous=>({...previous,loading:false,loadingMore:false,error:errorMessage(failure)}));}
+      finally{busy=false;if(queuedOlder&&live){queuedOlder=false;void load(true);}}
+    }
+    more.current=()=>load(true);reload.current=()=>load();load();
+    const timer=setInterval(()=>{if(document.visibilityState!=='hidden')load();},5000);
+    return()=>{live=false;controller.abort();clearInterval(timer);};
+  },[path,paramsKey,identity,field,epoch]);
+  const current=!!path&&state.identity===identity;
+  return {...(current?state:{rows:[],data:null,loading:!!path,error:'',hasMore:false}),loadMore:()=>more.current(),refresh:()=>reload.current()};
+}
+
+export default function CustomerChats({me,user,capabilities,categories,filters,epoch,onRefresh}) {
+  const location=useLocation(),navigate=useNavigate();
+  const [source,setSource]=useState('native');
+  const [requestMessage,setRequestMessage]=useState(null);
+  const [workQueue,setWorkQueue]=useState(false);
+  const [requestId,setRequestId]=useState(()=>new URLSearchParams(location.search).get('request')||'');
+  const initialQuery=new URLSearchParams(location.search);
+  const [status,setStatus]=useState(()=>['open','resolved','all','unknown'].includes(initialQuery.get('status'))?initialQuery.get('status'):'open');
+  const [assignment,setAssignment]=useState(()=>['unassigned','assigned','all','unknown'].includes(initialQuery.get('assignment'))?initialQuery.get('assignment'):'all');
+  function changeQueue(field,value){
+    if(field==='status')setStatus(value);else setAssignment(value);
+    const query=new URLSearchParams(location.search);query.set(field,value);
+    navigate(`${location.pathname}?${query}`,{replace:true});
   }
-  async function submitted() { setActive(null); setNotice('Review saved. Loading the next available review…'); onRefresh(); await next({ saved: true }); }
-  async function skipped() { setActive(null); setNotice('Skip reason saved for supervisor triage. This was not counted as a completed review.'); list.refresh(); onRefresh(); }
-  const first = pending[0];
-  const firstIssue = issueForReview(first);
-  const activeIssue = detail.data?.issue;
-  return <><ResourceState loading={list.loading} error={list.error}/>{error && <div className="cs-alert" role="alert">{error}</div>}{notice && <div className="cs-success" role="status">{notice}</div>}
-    {active && <div className="cs-toolbar"><div><p className="cs-eyebrow">My review · assigned centrally</p><h3>{activeIssue?.customerName || 'Loading customer…'}</h3></div><div className="cs-form-actions"><button onClick={() => next()} disabled={busy}>Reload current review</button><button disabled={!activeIssue} onClick={() => setContext(true)}>View customer</button></div></div>}
-    {issueId && <ResourceState loading={detail.loading} error={detail.error}/>}
-    {active && detail.data && <div className="cs-grid"><Conversation issue={activeIssue} messages={detail.data.messages || []}/><ReviewPanel key={`${idOf(active)}-${active.sourceRevision}`} review={active} detail={detail.data} categories={categories} owners={ownerList.data?.owners || []} capabilities={capabilities} currentUserId={currentUserId} onSubmitted={submitted} onSkipped={skipped} onReviewChanged={review => { if (review) setActive(review); }} onReload={() => next()} /></div>}
-    {active && detail.error && <section className="cs-card"><h3>Conversation evidence could not be loaded</h3><p className="cs-muted">Your assigned review remains saved. Reload the evidence before making a judgment.</p><button onClick={detail.refresh}>Reload conversation evidence</button></section>}
-    {!active && capabilities.review && <div className="cs-grid"><section className="cs-card"><p className="cs-eyebrow">My reviews</p><h2>Your next review</h2><p className="cs-muted">Assigned to you centrally. Continue in order; the conversation authors remain the actual responders.</p><div className="cs-metrics"><div className="cs-metric"><strong>{list.data ? visible.length : '—'}</strong><span>Assigned in this scope</span></div><div className="cs-metric"><strong>{list.data ? reviewed.length : '—'}</strong><span>Reviewed / evidence held</span></div><div className="cs-metric"><strong>{list.data ? pending.length : '—'}</strong><span>Remaining</span></div></div>
-      {first ? <div className="cs-queue-hero"><h3>{firstIssue?.customerName || 'Assigned customer issue'}</h3><p>{categoryLabels(firstIssue?.categoryIds, categories)} · {prettyStatus(first.sampleType || 'routine review')}</p>{firstIssue?.summary && <blockquote>{firstIssue.summary}</blockquote>}<button className="cs-primary" onClick={() => next()} disabled={busy}>{busy ? 'Loading next review…' : 'Start next review'}<ArrowRight size={18}/></button></div> : <div className="cs-queue-hero"><h3>{list.loading ? 'Loading assigned work…' : 'No reviews assigned'}</h3><p className="cs-muted">Start next review checks the central queue. No case or workload is invented when it is empty.</p><button className="cs-primary" onClick={() => next()} disabled={busy || list.loading}>{busy ? 'Checking queue…' : 'Start next review'}<ArrowRight size={18}/></button></div>}
-      <h3>Coming next</h3><div className="cs-table-wrap"><table><thead><tr><th>Customer</th><th>Topic</th><th>Status</th></tr></thead><tbody>{pending.slice(first ? 1 : 0, 5).map(review => { const issue = issueForReview(review); return <tr key={idOf(review)}><td><strong>{issue.customerName || 'Name not recorded'}</strong></td><td>{categoryLabels(issue.categoryIds, categories)}</td><td><span className="cs-badge">{prettyStatus(review.status)}</span></td></tr>; })}</tbody></table></div>{!pending.length && <p className="cs-muted">No remaining assigned cases in this filter.</p>}</section><section className="cs-card"><h2>How work is shared</h2><p>Declared review availability guides the share of new reviews. One active review stays with you until it is submitted or skipped with a reason.</p><p className="cs-muted">Planned review time is not measured effort or a productivity score. Leave, zero capacity and other duties must be reflected by the supervisor.</p><hr className="cs-divider"/><h3>Two separate responsibilities</h3><p className="cs-muted">Review completion records your assessment. A follow-up action has its own owner, due time and verified result.</p><p className="cs-muted">Need another person to act? Leave an assignment request for the supervisor in the next-action section.</p>{ownerList.error && <div className="cs-alert" role="alert">Action owners are unavailable: {ownerList.error}</div>}</section></div>}
-    {!capabilities.review && <section className="cs-card"><p className="cs-eyebrow">Captured chats</p><h2>Inspect conversation evidence</h2><p className="cs-muted">This profile does not claim scored review work. Your authorized captured conversations are available for oversight.</p><ResourceState loading={issueList.loading} error={issueList.error}/>{(issueList.data?.issues || []).filter(issue => matchesIssue(issue, filters)).map(issue => <div className="cs-toolbar" key={idOf(issue)} style={{ borderBottom: '1px solid #eceef1', padding: '12px 0' }}><div><strong>{issue.customerName || 'Customer'}</strong><p className="cs-muted">{issue.summary || categoryLabels(issue.categoryIds, categories)}</p></div><button onClick={() => setReadOnlyIssue(idOf(issue))}>View conversation</button></div>)}{issueList.data && !issueList.data.issues?.length && <p className="cs-muted">No captured conversations in this scope.</p>}</section>}
-    {!active && readOnlyIssue && detail.data && <div style={{ marginTop: 18 }}><Conversation issue={detail.data.issue} messages={detail.data.messages || []}/></div>}
-    {context && activeIssue && <CustomerContextDrawer customerId={activeIssue.customerId} customerName={activeIssue.customerName} issues={[activeIssue]} categories={categories} capabilities={capabilities} currentUserId={currentUserId} onClose={() => setContext(false)}/>}
+  const backlog=source==='native'&&(status==='open'||assignment==='unassigned');
+  const dateParams=filterParams(filters);
+  if(backlog){delete dateParams.from;delete dateParams.to;}
+  const [selected,setSelected]=useState(()=>new URLSearchParams(location.search).get('conversation')||'');
+  const [context,setContext]=useState(false),[actionId,setActionId]=useState('');
+  const transcript=useRef(null),atBottom=useRef(true),lastSeen=useRef({chat:'',message:''});
+  const [newMessages,setNewMessages]=useState(false);
+  const list=useInboxPages('/conversations',{...dateParams,source,...(source==='native'?{status,assignment}:{}),limit:50},'conversations',epoch);
+  const detail=useInboxPages(selected?`/conversations/${encodeURIComponent(selected)}`:null,{limit:100},'messages',epoch);
+  const owners=useServiceResource(selected?'/owners':null,{},epoch);
+  const currentUserId=idOf(me.profile?.userId||user?._id);
+  const conversation=detail.data?.conversation;
+  const issues=detail.data?.issues||[];
+  const actions=detail.data?.actions||[];
+  const chosen=actions.find(action=>idOf(action)===actionId);
+  function open(id){setRequestId('');setRequestMessage(null);atBottom.current=true;setNewMessages(false);setSelected(id);setActionId('');setContext(false);navigate(`${location.pathname}${serviceFilterSearch(filters)}&status=${status}&assignment=${assignment}&conversation=${encodeURIComponent(id)}`,{replace:true});}
+  const saved=(request)=>{setActionId('');if(request?._id){setRequestMessage(null);setRequestId(request._id);}detail.refresh();onRefresh();};
+  useLayoutEffect(()=>{
+    const panel=transcript.current,last=idOf(detail.rows.at(-1));
+    if(!panel||!last)return;
+    if(lastSeen.current.chat!==selected||atBottom.current){panel.scrollTop=panel.scrollHeight;setNewMessages(false);}
+    else if(lastSeen.current.message!==last)setNewMessages(true);
+    lastSeen.current={chat:selected,message:last};
+  },[detail.rows,selected]);
+  const showLatest=()=>{if(transcript.current)transcript.current.scrollTop=transcript.current.scrollHeight;atBottom.current=true;setNewMessages(false);};
+  return <>
+    <div className="cs-inbox">
+      <aside className="cs-card cs-inbox-list" aria-label="Conversations">
+<nav className="cs-inbox-mode" aria-label="Inbox view"><button aria-pressed={!workQueue} onClick={()=>setWorkQueue(false)}>Conversations</button><button aria-pressed={workQueue} onClick={()=>setWorkQueue(true)}>Staff work</button></nav>
+{workQueue?<RequestQueues capabilities={capabilities} epoch={epoch} onOpen={r=>{open(idOf(r.conversationId));setRequestId(r._id||'');if(r.candidate)setRequestMessage({_id:r.originMessageId,text:r.excerpt});}}/>:<>
+    <div className="cs-toolbar"><div><h2>Inbox</h2><span className="cs-muted">{list.error||detail.error?'Updates paused · retrying':'Incoming chats update automatically'}</span></div><label className="cs-inbox-source">Show<select aria-label="Conversation source" value={source} onChange={event=>{setSource(event.target.value);setSelected('');setActionId('');}}><option value="native">Native chats</option><option value="history">Workbook excerpts</option></select></label></div>
+    {source==='native'&&<div className="cs-toolbar" aria-label="Inbox filters"><label>Conversation status <select aria-label="Conversation status" value={status} onChange={e=>changeQueue('status',e.target.value)}><option value="open">Open</option><option value="resolved">Resolved</option><option value="all">All statuses</option><option value="unknown">Status unavailable</option></select></label><label>Assignment <select aria-label="Assignment" value={assignment} onChange={e=>changeQueue('assignment',e.target.value)}><option value="all">All assignments</option><option value="unassigned">Unassigned</option><option value="assigned">Assigned</option><option value="unknown">Assignment unavailable</option></select></label>{backlog&&<span className="cs-muted">Backlog · all dates</span>}</div>}
+<ResourceState loading={list.loading} error={list.error}/>
+        {list.rows.map(row=><button className={`cs-inbox-row ${(selected===idOf(row)||idOf(conversation?.historyAnchorId)===idOf(row))?'active':''}`} key={idOf(row)} aria-pressed={(selected===idOf(row)||idOf(conversation?.historyAnchorId)===idOf(row))} onClick={()=>open(idOf(row))}><span className="cs-inbox-row-top"><strong>{row.customerName||'Unnamed contact'}</strong><time>{formatDubai(row.lastMessageAt)}</time></span><span className="cs-inbox-preview">{row.lastMessage?.text||(row.lastMessage?.authorType==='system'?'Conversation activity':row.lastMessage?.type==='other'?'Message':row.lastMessage?.type)||row.summary||'Open conversation'}</span><span className="cs-inbox-tags">{row.providerInbox&&<><span className="cs-badge">{row.providerInbox.status==='open'?'Open':row.providerInbox.status==='resolved'?'Resolved':'Status unavailable'}</span><span className="cs-badge">{row.providerInbox.assignment==='unassigned'?'Unassigned':row.providerInbox.assignment==='assigned'?row.providerInbox.assigneeName||'Assigned':'Assignment unavailable'}</span></>}{!row.customerId&&<span className="cs-badge">Unmatched contact</span>}{row.historical&&<span className="cs-badge amber">Workbook excerpt</span>}{row.groupingUnverified&&<span className="cs-muted">Grouping unverified</span>}</span></button>)}
+        {!list.loading&&!list.rows.length&&<div className="cs-empty"><h3>No conversations match</h3><p>{backlog?'Try another status or assignment.':'Choose All time to browse older chats.'}</p></div>}
+        {list.hasMore&&<button className="cs-inbox-more" disabled={list.loadingMore} onClick={list.loadMore}>{list.loadingMore?'Loading…':'Load more conversations'}</button>}
+        {list.error&&<button onClick={list.refresh}>Retry conversation list</button>}
+      </>}
+      </aside>
+      <div className="cs-inbox-detail" key={selected||'empty'}>
+        {!selected?<section className="cs-card cs-empty"><h3>Select a conversation</h3></section>:<>
+          <ResourceState loading={detail.loading} error={detail.error}/>
+          {detail.error&&<button onClick={detail.refresh}>Retry conversation</button>}
+          {conversation&&<>
+            <div className="cs-toolbar cs-inbox-contact"><div><h3>{conversation.customerName||'Unnamed contact'}</h3>{conversation.providerInbox&&<div className="cs-inbox-tags"><span className="cs-muted">Gallabox</span><span className="cs-badge">{conversation.providerInbox.status==='open'?'Open':conversation.providerInbox.status==='resolved'?'Resolved':'Status unavailable'}</span><span className="cs-badge">{conversation.providerInbox.assignment==='unassigned'?'Unassigned':conversation.providerInbox.assignment==='assigned'?conversation.providerInbox.assigneeName||'Assigned':'Assignment unavailable'}</span></div>}<span className="cs-muted">{conversation.customerId||'Unmatched contact'} · {conversation.historical?'Workbook excerpt':`${conversation.threadCount||1} source thread${conversation.threadCount===1?'':'s'}`} · {conversation.coverageStatus==='complete'?'Source marks capture complete':conversation.coverageStatus==='partial'?'Partial capture':'Completeness unknown'}</span></div><div className="cs-form-actions"><button onClick={showLatest}>{newMessages?'New messages ↓':'Latest messages'}</button><button onClick={()=>setContext(true)}>View customer</button></div></div>
+            {conversation.historyRecovery&&<details className="cs-history-coverage"><summary>{conversation.historyRecovery.hasError?'History recovery needs retry':conversation.historyRecovery.pending?'Checking older source history':'Available source history checked'}</summary><p className="cs-muted">Last successful page: {formatDubai(conversation.historyRecovery.lastSuccessAt)} · Page {conversation.historyRecovery.page}. A completed scan means the provider returned no more pages; it does not prove deleted or expired messages are recoverable.</p></details>}
+            {detail.hasMore&&<button disabled={detail.loadingMore} onClick={()=>{atBottom.current=false;detail.loadMore();}}>{detail.loadingMore?'Loading…':'Load older messages'}</button>}
+            <div className="cs-conversation-workspace"><div><div className="cs-inbox-transcript" ref={transcript} onScroll={event=>{const panel=event.currentTarget;atBottom.current=panel.scrollHeight-panel.scrollTop-panel.clientHeight<70;if(atBottom.current)setNewMessages(false);}}><Conversation onRequest={setRequestMessage} conversationId={selected} issue={{...conversation,summary:'Conversation history'}} messages={detail.rows}/></div></div><RequestWork requestId={requestId} conversationId={selected} message={requestMessage} capabilities={capabilities} owners={owners.data?.owners||[]} epoch={epoch} onSaved={saved}/></div>
+            {issues.length>0&&<details className="cs-card cs-inbox-work"><summary>Historical review records · {issues.length} source episodes · {actions.filter(action=>action.status!=='completed').length} open actions</summary>
+              {issues.filter(issue=>issue.summary||issue.boundaryState==='confirmed').map(issue=><div key={idOf(issue)} className="cs-toolbar"><div><strong>{issue.summary||`Source episode · ${formatDubai(issue.episodeFrom||issue.createdAt)}`}</strong><p className="cs-muted">{categoryLabels(issue.categoryIds,categories)} · {prettyStatus(issue.outcome)}</p></div></div>)}
+              {actions.map(action=><div key={idOf(action)} className="cs-toolbar"><div><strong>{action.description}</strong><p className="cs-muted">{prettyStatus(action.status)} · {formatDubai(action.dueAt)} · {owners.data?.owners?.find(owner=>idOf(owner.userId||owner)===idOf(action.ownerId))?.displayName||(action.ownerId?'Assigned':'Unassigned')}</p></div><button onClick={()=>setActionId(idOf(action))}>{capabilities.supervise||idOf(action.ownerId)===currentUserId?'Manage action':'View history'}</button></div>)}
+              {capabilities.review&&<p><a href={`${servicePath}/reviews${serviceFilterSearch(filters)}`}>Open assigned reviews</a></p>}
+            </details>}
+            {chosen&&<ActionEditor key={`${idOf(chosen)}-${chosen.version}`} action={chosen} owners={owners.data?.owners||[]} capabilities={capabilities} currentUserId={currentUserId} onSaved={saved} onClose={()=>setActionId('')}/>}
+          </>}
+        </>}
+      </div>
+    </div>
+    {context&&conversation&&<CustomerContextDrawer filters={filters} customerId={conversation.customerId} customerName={conversation.customerName} issues={issues} categories={categories} capabilities={capabilities} currentUserId={currentUserId} onClose={()=>setContext(false)}/>}
   </>;
 }

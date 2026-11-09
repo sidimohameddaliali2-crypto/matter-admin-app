@@ -27,7 +27,7 @@ before(async () => {
   await Promise.all([User, Staff, Conversation, Message, Issue, Review, Action, Command, Allocation].map(m => m.init()));
   const actors = await User.create(['supervisor', 'reviewer', 'other'].map(name => ({ email: `${name}@fixture.invalid`, password: randomUUID(), role: 'admin', isActive: true })));
   [supervisor, reviewer, other] = actors;
-  const profiles = await Staff.create(actors.map((u, i) => ({ userId: u._id, mode: i === 0 ? 'supervisor' : 'reviewer', enabled: true, availableMinutes: 60, displayName: `Fixture ${i}` })));
+  const profiles = await Staff.create(actors.map((u, i) => ({ userId: u._id, mode: i === 0 ? 'supervisor' : 'reviewer', enabled: true, availableMinutes: 60, grants:i===1?['assignRequests']:[], displayName: `Fixture ${i}` })));
   profile = profiles[1]; otherProfile = profiles[2];
 });
 after(async () => {
@@ -324,4 +324,44 @@ run('each assessed staff member needs their own readable text or verified availa
   const saved = await submitServiceReview(args);
   assert.deepEqual(saved.review.revisions.at(-1).assessedContributorIds.map(String).sort(), [supervisor._id, other._id].map(String).sort());
   assert.equal(saved.review.status, 'submitted');
+});
+run('filtered Next claims only visible dates/categories/search and preserves an open out-of-scope draft',async()=>{
+ const person=await User.create({email:`filtered-${requestId()}@fixture.invalid`,password:requestId(),role:'admin',isActive:true});await Staff.create({userId:person._id,mode:'reviewer',enabled:true,availableMinutes:60,displayName:'Filter fixture'});
+ const old=await fixture(person._id,{customerName:'Older fixture',categoryIds:['wrong_meals']}),today=await fixture(person._id,{customerName:'Visible fixture',categoryIds:['wrong_meals']}),otherCategory=await fixture(person._id,{customerName:'Visible fixture',categoryIds:['ordering']});
+ await Message.updateMany({conversationId:old.conversation._id},{$set:{sentAt:new Date('2026-11-04T23:00:00Z')}});
+ await Message.updateMany({conversationId:{$in:[today.conversation._id,otherCategory.conversation._id]}},{$set:{sentAt:new Date('2026-11-05T23:00:00Z')}});
+ const filters={from:'2026-11-06',to:'2026-11-06',categoryId:'wrong_meals',q:'Visible'},command=requestId();
+ const claimed=await claimNextReview({actor:person,requestId:command,filters});assert.equal(String(claimed._id),String(today.review._id));
+ assert.equal(String((await claimNextReview({actor:person,requestId:command,filters}))._id),String(today.review._id));
+ await assert.rejects(claimNextReview({actor:person,requestId:command,filters:{...filters,from:'2026-11-05'}}),e=>e.statusCode===409);
+ await saveReviewDraft({actor:person,reviewId:claimed._id,version:claimed.version,draft:{note:'Keep this draft'}});
+ const before=JSON.stringify(await Review.findById(claimed._id).lean());
+ await assert.rejects(claimNextReview({actor:person,requestId:requestId(),filters:{from:'2026-11-05',to:'2026-11-05'}}),e=>e.statusCode===409&&/Finish your open review/.test(e.message));
+ assert.equal(JSON.stringify(await Review.findById(claimed._id).lean()),before);assert.equal(await Review.countDocuments({reviewerId:person._id,status:'in_review'}),1);
+ assert.equal(String((await claimNextReview({actor:person,requestId:requestId()}))._id),String(today.review._id));
+ await assert.rejects(claimNextReview({actor:person,requestId:requestId(),filters:{from:'2026-02-30',to:'2026-03-01'}}),e=>e.statusCode===400);
+});
+run('Next HTTP route forwards nested filters and rejects malformed filter objects',async()=>{
+ const [{default:express},{default:jwt},{default:router},{once}]=await Promise.all([import('express'),import('jsonwebtoken'),import('../routes/customerService.js'),import('node:events')]);
+ const person=await User.create({email:`route-filter-${requestId()}@fixture.invalid`,password:requestId(),role:'admin',isActive:true});await Staff.create({userId:person._id,mode:'reviewer',enabled:true,availableMinutes:60,displayName:'Route fixture'});
+ const old=await fixture(person._id),today=await fixture(person._id);await Message.updateMany({conversationId:old.conversation._id},{$set:{sentAt:new Date('2026-11-04T23:00:00Z')}});await Message.updateMany({conversationId:today.conversation._id},{$set:{sentAt:new Date('2026-11-05T23:00:00Z')}});
+ const previous=process.env.JWT_SECRET;process.env.JWT_SECRET=requestId();const app=express();app.use(express.json());app.use('/service',router);const server=app.listen(0,'127.0.0.1');await once(server,'listening');
+ try{const token=jwt.sign({id:String(person._id)},process.env.JWT_SECRET);const post=body=>fetch(`http://127.0.0.1:${server.address().port}/service/reviews/next`,{method:'POST',headers:{Authorization:`Bearer ${token}`,'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const result=await post({requestId:requestId(),filters:{from:'2026-11-06',to:'2026-11-06'}});assert.equal(result.status,200);assert.equal((await result.json()).data.review._id,String(today.review._id));
+ for(const filters of [null,[],{from:{bad:'date'}}])assert.equal((await post({requestId:requestId(),filters})).status,400);
+ }finally{server.closeAllConnections();await new Promise(r=>server.close(r));if(previous===undefined)delete process.env.JWT_SECRET;else process.env.JWT_SECRET=previous;}
+});
+run('private staff notes retain authors but cannot grade handling or establish customer promises',async()=>{
+ await Review.updateMany({},{$set:{status:'skipped'}});const f=await fixture();
+ await Message.updateOne({_id:f.message._id},{$set:{type:'audio',text:'',mediaState:'available',sourceMetadata:{nativeEvent:{kind:'internal_note',timestampBasis:'createdAt'},media:{url:'https://private.invalid/secret'}}}});
+ const active=await claim();await assert.rejects(submitServiceReview(submission(active,f.message)),e=>e.statusCode===400);
+ const detail=await getServiceIssueDetail({issueId:f.issue._id,actor:reviewer,profile});const note=detail.messages.find(m=>String(m._id)===String(f.message._id));assert.equal(note.internalNote,true);assert.equal(note.authorType,'staff');assert.equal(String(note.authorId),String(supervisor._id));assert.equal(note.sourceMetadata,undefined);assert.ok(!JSON.stringify(detail).includes('private.invalid'));
+ await assert.rejects(createServiceAction({actor:supervisor,issueId:f.issue._id,description:'Fixture action',dueAt:new Date(Date.now()+3600000).toISOString(),promisedDueAt:new Date(Date.now()+3600000).toISOString(),promiseMessageId:f.message._id,requestId:requestId()}),/internal note/i);
+ assert.equal((await Review.findById(active._id)).revisions.length,0);
+ const uncertain=await submitServiceReview(submission(active,f.message,{verdict:'insufficient',outcome:'unknown',note:'Internal note only',requestId:requestId()}));assert.deepEqual(uncertain.review.revisions.at(-1).assessedContributorIds,[]);
+});
+run('private-note episode never introduces a responder or unresolved staff attribution',async()=>{
+ const f=await fixture();await Issue.updateOne({_id:f.issue._id},{$set:{boundaryState:'confirmed',evidenceMessageIds:[f.message._id]}});
+ const note=await Message.create({source:'fixture',scope:'isolated',externalMessageId:requestId(),conversationId:f.conversation._id,authorId:supervisor._id,authorType:'staff',sentAt:new Date(Date.now()+5000),type:'audio',text:'',mediaState:'available',sourceMetadata:{nativeEvent:{kind:'internal_note'}}});
+ const issue=await Issue.findById(f.issue._id);const result=await createServiceEpisode({actor:supervisor,issueId:issue._id,version:issue.version,evidenceMessageIds:[note._id],summary:'Internal discussion only',requestId:requestId()});assert.deepEqual(result.issue.contributorIds,[]);assert.equal(result.issue.sourceMetadata.unmappedStaff,false);
 });

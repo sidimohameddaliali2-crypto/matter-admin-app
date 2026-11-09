@@ -32,3 +32,15 @@ test('date filter is Dubai day and rejects bad ranges',()=>{
  assert.equal(r.from.toISOString(),'2026-11-05T20:00:00.000Z'); assert.equal(r.to.toISOString(),'2026-11-06T20:00:00.000Z');
  assert.throws(()=>captureRange({from:'2026-11-07',to:'2026-11-06'}),/range/);
 });
+test('native contact identity is retained only for native source and validated',()=>{
+ const raw={...row,sourceMetadata:{externalContactId:'contact-fixture'}};
+ assert.equal(normalizeServiceMessage(raw,{source:'gallabox',scope:'account:channel'}).sourceMetadata.externalContactId,'contact-fixture');
+ assert.equal(normalizeServiceMessage(raw,{source:'fixture',scope:'isolated'}).sourceMetadata,undefined);
+ assert.throws(()=>normalizeServiceMessage({...raw,sourceMetadata:{externalContactId:'invalid contact'}},{source:'gallabox',scope:'account:channel'}),/contact/i);
+});
+test('internal-note boolean is derived only from verified native event metadata',()=>{
+ const base={externalMessageId:'note',externalConversationId:'thread',sentAt:'2026-11-06T00:00:00Z',type:'other',authorType:'staff'};
+ assert.equal(normalizeServiceMessage({...base,internalNote:true},{source:'gallabox',scope:'a:b'}).internalNote,false);
+ assert.equal(normalizeServiceMessage({...base,sourceMetadata:{nativeEvent:{kind:'internal_note',timestampBasis:'createdAt'}}},{source:'gallabox',scope:'a:b'}).internalNote,true);
+ assert.equal(normalizeServiceMessage({...base,sourceMetadata:{nativeEvent:{kind:'internal_note',timestampBasis:'createdAt'}}},{source:'gallabox_history',scope:'book'}).internalNote,false);
+});

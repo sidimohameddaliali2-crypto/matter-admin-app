@@ -8,7 +8,7 @@ test('generic administrators and page permission alone grant no service access',
   assert.equal(getServiceCapabilities({ ...user, permissions: { customer_service: true } }, null).supervise, false);
 });
 test('membership grants bounded review capability and disabled identities are denied', () => {
-  assert.deepEqual(getServiceCapabilities(user, profile), { view: true, review: true, supervise: false, workActions: true, setup: false });
+  assert.deepEqual(getServiceCapabilities(user, profile), { view: true, review: true, supervise: false, workActions: true, setup: false, assignRequests:false, approveExceptions:false, closeSensitive:false, managePolicies:false });
   for (const [u, p] of [[{ ...user, isActive: false }, profile], [user, { ...profile, enabled: false }], [user, { ...profile, userId: 'b' }]]) {
     assert.equal(getServiceCapabilities(u, p).view, false);
   }

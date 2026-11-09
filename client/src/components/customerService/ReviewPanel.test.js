@@ -56,3 +56,21 @@ test('a captured thread needs a confirmed issue span before a handling grade', a
   await act(async () => confirmation.querySelector('input').click());
   expect(button('Save review & next').disabled).toBe(false);
 });
+test('internal notes are excluded from grading evidence and promise selectors',async()=>{
+ const messages=[...detail.messages,{_id:'internal',authorType:'staff',internalNote:true,authorName:'Colleague',text:'Private follow-up note'}];
+ await act(async()=>root.render(<ReviewPanel review={review} detail={{...detail,messages}} categories={[{id:'renewal',label:'Renewal'}]} capabilities={{review:true}}/>));
+ expect(container.querySelector('.cs-evidence').textContent).not.toContain('Private follow-up note');expect([...container.querySelector('[aria-label="Customer promise message"]').options].map(o=>o.value)).toEqual(['','message']);
+});
+test('a saved draft using an internal note cannot be submitted without removing it',async()=>{
+ await act(async()=>root.unmount());root=createRoot(container);
+ const draft={...review.draft,evidenceMessageIds:['internal'],action:null};
+ await act(async()=>root.render(<ReviewPanel review={{...review,draft}} detail={{...detail,messages:[...detail.messages,{_id:'internal',authorType:'staff',internalNote:true,text:'Private note'}]}} categories={[{id:'renewal',label:'Renewal'}]} capabilities={{review:true}}/>));
+ expect(button('Save review & next').disabled).toBe(true);expect(container.textContent).toContain('Internal notes cannot support');await act(async()=>button('Remove internal notes').click());expect(container.textContent).not.toContain('Internal notes cannot support');expect(button('Save review & next').disabled).toBe(true);
+});
+test('an internal-note promise in an older draft must be replaced with a public staff message',async()=>{
+ await act(async()=>root.unmount());root=createRoot(container);
+ const draft={...review.draft,action:{...review.draft.action,promisedDueAt:'2026-11-07T10:00:00Z',promiseMessageId:'internal'}};
+ await act(async()=>root.render(<ReviewPanel review={{...review,draft}} detail={{...detail,messages:[...detail.messages,{_id:'internal',authorType:'staff',internalNote:true,text:'Private note'}]}} categories={[{id:'renewal',label:'Renewal'}]} capabilities={{review:true}}/>));
+ expect(button('Save review & next').disabled).toBe(true);expect(container.textContent).toContain('Choose a customer-facing promise');
+ await act(async()=>{const select=container.querySelector('[aria-label="Customer promise message"]');Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(select,'message');select.dispatchEvent(new Event('change',{bubbles:true}));});expect(button('Save review & next').disabled).toBe(false);
+});

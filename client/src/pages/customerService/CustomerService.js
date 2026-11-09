@@ -1,16 +1,17 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useSelector } from 'react-redux';
-import { ArrowUpRight, RefreshCw, Search } from 'lucide-react';
+import { RefreshCw, Search } from 'lucide-react';
 import api from '../../utils/api';
 import Summary from './Summary';
 import Problems from './Problems';
 import Customers from './Customers';
 import CustomerChats from './CustomerChats';
-import { displayName, errorMessage, idOf, servicePath, unpack, useServiceResource } from '../../components/customerService/serviceUtils';
+import CustomerReviews from './CustomerReviews';
+import { dubaiToday, serviceFiltersFromSearch, serviceFilterSearch, displayName, errorMessage, idOf, servicePath, unpack, useServiceResource } from '../../components/customerService/serviceUtils';
 import './customerService.css';
 
-const tabs = [['summary', 'Summary'], ['problems', 'Problems'], ['customers', 'Customers'], ['chats', 'Customer chats']];
+const tabs = [['chats', 'Inbox'], ['problems', 'Follow-ups'], ['customers', 'Customers'], ['reviews', 'Reviews'], ['summary', 'Summary']];
 
 function SupervisorSetup({ onConfigured }) {
   const team = useServiceResource('/team');
@@ -37,13 +38,14 @@ function SupervisorSetup({ onConfigured }) {
 export default function CustomerService() {
   const user = useSelector(state => state.auth?.user);
   const location = useLocation();
-  const selectedTab = location.pathname.split('/')[2] || 'summary';
-  const activeTab = tabs.some(([key]) => key === selectedTab) ? selectedTab : 'summary';
+  const navigate = useNavigate();
+  const selectedTab = location.pathname.split('/')[2] || 'chats';
+  const activeTab = tabs.some(([key]) => key === selectedTab) ? selectedTab : 'chats';
   const [me, setMe] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [epoch, setEpoch] = useState(0);
-  const [filters, setFilters] = useState({ from: '', to: '', categoryId: '', search: '' });
+  const [filters, setFilters] = useState(() => serviceFiltersFromSearch(location.search));
   const loadMe = useCallback(async () => {
     setLoading(true); setError('');
     try { setMe(unpack(await api.get(`${servicePath}/me`))); }
@@ -56,19 +58,21 @@ export default function CustomerService() {
   const dictionary = useServiceResource(allowed ? '/categories' : null, {}, epoch);
   const categories = Array.isArray(dictionary.data) ? dictionary.data : dictionary.data?.categories || [];
   const refresh = () => setEpoch(value => value + 1);
-  const updateFilter = (key, value) => setFilters(previous => ({ ...previous, [key]: value }));
+  useEffect(() => { setFilters(serviceFiltersFromSearch(location.search)); }, [location.search]);
+  const changeFilters = next => { setFilters(next); navigate(`${location.pathname}${serviceFilterSearch(next)}`, {replace:true}); };
+  const updateFilter = (key, value) => changeFilters({ ...filters, [key]: value });
+  const today = dubaiToday();
   const props = { me, user, capabilities, categories, filters, epoch, onRefresh: refresh };
   return <div className="matter-cs">
-    <header className="cs-header">
-      <div className="cs-heading-row"><div className="cs-brand">Matter<span />Customer service</div><nav aria-label="Customer service pages">{tabs.map(([key, label]) => <Link key={key} to={`${servicePath}/${key}`} className={key === activeTab ? 'active' : ''} aria-current={key === activeTab ? 'page' : undefined}>{label}</Link>)}</nav></div>
-      <div className="cs-filter-row"><div className="cs-period"><label>From<input type="date" aria-label="From date in Dubai" value={filters.from} max={filters.to || undefined} onChange={event => updateFilter('from', event.target.value)} /></label><label>To<input type="date" aria-label="To date in Dubai" value={filters.to} min={filters.from || undefined} onChange={event => updateFilter('to', event.target.value)} /></label></div><label className="cs-search"><Search size={17} aria-hidden="true"/><input aria-label="Search customer service" placeholder="Search customers or issues" value={filters.search} onChange={event => updateFilter('search', event.target.value)} /></label><select aria-label="Issue category filter" value={filters.categoryId} onChange={event => updateFilter('categoryId', event.target.value)}><option value="">All categories</option>{categories.map(category => <option key={category.id} value={category.id}>{category.label}</option>)}</select><div className="cs-person"><strong>{me?.profile?.displayName || displayName(user)}</strong><span>{capabilities.supervise ? 'Supervisor' : capabilities.review ? 'Reviewer' : capabilities.setup ? 'Setup administrator' : 'Staff'} · Dubai time</span></div><button className="cs-icon-button" aria-label="Refresh customer service" title="Refresh saved information" onClick={() => { if (!me) loadMe(); else refresh(); }}><RefreshCw size={18}/></button></div>
-      <div className="cs-header-note"><span>Reviews and internal follow-ups</span><span>Source inbox remains in Gallabox <ArrowUpRight size={13} aria-hidden="true"/></span></div>
+    <header className={`cs-header ${activeTab==='chats'?'cs-compact-header':''}`}>
+      <div className="cs-heading-row"><div className="cs-brand">Matter<span />Customer service</div><nav aria-label="Customer service pages">{tabs.map(([key, label]) => <Link key={key} to={`${servicePath}/${key}${serviceFilterSearch(filters)}`} className={key === activeTab ? 'active' : ''} aria-current={key === activeTab ? 'page' : undefined}>{label}</Link>)}</nav></div>
+      <div className="cs-filter-row"><div className="cs-chip-row cs-date-shortcuts" role="group" aria-label="Date range"><button aria-pressed={filters.from === today && filters.to === today} onClick={() => changeFilters({...filters,from:today,to:today})}>Today</button><button aria-pressed={!filters.from && !filters.to} onClick={() => changeFilters({...filters,from:'',to:''})}>All time</button></div><div className="cs-period"><label>From<input type="date" aria-label="From date in Dubai" value={filters.from} max={filters.to || undefined} onChange={event => updateFilter('from', event.target.value)} /></label><label>To<input type="date" aria-label="To date in Dubai" value={filters.to} min={filters.from || undefined} onChange={event => updateFilter('to', event.target.value)} /></label></div><label className="cs-search"><Search size={17} aria-hidden="true"/><input aria-label="Search customer service" placeholder="Search customers or issues" value={filters.search} onChange={event => updateFilter('search', event.target.value)} /></label><select aria-label="Issue category filter" value={filters.categoryId} onChange={event => updateFilter('categoryId', event.target.value)}><option value="">All categories</option>{categories.map(category => <option key={category.id} value={category.id}>{category.label}</option>)}</select><div className="cs-person"><strong>{me?.profile?.displayName || displayName(user)}</strong><span>{capabilities.supervise ? 'Supervisor' : capabilities.review ? 'Reviewer' : capabilities.setup ? 'Setup administrator' : 'Staff'} · Dubai time</span></div><button className="cs-icon-button" aria-label="Refresh customer service" title="Refresh saved information" onClick={() => { if (!me) loadMe(); else refresh(); }}><RefreshCw size={18}/></button></div>
     </header>
     {loading && <section className="cs-card"><p role="status">Checking customer service access…</p></section>}
     {error && <section className="cs-card"><div className="cs-alert" role="alert">{error}</div><button onClick={loadMe}>Try again</button></section>}
-    {!loading && !error && !allowed && !capabilities.setup && <section className="cs-card cs-empty"><h2>Customer service access is not configured</h2><p>Your existing app role does not grant access to this workflow. A customer service supervisor can configure reviewer membership.</p></section>}
+    {!loading && !error && !allowed && !capabilities.setup && <section className="cs-card cs-empty"><h2>Customer service access is not configured</h2><p>Ask your supervisor for access.</p></section>}
     {!loading && !error && !allowed && capabilities.setup && <SupervisorSetup onConfigured={loadMe} />}
-    {!loading && !error && allowed && <>{dictionary.error && <div className="cs-alert" role="alert">Category definitions unavailable: {dictionary.error}</div>}{activeTab === 'summary' && <Summary {...props} />}{activeTab === 'problems' && <Problems {...props} />}{activeTab === 'customers' && <Customers {...props} />}{activeTab === 'chats' && <CustomerChats {...props} />}</>}
-    <footer className="cs-page-footer">All times Asia/Dubai · Saving here records internal work and sends no customer message.</footer>
+    {!loading && !error && allowed && <>{dictionary.error && <div className="cs-alert" role="alert">Category definitions unavailable: {dictionary.error}</div>}{activeTab === 'summary' && <Summary {...props} />}{activeTab === 'problems' && <Problems {...props} />}{activeTab === 'customers' && <Customers {...props} />}{activeTab === 'chats' && <CustomerChats {...props} />}{activeTab === 'reviews' && <CustomerReviews {...props} />}</>}
+    <footer className="cs-page-footer">Dubai time · Staff inbox</footer>
   </div>;
 }

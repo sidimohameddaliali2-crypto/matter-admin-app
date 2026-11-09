@@ -1,3 +1,4 @@
+import {cloudWorkflowModel} from '../services/customerServiceCloudWorkflow.js';
 import mongoose from 'mongoose';
 import { SERVICE_CATEGORY_IDS, SERVICE_TAXONOMY_VERSION } from '../config/customerServiceCategories.js';
 const { Schema } = mongoose;
@@ -17,4 +18,4 @@ const schema = new Schema({
   episodeFrom: Date, episodeTo: Date, sourceMetadata: Schema.Types.Mixed,
 }, { timestamps: true });
 schema.index({ conversationId: 1, episodeKey: 1 }, { unique: true });
-export default mongoose.models.ServiceIssue || mongoose.model('ServiceIssue', schema);
+export default cloudWorkflowModel(mongoose.models.ServiceIssue || mongoose.model('ServiceIssue', schema));

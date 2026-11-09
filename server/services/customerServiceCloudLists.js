@@ -1,0 +1,30 @@
+import {cloudInbox,cloudSqlText as lit,decodeCloudRecord} from './customerServiceCloudStore.js';
+import {workflowFilter} from './customerServiceCloudWorkflow.js';
+import {captureRange} from './customerServiceCaptureFormat.js';
+export function cloudIssuePredicate(filters={}){
+ const range=captureRange(filters),clauses=[];
+ const issueMatch=filter=>"EXISTS(SELECT 1 FROM gallabox_private.inbox_record WHERE kind='serviceissues' AND id=i.id AND ("+workflowFilter(filter)+"))";
+ if(filters.categoryId)clauses.push(issueMatch({categoryIds:String(filters.categoryId)}));
+ if(filters.q){const escaped=String(filters.q).slice(0,200).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');clauses.push(issueMatch({$or:['customerName','customerId','summary'].map(key=>({[key]:{$regex:escaped,$options:'i'}}))}));}
+ if(range.from)clauses.push(`((i.body->>'episodeFrom'<${lit(range.to.toISOString())} AND i.body->>'episodeTo'>=${lit(range.from.toISOString())}) OR (i.body->>'episodeFrom' IS NULL AND EXISTS(SELECT 1 FROM gallabox_private.message_time m WHERE m.conversation_id=i.body->>'conversationId' AND m.sent_at>=${lit(range.from.toISOString())} AND m.sent_at<${lit(range.to.toISOString())})))`);
+ return clauses.length?clauses.map(c=>'('+c+')').join(' AND '):'TRUE';
+}
+export async function cloudFollowups({userId,supervise,filters={}}){
+ const offset=Math.max(0,Math.min(100000,Number(filters.offset)||0));
+ const predicate=cloudIssuePredicate(filters);
+ const queue=filters.queue==='mine'?`AND a.body->>'ownerId'=${lit(String(userId))}`:filters.queue==='unassigned'?"AND a.body->>'ownerId' IS NULL AND a.body->>'status'<>'completed'":filters.queue==='overdue'?`AND a.body->>'status'<>'completed' AND (a.body->>'dueAt'<${lit(new Date().toISOString())} OR a.body->>'promisedDueAt'<${lit(new Date().toISOString())})`:'';
+ const result=await cloudInbox().store.query(`WITH matching AS MATERIALIZED (SELECT a.kind,a.id,a.payload,a.sha256,a.body FROM gallabox_private.inbox_record a JOIN gallabox_private.inbox_record i ON i.kind='serviceissues' AND i.id=a.body->>'issueId' WHERE a.kind='serviceactions' ${supervise?'':`AND a.body->>'ownerId'=${lit(String(userId))}`} ${queue} AND ${predicate}), page AS (SELECT * FROM matching ORDER BY body->>'dueAt',id LIMIT 51 OFFSET ${offset}) SELECT jsonb_build_object('actions',COALESCE((SELECT jsonb_agg(jsonb_build_object('kind',kind,'id',id,'payload',payload,'sha256',sha256)) FROM page),'[]'),'total',(SELECT count(*) FROM matching),'issues',COALESCE((SELECT jsonb_agg(jsonb_build_object('kind',i.kind,'id',i.id,'payload',i.payload,'sha256',i.sha256)) FROM gallabox_private.inbox_record i WHERE i.kind='serviceissues' AND i.id IN (SELECT body->>'issueId' FROM page)),'[]'));`);
+ return {actions:result.actions.slice(0,50).map(decodeCloudRecord),issues:result.issues.map(decodeCloudRecord),total:result.total,nextOffset:result.actions.length>50?offset+50:null};
+}
+export async function cloudIssueOptions({userId,supervise,filters={}}){
+ const rows=await cloudInbox().store.query(`SELECT COALESCE(jsonb_agg(x),'[]') FROM (SELECT i.id AS _id,i.body->>'customerName' AS "customerName",i.body->>'summary' AS summary,i.body->'categoryIds' AS "categoryIds" FROM gallabox_private.inbox_record i WHERE i.kind='serviceissues' AND ${cloudIssuePredicate(filters)} ${supervise?'':`AND (EXISTS(SELECT 1 FROM gallabox_private.inbox_record r WHERE r.kind='servicereviews' AND r.body->>'issueId'=i.id AND r.body->>'reviewerId'=${lit(String(userId))}) OR EXISTS(SELECT 1 FROM gallabox_private.inbox_record a WHERE a.kind='serviceactions' AND a.body->>'issueId'=i.id AND a.body->>'ownerId'=${lit(String(userId))}))`} ORDER BY i.body->>'updatedAt' DESC,i.id LIMIT 50) x;`);return {issues:rows,limit:50};
+}
+export async function cloudSummarySnapshot({userId,supervise,filters={}}){
+ const result=await cloudInbox().store.query(`WITH issues AS MATERIALIZED (SELECT i.id,i.body FROM gallabox_private.inbox_record i WHERE i.kind='serviceissues' AND ${cloudIssuePredicate(filters)} ${supervise?'':`AND (EXISTS(SELECT 1 FROM gallabox_private.inbox_record r WHERE r.kind='servicereviews' AND r.body->>'issueId'=i.id AND r.body->>'reviewerId'=${lit(String(userId))}) OR EXISTS(SELECT 1 FROM gallabox_private.inbox_record a WHERE a.kind='serviceactions' AND a.body->>'issueId'=i.id AND a.body->>'ownerId'=${lit(String(userId))}))`}) SELECT jsonb_build_object(
+ 'issues',COALESCE((SELECT jsonb_agg(jsonb_build_object('_id',id)) FROM issues),'[]'),
+ 'reviews',COALESCE((SELECT jsonb_agg(jsonb_build_object('_id',r.id,'issueId',r.body->'issueId','reviewerId',r.body->'reviewerId','status',r.body->'status','sampleType',r.body->'sampleType','stale',r.body->'stale','revisions',COALESCE((SELECT jsonb_agg(jsonb_build_object('actorId',v->'actorId','verdict',v->'verdict','provisional',v->'provisional') ORDER BY n) FROM jsonb_array_elements(r.body->'revisions') WITH ORDINALITY AS rev(v,n)),'[]'))) FROM gallabox_private.inbox_record r WHERE r.kind='servicereviews' AND r.body->>'issueId' IN(SELECT id FROM issues) ${supervise?'':`AND r.body->>'reviewerId'=${lit(String(userId))}` }),'[]'),
+ 'actions',COALESCE((SELECT jsonb_agg(jsonb_build_object('status',a.body->'status','ownerId',a.body->'ownerId','dueAt',a.body->'dueAt','promisedDueAt',a.body->'promisedDueAt')) FROM gallabox_private.inbox_record a WHERE a.kind='serviceactions' AND a.body->>'issueId' IN(SELECT id FROM issues) ${supervise?'':`AND a.body->>'ownerId'=${lit(String(userId))}` }),'[]'),
+ 'profiles',COALESCE((SELECT jsonb_agg(jsonb_build_object('userId',p.body->'userId','displayName',p.body->'displayName','availableMinutes',p.body->'availableMinutes')) FROM gallabox_private.inbox_record p WHERE p.kind='servicestaffprofiles' AND p.body->>'enabled'='true' AND (NOT EXISTS(SELECT 1 FROM gallabox_private.staff_directory) OR EXISTS(SELECT 1 FROM gallabox_private.staff_login l WHERE l.staff_id=p.body->>'userId' AND l.active)) ${supervise?'':`AND p.body->>'userId'=${lit(String(userId))}` }),'[]'));
+ `);
+ return {...result,supervise,capture:null,asOf:new Date().toISOString(),filters};
+}

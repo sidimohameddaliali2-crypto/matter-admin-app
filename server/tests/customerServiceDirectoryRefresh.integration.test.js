@@ -1,0 +1,30 @@
+import test,{before,after}from'node:test';
+import assert from'node:assert/strict';
+import{randomUUID}from'node:crypto';
+import mongoose from'mongoose';
+import Customer from'../models/ServiceCustomer.js';
+import State from'../models/ServiceCustomerDirectoryState.js';
+import{normalizeMatterDirectory,normalizeCombinedMatterDirectory}from'../services/customerServiceMatterDirectory.js';
+import{persistCustomerDirectory}from'../services/customerServiceMatterDirectoryPersistence.js';
+import{createMatterDirectoryRefresh}from'../services/customerServiceMatterDirectoryRefresh.js';
+const uri=process.env.CUSTOMER_SERVICE_TEST_MONGODB_URI,enabled=Boolean(uri&&process.env.CUSTOMER_SERVICE_TEST_ISOLATED==='true');
+const dbName=`matter_service_test_${randomUUID().replaceAll('-','')}`;
+before(async()=>{if(!enabled)return;await mongoose.connect(uri,{dbName,autoIndex:false});await Customer.createCollection();await State.createCollection();await Customer.createIndexes();await State.createIndexes();});
+after(async()=>{if(!enabled)return;assert.equal(mongoose.connection.name,dbName);await mongoose.connection.dropDatabase();await mongoose.disconnect();});
+const oldAt='2026-11-04T00:00:00.000Z',freshAt='2026-11-06T00:00:00.000Z';
+const api=(ids,observedAt)=>({customers:normalizeMatterDirectory(ids.map(id=>({customer_id:id,subscription_id:id,name:`API ${id}`,phone:`+97150000000${id}`,subscription_status:'active'})),{observedAt}),report:{observedAt,sourceSubscriptionTotal:ids.length,detailsFailed:0}});
+test('partial generation transaction retains remote identities through reload, failed API, and source recovery',{skip:!enabled},async()=>{
+ const remoteRows=[{customerId:'r1',matterCustomerId:'1',firstName:'Remote One'},{customerId:'r2',firstName:'Remote Two'}];
+ const initial=normalizeCombinedMatterDirectory(remoteRows,api(['1','9'],oldAt),{observedAt:oldAt,expectedRemoteRecords:2});initial.report.remoteSnapshotObservedAt=oldAt;initial.report.apiObservedAt=oldAt;await persistCustomerDirectory(initial);
+ let remoteFailed=true,apiFailed=false;
+ const options={env:{},detailBudget:0,readApi:async()=>{if(apiFailed)throw Error('private API diagnostic');return api(['1','3'],freshAt);},loadRemote:async()=>{if(remoteFailed)throw Error('private database diagnostic');return{customers:remoteRows,count:2,observedAt:freshAt,report:{reconciled:true}};}};
+ let refresh=createMatterDirectoryRefresh(options);const result=await refresh.run();assert.equal(result.ok,true);assert.equal(result.partial,true);await refresh.stop();
+ let manifest=await State.findOne({key:'matter_customer_directory'}).lean();assert.equal(manifest.status,'partial');assert.equal(manifest.counts.customers,4);assert.equal(manifest.counts.remoteRecords,2);assert.equal(manifest.report.apiCustomers,2);
+ const priorAbsent=await Customer.findOne({customerId:'matter:9',active:true}).lean();assert.equal(priorAbsent.subscriptions[0].id,'9');assert.equal(priorAbsent.sourceStates.api.state,'retained');assert.equal(priorAbsent.sourceObservedAt.toISOString(),oldAt);
+ const joined=await Customer.findOne({customerId:'matter:1',active:true}).lean();assert.equal(joined.name,'API 1');assert.equal(joined.deliveryProfiles[0].name,'Remote One');assert.equal(joined.sourceStates.remoteDatabase.observedAt,oldAt);assert.equal(joined.phoneObservedAt.toISOString(),freshAt);
+ // Reopen the connection and recreate the worker: provenance must survive process reload.
+ await mongoose.disconnect();await mongoose.connect(uri,{dbName,autoIndex:false});refresh=createMatterDirectoryRefresh(options);
+ assert.equal((await State.findOne({key:'matter_customer_directory'}).lean()).status,'partial');assert.equal(await Customer.countDocuments({active:true}),4);
+ apiFailed=true;assert.equal((await refresh.run()).ok,false);manifest=await State.findOne({key:'matter_customer_directory'}).lean();assert.equal(manifest.status,'failed');assert.equal(manifest.activeGeneration,result.generation);assert.equal(manifest.report.sources.api.state,'unavailable');assert.equal(manifest.report.apiObservedAt,freshAt);assert.equal(await Customer.countDocuments({active:true}),4);assert.ok(!JSON.stringify(manifest).includes('private API diagnostic'));
+ apiFailed=false;remoteFailed=false;assert.equal((await refresh.run()).partial,false);manifest=await State.findOne({key:'matter_customer_directory'}).lean();assert.equal(manifest.status,'ready');assert.equal(manifest.report.sources.remoteDatabase.state,'available');assert.equal(manifest.report.sources.api.error,'');assert.equal((await Customer.findOne({customerId:'matter:1',active:true}).lean()).sourceStates.remoteDatabase.state,'available');await refresh.stop();
+});

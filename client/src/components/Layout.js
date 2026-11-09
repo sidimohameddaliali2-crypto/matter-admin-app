@@ -265,7 +265,7 @@ const Layout = ({ children }) => {
                 <p className="mo-user-name">
                   {user?.profile?.firstName} {user?.profile?.lastName}
                 </p>
-                <p className="mo-user-role">{user?.role}</p>
+                <p className="mo-user-role">{user?.serviceOnly ? 'Customer service' : user?.role}</p>
               </div>
               <div className="relative">
                 <button className="flex items-center text-sm rounded-full focus:outline-none focus:ring-2 focus:ring-blue-500">

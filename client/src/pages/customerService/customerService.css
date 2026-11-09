@@ -3,3 +3,106 @@
 @media(max-width:1250px){.matter-cs{padding:17px}.cs-heading-row{flex-wrap:wrap;gap:11px}.cs-brand{font-size:20px}.cs-filter-row{flex-wrap:wrap;gap:10px}.cs-search{min-width:200px}.cs-grid{grid-template-columns:minmax(0,1.3fr) minmax(300px,1fr)}.cs-card{padding:20px}.cs-person{margin-left:0}}
 @media(max-width:850px){.cs-grid{grid-template-columns:1fr}.cs-heading-row nav{width:100%;display:grid;grid-template-columns:repeat(4,1fr);gap:3px}.cs-heading-row nav a{padding:7px;text-align:center;font-size:12px}.cs-person{margin-left:auto}.cs-filter-row>select{max-width:none;width:calc(50% - 5px)}.cs-search{flex-basis:55%}.cs-brand{font-size:20px}.cs-header-note{font-size:10px}.cs-grid>.cs-card+.cs-card{margin-top:0}.cs-review-panel{order:2}}
 @media(max-width:520px){.matter-cs{padding:10px;border-radius:0}.cs-header{padding:14px 12px;margin-bottom:13px}.cs-brand{font-size:18px;gap:12px}.cs-heading-row nav a{font-size:10px;padding:7px 3px}.cs-period{width:100%}.cs-period label{flex:1}.cs-period input{max-width:none}.cs-search{flex-basis:100%}.cs-filter-row>select{width:100%;max-width:none}.cs-person{margin-left:0}.cs-header-note{gap:8px}.cs-header-note span:last-child{text-align:right}.cs-card{padding:18px 15px;border-radius:12px}.matter-cs h2{font-size:23px}.cs-metrics{gap:7px}.cs-metric{padding:10px}.cs-metric strong{font-size:25px}.cs-metric span{font-size:9px}.cs-form-grid{grid-template-columns:1fr}.cs-form-actions .cs-primary{width:100%;margin-left:0}.cs-message{max-width:96%}.cs-avatar{display:none}.cs-drawer{padding:17px}.cs-team-row{grid-template-columns:1fr 70px 75px;gap:7px}.cs-context-list{grid-template-columns:90px 1fr}}
+/* Compact service views: actions first, source details on demand. */
+.cs-date-shortcuts{flex:none}.cs-date-shortcuts button[aria-pressed=true]{background:#e5edff;border-color:#baccec}.cs-filter-row{gap:10px;flex-wrap:wrap}.matter-cs details:not([open]){margin-bottom:6px}.matter-cs td p{margin-bottom:4px}.matter-cs td details{border:0;padding-top:0}.cs-header{margin-bottom:16px}.cs-header-note{display:none}.cs-queue-hero{margin:12px 0}.cs-page-footer{padding-top:12px}
+.matter-cs [hidden]{display:none!important}
+/* Staff inbox keeps the selected conversation beside its contact list. */
+.cs-inbox{display:grid;grid-template-columns:minmax(260px,340px) minmax(0,1fr);gap:18px;align-items:start}.cs-inbox-list{padding:8px!important;max-height:calc(100vh - 260px);overflow:auto;position:sticky;top:12px}.matter-cs .cs-inbox-row{display:flex;flex-direction:column;align-items:stretch;text-align:left;width:100%;gap:7px;border:0;border-bottom:1px solid var(--line);border-radius:9px;padding:14px 12px;font-weight:400}.matter-cs .cs-inbox-row.active{background:#eaf2ff;box-shadow:inset 3px 0 #345c98}.cs-inbox-row-top{display:flex;flex-direction:column;gap:4px}.cs-inbox-row-top time{font-size:10px;color:var(--muted)}.cs-inbox-preview{font-size:12px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere}.cs-inbox-tags{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.cs-inbox-source{min-width:190px;font-size:11px}.cs-inbox-detail{min-width:0}.cs-inbox-contact{padding:10px 4px}.cs-inbox-more{width:100%;margin-top:8px}.cs-inbox-work{margin-top:16px}.cs-inbox-work>summary{margin-bottom:14px}.cs-inbox-detail>.cs-conversation{margin-top:10px}.cs-heading-row nav{flex-wrap:wrap}
+@media(max-width:850px){.cs-inbox{grid-template-columns:1fr}.cs-inbox-list{position:static;max-height:340px}.cs-heading-row nav{grid-template-columns:repeat(5,1fr)}.cs-inbox-source{min-width:150px}}
+.cs-inbox-transcript{max-height:calc(100vh - 310px);min-height:360px;overflow:auto;overscroll-behavior:contain;border-radius:16px}.cs-inbox-transcript>.cs-conversation{min-height:360px}.cs-inbox-transcript+.cs-inbox-work{margin-top:16px}@media(max-width:850px){.cs-inbox-transcript{max-height:70vh}}
+
+/* Source events belong to the timeline, never to a customer message bubble. */
+.cs-system-event { margin: 12px auto; max-width: 90%; padding: 6px 12px; text-align: center; color: #647067; background: #f2f4f1; border: 1px solid #e2e7e1; border-radius: 8px; font-size: 12px; }
+.cs-system-event summary { cursor: pointer; font-weight: 500; }
+.cs-system-event p { margin: 8px 0; }
+.cs-message.system { margin-left: auto; margin-right: auto; }
+.cs-message.system .cs-avatar { display: none; }
+
+/* Native inbox: compact customer-left / outgoing-right message rhythm. */
+.cs-chat { background: #f7f8f6; padding: 16px; }
+.cs-chat-tools { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+.cs-chat-tools button { padding: 3px 8px; font-size: 11px; background: transparent; border-color: transparent; color: var(--muted); }
+.cs-chat .cs-message { width: fit-content; max-width: min(76%, 720px); gap: 8px; margin: 10px 0; align-items: flex-start; }
+.cs-chat .cs-message.continued { margin-top: -4px; }
+.cs-chat .cs-message.continued .cs-avatar { visibility: hidden; }
+.cs-chat .cs-message.outgoing { margin-left: auto; flex-direction: row-reverse; }
+.cs-chat .cs-message-body { min-width: 0; display: flex; flex-direction: column; align-items: flex-start; }
+.cs-chat .outgoing .cs-message-body { align-items: flex-end; }
+.cs-chat .cs-message-meta { font-size: 11px; margin-bottom: 3px; }
+.cs-chat .outgoing .cs-message-meta { text-align: right; }
+.cs-chat .cs-bubble { width: fit-content; max-width: 100%; padding: 8px 11px 5px; background: #fff; border: 1px solid #e5e8e3; border-radius: 3px 12px 12px 12px; line-height: 1.5; box-shadow: 0 1px 2px #18241508; }
+.cs-chat .outgoing .cs-bubble { background: #e7f5dc; border-color: #dbeacc; border-radius: 12px 3px 12px 12px; }
+.cs-chat .cs-message-time { display: block; font-size: 10px; line-height: 1.4; text-align: right; color: #68776c; margin-top: 3px; white-space: nowrap; }
+.cs-chat .cs-avatar { width: 27px; height: 27px; background: #f2edce; }
+.cs-chat .outgoing .cs-avatar { background: #e3e9f5; }
+.cs-chat .automatic .cs-avatar { background: #deebd8; }
+.cs-chat .cs-source-reference { border: 0; padding: 3px 0; font-size: 11px; }
+.cs-chat .cs-source-reference p { margin: 5px 0; }
+.cs-day-divider { display: flex; align-items: center; gap: 12px; margin: 18px 0 12px; color: #647067; font-size: 12px; }
+.cs-day-divider::before, .cs-day-divider::after { content: ''; height: 1px; background: #dde3db; flex: 1; }
+.cs-day-divider span { background: #e9ede6; padding: 4px 12px; border-radius: 12px; }
+.cs-thread-divider { text-align: center; color: #647067; font-size: 12px; margin: 10px 0; }
+.cs-chat .cs-system-event { width: fit-content; max-width: 90%; padding: 3px 10px; margin: 7px auto; border: 0; background: #edf0e9; border-radius: 14px; font-size: 11px; }
+@media(max-width:760px) { .cs-chat { padding: 10px; } .cs-chat .cs-message { max-width: 90%; } }
+
+.cs-chat .cs-reply-context { margin: 0 0 6px; padding: 6px 9px; border-left: 3px solid #9aafbf; border-radius: 4px; background: #00000006; font-size: 12px; }
+.cs-chat .cs-reply-context small { color: #526574; }
+.cs-chat .cs-reply-context > div { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; white-space: pre-wrap; }
+
+.cs-template-options { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.cs-template-options span { border: 1px solid #cbd5c5; border-radius: 5px; padding: 3px 7px; font-size: 12px; }
+
+/* Daily request work: customer context and actions remain together. */
+.cs-compact-header {padding: 12px 18px;margin-bottom:12px;}
+.cs-compact-header .cs-filter-row {margin-top:8px;padding-top:8px;}
+.cs-compact-header .cs-person,.cs-compact-header .cs-period,.cs-compact-header .cs-date-shortcuts {display:none;}
+.cs-request-queues {margin-bottom:16px;}
+.cs-request-queues nav {display:flex;gap:8px;margin-bottom:10px;}
+.cs-request-queues nav button[aria-pressed="true"] {background:#17243a;color:white;}
+.cs-request-strip {display:flex;gap:8px;overflow:auto;max-height:140px;}
+.cs-request-strip button {display:flex;flex-direction:column;gap:4px;text-align:left;min-width:220px;max-width:300px;flex-shrink:0;}
+.cs-request-strip button span {overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+.cs-conversation-workspace {display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:12px;align-items:start;}
+.cs-request-work {padding:14px;position:sticky;top:12px;max-height:75vh;overflow:auto;}
+.cs-request-work form,.cs-request-work label {display:flex;flex-direction:column;gap:6px;}
+.cs-request-work form {gap:12px;}
+.cs-request-work input[type="checkbox"] {width:auto;align-self:flex-start;}
+.cs-request-work p {font-size:13px;margin:8px 0;}
+.cs-request-work select,.cs-request-work input {width:100%;min-width:0;}
+.cs-message-request {font-size:11px;padding:3px 6px;opacity:.7;}
+.cs-message-request:hover,.cs-message-request:focus {opacity:1;}
+@media(max-width:1200px){.cs-inbox {grid-template-columns:240px minmax(0,1fr);}.cs-conversation-workspace{grid-template-columns:minmax(0,1fr);}.cs-request-work{position:static;max-height:none;}.cs-inbox-transcript{max-height:55vh;}}
+@media(max-width:700px){.cs-inbox{grid-template-columns:1fr;}.cs-request-queues nav{flex-wrap:wrap;}}
+
+/* One inbox: navigation beside history, with actions alongside the conversation. */
+.cs-inbox{grid-template-columns:240px minmax(0,1fr);gap:10px;}
+.cs-inbox-list{border-radius:10px;max-height:calc(100vh - 200px);}
+.cs-inbox-mode{display:flex;gap:4px;margin-bottom:10px;}
+.cs-inbox-mode button{flex:1;padding:7px 6px;font-size:12px;}
+.cs-inbox-mode button[aria-pressed=true]{background:#eaf2ff;border-color:#b9cdec;}
+.cs-inbox-list .cs-toolbar{gap:8px;margin-bottom:10px;}
+.cs-inbox-list .cs-toolbar h2{font-size:18px;}
+.cs-inbox-list .cs-toolbar>label{width:100%;font-size:11px;}
+.cs-inbox-list .cs-toolbar select{padding:6px 8px;font-size:12px;}
+.cs-inbox-list .cs-request-queues{margin:0;}
+.cs-inbox-list .cs-request-queues nav{flex-direction:column;gap:4px;}
+.cs-inbox-list .cs-request-queues nav button{justify-content:flex-start;padding:8px;font-size:12px;}
+.cs-inbox-list .cs-request-strip{display:flex;flex-direction:column;max-height:none;overflow:visible;}
+.cs-inbox-list .cs-request-strip button{min-width:0;max-width:none;width:100%;padding:10px;font-size:12px;}
+.cs-inbox-contact{margin-bottom:8px;padding:4px;gap:6px;}
+.cs-inbox-contact .cs-form-actions{gap:4px;margin:0;}
+.cs-inbox-contact button{padding:6px 8px;font-size:11px;}
+.cs-conversation-workspace{grid-template-columns:minmax(0,1fr) 260px;gap:8px;}
+.cs-request-work{position:sticky;top:8px;padding:12px;border-radius:10px;max-height:calc(100vh - 260px);}
+.cs-request-work h3{font-size:15px;margin-bottom:8px;}
+.cs-request-work form{gap:8px;}
+.cs-request-work label{font-size:12px;gap:4px;}
+.cs-inbox-transcript{max-height:calc(100vh - 260px);min-height:280px;border-radius:10px;}
+.cs-inbox-transcript>.cs-conversation{padding:10px;min-height:280px;}
+.cs-compact-header .cs-heading-row{padding-bottom:8px;gap:16px;}
+.cs-compact-header .cs-filter-row{padding:6px 0;margin:0;}
+.cs-chat .cs-message{margin-top:8px;margin-bottom:8px;}
+.cs-chat .cs-message-request{padding:2px 4px;margin-top:2px;font-size:10px;}
+@media(max-width:1100px){.cs-inbox{grid-template-columns:205px minmax(0,1fr);}.cs-conversation-workspace{grid-template-columns:minmax(0,1fr) 230px;}.cs-chat{padding:8px;}.cs-chat .cs-message{max-width:94%;}}
+@media(max-width:850px){.cs-inbox{grid-template-columns:180px minmax(0,1fr);}.cs-conversation-workspace{grid-template-columns:minmax(0,1fr);}.cs-request-work{position:static;max-height:none;}.cs-inbox-list{max-height:70vh;}.cs-inbox-transcript{max-height:55vh;}}
+@media(max-width:600px){.cs-inbox{grid-template-columns:1fr;}.cs-inbox-list{max-height:280px;}}

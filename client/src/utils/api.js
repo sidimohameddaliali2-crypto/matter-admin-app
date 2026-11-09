@@ -44,6 +44,8 @@ api.interceptors.request.use(
 // Handle responses and errors
 api.interceptors.response.use(
   (response) => {
+    const rotated = response.headers?.['x-customer-service-session'];
+    if (typeof rotated === 'string' && rotated.startsWith('cs-sb.') && localStorage.getItem('token')?.startsWith('cs-sb.')) localStorage.setItem('token', rotated);
     return response;
   },
   (error) => {

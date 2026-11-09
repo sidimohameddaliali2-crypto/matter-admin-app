@@ -1,3 +1,4 @@
+import {cloudWorkflowModel} from '../services/customerServiceCloudWorkflow.js';
 import mongoose from 'mongoose';
 import { SERVICE_RUBRIC_VERSION, SERVICE_TAXONOMY_VERSION } from '../config/customerServiceCategories.js';
 const { Schema } = mongoose;
@@ -21,4 +22,4 @@ const schema = new Schema({
 schema.index({ issueId: 1, sampleKey: 1 }, { unique: true });
 schema.index({ reviewerId: 1, status: 1, assignedAt: 1 });
 schema.index({ reviewerId: 1 }, { unique: true, partialFilterExpression: { status: 'in_review' }, name: 'one_active_service_review_per_reviewer' });
-export default mongoose.models.ServiceReview || mongoose.model('ServiceReview', schema);
+export default cloudWorkflowModel(mongoose.models.ServiceReview || mongoose.model('ServiceReview', schema));

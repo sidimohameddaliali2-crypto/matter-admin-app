@@ -1,3 +1,5 @@
+import {cloudInbox} from './customerServiceCloudStore.js';
+import {readCloudEvidence,cloudConversationIdsInRange} from './customerServiceCloudEvidence.js';
 import XLSX from 'xlsx';
 import ServiceIssue from '../models/ServiceIssue.js';
 import ServiceReview from '../models/ServiceReview.js';
@@ -9,7 +11,8 @@ import ServiceCaptureBatch from '../models/ServiceCaptureBatch.js';
 import { captureRange, safeSheetText } from './customerServiceCaptureFormat.js';
 
 const id=v=>String(v?._id||v||'');
-export async function getServiceSnapshot({userId,supervise,filters={}}) {
+export const SERVICE_REPORT_ISSUE_LIMIT=10000;
+export async function getServiceIssueFilter({userId,supervise,filters={}}) {
   const range=captureRange(filters);
   let filter={};
   if(filters.categoryId) filter.categoryIds=String(filters.categoryId);
@@ -18,17 +21,20 @@ export async function getServiceSnapshot({userId,supervise,filters={}}) {
     filter.$or=['customerName','customerId','summary'].map(key=>({[key]:{$regex:escaped,$options:'i'}}));
   }
   if(range.from) {
-    const conversations=await ServiceMessage.distinct('conversationId',{sentAt:{$gte:range.from,$lt:range.to}});
+    const conversations=cloudInbox()?await cloudConversationIdsInRange(range):await ServiceMessage.distinct('conversationId',{sentAt:{$gte:range.from,$lt:range.to}});
     if(conversations.length>10000) throw Object.assign(new Error('Narrow the report date range'),{statusCode:422});
     filter.$and=[{$or:[{episodeFrom:{$lt:range.to},episodeTo:{$gte:range.from}},{episodeFrom:null,conversationId:{$in:conversations}}]}];
   }
   if(!supervise) {
-    const ownReviews=await ServiceReview.find({reviewerId:userId}).select('issueId').limit(10001).lean();
-    const ownActions=await ServiceAction.find({ownerId:userId}).select('issueId').limit(10001).lean();
-    filter._id={$in:[...ownReviews,...ownActions].map(r=>r.issueId)};
+    const [ownReviews,ownActions]=await Promise.all([ServiceReview.distinct('issueId',{reviewerId:userId}),ServiceAction.distinct('issueId',{ownerId:userId})]);
+    filter._id={$in:[...ownReviews,...ownActions]};
   }
-  const issues=await ServiceIssue.find(filter).sort({updatedAt:-1}).limit(5001).lean();
-  if(issues.length>5000) throw Object.assign(new Error('Report exceeds 5000 issues; narrow the date range'),{statusCode:422});
+  return filter;
+}
+export async function getServiceSnapshot({userId,supervise,filters={}}) {
+  const filter=await getServiceIssueFilter({userId,supervise,filters});
+  const issues=await ServiceIssue.find(filter).sort({updatedAt:-1}).limit(SERVICE_REPORT_ISSUE_LIMIT+1).lean();
+  if(issues.length>SERVICE_REPORT_ISSUE_LIMIT) throw Object.assign(new Error(`Report exceeds ${SERVICE_REPORT_ISSUE_LIMIT} issues; narrow the date range`),{statusCode:422});
   const issueIds=issues.map(x=>x._id);
   const [reviews,actions,profiles,capture]=await Promise.all([
     ServiceReview.find({issueId:{$in:issueIds},...(!supervise?{reviewerId:userId}:{})}).lean(),
@@ -60,7 +66,7 @@ export function summarizeServiceSnapshot(snapshot) {
   }
   return {asOf,reviewWorkload:workload,actions:{open:open.length,overdue:open.filter(overdue).length,unassigned:open.filter(a=>!a.ownerId).length},
     quality,coverage:{eligible:issues.length,reviewed:new Set(reviews.filter(r=>r.revisions?.length).map(r=>id(r.issueId))).size,insufficient:reviews.filter(r=>latest(r).verdict==='insufficient').length,provisional:reviews.filter(r=>latest(r).provisional).length,stale:reviews.filter(r=>r.stale).length},
-    capture:{lastSuccessAt:capture?.createdAt||null,from:capture?.from||null,to:capture?.to||null,status:capture?'Dated import; live coverage not verified':snapshot.supervise===false?'Source capture details available to supervisor':'No capture yet'}};
+    capture:{lastSuccessAt:capture?.createdAt||null,from:capture?.from||null,to:capture?.to||null,status:capture?(capture.source==='gallabox'?'Gallabox capture; see automatic sync status for progress. Historical coverage remains partial':'Dated import; live coverage not verified'):snapshot.supervise===false?'Source capture details available to supervisor':'No capture yet'}};
 }
 const clean=rows=>rows.map(row=>Object.fromEntries(Object.entries(row).map(([k,v])=>[k,typeof v==='string'?safeSheetText(v):v??''])));
 export async function buildServiceWorkbook(snapshot) {
@@ -71,7 +77,7 @@ export async function buildServiceWorkbook(snapshot) {
   if(!issues.length) messageFilter._id={$in:[]};
   if(!issues.length) delete messageFilter.$or;
   if(range.from) messageFilter.$and=[{sentAt:{$gte:range.from,$lt:range.to}}];
-  const messages=await ServiceMessage.find(messageFilter).sort({sentAt:1,_id:1}).limit(50001).lean();
+  const messages=cloudInbox()?await readCloudEvidence(messageFilter):await ServiceMessage.find(messageFilter).sort({sentAt:1,_id:1}).limit(50001).lean();
   if(messages.length>50000) throw Object.assign(new Error('Export exceeds 50000 messages; narrow the date range'),{statusCode:422});
   const book=XLSX.utils.book_new();
   const sheets={

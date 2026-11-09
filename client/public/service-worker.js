@@ -2,6 +2,8 @@
 
 const CACHE_NAME = 'delivery-tracker-v5-bag-reminders';
 const OFFLINE_URL = '/driver-mobile';
+const isCustomerServiceRequest = (url) => url.origin === location.origin
+  && /^\/api\/customer-service(?:-capture)?(?:\/|$)/.test(url.pathname);
 
 // Assets to cache on install
 const STATIC_ASSETS = [
@@ -35,11 +37,17 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     caches.keys().then((cacheNames) => {
       return Promise.all(
-        cacheNames.map((cacheName) => {
+        cacheNames.map(async (cacheName) => {
           if (cacheName !== CACHE_NAME) {
             console.log('[Service Worker] Deleting old cache:', cacheName);
             return caches.delete(cacheName);
           }
+          // Keep delivery/offline work intact, but remove service evidence saved
+          // by earlier workers. Cache API ignores HTTP Cache-Control: no-store.
+          const cache = await caches.open(cacheName);
+          const requests = await cache.keys();
+          await Promise.all(requests.filter(request => isCustomerServiceRequest(new URL(request.url)))
+            .map(request => cache.delete(request)));
         })
       );
     }).then(() => {
@@ -56,6 +64,16 @@ self.addEventListener('fetch', (event) => {
 
   // Skip cross-origin requests
   if (url.origin !== location.origin) {
+    return;
+  }
+
+  // Service membership and evidence must be checked by the server on every
+  // request. Never replay another account's cached case, or queue a mutation.
+  if (isCustomerServiceRequest(url)) {
+    event.respondWith(fetch(request, { cache: 'no-store' }).catch(() => new Response(
+      JSON.stringify({ success: false, offline: true, message: 'Customer service could not confirm the result. Reconnect, check saved work, and retry if needed.' }),
+      { status: 503, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } }
+    )));
     return;
   }
 

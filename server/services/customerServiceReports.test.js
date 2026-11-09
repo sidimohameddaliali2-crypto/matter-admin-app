@@ -144,3 +144,4 @@ test('impossible message calendar dates cannot silently roll into another servic
     assert.throws(() => normalizeServiceMessage({ ...base, sentAt }, { source: 'fixture', scope: 'isolated' }), /date|time/i, sentAt);
   }
 });
+test('native recent capture never implies dated or complete coverage',()=>{const fixture=reportFixture();fixture.capture={source:'gallabox',createdAt:asOf};const report=summarizeServiceSnapshot(fixture);assert.match(report.capture.status,/Gallabox.*partial/i);assert.equal(report.capture.from,null);assert.equal(report.capture.to,null);});

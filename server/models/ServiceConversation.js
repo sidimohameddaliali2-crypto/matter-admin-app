@@ -10,4 +10,5 @@ const schema = new Schema({
   sourceMetadata: Schema.Types.Mixed,
 }, { timestamps: true });
 schema.index({ source: 1, scope: 1, externalConversationId: 1 }, { unique: true });
+schema.index({ source: 1, lastMessageAt: -1, _id: -1 });
 export default mongoose.models.ServiceConversation || mongoose.model('ServiceConversation', schema);

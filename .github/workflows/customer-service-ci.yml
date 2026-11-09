@@ -3,7 +3,7 @@ on:
   pull_request:
     paths: ['server/**', 'client/**', '.github/workflows/customer-service-ci.yml']
   push:
-    branches: ['codex/customer-service-review-workflow']
+    branches: ['codex/customer-service-review-workflow', 'codex/pr45-local-gallabox-cache-fix']
 permissions:
   contents: read
 jobs:
@@ -25,12 +25,20 @@ jobs:
           for n in $(seq 1 30); do docker exec service-mongo mongosh --quiet --eval 'db.runCommand({ping:1})' && break || sleep 2; done
           docker exec service-mongo mongosh --quiet --eval 'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
           for n in $(seq 1 30); do docker exec service-mongo mongosh --quiet --eval 'if(!db.hello().isWritablePrimary)quit(1)' && break || sleep 1; done
+      - name: Isolated cloud-workflow Postgres
+        run: |
+          docker run -d --name service-postgres -p 65436:5432 -e POSTGRES_USER=gallabox_test -e POSTGRES_HOST_AUTH_METHOD=trust postgres:16
+          for n in $(seq 1 30); do docker exec service-postgres pg_isready -U gallabox_test && break || sleep 1; done
+          docker exec service-postgres psql -U gallabox_test -d postgres -c "CREATE ROLE anon; CREATE ROLE authenticated; CREATE ROLE service_role;"
+          command -v psql || (sudo apt-get update && sudo apt-get install -y postgresql-client)
+          sudo mkdir -p /opt/homebrew/bin
+          sudo ln -s "$(command -v psql)" /opt/homebrew/bin/psql
       - name: Focused service tests
-        working-directory: server
         env:
           CUSTOMER_SERVICE_TEST_MONGODB_URI: mongodb://127.0.0.1:27017/matter_customer_service_ci?replicaSet=rs0
           CUSTOMER_SERVICE_TEST_ISOLATED: 'true'
-        run: node --test services/customerService*.test.js tests/customerService*.integration.test.js
+          CUSTOMER_SERVICE_CLOUD_TEST: 'true'
+        run: node --test server/services/customerService*.test.js server/tests/customerService*.integration.test.js
   client:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -92,7 +100,10 @@ jobs:
           CUSTOMER_SERVICE_TEST_MONGODB_URI: mongodb://127.0.0.1:27017/matter_customer_service_ci?replicaSet=rs0
           CUSTOMER_SERVICE_TEST_ISOLATED: 'true'
           PLAYWRIGHT_MODULE: /tmp/matter-browser/node_modules/playwright/index.mjs
-        run: node tests/customerService.browser.mjs
+        run: |
+          node tests/customerService.browser.mjs
+          node tests/customerServiceCache.browser.mjs
+          node tests/customerServiceMedia.browser.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
