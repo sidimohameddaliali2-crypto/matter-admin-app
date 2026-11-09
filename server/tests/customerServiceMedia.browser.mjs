@@ -57,7 +57,7 @@ try {
  const {chromium}=await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{})});const context=await browser.newContext();
  await context.addInitScript(({token,user})=>{localStorage.setItem('token',token);localStorage.setItem('user',JSON.stringify(user));window.revokedMedia=[];const original=URL.revokeObjectURL.bind(URL);URL.revokeObjectURL=url=>{window.revokedMedia.push(url);original(url);};},{token:token(users[0]),user:JSON.parse(JSON.stringify(users[0]))});
  const page=await context.newPage();const requests=[];page.on('request',r=>requests.push(r.url()));
- await page.goto(`${base}/customer-service/chats`);await page.getByRole('button',{name:'Load audio',exact:true}).click();await page.getByRole('alert').filter({hasText:/unavailable or expired/}).waitFor();
+ await page.goto(`${base}/customer-service/reviews`);await page.getByRole('button',{name:'Load audio',exact:true}).click();await page.getByRole('alert').filter({hasText:/unavailable or expired/}).waitFor();
  await page.getByText('Private fixture note',{exact:true}).waitFor();
  assert.equal(await page.locator('.cs-message-meta').filter({hasText:'Internal note'}).count(),1);assert.equal(await page.locator('.cs-wait').count(),0,'Internal note never stops the customer reply clock');
  assert.ok(!(await page.locator('.cs-evidence').innerText()).includes('Private fixture note'),'Internal note cannot be selected as grading evidence');
@@ -72,7 +72,7 @@ try {
  const detail=await fetch(`${base}/api/customer-service/issues/${issue._id}`,{headers:{Authorization:`Bearer ${token(users[0])}`}}).then(r=>r.text());assert.ok(!detail.includes('files.gallabox.com'));assert.ok(!requests.some(url=>url.includes('files.gallabox.com')),'Browser never requests provider URLs');
  const mediaResponse=await fetch(endpoint,{headers:{Authorization:`Bearer ${token(users[0])}`}});assert.equal(mediaResponse.status,200);assert.match(mediaResponse.headers.get('cache-control'),/no-store/);assert.equal(mediaResponse.headers.get('x-content-type-options'),'nosniff');
  await page.getByRole('navigation',{name:'Customer service pages'}).getByRole('link',{name:'Summary',exact:true}).click();await page.waitForFunction(()=>window.revokedMedia.length>=2);
- await page.goto(`${base}/customer-service/chats`);await page.getByRole('button',{name:'Load audio',exact:true}).waitFor();assert.equal(await page.locator('audio').count(),0,'Reload never restores a private media blob');
+ await page.goto(`${base}/customer-service/reviews`);await page.getByRole('button',{name:'Load audio',exact:true}).waitFor();assert.equal(await page.locator('audio').count(),0,'Reload never restores a private media blob');
  console.log('PASS: internal note labeled/excluded from reply clocks, grading and promises; Today defaults; real audio playback advances, image decodes, expired source retry succeeds, issue-scoped outsider denied, no provider URLs/cache, blobs revoked, reload resets playback, metadata-only refresh preserves revisions/reviews.');
 } finally {
  await browser?.close();if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}
