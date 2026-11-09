@@ -56,7 +56,7 @@ const NAV_ITEMS = [
   { name: 'Menus', href: '/menus', icon: Menu, permission: 'menus', group: 'Kitchen & Menus' },
   { name: 'Meals', href: '/admin/meal-selection-v2/meals', icon: Menu, permission: 'menus', group: 'Menu Creation' },
   { name: 'Cycle Menu', href: '/admin/meal-selection-v2/weekly-menu', icon: Calendar, permission: 'menus', group: 'Menu Creation' },
-  { name: 'Recipes', href: '/admin/meal-selection-v2/recipes', icon: UtensilsCrossed, permission: 'menus', group: 'Menu Creation' },
+  { name: 'Components', href: '/admin/meal-selection-v2/components', icon: UtensilsCrossed, permission: 'menus', group: 'Menu Creation' },
   { name: 'Kitchen List', href: '/kitchen-list', icon: UtensilsCrossed, permission: 'kitchen_list', group: 'Kitchen & Menus' },
   { name: 'Kitchen Counting', href: '/kitchen-counting', icon: BarChart3, permission: 'kitchen_counting', group: 'Kitchen & Menus' },
   { name: 'Matter Core', href: '/matter-core', icon: FileText, permission: 'matter_core', group: 'Kitchen & Menus' },
