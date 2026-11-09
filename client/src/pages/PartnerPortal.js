@@ -154,10 +154,10 @@ const PartnerPortal = () => {
   const todayISO = toISO(new Date());
 
   // ── loaders ───────────────────────────────────────────────────────────────
-  const loadMenu = useCallback(async (date) => {
+  const loadMenu = useCallback(async (date, orderId) => {
     setMenuLoading(true);
     try {
-      const res = await partnerApi.get(`/partner/menu?date=${date}`);
+      const res = await partnerApi.get(`/partner/menu?date=${date}${orderId ? '&orderId=' + encodeURIComponent(orderId) : ''}`);
       setMenu(res.data.data || []);
     } catch {
       setMenu([]);
@@ -211,7 +211,7 @@ const PartnerPortal = () => {
   const anchorDate = sortedSelected[0] || firstOrderableISO();
 
   useEffect(() => { loadOrders(); }, [loadOrders]);
-  useEffect(() => { if (tab === 'order' && editing) loadMenu(anchorDate); }, [tab, anchorDate, loadMenu, editing]);
+  useEffect(() => { if (tab === 'order' && editing) loadMenu(anchorDate, editing.id); }, [tab, anchorDate, loadMenu, editing]);
   useEffect(() => { if (tab === 'profile' && !reports) loadReports(); }, [tab, reports, loadReports]);
   useEffect(() => { if (tab === 'members') loadMembers(); }, [tab, loadMembers]);
 
@@ -283,6 +283,7 @@ const PartnerPortal = () => {
     setEditing({ id: o._id, date, ref: `PO-${String(o._id).slice(-4).toUpperCase()}`, originalIds: Object.keys(next) });
     setSelectedDates(new Set([date]));
     setCart(next);
+    setMenu([]);
     setDeliveryWindow(DELIVERY_WINDOWS.includes(o.deliveryTime) ? o.deliveryTime : DELIVERY_WINDOWS[0]);
     setOrderErr('');
     setSheet(null);
@@ -354,7 +355,9 @@ const PartnerPortal = () => {
     }
   };
 
+  const cartNotReady = menuLoading || Object.keys(cart).some(id => cart[id] > 0 && !menu.some(item => String(item._id) === id));
   const openCheckout = () => {
+    if (cartNotReady) { setOrderErr('All ordered items must load before checkout. Please retry loading this order.'); return; }
     if (subtotal < minOrder) {
       setOrderErr(`Minimum order is AED ${fmtAED(minOrder)} — you're at AED ${fmtAED(subtotal)}.`);
       return;
@@ -364,6 +367,7 @@ const PartnerPortal = () => {
   };
 
   const placeOrder = async () => {
+    if (cartNotReady) { setOrderErr('All ordered items must load before saving. Please retry loading this order.'); return; }
     if (subtotal < minOrder) {
       setOrderErr(`Minimum order is AED ${fmtAED(minOrder)} — you're at AED ${fmtAED(subtotal)}.`);
       return;
@@ -404,6 +408,7 @@ const PartnerPortal = () => {
     const failResults = results.filter((r) => !r.ok);
     if (okResults.length > 0) {
       setDone({
+        sameWindow: true,
         count: okResults.length,
         days: okResults.map((r) => fmtDay(r.date)),
         win: deliveryWindow,

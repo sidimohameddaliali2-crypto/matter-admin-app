@@ -381,3 +381,37 @@ test('admin creates and edits manual items without date windows and retains sync
   assert.equal(saved.availableFrom, DAY);
   assert.equal(saved.availableTo, DAY);
 });
+
+
+test('editing keeps referenced duplicate IDs and prices, and explicit removal deletes the original line', async t => {
+  const f = fixtures(t);
+  Object.assign(f.item, {name: 'Chicken Quinoa', source: 'menu-selection', mealType: 'main', category: 'Chicken'});
+  const canonical = doc({...f.item, _id: '111111111111111111111111', name: 'CHICKEN QUINOA'});
+  const other = doc({_id: 'dddddddddddddddddddddddd', name: 'Snack', mealType: 'snack', source: 'manual', price: 20, isAvailable: true});
+  Menu.find.mock.mockImplementation(() => query([{menuItem: canonical}, {menuItem: f.item}, {menuItem: other}]));
+  Price.aggregate.mock.mockImplementation(async () => [{_id: ITEM, price: 40}]);
+  const normal = await call(partnerRouter, 'get', '/menu', {query: {date: DAY}});
+  assert.equal(normal.body.data.some(item => String(item._id) === ITEM), false);
+  const editor = await call(partnerRouter, 'get', '/menu', {query: {date: DAY, orderId: ORDER}});
+  assert.equal(editor.code, 200);
+  assert.deepEqual(editor.body.data.filter(item => item.mealType === 'main').map(item => String(item._id)), [ITEM]);
+  assert.equal(editor.body.data.find(item => String(item._id) === ITEM).price, 40);
+  let response = await call(partnerRouter, 'post', '/orders', {body: {deliveryDate: DAY, lines: [{menuItemId: ITEM, quantity: 3}]}});
+  assert.equal(response.code, 200);
+  assert.equal(f.lines().find(line => line.menuItem === ITEM).quantity, 3);
+  response = await call(partnerRouter, 'post', '/orders', {body: {deliveryDate: DAY, lines: [{menuItemId: ITEM, quantity: 0}, {menuItemId: other._id, quantity: 5}]}});
+  assert.equal(response.code, 200);
+  assert.deepEqual(f.lines().map(line => [line.menuItem, line.quantity]), [[other._id, 5]]);
+  // Orders that already contain both copies must expose both independently.
+  Line.find.mock.mockImplementation(() => query([{menuItem: ITEM}, {menuItem: canonical._id}]));
+  const both = await call(partnerRouter, 'get', '/menu', {query: {date: DAY, orderId: ORDER}});
+  assert.deepEqual(both.body.data.filter(item => item.mealType === 'main').map(item => String(item._id)), [canonical._id, ITEM]);
+});
+
+test('an edit menu validates order ownership and matching delivery date', async t => {
+  const f = fixtures(t);
+  Order.findOne.mock.mockImplementation(filter => query(filter._id === ORDER && filter.space === SPACE ? f.order : null));
+  assert.equal((await call(partnerRouter, 'get', '/menu', {query: {date: DAY, orderId: ORDER}, partner: {_id: 'eeeeeeeeeeeeeeeeeeeeeeee'}})).code, 404);
+  assert.equal((await call(partnerRouter, 'get', '/menu', {query: {date: '2099-01-06', orderId: ORDER}})).code, 400);
+  assert.equal((await call(partnerRouter, 'get', '/menu', {query: {date: DAY, orderId: 'bad'}})).code, 400);
+});

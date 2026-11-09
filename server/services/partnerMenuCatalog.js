@@ -8,15 +8,21 @@ export const partnerMenuView = item => {
   return value.source === 'menu-selection' ? value : { ...value, availableFrom: null, availableTo: null };
 };
 
-// Filter for the partner and date first. Keep a stable existing ID for legacy
-// casing duplicates, preserving order references and per-partner prices.
-export const uniquePartnerMenuItems = items => {
+// Filter for the partner/date first. During editing prefer the order's IDs,
+// retaining every referenced duplicate so each original line stays editable.
+export const uniquePartnerMenuItems = (items, referencedIds = []) => {
+  const referenced = new Set(referencedIds.map(String));
   const seen = new Set();
-  return [...items].sort((a, b) => String(a._id).localeCompare(String(b._id))).filter(item => {
+  const seenIds = new Set();
+  return [...items].sort((a, b) => Number(referenced.has(String(b._id))) - Number(referenced.has(String(a._id)))
+    || String(a._id).localeCompare(String(b._id))).filter(item => {
+    const id = String(item._id);
+    if (seenIds.has(id)) return false;
+    seenIds.add(id);
     const key = item.source === 'menu-selection' && item.mealType === 'main'
       ? 'main|' + partnerMenuNameKey(item.name) + '|' + partnerMenuNameKey(item.category)
-      : 'id|' + String(item._id);
-    if (seen.has(key)) return false;
+      : 'id|' + id;
+    if (seen.has(key) && !referenced.has(id)) return false;
     seen.add(key);
     return true;
   });
