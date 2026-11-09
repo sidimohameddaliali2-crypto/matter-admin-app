@@ -105,6 +105,9 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
       day = { ...day, reviewed: true, error: '' };
       const days = plan.days.map((d, i) => i === plan.index ? day : d);
       const next = days.findIndex(d => !d.reviewed);
+      // Each next day starts with a fresh selection, even after returning to
+      // a previous day. Confirmed orders remain in the final checkout.
+      if (next >= 0 && !days[next].placed) days[next] = { ...days[next], items: {}, skipped: false, error: '' };
       setPlan(p => ({ ...p, days, index: next < 0 ? p.index : next, phase: next < 0 ? 'review' : 'days' }));
       setError('');
     } catch (err) { setError(err.message); }
