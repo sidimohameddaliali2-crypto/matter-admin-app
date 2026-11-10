@@ -3623,8 +3623,8 @@ router.put('/:menuId/selections/:email', protect, async (req, res) => {
       : String(nutrition.customer_email || '').trim().toLowerCase() !== String(profileEmail || '').trim().toLowerCase())) {
       return res.status(409).json({ success: false, message: 'Could not save your selections.' });
     }
-    const checkedSelections = await validatedMenuSelections({ menuId, selections, nutrition });
-    const normalizedSelections = checkedSelections.map((sel) => ({
+    const checkedSelections = await validatedMenuSelections({ menuId, selections, nutrition, staffRecord: existingRecord });
+    const normalizedSelections = checkedSelections.map((sel) => sel.isAutoAssigned ? sel : ({
       date: sel.date,
       mealType: sel.mealType,
       menuItemId: toMenuItemId(sel.menuItemId),

@@ -315,6 +315,7 @@ const KitchenList = () => {
   const [importName, setImportName] = useState('');
   const [mealTypeOverrides, setMealTypeOverrides] = useState({});
   const [savingOverrideKey, setSavingOverrideKey] = useState('');
+  const overrideInFlight = useRef(false);
   // Day-note draft text (per customer, per date) now lives as local state
   // inside CustomerCard itself, not here — see the note on that component
   // for why. savingDayNoteKey is the one piece that still needs to live at
@@ -1188,40 +1189,46 @@ const KitchenList = () => {
   // props by reference, and a fresh function identity every time would make
   // every card "changed" on every render regardless of the memo.
   const persistMealTypeOverride = useCallback(async ({ entry, meal, index, value }) => {
+    if (overrideInFlight.current || !selectedMenuId) return;
     const key = meal?._overrideKey || buildMealOverrideKey(entry, meal, index);
     const normalizedValue = String(value || '').trim().toLowerCase();
-
-    setMealTypeOverrides((prev) => ({ ...prev, [key]: normalizedValue }));
-
-    let updatedSelections = null;
-    setMenuSelections((prev) => prev.map((row) => {
+    const sameCustomer = row => {
+      if (row._id && entry._id) return String(row._id) === String(entry._id);
       const sameEmail = String(row?.email || '').trim().toLowerCase() === String(entry?.email || '').trim().toLowerCase();
-      if (!sameEmail) return row;
-
-      const nextMeals = (row.selectedMeals || []).map((rowMeal, rowIndex) => {
-        const rowKey = rowMeal?._overrideKey || buildMealOverrideKey(row, rowMeal, rowIndex);
-        if (rowKey !== key) return rowMeal;
-        return { ...rowMeal, manualProteinType: normalizedValue };
-      });
-
-      updatedSelections = nextMeals;
-      return { ...row, selectedMeals: nextMeals };
-    }));
-
-    if (!updatedSelections || !selectedMenuId) return;
-
+      return sameEmail && String(row.matterCustomerId || '') === String(entry.matterCustomerId || '');
+    };
+    const row = menuSelections.find(sameCustomer);
+    if (!row) return;
+    let found = false;
+    const updatedSelections = (row.selectedMeals || []).map((rowMeal, rowIndex) => {
+      if ((rowMeal?._overrideKey || buildMealOverrideKey(row, rowMeal, rowIndex)) !== key) return rowMeal;
+      found = true;
+      return { ...rowMeal, manualProteinType: normalizedValue };
+    });
+    if (!found) return;
+    const scope = activeSelectionScope.current;
+    overrideInFlight.current = true;
     try {
       setSavingOverrideKey(key);
-      await api.put(`/menus/${selectedMenuId}/selections/${encodeURIComponent(entry.email)}`, {
+      setError('');
+      const response = await api.put(`/menus/${selectedMenuId}/selections/${encodeURIComponent(entry.email)}`, {
         matterCustomerId: entry.matterCustomerId,
         selections: updatedSelections.map(normalizeSelectionForSave)
       });
+      if (!response.data?.success) throw new Error(response.data?.message || 'Failed to save meal type override');
+      if (activeSelectionScope.current !== scope) return;
+      // Commit the displayed correction only after the server has accepted it.
+      setMealTypeOverrides(prev => ({ ...prev, [key]: normalizedValue }));
+      const savedMeals = response.data.record?.selectedMeals || updatedSelections;
+      setMenuSelections(prev => prev.map(current => sameCustomer(current)
+        ? attachStableMealKeys({ ...current, selectedMeals: savedMeals }) : current));
     } catch (saveError) {
-      setError(saveError.response?.data?.message || 'Failed to save meal type override');
+      if (activeSelectionScope.current === scope) setError(saveError.response?.data?.message || saveError.message || 'Failed to save meal type override');
     } finally {
+      overrideInFlight.current = false;
       setSavingOverrideKey('');
     }
-  }, [selectedMenuId]);
+  }, [selectedMenuId, menuSelections]);
 
   // Saves a kitchen-only note for one customer on one specific delivery day.
   // An empty note removes that date's entry server-side. Updates
@@ -3124,6 +3131,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
                       <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wide text-slate-500">Protein Type</label>
                       <select
                         value={meal.manualProteinType || ''}
+                        disabled={!!savingOverrideKey}
                         onChange={(e) => persistMealTypeOverride({ entry, meal, index, value: e.target.value })}
                         className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm"
                       >

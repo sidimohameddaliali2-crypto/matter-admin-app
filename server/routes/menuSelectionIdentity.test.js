@@ -64,7 +64,7 @@ async function withSelectionFixtures(run) {
   matter.getKitchenNutrition = async ({ email }) => { state.profileEmail = email; return state.nutrition; };
   Customer.find = () => ({ select: () => ({ lean: async () => state.allergies }) });
   Menu.findById = () => { const menu = { _id: menuId, meals: [{ date: '2026-10-22', mealType: 'main', items: [state.item] }] }; return { populate() { return this; }, lean: async () => menu, then: (yes, no) => Promise.resolve(menu).then(yes, no) }; };
-  Record.findOne = () => ({ select() { return this; }, lean: async () => ({ matterEmail: 'website@example.invalid', email: 'storage@example.invalid', matterCustomerId: 'permanent', skippedDays: [] }) });
+  Record.findOne = () => ({ select() { return this; }, lean: async () => ({ matterEmail: 'website@example.invalid', email: 'storage@example.invalid', matterCustomerId: 'permanent', skippedDays: [], selectedMeals: state.savedMeals || [] }) });
   Record.findOneAndUpdate = async (filter, update) => { state.writes.push({ filter, update }); return {}; };
   Record.countDocuments = async () => 1; Menu.findByIdAndUpdate = async () => ({});
   console.log = console.error = () => {};
@@ -106,17 +106,44 @@ test('admin cannot save against a mismatched verified Matter identity', () => wi
 }));
 
 
-test('customer and admin save reject unchecked component and protein overrides before writing', () => withSelectionFixtures(async state => {
+test('customer and admin save reject unchecked component overrides before writing', () => withSelectionFixtures(async state => {
   state.nutrition.exclusions = ['Chicken'];
   state.allergies = [{ matterCustomerId: 'permanent', allergies: ['Nuts'] }];
   state.item = { ...state.item, portionType: 'beef', proteinSource: 'Beef roast', carbs: 'Rice', veg: 'Broccoli', sauce: 'Lemon sauce', cycleMeal: { components: [{ id: 'p', type: 'Protein', name: 'Beef', exclusions: [] }] } };
   for (const override of [
-    { proteinChoice: 'Chicken' }, { carbChoice: 'Chicken rice' }, { vegChoice: 'Nut topping' }, { sauceChoice: 'Nut butter' }, { manualProteinType: 'chicken' }, { sauceChoice: {} },
+    { proteinChoice: 'Chicken' }, { carbChoice: 'Chicken rice' }, { vegChoice: 'Nut topping' }, { sauceChoice: 'Nut butter' }, { sauceChoice: {} },
   ]) {
     const customer = await post([submitted(override)]); assert.equal(customer.statusCode, 409);
     const admin = response(); await adminHandler({ params: { menuId, email: 'storage@example.invalid' }, body: { selections: [submitted(override)] } }, admin); assert.equal(admin.statusCode, 409);
   }
   assert.equal(state.writes.length, 0);
+}));
+
+test('staff saves correct protein classification while preserving saved pool snacks, breakfast and fallback rows', () => withSelectionFixtures(async state => {
+  state.nutrition.exclusions=[];
+  state.savedMeals=[
+    {date:new Date('2026-10-22'),mealType:'snack',mealName:'Pool snack',isAutoAssigned:true,quantity:1,snackMacros:{C:11,P:4,F:3}},
+    {date:new Date('2026-10-22'),mealType:'breakfast',mealName:'Pool breakfast',isAutoAssigned:true,quantity:1},
+    {date:new Date('2026-10-22'),mealType:'main',mealName:'Fallback',isAutoAssigned:true,quantity:1,exclusionConflict:['Dairy'],remark:'veg'},
+  ];
+  const request=[submitted({manualProteinType:'fish'}),...state.savedMeals.map(row=>({...row,date:'2026-10-22',snackMacros:{C:999},exclusionConflict:[]}))];
+  const denied=await post(request);assert.equal(denied.statusCode,409);assert.equal(state.writes.length,0);
+  const res=response();await adminHandler({params:{menuId,email:'storage@example.invalid'},body:{selections:request}},res);
+  assert.equal(res.statusCode,200);const saved=state.writes[0].update.$set.selectedMeals;
+  assert.equal(saved[0].manualProteinType,'fish');
+  for(let i=0;i<state.savedMeals.length;i++)assert.deepEqual(saved[i+1],{...state.savedMeals[i],manualProteinType:''});
+  const record=new Record({weeklyMenuId:menuId,email:'website@example.invalid',selectedMeals:saved});
+  assert.equal(record.validateSync(),undefined);assert.equal(record.toObject().selectedMeals[1].snackMacros.C,11);
+}));
+
+test('staff correction accepts valid protein enums while public submissions cannot claim staff privileges', () => withSelectionFixtures(async state => {
+  state.nutrition.exclusions=[];
+  for(const portionType of ['', 'beef']){
+    state.item.portionType=portionType;
+    const customer=await post([submitted({manualProteinType:'fish',staffOverride:true,staffRecord:{selectedMeals:[]}})]);assert.equal(customer.statusCode,409);
+    const staff=response();await adminHandler({params:{menuId,email:'storage@example.invalid'},body:{selections:[submitted({manualProteinType:'fish'})]}},staff);assert.equal(staff.statusCode,200);
+    assert.equal(state.writes.at(-1).update.$set.selectedMeals[0].manualProteinType,'fish');
+  }
 }));
 test('customer and admin preserve verified unchanged component choices and metadata', () => withSelectionFixtures(async state => {
   state.item = { ...state.item, portionType: 'beef', proteinSource: 'Beef roast', carbs: 'Rice', veg: 'Broccoli', sauce: 'Lemon sauce', cycleMeal: { components: [{ id: 'p', type: 'Protein', name: 'Beef', exclusions: [] }] } };

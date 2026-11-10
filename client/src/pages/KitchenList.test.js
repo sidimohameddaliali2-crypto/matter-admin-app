@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import api from '../utils/api';
 import KitchenList from './KitchenList';
 
-jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn(), patch: jest.fn() } }));
+jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn(), patch: jest.fn(), put: jest.fn() } }));
 jest.mock('../components/PartnerKitchenOrders', () => () => null);
 jest.mock('../lib/kitchenDayScope', () => ({ ...jest.requireActual('../lib/kitchenDayScope'), kitchenToday: () => '2026-10-22' }));
 global.IS_REACT_ACT_ENVIRONMENT = true;
@@ -101,6 +101,36 @@ beforeEach(async () => {
 });
 
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); jest.clearAllMocks(); });
+
+test.each(['rejected request','unsuccessful response'])('failed protein correction restores the saved display (%s)', async outcome => {
+  await select(dateSelect(), friday);
+  const protein=()=>container.querySelector('.kitchen-meal-protein select');
+  const prior=protein().value;
+  if(outcome==='rejected request')api.put.mockRejectedValueOnce({response:{data:{message:'Correction rejected'}}});
+  else api.put.mockResolvedValueOnce({data:{success:false,message:'Correction rejected'}});
+  await select(protein(),'fish');
+  expect(api.put).toHaveBeenCalledTimes(1);
+  expect(protein().value).toBe(prior);
+  expect(protein().disabled).toBe(false);
+  expect(container.textContent).toContain('Correction rejected');
+});
+
+test('protein correction commits only after acceptance, serializes whole-record saves and can be cleared', async () => {
+  await select(dateSelect(), friday);
+  let release;
+  api.put.mockImplementationOnce((url,body)=>new Promise(resolve=>{release=()=>resolve({data:{success:true,record:{selectedMeals:body.selections}}});}));
+  const protein=()=>container.querySelector('.kitchen-meal-protein select');
+  await select(protein(),'fish');
+  expect(protein().value).toBe('');expect(protein().disabled).toBe(true);
+  expect(container.textContent).toContain('Saving...');
+  expect(api.put.mock.calls[0][1].selections).toHaveLength(2);
+  await act(async()=>release());
+  expect(protein().value).toBe('fish');expect(protein().disabled).toBe(false);
+  api.put.mockImplementationOnce(async(url,body)=>({data:{success:true,record:{selectedMeals:body.selections}}}));
+  await select(protein(),'');
+  expect(protein().value).toBe('');
+  expect(api.put.mock.calls[1][1].selections.find(row=>row.date===friday).manualProteinType).toBe('');
+});
 
 test('Kitchen List automatically uses only the active menu and locks the selector', () => {
   const menu = container.querySelector('#kitchen-list-menu');
