@@ -78,7 +78,13 @@ Offline fixtures exercise failure behavior and Mongoose casting without database
 
 Current capacity must be measured against the existing allowance without changing retention or purchasing a larger tier. Report receipt, batch, observation and index costs separately, with the original saved response hash and candidate revision. If only normalized cache data is available, use it to measure normalized rows/batches and label raw-response receipt cost unmeasured; do not reconstruct a provider response and call it original evidence. Any growth scenario must state fleet count, interval, active hours and receipt reuse assumptions. Current free space alone does not establish long-term capacity because the proposed evidence collections have no automatic expiry.
 
-### Read-only runtime diagnostic
+### Independent MongoDB 8 recovery qualification (2026-11-11)
+
+The GPS implementation at `db52fdc4585106528158b341d96b091de3b462b2` was independently tested with MongoDB Community **8.0.37**, matching the observed Atlas server version, Node **24.21.0**, and the unchanged locked Mongoose **7.8.7** / MongoDB driver **5.9.2**. The existing `qualifyGpsRecovery.mjs --faults` harness used a fresh, loopback-only three-member replica set and synthetic inputs. All **10 recovery groups passed**, including actual test-worker termination, primary termination and election, restart, lost acknowledgements, logical BSON restore, and corruption rejection. All **15 final observations** retained their original response links, source-row indexes, clocks and hashes.
+
+The official temporary MongoDB archive was SHA-256 verified before use; there was no global installation, dependency upgrade, production connection, provider call or deployment. Test processes and test databases were stopped/removed by the harness. This closes the previously missing independent MongoDB 8 recovery test. It does not establish the actual production Node/process/configuration, qualify every application path, change the library publisher's support matrix, or prove restoration of an operational Atlas snapshot. Managed Atlas Flex failover controls remain separate from this local fault test.
+
+### Read-only runtime diagnostic procedure
 
 The deployment owner can download `server/scripts/inspectGpsRuntime.mjs` from the exact reviewed PR revision to a temporary directory on the existing Linux API host, without checking out the PR or merging main. Run it as the existing API process owner:
 
