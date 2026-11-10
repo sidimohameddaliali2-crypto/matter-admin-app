@@ -20,6 +20,12 @@ export function mealType(meal) {
 }
 export const COMPONENT_TYPES = ['Protein', 'Breakfast', 'Snack', 'Carb', 'Vegetable', 'Sauce', 'Sauce 2', 'Extra sauce / topping', 'Garnish'];
 const text = value => String(value ?? '').trim();
+const absentComponent = (column, value) => {
+  const marker = text(value).toUpperCase();
+  return (column === 'Sauce' || column === 'Sauce 2') && marker === 'NO SAUCE'
+    || column === 'Garnish' && ['NO TOPPINGS', 'NO GARNISH'].includes(marker);
+};
+
 
 function records(rows, required, sheet) {
   const headerIndex = rows.findIndex(row => row.some(v => text(v) === 'Meal ID'));
@@ -37,6 +43,10 @@ function records(rows, required, sheet) {
 export function parseMealWorkbook(sheets) {
   if (!sheets.Meals || !sheets.Components) throw new Error('This import needs both Meals and Components sheets.');
   const rows = records(sheets.Meals, ['Meal ID', 'Day', 'Meal category', 'Temperature', 'Meal name', 'Protein / main item', 'Carb', 'Vegetable', 'Sauce', 'Garnish', 'Tags', 'Carb combined with veg', 'Preparation / option notes'], 'Meals');
+  rows.forEach(row => {
+    if (row['Sauce 2'] && row['Sauce 2 / extras'] && row['Sauce 2'] !== row['Sauce 2 / extras']) throw new Error(`Meal ${row['Meal ID']}: conflicting second-sauce columns.`);
+    row['Sauce 2'] = row['Sauce 2'] || row['Sauce 2 / extras'] || '';
+  });
   const componentRows = records(sheets.Components, ['Meal ID', 'Component type', 'Component name', 'Preparation / option notes'], 'Components');
   const ids = new Set();
   const meals = rows.map(row => {
@@ -48,8 +58,8 @@ export function parseMealWorkbook(sheets) {
     return {
       id, name: row['Meal name'], day: row.Day, category: row['Meal category'], temperature: row.Temperature,
       tags: row.Tags, carbCombined: row['Carb combined with veg'], notes: row['Preparation / option notes'],
-      sourceRows: row['Source rows'], workbookRow: row.sourceRow, status: 'Draft', components: [],
-      absentSlots: row.Sauce === 'NO SAUCE' ? { Sauce: 'NO SAUCE' } : {},
+      sourceRows: row['Source rows'] || row['Source row'], workbookRow: row.sourceRow, status: 'Draft', components: [],
+      absentSlots: Object.fromEntries(['Sauce', 'Sauce 2', 'Garnish'].filter(column => absentComponent(column, row[column])).map(column => [column, row[column]])),
     };
   });
   const byId = new Map(meals.map(meal => [meal.id, meal]));
@@ -67,8 +77,8 @@ export function parseMealWorkbook(sheets) {
   // Do not silently lose populated meal components if their detail row is absent.
   rows.forEach(row => {
     const meal = byId.get(row['Meal ID']);
-    [['Protein / main item', ['Protein', 'Breakfast', 'Snack']], ['Carb', ['Carb']], ['Vegetable', ['Vegetable']], ['Sauce', ['Sauce']], ['Sauce 2', ['Sauce 2']], ['Garnish', ['Garnish']]].forEach(([column, types]) => {
-      if (row[column] && !(column === 'Sauce' && row[column] === 'NO SAUCE') && !meal.components.some(c => types.includes(c.type) && c.name === row[column])) {
+    [['Protein / main item', ['Protein', 'Breakfast', 'Snack']], ['Carb', ['Carb']], ['Vegetable', ['Vegetable']], ['Sauce', ['Sauce']], ['Sauce 2', ['Sauce 2', 'Extra sauce / topping']], ['Garnish', ['Garnish']]].forEach(([column, types]) => {
+      if (row[column] && !absentComponent(column, row[column]) && !meal.components.some(c => types.includes(c.type) && c.name === row[column])) {
         throw new Error(`Meal ${meal.id}: “${column}” is missing a matching Components row.`);
       }
     });

@@ -4,6 +4,7 @@ import Menu from '../models/WeeklyMenu.js';
 import Item from '../models/MenuItem.js';
 import Selection from '../models/MenuSelectionRecord.js';
 import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
+import { validateCycleMealSnapshot } from './menuComponentSnapshot.js';
 
 const fail = (message, statusCode = 400, conflicts) => {
   throw Object.assign(new Error(message), { statusCode, ...(conflicts ? { conflicts } : {}) });
@@ -67,6 +68,7 @@ export const planManagedMenu = ({ days, existingItems = [], selections = [], sta
         allergens: (Array.isArray(input.allergens) ? input.allergens : String(input.allergens || '').split(',')).map(value => String(value).trim()).filter(Boolean),
         garnish: input.garnish || '', carbs: input.carbs || '', veg: input.veg || '', sauce: input.sauce || '',
         portionType: input.portionType || '', rotationCategory: input.rotationCategory || '',
+        ...(input.cycleMeal !== undefined ? { cycleMeal: validateCycleMealSnapshot(input.cycleMeal) } : original?.cycleMeal !== undefined ? { cycleMeal: validateCycleMealSnapshot(original.cycleMeal) } : {}),
         usedForCorePlan: input.usedForCorePlan === undefined ? !!original?.usedForCorePlan : input.usedForCorePlan,
         ...Object.fromEntries(['portionIngredients', 'carbIngredients', 'vegIngredients', 'sauceIngredients'].map(key => [key, Array.isArray(input[key]) ? input[key] : []])),
       };
@@ -109,7 +111,10 @@ export const saveManagedMenu = async ({ menuId, body, userId, buildMealName, mer
     const selections = menuId ? await Selection.find({ weeklyMenuId: menuId }).session(session).lean() : [];
     const previousStart = menuId ? dayKey(menu.startDate) : null;
     const previousEnd = menuId ? dayKey(menu.endDate) : null;
+    if (body.title !== undefined && (typeof body.title !== 'string' || !body.title.trim())) fail('Enter a menu title before saving or publishing.');
     for (const field of ['title', 'description', 'startDate', 'endDate', 'mealPlans', 'isPublished', 'enableCompletionMessage', 'completionMessage', 'breakfastPreset', 'breakfastPresetsByName']) if (body[field] !== undefined) menu.set(field, body[field]);
+    if (typeof menu.title !== 'string' || !menu.title.trim()) fail('Enter a menu title before saving or publishing.');
+    menu.title = menu.title.trim();
     const start = dayKey(menu.startDate), end = dayKey(menu.endDate);
     if (start > end) fail('The menu end date must be on or after the start date.');
     // Historical out-of-week rows must not prevent an unchanged menu from saving.

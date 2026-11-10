@@ -121,6 +121,10 @@ const menuItemSchema = new mongoose.Schema({
     default: false
   },
   
+  // Full Cycle Menu meal/component snapshot. Display fields above remain the
+  // customer-facing menu; this snapshot retains internal dietary rule metadata.
+  cycleMeal: { type: mongoose.Schema.Types.Mixed, default: undefined },
+
   // Availability
   isAvailable: {
     type: Boolean,

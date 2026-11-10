@@ -11,6 +11,33 @@ const mockExcelRows = jest.fn();
 jest.mock('xlsx-js-style',()=>({utils:{ book_new: () => ({}), aoa_to_sheet: rows => { mockExcelRows(rows); return {}; }, book_append_sheet: () => {} }, writeFile: jest.fn()}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
 
+test.each([
+  [{preferenceConflict:['Coriander'],carbVegAction:'kept'},[]],
+  [{carbVegAction:'replace',carbConflict:['DAIRY'],vegConflict:['MUSHROOM']},['Replace carb: Dairy','Replace veg: Mushroom']],
+  [{carbVegAction:'kept',preferenceConflict:['Dairy'],keptCarbConflict:['DAIRY']},['Keep carb: Dairy']],
+])('saved selection views scope side tags and highlight portion warnings (%s)', async (flags, labels) => {
+  const date='2099-11-02';
+  const meal={date,mealName:'Fixture dish',mealType:'main',menuItemId:'dish',quantity:1,...flags};
+  const customer={_id:'person',firstName:'Test',email:'test@example.invalid',matterCustomerId:'person',selectedMeals:[meal]};
+  api.get.mockImplementation(async url=>({data:{success:true,data:url==='/menus'
+    ?[{_id:'menu',title:'Fixture',startDate:date,endDate:date,meals:[{date,mealType:'main',items:[]}]}]
+    :url.endsWith('/selections')?[customer]:{customer_id:'person',customer_name:'Test',customer_email:customer.email,subscription_id:'sub'}}}));
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const verify=()=>{
+    for(const label of labels)expect(node.textContent).toContain(label);
+    expect(node.textContent).not.toMatch(/Keep carb\/veg|Replace carb\/veg/);
+    if(flags.preferenceConflict?.length)expect(node.querySelector('.bg-yellow-50.ring-yellow-400')).not.toBeNull();
+    if(!labels.length)expect(node.textContent).not.toMatch(/Keep carb|Keep veg|Replace carb|Replace veg/);
+  };
+  try {
+    await act(async()=>root.render(<MenuManagement/>));
+    await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent==='View selections').click());
+    verify();
+    await act(async()=>node.querySelector('.cursor-pointer.border-2').click());
+    verify();
+  } finally {await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
+});
+
 test('downloaded template includes a TRUE/FALSE Core Plan column and visible guidance', async () => {
   api.get.mockResolvedValue({ data: { success: true, data: [] } });
   mockExcelRows.mockClear();
@@ -167,4 +194,69 @@ test('menu browser loads saved choices without nutrition fan-out; opening a cust
     expect(node.textContent).toContain('Current Name');
     expect(JSON.stringify(raw)).toBe(before);
   }finally{await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
+});
+
+
+test('Cycle import saves a new dated draft and reopening preserves its private snapshot', async () => {
+  const meals = [{ id:'own-meal',name:'Own Chicken',mealKind:'Main meal',mealType:'Chicken',temperature:'WARM',carbCombined:'No',components:[{id:'p',type:'Protein',name:'Chicken portion',exclusions:['Nuts'],notes:'Private preparation'}] }];
+  const board=Array.from({length:7},()=>Array.from({length:4},()=>[]));board[0][1]=[{mealId:'own-meal',isMatterCore:true}];
+  sessionStorage.setItem('matter-admin-v2:workbook-cycle-v2',JSON.stringify({meals,source:'Own.xlsx'}));
+  sessionStorage.setItem('matter-admin-v2:weekly-board-v1',JSON.stringify({'Main menu:Week 1':board}));
+  const before=[sessionStorage.getItem('matter-admin-v2:workbook-cycle-v2'),sessionStorage.getItem('matter-admin-v2:weekly-board-v1')];
+  let saved;
+  api.get.mockImplementation(async url=>({data:{success:true,data:url==='/menus'?[]:saved}}));
+  api.post.mockImplementation(async (_url,payload)=>{
+    saved={_id:'saved-menu',...payload,meals:payload.days.flatMap(day=>day.items.map((item,index)=>({date:day.date,mealType:item.mealType,items:[{...item,_id:`saved-${index}`}]})))};
+    return {data:{success:true,data:saved}};
+  });
+  api.put.mockImplementation(async (_url,payload)=>({data:{success:true,data:{...saved,...payload}}}));
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const click=async text=>act(async()=>[...node.querySelectorAll('button')].find(button=>button.textContent.trim()===text).click());
+  const fill=async(input,value)=>act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});
+  try {
+    await act(async()=>root.render(<MenuManagement/>));await click('New menu');
+    await fill(node.querySelector('input[placeholder="Menu Title"]'),'Imported menu');
+    await fill(node.querySelector('input[aria-label="Menu start date"]'),'2026-11-09');
+    await fill(node.querySelector('input[aria-label="Menu end date"]'),'2026-11-15');
+    await click('Create from Cycle Menu');expect(node.textContent).toContain('Own Chicken');
+    await click('Save draft');
+    const payload=api.post.mock.calls.at(-1)[1];expect(payload.title).toBe('Imported menu');const imported=payload.days[0].items[0];
+    expect(imported.cycleMeal.components).toEqual(meals[0].components);expect(imported).toMatchObject({rotationCategory:'main',usedForCorePlan:true,intolerances:'',allergens:''});
+    await click('Edit');expect([...node.querySelectorAll('button')].some(button=>button.textContent.trim()==='Create from Cycle Menu')).toBe(false);
+    await act(async()=>node.querySelector('.cursor-pointer.bg-white.rounded-lg').click());
+    const combined=node.querySelector('input[aria-label="Carb combined with veg"]');expect(combined).not.toBeNull();
+    await act(async()=>combined.click());await click('Close');
+    await click('Save draft');expect(api.put.mock.calls.at(-1)[1].days[0].items[0].cycleMeal).toEqual({...imported.cycleMeal,carbCombined:'Yes'});
+    expect([sessionStorage.getItem('matter-admin-v2:workbook-cycle-v2'),sessionStorage.getItem('matter-admin-v2:weekly-board-v1')]).toEqual(before);
+  } finally {await act(async()=>root.unmount());node.remove();sessionStorage.clear();jest.clearAllMocks();}
+});
+
+
+test.each(['Save draft','Publish & copy link'])('%s with a whitespace title never calls the API',async action=>{
+  api.get.mockResolvedValue({data:{success:true,data:[]}});api.post.mockClear();api.put.mockClear();
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const click=async text=>act(async()=>[...node.querySelectorAll('button')].find(button=>button.textContent.trim()===text).click());
+  try{
+    await act(async()=>root.render(<MenuManagement/>));await click('New menu');
+    const input=node.querySelector('input[placeholder="Menu Title"]');
+    await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'   ');input.dispatchEvent(new Event('input',{bubbles:true}));});
+    await click(action);
+    expect(api.post).not.toHaveBeenCalled();expect(api.put).not.toHaveBeenCalled();
+    expect(node.textContent).toContain('Enter a menu title before saving or publishing.');expect(document.activeElement).toBe(input);
+  }finally{await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
+});
+
+test('Cycle import supplies a dated title when no title was entered',async()=>{
+  const meal={id:'cycle',name:'Chicken',mealKind:'Main meal',mealType:'Chicken',components:[{id:'p',type:'Protein',name:'Chicken',exclusions:[]}]};
+  const board=Array.from({length:7},()=>Array.from({length:4},()=>[]));board[0][1]=[{mealId:'cycle'}];
+  sessionStorage.setItem('matter-admin-v2:workbook-cycle-v2',JSON.stringify({meals:[meal]}));sessionStorage.setItem('matter-admin-v2:weekly-board-v1',JSON.stringify({'Main menu:Week 1':board}));
+  api.get.mockResolvedValue({data:{success:true,data:[]}});
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const click=async text=>act(async()=>[...node.querySelectorAll('button')].find(button=>button.textContent.trim()===text).click());
+  const fill=async(input,value)=>act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});
+  try{
+    await act(async()=>root.render(<MenuManagement/>));await click('New menu');
+    await fill(node.querySelector('input[aria-label="Menu start date"]'),'2026-11-16');await fill(node.querySelector('input[aria-label="Menu end date"]'),'2026-11-22');
+    await click('Create from Cycle Menu');expect(node.querySelector('input[placeholder="Menu Title"]').value).toBe('Week 1 · 2026-11-16 – 2026-11-22');
+  }finally{await act(async()=>root.unmount());node.remove();sessionStorage.clear();jest.clearAllMocks();}
 });
