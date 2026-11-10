@@ -41,7 +41,8 @@ export function createGpsEvidenceStore({ store = TruckoomGpsReceipt,
       encoding: 'gzip-json-v1', payload: compressed };
     // A single immutable document avoids a partially published multi-object
     // receipt. Unknown acknowledgements are not treated as successful captures.
-    await store.create([document], { writeConcern: { w: 'majority', j: true, wtimeoutMS: 10000 } });
+    // Model.create uses save(), whose Mongoose option filter accepts wtimeout.
+    await store.create([document], { writeConcern: { w: 'majority', j: true, wtimeout: 10000 } });
     return { receiptId, sha256, kind, responseReceivedAt: received.toISOString() };
   };
 }

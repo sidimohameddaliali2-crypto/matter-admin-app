@@ -192,3 +192,27 @@ partition, geographic failover, disk corruption or the deployed Atlas topology.
 The test does not identify the deployed application credential, inspect actual
 backup policy, restore an operational backup, measure production capacity or
 approve deployment. The default single-member qualification remains available.
+
+### Receipt write-concern serialization
+
+An isolated MongoDB command-monitoring check found that Mongoose's
+`Model.create()`/`save()` path discarded the receipt's `wtimeoutMS` option.
+Majority acknowledgement and journaling were still transmitted, but the intended
+ten-second write-concern timeout was absent. The receipt now uses Mongoose's
+accepted `wtimeout` spelling; the query and bulk-write paths keep their existing
+options. No dependency or database schema change is required.
+
+A regression exercises real Mongoose create/save filtering and driver command
+serialization without connecting to a database. It fails with the former option,
+passes with the correction, and verifies that a failed acknowledgement propagates
+instead of returning a retained-receipt reference. The runtime inspector also
+rejects the former receipt spelling when identifying this configured concern.
+
+Independent command monitoring against an isolated MongoDB 7.0.14 replica set,
+using the locked Mongoose 7.8.7 and driver 5.9.2, confirmed explicit
+`{ w: 'majority', j: true, wtimeout: 10000 }` on receipt insertion, capture-batch
+claim/save/release/recovery/completion and history bulk writes. Locally created
+index options were read back and matched the model declarations. This verifies
+the commands emitted by these paths, not the deployed runtime or live indexes.
+The timeout bounds waiting for write-concern acknowledgement; it is not a
+whole-request deadline and does not prove that a timed-out write was rolled back.

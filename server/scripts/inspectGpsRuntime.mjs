@@ -183,8 +183,9 @@ export function inspectRuntime({ io = fs, run = defaultRun, procRoot = '/proc', 
         : missing('CONNECTION_OVERRIDES_UNRECOGNIZED');
       const intervalSource = tryRead(path.join(serverDir, 'jobs', 'recordVehicleLocations.js')).text;
       worker.gpsInterval = main.includes('startRecordVehicleLocationsJob();') ? gpsInterval(values.VEHICLE_LOCATION_RECORD_INTERVAL_MS, intervalSource) : missing('GPS_JOB_CALL_UNRECOGNIZED');
-      const explicitMajority = file => /writeConcern:\s*\{\s*w:\s*'majority',\s*j:\s*true,\s*wtimeoutMS:\s*10000\s*\}/.test(tryRead(path.join(serverDir, 'services', file)).text);
-      worker.gpsWriteConcern = explicitMajority('vehicleLocationCaptureStore.js') && explicitMajority('truckoomGpsEvidence.js')
+      const explicitMajority = (file, timeoutKey) => new RegExp(`writeConcern:\\s*\\{\\s*w:\\s*'majority',\\s*j:\\s*true,\\s*${timeoutKey}:\\s*10000\\s*\\}`).test(tryRead(path.join(serverDir, 'services', file)).text);
+      // Receipt create/save filters options differently from query/bulk writes.
+      worker.gpsWriteConcern = explicitMajority('vehicleLocationCaptureStore.js', 'wtimeoutMS') && explicitMajority('truckoomGpsEvidence.js', 'wtimeout')
         ? { w: 'majority', journal: true, wtimeoutMS: 10000, provenance: 'explicit_current_source_capture_and_receipt_operations', acknowledgedDurability: 'not_checked' }
         : missing('NO_RECOGNIZED_EXPLICIT_GPS_WRITE_CONCERN');
     } else {

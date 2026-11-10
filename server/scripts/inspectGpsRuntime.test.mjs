@@ -78,7 +78,7 @@ test('interval reconstruction follows both checked source contracts rather than 
   assert.equal(gpsInterval('PRIVATE_TOKEN', '').status, 'unavailable');
 });
 
-function fixture({ local = '', inaccessibleLocal = false, processChanged = false, targetName = 'matter-delivery-api', unsupportedLoader = false } = {}) {
+function fixture({ local = '', inaccessibleLocal = false, processChanged = false, targetName = 'matter-delivery-api', unsupportedLoader = false, legacyReceiptTimeout = false } = {}) {
   const root = '/fixture-proc', dir = '/PRIVATE_PATH/server';
   const stat = token => '123 (node) ' + [...Array(19).fill('0'), token].join(' ');
   const env = `name=${targetName}\0pm_id=0\0MONGODB_URI=${uri}\0VEHICLE_LOCATION_RECORD_INTERVAL_MS=30000\0JWT_SECRET=PRIVATE_JWT\0NODE_OPTIONS=--require PRIVATE_PATH\0`;
@@ -91,7 +91,7 @@ function fixture({ local = '', inaccessibleLocal = false, processChanged = false
     [`${dir}/server.js`, 'mongoose.connect(process.env.MONGODB_URI, { retryWrites: true });\nstartRecordVehicleLocationsJob();'],
     [`${dir}/jobs/recordVehicleLocations.js`, fs.readFileSync(new URL('../jobs/recordVehicleLocations.js', import.meta.url), 'utf8')],
     [`${dir}/services/vehicleLocationCaptureStore.js`, "const WRITE_OPTIONS = { writeConcern: { w: 'majority', j: true, wtimeoutMS: 10000 } };"],
-    [`${dir}/services/truckoomGpsEvidence.js`, "store.create([], { writeConcern: { w: 'majority', j: true, wtimeoutMS: 10000 } });"]
+    [`${dir}/services/truckoomGpsEvidence.js`, `store.create([], { writeConcern: { w: 'majority', j: true, ${legacyReceiptTimeout ? 'wtimeoutMS' : 'wtimeout'}: 10000 } });`]
   ]);
   const calls = []; let statReads = 0;
   const io = {
@@ -124,6 +124,13 @@ test('actual worker discovery deduplicates npm/Node PM2 instance and only runs e
   assert.equal(report.workers[0].mongo.uriWriteOptions.retrywrites.value, false);
   assert.equal(report.workers[0].mongo.sourceConnectionOverrides.retryWrites, true);
   assert.equal(report.workers[0].gpsWriteConcern.w, 'majority'); assert.equal(f.calls.length, 2); assertPrivate(report);
+});
+
+test('receipt timeout spelling discarded by Mongoose is not reported as a recognized concern', () => {
+  const f = fixture({ legacyReceiptTimeout: true });
+  const report = inspectRuntime({ io: f.io, run: f.run, procRoot: f.root });
+  assert.equal(report.workers[0].gpsWriteConcern.status, 'unavailable');
+  assertPrivate(report);
 });
 
 test('current .env.local overrides initial proc configuration with explicit provenance', () => {

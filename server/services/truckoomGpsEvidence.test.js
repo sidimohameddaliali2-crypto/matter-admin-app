@@ -1,8 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import mongoose from 'mongoose';
+import TruckoomGpsReceipt from '../models/TruckoomGpsReceipt.js';
 import { createGpsEvidenceStore, decodeGpsReceipt, scopedLiveGpsPayload, scopedHistoryGpsPayload } from './truckoomGpsEvidence.js';
 const input = { kind: 'live', scope: { company: 'Fixture' }, requestStartedAt: '2026-01-01T00:00:00Z', responseReceivedAt: '2026-01-01T00:00:01Z', payload: { rows: [{ GPSActualTime: null, Latitude: 'invalid' }] } };
+test('receipt durability and timeout survive real Mongoose create/save and driver serialization', async () => {
+  // Exercise Mongoose's option filtering without opening a database connection.
+  const connection = mongoose.createConnection();
+  const Receipt = connection.model('ReceiptWriteConcernFixture', TruckoomGpsReceipt.schema.clone());
+  let command;
+  Receipt.collection.insertOne = async (document, options) => {
+    command = mongoose.mongo.WriteConcern.apply({}, mongoose.mongo.WriteConcern.fromOptions(options));
+    return { acknowledged: true, insertedId: document._id };
+  };
+  try {
+    const retain = createGpsEvidenceStore({ store: Receipt, available: () => true });
+    await retain(input);
+    assert.deepEqual(command.writeConcern, { w: 'majority', wtimeout: 10000, j: true });
+    const timeout = Object.assign(new Error('Synthetic write acknowledgement timeout'), { code: 64 });
+    Receipt.collection.insertOne = async () => { throw timeout; };
+    await assert.rejects(retain(input), error => error === timeout);
+  } finally {
+    await connection.close();
+  }
+});
 test('retains rejected source fields before normalization and restores hash-bound bytes', async () => {
   let saved; const retain = createGpsEvidenceStore({ available: () => true, newId: () => 'receipt-fixture', store: { create: async doc => { saved = doc[0]; } } });
   const ref = await retain(input); assert.equal(ref.receiptId, saved._id);
