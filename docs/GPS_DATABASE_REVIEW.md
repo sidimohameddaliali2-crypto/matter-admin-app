@@ -70,11 +70,26 @@ Before promotion, record the actual application revision, process count and data
 - Storage, compression, index growth and write load are acceptable under the deployed fleet and capture schedule.
 - The deployment's write concern, journaling, replica-set behavior and backup settings match the intended durability requirements.
 - A real isolated database test passes partial insert, unknown acknowledgement, two-worker contention, lease expiry and restart recovery.
-- A restored copy reproduces original receipt hashes, batch identities, history rows and derived reporting evidence.
-- A complete closed delivery day reconciles expected collection outcomes, saved observations, distinct fixes and export pages separately.
-- Rollback changes code without deleting retained evidence or resetting completed/pending batches. Review schema compatibility before switching versions.
+- Recovery qualification distinguishes the isolated candidate restore from an operational Atlas snapshot restore. Existing daily snapshots are verified. Before source deployment, test an existing snapshot in isolation or record the deployment owner's explicit acceptance of the unverified operational recovery risk. Snapshot download is not a gate for development or reporting validation. An undeployed candidate's new collections cannot already be present in an older production snapshot.
+- After approved source deployment, and before report promotion, a complete closed delivery day reconciles expected collection outcomes, saved observations, distinct fixes and export pages separately.
+- Rollback changes code without deleting retained evidence or resetting completed/pending batches. The reviewed older code preserves additive fields on reads but does not implement the new recovery or GPS uncertainty rules; withhold new GPS-derived report publication until compatible processing resumes and passes reconciliation.
 
 Offline fixtures exercise failure behavior and Mongoose casting without database writes. They do not replace the real database and restore checks. No live database mutation, index creation or backup change was performed during this review.
+
+Current capacity must be measured against the existing allowance without changing retention or purchasing a larger tier. Report receipt, batch, observation and index costs separately, with the original saved response hash and candidate revision. If only normalized cache data is available, use it to measure normalized rows/batches and label raw-response receipt cost unmeasured; do not reconstruct a provider response and call it original evidence. Any growth scenario must state fleet count, interval, active hours and receipt reuse assumptions. Current free space alone does not establish long-term capacity because the proposed evidence collections have no automatic expiry.
+
+### Read-only runtime diagnostic
+
+The deployment owner can download `server/scripts/inspectGpsRuntime.mjs` from the exact reviewed PR revision to a temporary directory on the existing Linux API host, without checking out the PR or merging main. Run it as the existing API process owner:
+
+```sh
+umask 077
+node /tmp/inspectGpsRuntime.mjs > /tmp/gps-runtime.private.json
+```
+
+Send that JSON through the existing private handoff. The helper scans readable API processes, runs the actual Node executable with `--version`, and reads the checkout commit. It never starts the application, invokes PM2, opens a database/provider connection, or changes server settings. It returns allowlisted metadata and a hash of the database username; passwords, full connection strings, raw environment variables and customer records are omitted. Its only external parser is the already-installed dotenv dependency from the identified server directory. No installation is needed.
+
+If discovery reports unavailable, use `--pid` only with the actual existing API Node worker PID; do not restart the server to make the diagnostic pass. Current checkout and environment-file reconstruction are explicitly distinguished from the already-loaded code/configuration. The configured timer is not proof of successful capture or fleet completeness. Missing metadata remains unverified; the helper does not attest database defaults, actual journal acknowledgements or full index options.
 
 ## Isolated recovery evidence (2026-11-10)
 
