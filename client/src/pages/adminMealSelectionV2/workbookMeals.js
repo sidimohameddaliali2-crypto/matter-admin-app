@@ -3,6 +3,8 @@ export const MEAL_CATEGORIES = ['MAIN FISH', 'MAIN CHX', 'MAIN BEEF', "MAIN B'FA
 export const MEAL_TYPES = ['Chicken', 'Beef', 'Fish'];
 export const MEAL_FORMATS = ['Main', 'Breakfast', 'Snack'];
 export function mealFormat(meal) {
+  if (meal.mealKind === 'Main meal') return 'Main';
+  if (['Breakfast', 'Snack'].includes(meal.mealKind)) return meal.mealKind;
   if (MEAL_FORMATS.includes(meal.mealFormat)) return meal.mealFormat;
   if (/B'FAST|OATS/.test(meal.category || '')) return 'Breakfast';
   if (/SNACK/.test(meal.category || '')) return 'Snack';
@@ -34,7 +36,7 @@ function records(rows, required, sheet) {
 // interpret “NO DAIRY & GLUTEN FREE OPTION” as an approved dietary adaptation.
 export function parseMealWorkbook(sheets) {
   if (!sheets.Meals || !sheets.Components) throw new Error('This import needs both Meals and Components sheets.');
-  const rows = records(sheets.Meals, ['Meal ID', 'Day', 'Meal category', 'Temperature', 'Meal name', 'Protein / main item', 'Carb', 'Vegetable', 'Sauce', 'Sauce 2', 'Garnish', 'Tags', 'Carb combined with veg', 'Preparation / option notes'], 'Meals');
+  const rows = records(sheets.Meals, ['Meal ID', 'Day', 'Meal category', 'Temperature', 'Meal name', 'Protein / main item', 'Carb', 'Vegetable', 'Sauce', 'Garnish', 'Tags', 'Carb combined with veg', 'Preparation / option notes'], 'Meals');
   const componentRows = records(sheets.Components, ['Meal ID', 'Component type', 'Component name', 'Preparation / option notes'], 'Components');
   const ids = new Set();
   const meals = rows.map(row => {
@@ -79,5 +81,10 @@ export function dietaryFlags(meal) {
 }
 
 export function componentName(meal, type) {
-  return meal.components.filter(c => (type === 'Main item' ? ['Protein', 'Breakfast', 'Snack'].includes(c.type) : c.type === type)).map(c => c.name).join(' + ') || meal.absentSlots?.[type] || '—';
+  return meal.components.filter(c => (type === 'Main item' ? ['Protein', 'Breakfast', 'Snack'].includes(c.type) : type === 'Vegetable' ? ['Vegetable', 'Salad'].includes(c.type) : c.type === type)).map(c => c.name).join(' + ') || meal.absentSlots?.[type] || '—';
+}
+
+// A main meal can occupy either Main or Sub; that belongs to the assignment.
+export function cycleSlots(meal) {
+  return mealFormat(meal) === 'Breakfast' ? [0] : mealFormat(meal) === 'Snack' ? [3] : [1, 2];
 }
