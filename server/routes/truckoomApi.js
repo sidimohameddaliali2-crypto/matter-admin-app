@@ -1,4 +1,5 @@
 import express from 'express';
+import { captureMetadata, driverMappings, CAPTURE_FIELDS } from '../services/vehicleLocationView.js';
 import User from '../models/User.js';
 import truckoomApiService from '../services/truckoomApiService.js';
 import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
@@ -62,18 +63,19 @@ router.get('/vehicles', async (req, res) => {
     ]);
     const { fleet, warning: trackerWarning } = trackerResult;
 
-    const driverByVehicleNo = new Map(
-      drivers.filter((d) => d.profile?.truckoomVehicleNo).map((d) => [d.profile.truckoomVehicleNo, d])
-    );
+    const mappingByVehicleNo = driverMappings(drivers);
 
     const appLocations = new Map();
     await mapWithLimit(drivers, 5, async (d) => { appLocations.set(String(d._id), await appLocationOf(d)); });
 
     const vehicles = await mapWithLimit(fleet, 5, async (v) => {
-      const driver = driverByVehicleNo.get(v.vehicleNo);
+      const mapping = mappingByVehicleNo.get(v.vehicleNo);
+      const driver = mapping?.driver;
+      const { rawCoordinates, sourceReceipt, sourceRow, sourceQualityFlags, ...publicVehicle } = v;
       const hasFix = Number.isFinite(v.latitude) && Number.isFinite(v.longitude);
       return {
-        ...v,
+        ...publicVehicle,
+        driverMappingState: mapping?.state || 'unmapped',
         address: hasFix ? v.address || (await addressForDriver(`vehicle:${v.vehicleNo}`, v.latitude, v.longitude)) || null : null,
         driver: driver
           ? {
@@ -150,17 +152,24 @@ router.put('/vehicles/:vehicleNo/driver', async (req, res) => {
 
 // @desc    Recorded GPS trail for a vehicle or driver over a time range —
 //          the history jobs/recordVehicleLocations.js builds every minute,
-//          since Truckoom's own API has no route-trail/playback endpoint.
+//          separate from vendor history; times remain observation vs fix clocks.
 // @route   GET /api/truckoom/history?vehicleNo=...&driverId=...&from=...&to=...
 router.get('/history', async (req, res) => {
   try {
     const { vehicleNo, driverId, from, to } = req.query;
+    if ([vehicleNo, driverId, from, to].some(value => value !== undefined && typeof value !== 'string')
+      || driverId && !/^[a-f\d]{24}$/i.test(driverId)
+      || vehicleNo !== undefined && (!vehicleNo.trim() || vehicleNo.length > 80)
+      || [from, to].some(value => value !== undefined && !Number.isFinite(Date.parse(value)))
+      || from && to && Date.parse(from) > Date.parse(to)) {
+      return res.status(400).json({ success: false, message: 'Invalid history scope or clock' });
+    }
     if (!vehicleNo && !driverId) {
       return res.status(400).json({ success: false, message: 'vehicleNo or driverId is required' });
     }
 
     const query = {};
-    if (vehicleNo) query.vehicleNo = vehicleNo;
+    if (vehicleNo) query.vehicleNo = vehicleNo.trim();
     if (driverId) query.driver = driverId;
     if (from || to) {
       query.recordedAt = {};
@@ -169,12 +178,21 @@ router.get('/history', async (req, res) => {
     }
 
     const points = await VehicleLocationHistory.find(query)
-      .sort({ recordedAt: 1 })
-      .limit(10000)
-      .select('vehicleNo driver latitude longitude recordedAt')
+      .sort({ recordedAt: 1, _id: 1 })
+      .limit(10001)
+      .select('vehicleNo driver latitude longitude gpsTime recordedAt ' + CAPTURE_FIELDS)
       .lean();
 
-    res.json({ success: true, data: points });
+    const data = points.slice(0, 10000).map(point => {
+      const { vehicleNo, driver, latitude, longitude, recordedAt, gpsTime, _id } = point;
+      const capture = captureMetadata(point);
+      const valid = Number.isFinite(latitude) && Number.isFinite(longitude)
+        && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180 && !(latitude === 0 && longitude === 0);
+      return { _id, vehicleNo, driver, latitude: valid ? latitude : null, longitude: valid ? longitude : null, recordedAt, gpsTime: gpsTime || null,
+        ...(capture ? { capture } : {}) };
+    });
+    res.json({ success: true, data, range: { filteredBy: 'recordedAt' },
+      pagination: { limit: 10000, returned: data.length, truncated: points.length > 10000 } });
   } catch (error) {
     console.error('Truckoom history error:', error.message);
     res.status(500).json({ success: false, message: 'Failed to fetch vehicle location history' });

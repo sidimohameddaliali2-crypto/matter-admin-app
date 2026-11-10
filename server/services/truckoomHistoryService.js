@@ -3,6 +3,7 @@ import TrackerSyncLease from '../models/TrackerSyncLease.js';
 import TruckoomTrackHistory from '../models/TruckoomTrackHistory.js';
 import truckoom from './truckoomApiService.js';
 import { parseTruckoomAlertTime } from './truckoomVisitRules.js';
+import { gpsFixTime } from './trackerGpsVisits.js';
 
 const UAE_OFFSET = 4 * 60 * 60000;
 const REQUEST_INTERVAL = 3 * 60000;
@@ -21,20 +22,41 @@ export function parseTrackLogTime(value) {
 
 export function normalizeTrackLogs(rows, vehicleNo, start, end) {
   if (!Array.isArray(rows)) throw new Error('Invalid Truckoom track history');
-  const points = new Map();
+  const points = new Map(), qualityObservations = [];
   for (const row of rows) {
+    if (String(row?.vehicleNumber).trim() !== String(vehicleNo)) continue;
     const at = parseTrackLogTime(row.timestamp);
-    const latitude = row.latitude == null || row.latitude === '' ? NaN : Number(row.latitude);
-    const longitude = row.longitude == null || row.longitude === '' ? NaN : Number(row.longitude);
-    if (String(row.vehicleNumber).trim() !== String(vehicleNo) || !at || +at < +start || +at >= +end
-      || !Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90
-      || Math.abs(longitude) > 180 || (latitude === 0 && longitude === 0)) continue;
+    if (at && (+at < +start || +at >= +end)) continue;
+    const latitude = row.latitude == null || String(row.latitude).trim() === '' ? NaN : Number(row.latitude);
+    const longitude = row.longitude == null || String(row.longitude).trim() === '' ? NaN : Number(row.longitude);
+    const validCoordinates = Number.isFinite(latitude) && Number.isFinite(longitude)
+      && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180 && !(latitude === 0 && longitude === 0);
+    if (!at || !validCoordinates) {
+      qualityObservations.push({ gpsTime: at, latitude: Number.isFinite(latitude) ? latitude : null,
+        longitude: Number.isFinite(longitude) ? longitude : null,
+        qualityFlags: [!at ? 'missing_fix_clock' : 'invalid_coordinates'] });
+      continue;
+    }
     points.set(`${+at}:${latitude}:${longitude}`, { latitude, longitude, gpsTime: at });
   }
-  return [...points.values()].sort((a, b) => a.gpsTime - b.gpsTime);
+  const valid = [...points.values()].sort((a, b) => a.gpsTime - b.gpsTime);
+  Object.defineProperty(valid, 'qualityObservations', { value: qualityObservations });
+  return valid;
 }
 
 const uaeDate = date => new Date(+date + UAE_OFFSET).toISOString().slice(0, 19).replace('T', ' ');
+
+function withReceipt(points, receiptTime) {
+  const receipt = gpsFixTime(receiptTime);
+  return points.map(point => {
+    const recordedAt = gpsFixTime(point.recordedAt) || receipt;
+    if (recordedAt) return { ...point, recordedAt };
+    // Legacy request start times are not response receipt times. Preserve the
+    // original evidence, but do not promote it to a qualified timed comparison.
+    if (!gpsFixTime(point.gpsTime)) return point;
+    return { ...point, qualityFlags: [...new Set([...(point.qualityFlags || []), 'missing_observation_receipt'])] };
+  });
+}
 
 export async function getHistoryPoints(vehicleNo, start, end, now = new Date()) {
   if (+start >= +now) return [];
@@ -43,7 +65,10 @@ export async function getHistoryPoints(vehicleNo, start, end, now = new Date()) 
   // A partial snapshot must keep its short lifetime across midnight. Only a
   // request made after the day closed can qualify for the longer lifetime.
   const ttl = cached?.fetchedAt && +cached.fetchedAt >= +end ? 24 * 60 * 60000 : 60 * 60000;
-  if (cached?.fetchedAt && +now - +cached.fetchedAt < ttl) return cached.points;
+  const cachedPoints = cached ? withReceipt([...(cached.points || []), ...(cached.qualityObservations || [])],
+    cached.sourceReceipt?.responseReceivedAt || cached.responseReceivedAt) : [];
+  const lastRefresh = cached?.lastRefreshAt || cached?.fetchedAt;
+  if (lastRefresh && +now - +lastRefresh < ttl) return cachedPoints;
   const owner = randomUUID();
   // Hold a longer lock during authentication/transport, then retain a full
   // three-minute cooldown after completion, including failed attempts.
@@ -52,9 +77,9 @@ export async function getHistoryPoints(vehicleNo, start, end, now = new Date()) 
     const lease = await TrackerSyncLease.findOneAndUpdate({ _id: 'truckoom-track-logs',
       $or: [{ expiresAt: { $lte: reservedAt } }, { expiresAt: { $exists: false } }] },
     { $set: { owner, expiresAt: new Date(+reservedAt + REQUEST_LOCK) } }, { upsert: true, new: true });
-    if (lease.owner !== owner) return cached?.points || [];
+    if (lease.owner !== owner) return cachedPoints;
   } catch (error) {
-    if (error.code === 11000) return cached?.points || [];
+    if (error.code === 11000) return cachedPoints;
     throw error;
   }
   let dispatchedAt;
@@ -77,12 +102,28 @@ export async function getHistoryPoints(vehicleNo, start, end, now = new Date()) 
         body.end_date = uaeDate(new Date(Math.min(+end - 1000, +dispatchedAt)));
       },
     });
-    const points = normalizeTrackLogs(rows, vehicleNo, start, end);
-    await TruckoomTrackHistory.updateOne({ _id: key }, { $set: { fetchedAt: dispatchedAt, points } }, { upsert: true });
-    return points;
+    // Keep the original response clock across later cache reads. Measuring the
+    // response here is safe for adapters without an archive receipt; request
+    // dispatch time and the later evaluation clock are not substitutes.
+    const responseReceivedAt = gpsFixTime(rows.sourceReceipt?.responseReceivedAt) || new Date(Date.now());
+    const normalized = normalizeTrackLogs(rows, vehicleNo, start, end);
+    const points = withReceipt(normalized, responseReceivedAt);
+    if (!rows.length && cachedPoints.length) {
+      // Keep prior observations while recording that the latest response was
+      // empty. Refresh cadence uses this check time, not the old evidence clock.
+      await TruckoomTrackHistory.updateOne({ _id: key }, { $set: {
+        lastRefreshAt: dispatchedAt, lastRefreshOutcome: 'empty_preserved',
+      } });
+      return cachedPoints;
+    }
+    const qualityObservations = withReceipt(normalized.qualityObservations || [], responseReceivedAt);
+    await TruckoomTrackHistory.updateOne({ _id: key }, { $set: { fetchedAt: dispatchedAt,
+      lastRefreshAt: dispatchedAt, lastRefreshOutcome: qualityObservations.length ? 'quality_affected' : 'received',
+      points, qualityObservations, responseReceivedAt, sourceReceipt: rows.sourceReceipt || null } }, { upsert: true });
+    return [...points, ...qualityObservations];
   } catch {
     // A vendor failure must not erase the last usable GPS or block a delivery.
-    return cached?.points || [];
+    return cachedPoints;
   } finally {
     try {
       await TrackerSyncLease.updateOne({ _id: 'truckoom-track-logs', owner },

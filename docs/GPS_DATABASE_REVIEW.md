@@ -1,0 +1,77 @@
+# GPS database design and review
+
+This document helps maintainers review the GPS persistence changes and qualify them before deployment. It covers the affected database paths, not every business rule in the application. It contains no production records or customer data.
+
+## Existing responsibilities
+
+The application uses several separate representations:
+
+| Area | Models | Responsibility |
+|---|---|---|
+| Saved vehicle observations | `VehicleLocationHistory` | Samples of the provider's last-known position, with the sampler's record time. |
+| Provider working caches | `TruckoomLiveSnapshot`, `TruckoomTrackHistory` | Shared live refresh coordination and a replaceable normalized vehicle-history cache. A cache is not an immutable archive. |
+| Request coordination | `TrackerSyncLease` | Shared ownership and cooldown for provider operations. Lease expiry is not evidence retention. |
+| Account assignment | `User.profile.truckoomVehicleNo` | The account-to-tracker mapping used by GPS collection. It has no effective-date assignment history. |
+| Operational vehicles | `Vehicle` | Operational vehicle records and `assignedDriver`; these are not interchangeable with provider identifiers or the GPS mapping. |
+| Delivery evidence | `Delivery.trackerVisit` and proof fields | Customer-specific visit interpretation and photo evidence. Position time, photo time and physical handover are distinct. |
+
+Repository model/index declarations and the relevant live collection metadata were inspected read-only. Live metadata confirmed the saved-history query indexes and related collection identities. Schema inference used a bounded sample; it does not prove all historical rows have one shape. The connector's index output provides names and keys, not every option. Verify uniqueness, TTL, collation and partial-index options directly in the deployment environment before making an operational claim about them.
+
+A legacy driver collection can coexist with the account model. Do not use a collection's existence or a current vehicle assignment as proof of historical identity or complete provider-fleet coverage.
+
+## Add two persistence responsibilities
+
+The proposed models separate evidence retention from recovery:
+
+| Model | Purpose | Identity and retention |
+|---|---|---|
+| `TruckoomGpsReceipt` | Retains a compressed, scoped JSON response before normalization, with its clock and content hash. The retained JSON is not an original HTTP wire capture. | Receipt ID; source hash; response-time index. No TTL is declared. |
+| `VehicleLocationCaptureBatch` | Retains one sampling tick and its immutable normalized payload until acknowledged persistence, including explicit pending or failed outcomes. | Deterministic tick ID; owner/fence lease; recovery index on state, lease and tick time; separate tick-time index for day-scoped health reads. No TTL is declared. |
+
+`VehicleLocationHistory` receives optional source-reference, clock, quality, assignment and batch-provenance fields. Existing historical rows remain readable. Coordinates become nullable so a known vehicle's unusable observation remains visible to the quality evaluator rather than disappearing between valid fixes. Valid legacy positions are unchanged. No legacy history deletion, backfill, unique-index replacement or guessed timestamp migration is required by this change.
+
+The mutable history cache receives a source-receipt reference. Previous retained receipts remain independent when the cache refreshes. Missing/invalid positions remain in retained source evidence and in known-vehicle history observations with explicit quality flags. The external history API returns `location: null`; the staff history API returns null coordinates for unusable positions. The visit evaluator must retain these as uncertainty instead of connecting valid fixes across them. Preserving an observation does not make it a valid map point.
+
+## Recovery invariants
+
+The capture store enforces these rules:
+
+1. A scheduled tick is claimed once through its document identity.
+2. A payload is saved before derived rows are written. A repeated save must match the same payload hash.
+3. Each derived history row receives a deterministic ObjectId from the batch ID and row position. Retrying a partly acknowledged batch uses insert-if-absent operations with the same IDs.
+4. History rows preserve `captureBatchId` and `captureRow`, and the store verifies each written chunk's identities before completion.
+5. Ownership and fencing protect batch completion. An expired worker can only attempt the same immutable rows; it cannot complete a newer owner's batch.
+6. An interrupted tick with no retained payload becomes explicitly failed. A later live response is not relabeled as that original tick's observation.
+7. Recovery processes a bounded pending batch and seals a bounded abandoned unsaved tick per poll, so it does not intentionally replay an unlimited backlog ahead of live capture.
+8. An unknown database acknowledgement is not proof of failure or success. Retry/readback reconciles the retained batch; it does not discard prior rows.
+
+The batch store and receipt archive use majority and journal acknowledgement. A batch's payload limit is 2,000 rows and 4 MiB, checked against both JSON and BSON size before persistence; bulk writes are bounded. A receipt allows at most 32 MiB of JSON and 8 MiB after compression, and the provider GPS requests also bound response size. These are processing limits, not an estimate of fleet size or a guarantee of cluster capacity. Oversized input remains an explicit failed capture requiring review; it must not silently truncate.
+
+## Compatibility and operational effects
+
+Existing collection consumers query vehicle or driver with `recordedAt`. Preserve those indexes and the API's clock meanings. Do not add a unique driver-to-vehicle constraint as part of this change: existing ambiguity needs to remain inspectable, and assignment updates occur through separate operations.
+
+Retaining responses and normalized pending payloads increases storage and write work. Cached repeated positions remain legitimate observations; deduplication belongs in a derived reporting view rather than deletion from the source archive.
+
+If raw-response retention fails, the live service can still return normalized positions for operational viewing with an internal unretained-evidence status. The recorder refuses to acknowledge that snapshot as retained history and records a failed tick when the batch store remains available. An unavailable database cannot record its own outage; subsequent schedule reconciliation must expose missing ticks, and abandoned claims are sealed during recovery. The raw-retention fallback does not guarantee availability during provider outages or failures of the shared Mongo live cache itself; existing operational error/fallback paths still apply. Transport failures may have no response body to retain. Preserve their explicit failure outcomes and distinguish them from received but rejected payloads.
+
+Live retention scopes rows to the configured company; history retention scopes rows to the requested vehicle. Out-of-scope rows are excluded and the stored payload is a scoped JSON representation, not a verbatim provider envelope. Registry responses are not covered by these two receipt kinds, so expected-fleet completeness still requires independent reconciliation.
+
+The capture-status API queries one Dubai date with a bounded result limit and projects aggregate states/counts. It does not return raw receipt payloads, coordinates or driver identities, and it does not certify a full day merely because a tick is marked complete. Its tick-time index is additive on the new batch collection; no live index was created during this work.
+
+Receipt hashes verify retained content identity. They do not independently prove the provider's information was correct, the database was backed up, or a later restore will be available. Original raw bytes, normalized caches, capture batches and reporting copies have different roles.
+
+## Deployment qualification
+
+Before promotion, record the actual application revision, process count and database configuration, then verify:
+
+- The two new collections and their intended indexes can be created with the deployment role; existing collections/indexes remain intact.
+- The existing application account retains necessary read/write access without expanding external API access to raw payloads.
+- Storage, compression, index growth and write load are acceptable under the deployed fleet and capture schedule.
+- The deployment's write concern, journaling, replica-set behavior and backup settings match the intended durability requirements.
+- A real isolated database test passes partial insert, unknown acknowledgement, two-worker contention, lease expiry and restart recovery.
+- A restored copy reproduces original receipt hashes, batch identities, history rows and derived reporting evidence.
+- A complete closed delivery day reconciles expected collection outcomes, saved observations, distinct fixes and export pages separately.
+- Rollback changes code without deleting retained evidence or resetting completed/pending batches. Review schema compatibility before switching versions.
+
+Offline fixtures exercise failure behavior and Mongoose casting without database writes. They do not replace the real database and restore checks. No live database mutation, index creation or backup change was performed during this review.

@@ -5,6 +5,7 @@ import TruckoomTrackHistory from '../models/TruckoomTrackHistory.js';
 import TrackerSyncLease from '../models/TrackerSyncLease.js';
 import truckoom from './truckoomApiService.js';
 import axios from 'axios';
+import { evaluateGpsVisit } from './trackerGpsVisits.js';
 
 const start=new Date('2026-10-27T20:00:00Z'),end=new Date('2026-10-28T20:00:00Z');
 const now=new Date('2026-10-29T06:00:00Z');
@@ -134,6 +135,7 @@ function realDispatchFixture(t, {authFails=false, vendorFails=false, acquisition
     return {matchedCount:1};
   });
   const service=new truckoom.constructor();
+  service.retainGpsResponse=async()=>({receiptId:'history-fixture',kind:'history',sha256:'a'.repeat(64),responseReceivedAt:new Date(Date.now()).toISOString()});
   Object.assign(service,{username:'fixture-user',password:'fixture-password',companyName:'Fixture Company'});
   t.mock.method(truckoom,'getVehicleTrackLogs',service.getVehicleTrackLogs.bind(service));
   t.mock.method(axios,'post',async(url,body)=>{
@@ -207,4 +209,71 @@ test('authentication crossing midnight refreshes request bounds before caching a
   await getHistoryPoints('71592',start,end,cycleStart);
   assert.equal(fixture.bodies[0].end_date,'2026-10-28 23:59:59');
   assert.equal(+fixture.writes[0].update.$set.fetchedAt,+end+10000);
+});
+
+test('history persists and returns unusable observations alongside clean cache points', async t => {
+  const writes = setup(t);
+  t.mock.method(truckoom, 'getVehicleTrackLogs', async () => [row, { ...row, latitude: null }, { ...row, timestamp: null }]);
+  const result = await getHistoryPoints('71592', start, end, now);
+  assert.equal(result.length, 3); assert.equal(writes[0].update.$set.qualityObservations.length, 2);
+  assert.equal(result.filter(p => p.gpsTime === null).length, 1);
+});
+
+test('fresh cached quality markers survive readback and empty refresh preserves earlier evidence', async t => {
+  const marker = { latitude: null, longitude: 55, gpsTime: null };
+  setup(t, { fetchedAt: now, points: [row], qualityObservations: [marker] });
+  assert.deepEqual(await getHistoryPoints('71592', start, end, now), [row, marker]);
+  assert.equal(truckoom.getVehicleTrackLogs.mock.callCount(), 0);
+});
+
+test('empty valid response does not erase an earlier nonempty cache', async t => {
+  const writes = setup(t, { fetchedAt: start, points: [row] });
+  t.mock.method(truckoom, 'getVehicleTrackLogs', async () => []);
+  assert.deepEqual(await getHistoryPoints('71592', start, end, now), [row]);
+  assert.equal(writes[0].update.$set.lastRefreshOutcome, 'empty_preserved');
+  assert.equal('points' in writes[0].update.$set, false);
+});
+
+test('a history fix future at original receipt stays unusable after persistence and later cache evaluation', async t => {
+  setup(t);
+  const receipt = new Date('2026-10-28T05:00:00Z');
+  const photo = new Date('2026-10-28T05:01:00Z');
+  const later = new Date('2026-10-28T05:10:00Z');
+  let cached = null;
+  t.mock.method(Date, 'now', () => +receipt);
+  t.mock.method(TruckoomTrackHistory, 'findById', () => ({ lean: async () => cached }));
+  t.mock.method(TruckoomTrackHistory, 'updateOne', async (filter, update) => {
+    const doc = new TruckoomTrackHistory({ _id: filter._id, ...update.$set });
+    await doc.validate();
+    cached = doc.toObject();
+  });
+  t.mock.method(truckoom, 'getVehicleTrackLogs', async (_vehicle, _start, _end, options) => {
+    await options.beforeDispatch({});
+    const rows = [{ ...row, timestamp: '28-10-2026 09:01:00 AM' }];
+    Object.defineProperty(rows, 'sourceReceipt', { value: { responseReceivedAt: receipt.toISOString() } });
+    return rows;
+  });
+  const evaluate = (points, asOf) => evaluateGpsVisit({ points, asOf, start, end,
+    pin: { lat: 25.1, lng: 55.2 }, photoSource: 'camera', photoCapturedAt: photo });
+  const fresh = await getHistoryPoints('71592', start, end, receipt);
+  assert.equal(+fresh[0].recordedAt, +receipt);
+  assert.equal(evaluate(fresh, receipt).status, 'incomplete_events');
+  t.mock.method(Date, 'now', () => +later);
+  const reread = await getHistoryPoints('71592', start, end, later);
+  assert.equal(truckoom.getVehicleTrackLogs.mock.callCount(), 1);
+  assert.equal(+reread[0].recordedAt, +receipt);
+  const result = evaluate(reread, later);
+  assert.equal(result.status, 'incomplete_events');
+  assert.ok(result.gpsQualityReasons.includes('future_fix_time'));
+});
+
+test('legacy history with no response receipt stays uncertain without inventing a clock', async t => {
+  const gpsTime = new Date('2026-10-27T21:30:00Z');
+  setup(t, { fetchedAt: now, points: [{ latitude: 25.1, longitude: 55.2, gpsTime }] });
+  const points = await getHistoryPoints('71592', start, end, now);
+  assert.equal(points[0].recordedAt, undefined);
+  const result = evaluateGpsVisit({ points, asOf: now, start, end, pin: { lat: 25.1, lng: 55.2 },
+    photoSource: 'camera', photoCapturedAt: gpsTime });
+  assert.equal(result.status, 'incomplete_events');
+  assert.ok(result.gpsQualityReasons.includes('missing_observation_receipt'));
 });

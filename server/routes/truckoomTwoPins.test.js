@@ -134,3 +134,10 @@ test('every position is looked up at most once per request (cached), and a faili
   assert.equal(out.body.data[0].address, null);
   assert.equal(out.body.data[0].latitude, 25.2);
 });
+
+test('conflicting driver mappings never attach one arbitrary phone or identity to a tracker', async () => {
+  const result = await run({ fleet: [{ vehicleNo: 'V1', latitude: null, longitude: null }],
+    drivers: [driver('d1', { profile: { truckoomVehicleNo: 'V1' } }), driver('d2', { profile: { truckoomVehicleNo: 'V1' } })] });
+  assert.equal(result.body.data[0].driver, null);
+  assert.equal(result.body.data[0].driverMappingState, 'ambiguous_current_mapping');
+});

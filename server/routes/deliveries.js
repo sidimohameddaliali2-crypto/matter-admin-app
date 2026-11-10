@@ -359,13 +359,14 @@ async function checkAndApplyPendingChanges(delivery) {
 // All routes are protected
 router.use(protect);
 router.use(protectMatterRevenueInput);
-// Tracker verdicts and receipt timestamps are exclusively server-owned.
-router.use((req, res, next) => {
+// Tracker verdicts, their baseline evidence, and receipt timestamps are server-owned.
+router.use(function protectTrackerEvidence(req, res, next) {
   const clean = value => {
     if (!value || typeof value !== 'object') return;
     if (Array.isArray(value)) { value.forEach(clean); return; }
     for (const key of Object.keys(value)) {
-      if (key === 'trackerVisit' || key.startsWith('trackerVisit.') || key === 'receivedAt' || key === 'proof.receivedAt') delete value[key];
+      if (key === 'trackerVisit' || key.startsWith('trackerVisit.')
+        || key === 'trackerVisitGpsBaseline' || key.startsWith('trackerVisitGpsBaseline.') || key === 'receivedAt' || key === 'proof.receivedAt') delete value[key];
       else clean(value[key]);
     }
   };
