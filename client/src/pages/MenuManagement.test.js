@@ -193,7 +193,7 @@ test('Cycle import saves a new dated draft and reopening preserves its private s
     await fill(node.querySelector('input[aria-label="Menu end date"]'),'2026-11-15');
     await click('Create from Cycle Menu');expect(node.textContent).toContain('Own Chicken');
     await click('Save draft');
-    const payload=api.post.mock.calls.at(-1)[1];const imported=payload.days[0].items[0];
+    const payload=api.post.mock.calls.at(-1)[1];expect(payload.title).toBe('Imported menu');const imported=payload.days[0].items[0];
     expect(imported.cycleMeal.components).toEqual(meals[0].components);expect(imported).toMatchObject({rotationCategory:'main',usedForCorePlan:true,intolerances:'',allergens:''});
     await click('Edit');expect([...node.querySelectorAll('button')].some(button=>button.textContent.trim()==='Create from Cycle Menu')).toBe(false);
     await act(async()=>node.querySelector('.cursor-pointer.bg-white.rounded-lg').click());
@@ -202,4 +202,34 @@ test('Cycle import saves a new dated draft and reopening preserves its private s
     await click('Save draft');expect(api.put.mock.calls.at(-1)[1].days[0].items[0].cycleMeal).toEqual({...imported.cycleMeal,carbCombined:'Yes'});
     expect([sessionStorage.getItem('matter-admin-v2:workbook-cycle-v2'),sessionStorage.getItem('matter-admin-v2:weekly-board-v1')]).toEqual(before);
   } finally {await act(async()=>root.unmount());node.remove();sessionStorage.clear();jest.clearAllMocks();}
+});
+
+
+test.each(['Save draft','Publish & copy link'])('%s with a whitespace title never calls the API',async action=>{
+  api.get.mockResolvedValue({data:{success:true,data:[]}});api.post.mockClear();api.put.mockClear();
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const click=async text=>act(async()=>[...node.querySelectorAll('button')].find(button=>button.textContent.trim()===text).click());
+  try{
+    await act(async()=>root.render(<MenuManagement/>));await click('New menu');
+    const input=node.querySelector('input[placeholder="Menu Title"]');
+    await act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'   ');input.dispatchEvent(new Event('input',{bubbles:true}));});
+    await click(action);
+    expect(api.post).not.toHaveBeenCalled();expect(api.put).not.toHaveBeenCalled();
+    expect(node.textContent).toContain('Enter a menu title before saving or publishing.');expect(document.activeElement).toBe(input);
+  }finally{await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
+});
+
+test('Cycle import supplies a dated title when no title was entered',async()=>{
+  const meal={id:'cycle',name:'Chicken',mealKind:'Main meal',mealType:'Chicken',components:[{id:'p',type:'Protein',name:'Chicken',exclusions:[]}]};
+  const board=Array.from({length:7},()=>Array.from({length:4},()=>[]));board[0][1]=[{mealId:'cycle'}];
+  sessionStorage.setItem('matter-admin-v2:workbook-cycle-v2',JSON.stringify({meals:[meal]}));sessionStorage.setItem('matter-admin-v2:weekly-board-v1',JSON.stringify({'Main menu:Week 1':board}));
+  api.get.mockResolvedValue({data:{success:true,data:[]}});
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const click=async text=>act(async()=>[...node.querySelectorAll('button')].find(button=>button.textContent.trim()===text).click());
+  const fill=async(input,value)=>act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});
+  try{
+    await act(async()=>root.render(<MenuManagement/>));await click('New menu');
+    await fill(node.querySelector('input[aria-label="Menu start date"]'),'2026-11-16');await fill(node.querySelector('input[aria-label="Menu end date"]'),'2026-11-22');
+    await click('Create from Cycle Menu');expect(node.querySelector('input[placeholder="Menu Title"]').value).toBe('Week 1 · 2026-11-16 – 2026-11-22');
+  }finally{await act(async()=>root.unmount());node.remove();sessionStorage.clear();jest.clearAllMocks();}
 });

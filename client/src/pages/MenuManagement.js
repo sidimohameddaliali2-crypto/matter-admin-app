@@ -685,6 +685,7 @@ const MenuManagement = () => {
       const days = importSavedCycleMenu({ storage: sessionStorage, week: cycleWeek, startDate: formData.startDate, endDate: formData.endDate });
       if (weeklyItems.some(day => day.items?.length) && !window.confirm('Replace the meals in this unsaved menu draft?')) return;
       setWeeklyItems(days); setEditingSlot(null); setUploadError(null);
+      setFormData(current => ({ ...current, title: current.title.trim() ? current.title : `${cycleWeek} · ${current.startDate} – ${current.endDate}` }));
     } catch (err) { setUploadError(err.message); }
   };
 
@@ -717,7 +718,8 @@ const MenuManagement = () => {
       closeCreateForm();
       if (response.data.warnings?.length) setError(response.data.warnings.join(' '));
     } catch (err) {
-      setError(err.response?.data?.message || 'Failed to save menu');
+      setError(err.response?.data?.message || (err.code === 'MENU_TITLE_REQUIRED' ? err.message : 'Failed to save menu'));
+      if (err.code === 'MENU_TITLE_REQUIRED') document.querySelector('input[placeholder="Menu Title"]')?.focus();
     }
   };
 

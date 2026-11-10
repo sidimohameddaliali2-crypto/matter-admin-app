@@ -343,3 +343,26 @@ test('sauce and garnish are optional for an otherwise valid breakfast snapshot',
   days[0].items[0].mealType = 'breakfast'; days[0].items[0].cycleMeal = snapshot;
   assert.deepEqual(plan({ days })[0].fields.cycleMeal, snapshot);
 });
+
+
+test('blank or malformed explicit titles fail clearly before item writes', async t => {
+  const {store,writes}=fixture(t);const before=JSON.stringify(store);
+  for(const title of ['', '   ', null, 42, {}]) {
+    await assert.rejects(saveManagedMenu({menuId,body:{title,days:baseDays(),isPublished:true},buildMealName,mergeUploadedSnackPools:()=>{}}),error=>error.statusCode===400&&error.message==='Enter a menu title before saving or publishing.');
+    assert.equal(writes.length,0);assert.equal(JSON.stringify(store),before);
+  }
+});
+
+test('a missing title on a new menu gets a friendly validation response', async t => {
+  const {writes}=fixture(t);
+  await assert.rejects(saveManagedMenu({body:{startDate,endDate,days:baseDays()},buildMealName,mergeUploadedSnackPools:()=>{}}),error=>error.statusCode===400&&error.message==='Enter a menu title before saving or publishing.');
+  assert.equal(writes.length,0);
+});
+
+test('publish-only updates preserve an existing title, and explicit titles are trimmed', async t => {
+  const {store}=fixture(t);
+  await saveManagedMenu({menuId,body:{isPublished:true},buildMealName,mergeUploadedSnackPools:()=>{}});
+  assert.equal(store.menu.title,'Original');assert.equal(store.menu.isPublished,true);
+  await saveManagedMenu({menuId,body:{title:'  Revised menu  '},buildMealName,mergeUploadedSnackPools:()=>{}});
+  assert.equal(store.menu.title,'Revised menu');
+});

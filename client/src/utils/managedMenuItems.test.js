@@ -22,3 +22,14 @@ test('copying a cycle-backed dish deep-copies nested component notes and exclusi
   const copy = copyManagedMenuItem(item); copy.cycleMeal.components[0].exclusions.push('Dairy'); copy.cycleMeal.components[0].preparation.note = 'Changed';
   expect(item.cycleMeal.components[0]).toEqual({ id: 'protein', exclusions: ['Nuts'], preparation: { note: 'Original' } });
 });
+
+
+test.each([undefined, null, '', '   ', 42])('missing or malformed title %s is rejected before a save payload is built', title => {
+  for (const publish of [false, true]) expect(() => managedMenuPayload({title}, [], publish)).toThrow('Enter a menu title before saving or publishing.');
+});
+
+test('menu titles are trimmed without changing dish IDs or form state', () => {
+  const form={title:'  Own menu  '};const days=[{items:[{menuItemId:'original'}]}];
+  expect(managedMenuPayload(form,days,true)).toMatchObject({title:'Own menu',days,isPublished:true});
+  expect(form.title).toBe('  Own menu  ');
+});

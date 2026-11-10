@@ -111,7 +111,10 @@ export const saveManagedMenu = async ({ menuId, body, userId, buildMealName, mer
     const selections = menuId ? await Selection.find({ weeklyMenuId: menuId }).session(session).lean() : [];
     const previousStart = menuId ? dayKey(menu.startDate) : null;
     const previousEnd = menuId ? dayKey(menu.endDate) : null;
+    if (body.title !== undefined && (typeof body.title !== 'string' || !body.title.trim())) fail('Enter a menu title before saving or publishing.');
     for (const field of ['title', 'description', 'startDate', 'endDate', 'mealPlans', 'isPublished', 'enableCompletionMessage', 'completionMessage', 'breakfastPreset', 'breakfastPresetsByName']) if (body[field] !== undefined) menu.set(field, body[field]);
+    if (typeof menu.title !== 'string' || !menu.title.trim()) fail('Enter a menu title before saving or publishing.');
+    menu.title = menu.title.trim();
     const start = dayKey(menu.startDate), end = dayKey(menu.endDate);
     if (start > end) fail('The menu end date must be on or after the start date.');
     // Historical out-of-week rows must not prevent an unchanged menu from saving.
