@@ -3,7 +3,7 @@ import api from '../../utils/api';
 import { evaluateComponentSelection } from '../../constants/componentSelectionRules';
 import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
 import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm, allergenMatchesAny } from '../../constants/exclusionList';
-import { toSentenceCase, toTitleCase } from '../../utils/textFormat';
+import { toTitleCase } from '../../utils/textFormat';
 import MatterLogo from './MatterLogo';
 import SkipPauseCalendarModal from './SkipPauseCalendarModal';
 import {
@@ -90,7 +90,7 @@ const visibleIngredientNames = (list) =>
 // Labels only: exclusion checking continues to use the original private snapshot.
 // Salad and its dressing retain their deliberately private display policy.
 const componentDisplayName = (item, type, value) => {
-  const name = String(value || '').trim();
+  const name = toTitleCase(String(value || '').trim());
   const components = item.cycleMeal?.components || [];
   if (!name || type === 'Vegetable' && (item.cycleMeal?.isSaladBase || components.some(c => c.type === 'Salad'))) return name;
   const flags = [...new Set(components.filter(c => c.type === type).flatMap(c => c.exclusions || []).map(flag => toTitleCase(String(flag).trim())).filter(Boolean))];
@@ -248,10 +248,10 @@ function buildRealModel(weeklyMenu, profile) {
         type,
         name: item.mealName || 'Meal',
         sub: subParts.join(' · '),
-        proteinText: [String(item.proteinSource || '').trim(), visibleIngredientNames(item.portionIngredients)].filter(Boolean).join(' — '),
-        carbText: [componentDisplayName(item, 'Carb', item.carbs), visibleIngredientNames(item.carbIngredients)].filter(Boolean).join(' — '),
-        vegText: [componentDisplayName(item, 'Vegetable', item.veg), visibleIngredientNames(item.vegIngredients)].filter(Boolean).join(' — '),
-        sauceText: [String(item.sauce || '').trim(), visibleIngredientNames(item.sauceIngredients)].filter(Boolean).join(' — '),
+        proteinText: [toTitleCase(String(item.proteinSource || '').trim()), toTitleCase(visibleIngredientNames(item.portionIngredients))].filter(Boolean).join(' — '),
+        carbText: [componentDisplayName(item, 'Carb', item.carbs), toTitleCase(visibleIngredientNames(item.carbIngredients))].filter(Boolean).join(' — '),
+        vegText: [componentDisplayName(item, 'Vegetable', item.veg), toTitleCase(visibleIngredientNames(item.vegIngredients))].filter(Boolean).join(' — '),
+        sauceText: [toTitleCase(String(item.sauce || '').trim()), toTitleCase(visibleIngredientNames(item.sauceIngredients))].filter(Boolean).join(' — '),
         allergens: allergensDisplay,
         allergenMatchTokens,
         exclMatchTokens,
@@ -597,7 +597,10 @@ const MenuSelectionLink = ({ token }) => {
   // before it goes out (mirrors MenuSelection.jsx's sauceGarnishFlags).
   const computeSauceGarnishFlags = useCallback(
     (m) => {
-      if (!preview) return evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []).flags;
+      if (!preview) {
+        const result = evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []);
+        return { ...result.flags, ...(result.wholeMeal && result.flags.carbVegConflict.length ? { carbVegAction: 'kept' } : {}), exclusionConflict: result.wholeMeal ? [...new Set([...result.publicConflicts, ...result.flags.carbVegConflict])] : [] };
+      }
       const exclusionPhrases = preview ? [] : (account?.exclusionPhrases || []);
       const matchedSauce = matchAgainstExclusions(m.sauceNames || [], exclusionPhrases);
       const matchedGarnish = matchAgainstExclusions(m.garnishNames || [], exclusionPhrases);
@@ -618,7 +621,7 @@ const MenuSelectionLink = ({ token }) => {
   const addWithCap = useCallback(
     (m, extraFlags = {}) => {
       const rule = !preview && evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []);
-      if (rule && (rule.wholeMeal || rule.allergies.length)) return false;
+      if (rule && rule.allergies.length) return false;
       const dayTotal = (model?.meals || [])
         .filter((mm) => mm.dayIndex === m.dayIndex)
         .reduce((a, mm) => a + (qty[mm.key] || 0), 0);
@@ -660,7 +663,7 @@ const MenuSelectionLink = ({ token }) => {
   const openExclusion = useCallback(
     (m, conflict) => {
       if (conflict.hidden) return;
-      const items = conflict.items || [];
+      const items = (conflict.items || []).map(toTitleCase);
       const carbVegNames = [...(conflict.matchedCarb || []), ...(conflict.matchedVeg || [])];
       const hasCarbVeg = !conflict.wholeMeal && carbVegNames.length > 0;
 
@@ -675,8 +678,8 @@ const MenuSelectionLink = ({ token }) => {
         kicker: 'Against your preferences',
         title: `This meal includes ${items.join(', ')}`,
         body: hasCarbVeg
-          ? `${m.name} conflicts with an exclusion on your plan. Would you like the kitchen to replace the ${carbVegNames.join(', ')}, or keep it as is?`
-          : `${m.name} conflicts with an exclusion on your plan. You can keep it in your selection anyway, or pick something else for this slot.`,
+          ? `${toTitleCase(m.name)} conflicts with an exclusion on your plan. Would you like the kitchen to replace the ${carbVegNames.join(', ')}, or keep it as is?`
+          : `${toTitleCase(m.name)} conflicts with an exclusion on your plan. You can keep it in your selection anyway, or pick something else for this slot.`,
         items: items.map((x) => ({ label: x, bg: 'var(--color-neutral-200)', fg: 'var(--color-neutral-800)' })),
         actions: hasCarbVeg
           ? [
@@ -704,7 +707,7 @@ const MenuSelectionLink = ({ token }) => {
               { label: 'Replace with another', kind: 'secondary', onClick: () => setModal(null) },
               {
                 label: 'Keep selection',
-                disabled: !!conflict.wholeMeal,
+                disabled: false,
                 kind: 'primary',
                 onClick: () => {
                   setModal(null);
@@ -722,7 +725,7 @@ const MenuSelectionLink = ({ token }) => {
     (m) => {
       const c = conflictOf(m);
       if (c && c.kind === 'allergen') return openAllergen(c.items);
-      if (c && c.kind === 'exclusion' && (c.wholeMeal || !acknowledged[m.key])) return openExclusion(m, c);
+      if (c && c.kind === 'exclusion' && !c.hidden && !acknowledged[m.key]) return openExclusion(m, c);
       addWithCap(m);
     },
     [acknowledged, addWithCap, conflictOf, openAllergen, openExclusion]
@@ -743,8 +746,6 @@ const MenuSelectionLink = ({ token }) => {
       flash(`Remove ${blockedMeal.name} before submitting: it conflicts with your allergy profile.`);
       return;
     }
-    const wholeMealConflict = !preview && (model?.meals || []).some(m => qty[m.key] > 0 && !skipped[m.dayIndex] && evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []).wholeMeal);
-    if (wholeMealConflict) { flash('Could not save your selections.'); return; }
     if (preview) {
       setLockedSkipDays(skipped);
       setStep('done');
@@ -765,7 +766,7 @@ const MenuSelectionLink = ({ token }) => {
           // carbVegAction/carbConflict/vegConflict (from the exclusion modal)
           // and needsSauceChange/needsGarnishChange (silent) — see addWithCap.
           ...(mealFlags[m.key] || {}),
-          ...(!preview ? evaluateComponentSelection(m.item, account.exclusionPhrases || [], account.allergensLc || []).flags : {}),
+          ...(!preview ? computeSauceGarnishFlags(m) : {}),
         });
       });
       const skippedDates = [...new Set([
@@ -806,7 +807,7 @@ const MenuSelectionLink = ({ token }) => {
     } finally {
       setSubmitting(false);
     }
-  }, [account, conflictOf, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped]);
+  }, [account, computeSauceGarnishFlags, conflictOf, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped]);
 
   // Fetches available dates for the currently-skipped days and opens
   // the pause-confirmation calendar. Never calls select-meals itself — the
@@ -931,7 +932,7 @@ const MenuSelectionLink = ({ token }) => {
             );
           return {
             m,
-            name: m.name,
+            name: toTitleCase(m.name),
             sub: m.sub,
             proteinText: m.proteinText,
             carbText: m.carbText,
@@ -972,11 +973,11 @@ const MenuSelectionLink = ({ token }) => {
             selectable: !blocked && !deadlineLockedToday,
             qty: q,
             minusDisabled: q === 0 || deadlineLockedToday,
-            plusDisabled: dayFull || deadlineLockedToday || !!conflict?.wholeMeal,
+            plusDisabled: dayFull || deadlineLockedToday,
             onCard: () => {
               if (deadlineLockedToday) return;
               if (blocked) return openAllergen(conflict.items);
-              if (warned && (conflict.wholeMeal || !acknowledged[m.key])) return openExclusion(m, conflict);
+              if (warned && !conflict.hidden && !acknowledged[m.key]) return openExclusion(m, conflict);
             },
             onPlus: () => tryAdd(m),
             onMinus: () => bump(m.key, -1),
@@ -1039,7 +1040,7 @@ const MenuSelectionLink = ({ token }) => {
       dayKeys.map((k, i) => {
         const picks = (model?.meals || [])
           .filter((m) => m.dayIndex === i && (qty[m.key] || 0) > 0)
-          .map((m) => m.name);
+          .map((m) => toTitleCase(m.name));
         return {
           day: fmtDayLong(k),
           value: skipped[i] ? 'Skipped' : picks.length ? picks.join(', ') : 'No meals',
@@ -1115,7 +1116,7 @@ const MenuSelectionLink = ({ token }) => {
   const renderSignIn = () => (
     <div style={{ minHeight: preview ? 844 : '100vh', display: 'flex', flexDirection: 'column', padding: '54px 26px 32px' }}>
       <MatterLogo height={28} style={{ alignSelf: 'flex-start', marginBottom: 40 }} />
-      <h2 style={{ margin: '0 0 30px' }}>{toSentenceCase(menuName)}</h2>
+      <h2 style={{ margin: '0 0 30px' }}>{toTitleCase(menuName)}</h2>
       <p style={{ margin: '0 0 24px', fontSize: 15, lineHeight: 1.6 }}>
         Enter the email your subscription is registered to. We&apos;ll load your plan and this week&apos;s meals.
       </p>

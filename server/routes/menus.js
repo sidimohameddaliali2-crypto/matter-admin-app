@@ -3285,7 +3285,8 @@ router.post('/customers/:email/select-meals', async (req, res) => {
       needsSauceChange: !!sel.needsSauceChange,
       needsGarnishChange: !!sel.needsGarnishChange,
       sauceConflict: sel.sauceConflict?.length ? sel.sauceConflict : undefined,
-      garnishConflict: sel.garnishConflict?.length ? sel.garnishConflict : undefined
+      garnishConflict: sel.garnishConflict?.length ? sel.garnishConflict : undefined,
+      exclusionConflict: sel.exclusionConflict?.length ? sel.exclusionConflict : undefined
     }));
 
     console.log('Mapped selections with quantity:', mappedSelections.map(s => ({ 

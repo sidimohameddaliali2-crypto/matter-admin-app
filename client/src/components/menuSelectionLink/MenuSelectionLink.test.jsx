@@ -52,7 +52,7 @@ const modelFor = item => buildRealModel({ meals: [{ date: DELIVERY_DATE, mealTyp
 test('private salad and dressing flags participate in allergy checks without changing menu labels or visible tags', () => {
   const item = cycleItem([privateComponent('portion','Protein'),privateComponent('salad','Salad',['Mushroom']),privateComponent('dressing','Sauce 2',['Nuts'])]);
   const rendered = modelFor(item).meals[0];
-  expect(rendered.proteinText).toBe('Chicken portion');expect(rendered.carbText).toBe('Rice name');expect(rendered.vegText).toBe('Vegetable name');
+  expect(rendered.proteinText).toBe('Chicken Portion');expect(rendered.carbText).toBe('Rice Name');expect(rendered.vegText).toBe('Vegetable Name');
   expect(rendered.allergens).toEqual([]);expect(rendered.dietTags).toEqual([]);
   expect(rendered.sub).not.toContain('Internal kitchen note');
   expect(allergenMatchesAny('Nuts', rendered.allergenMatchTokens)).toBe(true);
@@ -69,7 +69,7 @@ beforeEach(() => {
 afterEach(() => {act(()=>root.unmount());node.remove();scroll.mockRestore();});
 const button = (text, scope = node) => [...scope.querySelectorAll('button')].find(element => element.textContent.trim() === text);
 const click = async element => {expect(element).toBeDefined();await act(async()=>element.click());};
-const card = () => [...node.querySelectorAll('div')].find(element => element.textContent === 'Private fixture meal').closest('.card');
+const card = () => [...node.querySelectorAll('div')].find(element => element.textContent === 'Private Fixture Meal').closest('.card');
 const setText = async (input, value) => act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});
 const signIn = async (item, profile = {}) => {
   const menu={_id:'menu-private',title:'Saved menu',startDate:DELIVERY_DATE,endDate:DELIVERY_DATE,meals:[{date:DELIVERY_DATE,mealType:item.mealType,items:[item]}]};
@@ -83,21 +83,23 @@ const signIn = async (item, profile = {}) => {
   expect(node.textContent).toContain('Sign out');
 };
 
-test('a portion exclusion cannot be added using the existing modal acknowledgement', async () => {
+test('a portion preference warns and allows keeping the meal without changing saved identity', async () => {
   await signIn(cycleItem([privateComponent('portion','Protein',['Coriander'])]),{mealExclusion:'Coriander'});
-  expect(button('+',card()).disabled).toBe(true);
-  await act(async()=>[...card().querySelectorAll('div')].find(element=>element.textContent==='Private fixture meal').click());
-  expect(button('Keep selection').disabled).toBe(true);
+  expect(button('+',card()).disabled).toBe(false);
+  await act(async()=>[...card().querySelectorAll('div')].find(element=>element.textContent==='Private Fixture Meal').click());
+  expect(button('Keep selection').disabled).toBe(false);
   await click(button('Keep selection'));await click(button('Submit my week'));
-  expect(api.post).not.toHaveBeenCalled();
+  expect(api.post).toHaveBeenCalledTimes(1);
+  expect(api.post.mock.calls[0][1].selections[0]).toMatchObject({mealName:'Private fixture meal',exclusionConflict:['Coriander']});
 });
 
-test.each(['portion','mixed'])('restored %s conflicts cannot submit an already selected meal', async scenario => {
+test.each(['portion','mixed'])('restored %s preference conflicts can submit with computed warning flags', async scenario => {
   const components=scenario==='portion'?[privateComponent('portion','Protein',['Coriander'])]:[privateComponent('portion','Protein'),privateComponent('carb','Carb',['Coriander']),privateComponent('veg','Vegetable')];
   const item=cycleItem(components);if(scenario==='mixed')item.cycleMeal.carbCombined='Yes';
   await signIn(item,{mealExclusion:'Coriander',hasSubmittedForRequestedMenu:true,selectedMeals:[{date:DELIVERY_DATE,mealType:'main',menuItemId:'private-item',quantity:1}]});
   await click(button('Submit my week'));
-  expect(api.post).not.toHaveBeenCalled();expect(node.textContent).toContain('Could not save your selections.');
+  expect(api.post).toHaveBeenCalledTimes(1);expect(api.post.mock.calls[0][1].selections[0].exclusionConflict).toContain('Coriander');
+  if(scenario==='mixed')expect(api.post.mock.calls[0][1].selections[0].carbVegAction).toBe('kept');
 });
 
 test('separate carb and vegetable conflicts retain existing messages and submit replacement flags', async () => {
@@ -144,10 +146,10 @@ test('only carb and ordinary veg names gain title-cased w/ exclusion labels with
   const before = JSON.parse(JSON.stringify(item));
   const rules = evaluateComponentSelection(item, ['Raw Onion', 'Gluten']);
   const meal = modelFor(item).meals[0];
-  expect(meal.proteinText).toBe('Chicken portion');
-  expect(meal.carbText).toBe('Rice name (w/ Gluten, Dairy)');
-  expect(meal.vegText).toBe('Vegetable name (w/ Raw Onion, Coriander)');
-  expect(meal.sauceText).toBe('Sauce name');
+  expect(meal.proteinText).toBe('Chicken Portion');
+  expect(meal.carbText).toBe('Rice Name (w/ Gluten, Dairy)');
+  expect(meal.vegText).toBe('Vegetable Name (w/ Raw Onion, Coriander)');
+  expect(meal.sauceText).toBe('Sauce Name');
   expect(item).toEqual(before);
   expect(item.carbIngredients).toBeUndefined(); expect(item.vegIngredients).toBeUndefined();
   expect(evaluateComponentSelection(item, ['Raw Onion', 'Gluten'])).toEqual(rules);
@@ -157,5 +159,18 @@ test('only carb and ordinary veg names gain title-cased w/ exclusion labels with
 test('empty exclusions and legacy hidden ingredients do not create w/ labels', () => {
   const item = cycleItem([privateComponent('c','Carb'),privateComponent('v','Vegetable')], { carbIngredients: [{name:'Hidden ingredient',visible:false}] });
   const meal = modelFor(item).meals[0];
-  expect(meal.carbText).toBe('Rice name'); expect(meal.vegText).toBe('Vegetable name');
+  expect(meal.carbText).toBe('Rice Name'); expect(meal.vegText).toBe('Vegetable Name');
+});
+
+
+test('customer title and component casing is display-only; original uppercase identity is submitted', async () => {
+  const item=cycleItem([privateComponent('p','Protein')], {mealName:'PHILLY SHREDDED CHICKEN',proteinSource:'PHILLY CHICKEN',carbs:'MASHED POTATO',veg:'CAULIFLOWER,CARROT'});
+  await signIn(item);
+  expect(node.textContent).toContain('Philly Shredded Chicken');
+  expect(node.textContent).toContain('Philly Chicken');
+  expect(node.textContent).toContain('Mashed Potato');
+  expect(node.textContent).toContain('Cauliflower,Carrot');
+  const mealCard=[...node.querySelectorAll('div')].find(el=>el.textContent==='Philly Shredded Chicken').closest('.card');
+  await click(button('+',mealCard));await click(button('Submit my week'));
+  expect(api.post.mock.calls[0][1].selections[0].mealName).toBe('PHILLY SHREDDED CHICKEN');
 });

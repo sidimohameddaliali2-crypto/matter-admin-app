@@ -62,10 +62,19 @@ export function validateMenuSelections({ menu, selections, exclusions = [], alle
     if (!Number.isInteger(quantity) || quantity < 1) throw failure();
     const choices = validateComponentChoices(item, selection);
     const result = evaluateComponentSelection(item, exclusions, allergies);
-    if (result.wholeMeal || result.allergies.length) throw failure();
+    if (result.allergies.length) throw failure();
+    // Preference conflicts warn rather than block. A whole-meal conflict must
+    // not be turned into a separate carb/veg replacement (especially mixtures).
+    const flags = { ...result.flags };
+    if (result.wholeMeal) {
+      delete flags.carbVegAction;
+      if (flags.carbVegConflict.length) flags.carbVegAction = 'kept';
+    }
+    const actualExclusionConflict = result.wholeMeal
+      ? [...new Set([...result.publicConflicts, ...flags.carbVegConflict])] : [];
     // Clear all client claims first. Only the stored item and profile decide flags.
     const { carbVegAction, carbVegConflict, carbConflict, vegConflict, needsSauceChange, needsGarnishChange, sauceConflict, garnishConflict, exclusionConflict, ...input } = selection;
-    return { ...input, ...choices, date, mealType: type, menuItemId: idOf(item), mealName: item.mealName, quantity, ...result.flags, exclusionConflict: [] };
+    return { ...input, ...choices, date, mealType: type, menuItemId: idOf(item), mealName: item.mealName, quantity, ...flags, exclusionConflict: actualExclusionConflict };
   });
 }
 

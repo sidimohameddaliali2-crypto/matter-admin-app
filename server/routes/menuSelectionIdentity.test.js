@@ -73,10 +73,11 @@ async function withSelectionFixtures(run) {
 const submitted = extra => ({ date: '2026-10-22', mealType: 'main', menuItemId: dishId, mealName: 'Fixture', ...extra });
 const post = async selections => { const res = response(); await handler({ params: { email: 'website@example.invalid' }, body: { weeklyMenuId: menuId, selections } }, res); return res; };
 
-test('customer save rejects a portion exclusion before any write even with forged safe flags', () => withSelectionFixtures(async state => {
+test('customer save allows a portion preference warning but recomputes its conflict record', () => withSelectionFixtures(async state => {
   state.item.cycleMeal.components[0].exclusions = ['Nuts'];
   const res = await post([submitted({ carbVegAction: 'replace', exclusionConflict: [] })]);
-  assert.equal(res.statusCode, 409); assert.equal(state.writes.length, 0);
+  assert.equal(res.statusCode, 200); assert.equal(state.writes.length, 1);
+  const saved=state.writes[0].update.$set.selectedMeals[0];assert.deepEqual(saved.exclusionConflict,['Nuts']);assert.equal(saved.carbVegAction,undefined);
 }));
 test('customer save recomputes private salad replacement flags', () => withSelectionFixtures(async state => {
   state.item.cycleMeal.components.push({ id: 's', type: 'Sauce 2', name: 'Dressing', exclusions: ['Nuts'] }, { id: 'v', type: 'Salad', name: 'Slaw', exclusions: [] });
@@ -124,4 +125,14 @@ test('customer and admin preserve verified unchanged component choices and metad
   const admin = response(); await adminHandler({ params: { menuId, email: 'storage@example.invalid' }, body: { selections: [submitted({ ...choices, remark: 'Keep note' })] } }, admin); assert.equal(admin.statusCode, 200);
   for (const write of state.writes) for (const [field, value] of Object.entries(choices)) assert.equal(write.update.$set.selectedMeals[0][field], value);
   assert.equal(state.writes[1].update.$set.selectedMeals[0].remark, 'Keep note');
+}));
+
+
+test('customer and admin save mixed preferences as warnings without trusting replacement or conflict claims', () => withSelectionFixtures(async state => {
+  state.nutrition.exclusions=['Gluten','Coriander'];
+  state.item.cycleMeal={carbCombined:'Yes',components:[{id:'p',type:'Protein',name:'Roast',exclusions:[]},{id:'c',type:'Carb',name:'Rice',exclusions:['Gluten']},{id:'v',type:'Salad',name:'Slaw',exclusions:['Coriander']}]};
+  const choices=submitted({carbVegAction:'replace',exclusionConflict:['Fake']});
+  assert.equal((await post([choices])).statusCode,200);
+  const admin=response();await adminHandler({params:{menuId,email:'storage@example.invalid'},body:{selections:[choices]}},admin);assert.equal(admin.statusCode,200);
+  for(const write of state.writes){const saved=write.update.$set.selectedMeals[0];assert.equal(saved.carbVegAction,'kept');assert.deepEqual(saved.exclusionConflict,['Gluten','Coriander']);assert.deepEqual(saved.carbConflict,['Gluten']);assert.deepEqual(saved.vegConflict,['Coriander']);}
 }));
