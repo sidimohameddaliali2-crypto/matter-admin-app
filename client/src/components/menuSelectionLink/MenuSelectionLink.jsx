@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/api';
+import { evaluateComponentSelection, selectionPreferenceFlags } from '../../constants/componentSelectionRules';
 import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
+import { isWithinRenewalWindow } from '../../utils/subscriptionRenewal';
 import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm, allergenMatchesAny } from '../../constants/exclusionList';
-import { toSentenceCase } from '../../utils/textFormat';
+import { toTitleCase } from '../../utils/textFormat';
 import MatterLogo from './MatterLogo';
 import SkipPauseCalendarModal from './SkipPauseCalendarModal';
 import {
@@ -85,6 +87,16 @@ const visibleIngredientNames = (list) =>
     .map((t) => t?.name)
     .filter(Boolean)
     .join(', ');
+
+// Labels only: exclusion checking continues to use the original private snapshot.
+// Salad and its dressing retain their deliberately private display policy.
+const componentDisplayName = (item, type, value) => {
+  const name = toTitleCase(String(value || '').trim());
+  const components = item.cycleMeal?.components || [];
+  if (!name || type === 'Vegetable' && (item.cycleMeal?.isSaladBase || components.some(c => c.type === 'Salad'))) return name;
+  const flags = [...new Set(components.filter(c => c.type === type).flatMap(c => c.exclusions || []).map(flag => toTitleCase(String(flag).trim())).filter(Boolean))];
+  return flags.length ? `${name} (w/ ${flags.join(', ')})` : name;
+};
 
 // Every ingredient's own display name (unfiltered by visible, like
 // tagTokens) — used to report exactly which carb/veg/sauce/garnish
@@ -210,7 +222,7 @@ function buildRealModel(weeklyMenu, profile) {
       // sauce/garnish included — a real allergy must always block, no matter
       // which component it's hiding in.
       const allergenMatchTokens = Array.from(
-        new Set([...declaredAllergens, ...intoleranceTokens, ...proteinTokens, ...carbTokens, ...vegTokens, ...sauceTokens, ...garnishTokens])
+        new Set([...declaredAllergens, ...intoleranceTokens, ...proteinTokens, ...carbTokens, ...vegTokens, ...sauceTokens, ...garnishTokens, ...(item.cycleMeal?.components || []).flatMap(c => [c.name, ...(c.exclusions || [])])])
       );
       // Soft-warn set (vs the customer's exclusion phrases) — portion/carb/veg
       // only. A sauce or garnish exclusion match is never shown to the
@@ -237,10 +249,10 @@ function buildRealModel(weeklyMenu, profile) {
         type,
         name: item.mealName || 'Meal',
         sub: subParts.join(' · '),
-        proteinText: [String(item.proteinSource || '').trim(), visibleIngredientNames(item.portionIngredients)].filter(Boolean).join(' — '),
-        carbText: [String(item.carbs || '').trim(), visibleIngredientNames(item.carbIngredients)].filter(Boolean).join(' — '),
-        vegText: [String(item.veg || '').trim(), visibleIngredientNames(item.vegIngredients)].filter(Boolean).join(' — '),
-        sauceText: [String(item.sauce || '').trim(), visibleIngredientNames(item.sauceIngredients)].filter(Boolean).join(' — '),
+        proteinText: [toTitleCase(String(item.proteinSource || '').trim()), toTitleCase(visibleIngredientNames(item.portionIngredients))].filter(Boolean).join(' — '),
+        carbText: [componentDisplayName(item, 'Carb', item.carbs), toTitleCase(visibleIngredientNames(item.carbIngredients))].filter(Boolean).join(' — '),
+        vegText: [componentDisplayName(item, 'Vegetable', item.veg), toTitleCase(visibleIngredientNames(item.vegIngredients))].filter(Boolean).join(' — '),
+        sauceText: [toTitleCase(String(item.sauce || '').trim()), toTitleCase(visibleIngredientNames(item.sauceIngredients))].filter(Boolean).join(' — '),
         allergens: allergensDisplay,
         allergenMatchTokens,
         exclMatchTokens,
@@ -308,10 +320,16 @@ const MenuSelectionLink = ({ token }) => {
   // the customer confirms it (SkipPauseCalendarModal's onConfirm -> doSubmit).
   const [skipPauseReview, setSkipPauseReview] = useState(null); // Availability and pause dates, without generated resume dates.
   const [pausePreviewLoading, setPausePreviewLoading] = useState(false);
-  // Frozen at the moment of a successful submit (same convention as
-  // lockedSkipDays) so the done screen's Renew button can't drift if the
-  // customer later reopens "Change my selections".
-  const [renewalEligible, setRenewalEligible] = useState(false);
+  // Recheck the renewal window while the page stays open and on return.
+  const [renewalNow, setRenewalNow] = useState(() => Date.now());
+  useEffect(() => {
+    const refresh = () => setRenewalNow(Date.now());
+    const timer = setInterval(refresh, 60_000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => { clearInterval(timer); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); };
+  }, []);
+  const renewalEligible = isWithinRenewalWindow(account?.cycleEndDate, renewalNow);
   const [toast, setToast] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const toastTimer = useRef(null);
@@ -446,6 +464,7 @@ const MenuSelectionLink = ({ token }) => {
 
       // preload a previously submitted selection for this menu
       const preQty = {};
+      const preFlags = {};
       const alreadySubmitted =
         profile.hasSubmittedForRequestedMenu ||
         (profile.currentWeekMenu && rawMenu?._id && String(profile.currentWeekMenu) === String(rawMenu._id));
@@ -453,10 +472,15 @@ const MenuSelectionLink = ({ token }) => {
         profile.selectedMeals.forEach((sm) => {
           const itemId = String(sm.menuItemId?._id || sm.menuItemId || '');
           const k = `${toDateKey(sm.date)}::${String(sm.mealType || '').toLowerCase()}::${itemId}`;
-          if (itemId) preQty[k] = (preQty[k] || 0) + (Number(sm.quantity) || 1);
+          if (itemId) {
+            preQty[k] = (preQty[k] || 0) + (Number(sm.quantity) || 1);
+            const preference = sm.carbVegPreference || sm.carbVegAction;
+            if (['kept', 'replace'].includes(preference)) preFlags[k] = { carbVegPreference: preference };
+          }
         });
       }
       setQty(preQty);
+      setMealFlags(preFlags);
       const savedSkipDates = new Set((profile.skippedDays || []).map((d) => toDateKey(d.date || d)));
       const savedSkips = Object.fromEntries(built.dayKeys.map((key, i) => [i, savedSkipDates.has(key)]));
       setSkipped(savedSkips);
@@ -491,7 +515,7 @@ const MenuSelectionLink = ({ token }) => {
   // already filtered to the customer's own Matter calendar + the published
   // menu) on or before the subscription's cycle_end_date — not that raw
   // boundary itself, since it isn't necessarily a delivery day. null when
-  // cycleEndDate is unknown, so neither the banner nor the Renew button show.
+  // cycleEndDate is unknown. Renewal eligibility is checked separately against today.
   const lastCycleDayKey = useMemo(() => {
     if (!account?.cycleEndDate || dayKeys.length === 0) return null;
     // Owner (2026-10-21): the cycle must actually END somewhere within this
@@ -539,6 +563,13 @@ const MenuSelectionLink = ({ token }) => {
     (m) => {
       if (!account) return null;
 
+      if (!preview) {
+        const rule = evaluateComponentSelection(m.item, account.exclusionPhrases || [], account.allergensLc || []);
+        if (rule.allergies.length) return { kind: 'allergen', items: rule.allergies.map(titleCase) };
+        if (rule.wholeMeal || rule.publicConflicts.length) return { kind: 'exclusion', items: rule.publicConflicts, matchedCarb: rule.matchedCarb, matchedVeg: rule.matchedVeg, wholeMeal: rule.wholeMeal, hidden: !rule.publicConflicts.length };
+        return null;
+      }
+
       // Hard block using complete ingredient phrases, including hidden tags.
       const allergenTokens = preview ? m.allergens || [] : m.allergenMatchTokens || [];
       const al = account.allergensLc.filter((allergy) => allergenMatchesAny(allergy, allergenTokens));
@@ -578,7 +609,11 @@ const MenuSelectionLink = ({ token }) => {
   // flag through to Kitchen List so staff know to swap that component
   // before it goes out (mirrors MenuSelection.jsx's sauceGarnishFlags).
   const computeSauceGarnishFlags = useCallback(
-    (m) => {
+    (m, preference) => {
+      if (!preview) {
+        const result = evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []);
+        return selectionPreferenceFlags(result, preference);
+      }
       const exclusionPhrases = preview ? [] : (account?.exclusionPhrases || []);
       const matchedSauce = matchAgainstExclusions(m.sauceNames || [], exclusionPhrases);
       const matchedGarnish = matchAgainstExclusions(m.garnishNames || [], exclusionPhrases);
@@ -598,6 +633,8 @@ const MenuSelectionLink = ({ token }) => {
   // and stashed per meal key so doSubmit can attach them to the selection.
   const addWithCap = useCallback(
     (m, extraFlags = {}) => {
+      const rule = !preview && evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []);
+      if (rule && rule.allergies.length) return false;
       const dayTotal = (model?.meals || [])
         .filter((mm) => mm.dayIndex === m.dayIndex)
         .reduce((a, mm) => a + (qty[mm.key] || 0), 0);
@@ -606,10 +643,10 @@ const MenuSelectionLink = ({ token }) => {
         return false;
       }
       bump(m.key, 1);
-      setMealFlags((s) => ({ ...s, [m.key]: { ...computeSauceGarnishFlags(m), ...extraFlags } }));
+      setMealFlags((s) => ({ ...s, [m.key]: { ...extraFlags, ...computeSauceGarnishFlags(m, extraFlags.carbVegAction ?? s[m.key]?.carbVegPreference) } }));
       return true;
     },
-    [bump, computeSauceGarnishFlags, flash, model, qty, target]
+    [account, preview, bump, computeSauceGarnishFlags, flash, model, qty, target]
   );
 
   const openAllergen = useCallback(
@@ -638,9 +675,10 @@ const MenuSelectionLink = ({ token }) => {
 
   const openExclusion = useCallback(
     (m, conflict) => {
-      const items = conflict.items || [];
-      const carbVegNames = [...(conflict.matchedCarb || []), ...(conflict.matchedVeg || [])];
-      const hasCarbVeg = carbVegNames.length > 0;
+      if (conflict.hidden) return;
+      const items = (conflict.items || []).map(toTitleCase);
+      const carbVegNames = [...new Set([...(conflict.matchedCarb || []), ...(conflict.matchedVeg || [])].map(toTitleCase))];
+      const hasCarbVeg = !conflict.wholeMeal && carbVegNames.length > 0;
 
       const carbVegFlags = (action) => ({
         carbVegAction: action,
@@ -653,8 +691,8 @@ const MenuSelectionLink = ({ token }) => {
         kicker: 'Against your preferences',
         title: `This meal includes ${items.join(', ')}`,
         body: hasCarbVeg
-          ? `${m.name} conflicts with an exclusion on your plan. Would you like the kitchen to replace the ${carbVegNames.join(', ')}, or keep it as is?`
-          : `${m.name} conflicts with an exclusion on your plan. You can keep it in your selection anyway, or pick something else for this slot.`,
+          ? `${toTitleCase(m.name)} conflicts with an exclusion on your plan. Would you like the kitchen to replace the ${carbVegNames.join(', ')}, or keep it as is?`
+          : `${toTitleCase(m.name)} conflicts with an exclusion on your plan. You can keep it in your selection anyway, or pick something else for this slot.`,
         items: items.map((x) => ({ label: x, bg: 'var(--color-neutral-200)', fg: 'var(--color-neutral-800)' })),
         actions: hasCarbVeg
           ? [
@@ -669,6 +707,7 @@ const MenuSelectionLink = ({ token }) => {
               },
               {
                 label: 'Keep as is',
+                disabled: false,
                 kind: 'primary',
                 onClick: () => {
                   setModal(null);
@@ -681,6 +720,7 @@ const MenuSelectionLink = ({ token }) => {
               { label: 'Replace with another', kind: 'secondary', onClick: () => setModal(null) },
               {
                 label: 'Keep selection',
+                disabled: false,
                 kind: 'primary',
                 onClick: () => {
                   setModal(null);
@@ -698,7 +738,7 @@ const MenuSelectionLink = ({ token }) => {
     (m) => {
       const c = conflictOf(m);
       if (c && c.kind === 'allergen') return openAllergen(c.items);
-      if (c && c.kind === 'exclusion' && !acknowledged[m.key]) return openExclusion(m, c);
+      if (c && c.kind === 'exclusion' && !c.hidden && !acknowledged[m.key]) return openExclusion(m, c);
       addWithCap(m);
     },
     [acknowledged, addWithCap, conflictOf, openAllergen, openExclusion]
@@ -739,6 +779,7 @@ const MenuSelectionLink = ({ token }) => {
           // carbVegAction/carbConflict/vegConflict (from the exclusion modal)
           // and needsSauceChange/needsGarnishChange (silent) — see addWithCap.
           ...(mealFlags[m.key] || {}),
+          ...(!preview ? computeSauceGarnishFlags(m, mealFlags[m.key]?.carbVegPreference) : {}),
         });
       });
       const skippedDates = [...new Set([
@@ -769,7 +810,6 @@ const MenuSelectionLink = ({ token }) => {
         }
         setSkipPauseReview(null);
         setLockedSkipDays(skipped);
-        setRenewalEligible(!!lastCycleDayKey);
         setStep('done');
       } else {
         flash(res.data?.message || 'Could not save your selections.');
@@ -779,7 +819,7 @@ const MenuSelectionLink = ({ token }) => {
     } finally {
       setSubmitting(false);
     }
-  }, [account, conflictOf, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped]);
+  }, [account, computeSauceGarnishFlags, conflictOf, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped]);
 
   // Fetches available dates for the currently-skipped days and opens
   // the pause-confirmation calendar. Never calls select-meals itself — the
@@ -854,7 +894,6 @@ const MenuSelectionLink = ({ token }) => {
     setModal(null);
     setSkipPauseReview(null);
     setPausePreviewLoading(false);
-    setRenewalEligible(false);
     setDay(0);
   }, []);
 
@@ -904,7 +943,7 @@ const MenuSelectionLink = ({ token }) => {
             );
           return {
             m,
-            name: m.name,
+            name: toTitleCase(m.name),
             sub: m.sub,
             proteinText: m.proteinText,
             carbText: m.carbText,
@@ -949,7 +988,7 @@ const MenuSelectionLink = ({ token }) => {
             onCard: () => {
               if (deadlineLockedToday) return;
               if (blocked) return openAllergen(conflict.items);
-              if (warned && !acknowledged[m.key]) return openExclusion(m, conflict);
+              if (warned && !conflict.hidden && !acknowledged[m.key]) return openExclusion(m, conflict);
             },
             onPlus: () => tryAdd(m),
             onMinus: () => bump(m.key, -1),
@@ -1012,7 +1051,7 @@ const MenuSelectionLink = ({ token }) => {
       dayKeys.map((k, i) => {
         const picks = (model?.meals || [])
           .filter((m) => m.dayIndex === i && (qty[m.key] || 0) > 0)
-          .map((m) => m.name);
+          .map((m) => toTitleCase(m.name));
         return {
           day: fmtDayLong(k),
           value: skipped[i] ? 'Skipped' : picks.length ? picks.join(', ') : 'No meals',
@@ -1088,7 +1127,7 @@ const MenuSelectionLink = ({ token }) => {
   const renderSignIn = () => (
     <div style={{ minHeight: preview ? 844 : '100vh', display: 'flex', flexDirection: 'column', padding: '54px 26px 32px' }}>
       <MatterLogo height={28} style={{ alignSelf: 'flex-start', marginBottom: 40 }} />
-      <h2 style={{ margin: '0 0 30px' }}>{toSentenceCase(menuName)}</h2>
+      <h2 style={{ margin: '0 0 30px' }}>{toTitleCase(menuName)}</h2>
       <p style={{ margin: '0 0 24px', fontSize: 15, lineHeight: 1.6 }}>
         Enter the email your subscription is registered to. We&apos;ll load your plan and this week&apos;s meals.
       </p>
@@ -1288,7 +1327,7 @@ const MenuSelectionLink = ({ token }) => {
         </div>
       )}
 
-      {!skippedToday && dayKeys[day] === lastCycleDayKey && (
+      {renewalEligible && !skippedToday && dayKeys[day] === lastCycleDayKey && (
         <div style={{ padding: '18px 22px 0' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, background: 'var(--color-accent-200)', borderRadius: 'var(--radius-lg)', padding: '14px 16px' }}>
             <div>
@@ -1476,6 +1515,7 @@ const MenuSelectionLink = ({ token }) => {
                 key={i}
                 className="btn"
                 onClick={a.onClick}
+                disabled={!!a.disabled}
                 style={{
                   fontSize: 13.5,
                   fontWeight: a.kind === 'danger' ? 600 : 400,

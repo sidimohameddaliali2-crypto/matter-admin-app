@@ -272,3 +272,97 @@ test('deleting a menu with customer history is blocked before any menu or item d
   await handler('/:id', 'delete')({ params: { id: menuId } }, res);
   assert.equal(res.statusCode, 409);
 });
+
+
+const cycleSnapshot = () => ({
+  id: 'cycle-1', name: 'Chosen Chicken', mealKind: 'Main meal', carbCombined: 'Yes', isSaladBase: true, isOatmeal: false,
+  components: [
+    { id: 'protein', type: 'Protein', name: 'Chicken', exclusions: ['Dairy'], notes: 'Approved preparation', adaptation: 'Dairy-free option available.', sourceCell: 'F12' },
+    { id: 'salad', type: 'Salad', name: 'Salad', exclusions: ['Coriander'], notes: 'Serve cold' },
+    { id: 'dressing', type: 'Sauce 2', name: 'Dressing', exclusions: ['Soy'], notes: 'Separate pot', saladComponentId: 'salad' },
+  ],
+  sourceRows: '12-14', importedMetadata: { originalName: 'Original meal' },
+});
+
+test('new cycle snapshots persist losslessly through menu save and are detached from payload', async t => {
+  const { store, writes } = fixture(t);
+  const snapshot = cycleSnapshot(), days = baseDays(); days[0].items[0].cycleMeal = snapshot;
+  const before = JSON.parse(JSON.stringify(snapshot));
+  await saveManagedMenu({ menuId, body: { days }, buildMealName, mergeUploadedSnackPools: () => {} });
+  assert.equal(writes.length, 1);
+  const linked = store.items.find(item => String(item._id) === String(store.menu.meals[0].items[0]));
+  assert.deepEqual(linked.cycleMeal, before);
+  snapshot.components[0].exclusions.push('Nuts'); assert.deepEqual(linked.cycleMeal, before);
+});
+
+test('older editors omitting cycleMeal preserve snapshots and selected IDs', async t => {
+  const { store, writes } = fixture(t);
+  store.items[0].cycleMeal = cycleSnapshot(); store.selections = [selection()];
+  const before = JSON.stringify(store.items[0].cycleMeal);
+  const planned = plan({ days: baseDays(), existingItems: store.items, selections: store.selections });
+  assert.deepEqual(planned[0].fields.cycleMeal, store.items[0].cycleMeal);
+  await saveManagedMenu({ menuId, body: { days: baseDays() }, buildMealName, mergeUploadedSnackPools: () => {} });
+  assert.equal(String(store.menu.meals[0].items[0]), itemId); assert.equal(writes.length, 0);
+  assert.equal(JSON.stringify(store.items[0].cycleMeal), before);
+});
+
+test('omitted snapshots also survive an unselected legacy display edit', async t => {
+  const { store } = fixture(t); store.items[0].cycleMeal = cycleSnapshot();
+  const days = baseDays(); days[0].items[0].carbs = 'Potato';
+  await saveManagedMenu({ menuId, body: { days }, buildMealName, mergeUploadedSnackPools: () => {} });
+  assert.deepEqual(store.items[1].cycleMeal, store.items[0].cycleMeal);
+});
+
+test('selected dishes protect snapshot exclusion, preparation and mixed-component changes', () => {
+  for (const change of [s => s.components[0].exclusions.push('Nuts'), s => { s.components[1].notes = 'New preparation'; }, s => { s.carbCombined = 'No'; }, s => { s.components.pop(); }]) {
+    const item = { ...existing(), cycleMeal: cycleSnapshot() }, days = baseDays();
+    days[0].items[0].cycleMeal = cycleSnapshot(); change(days[0].items[0].cycleMeal);
+    assert.throws(() => plan({ days, existingItems: [item], selections: [selection()] }), error => error.statusCode === 409 && /Existing customer selections/.test(error.message));
+  }
+});
+
+test('malformed snapshots reject instead of clearing dietary information', () => {
+  const changes = [
+    () => null, () => [], s => ({ ...s, components: {} }), s => ({ ...s, components: [] }),
+    s => ({ ...s, components: [{ ...s.components[0], exclusions: 'Nuts' }] }),
+    s => ({ ...s, components: [{ ...s.components[0], exclusions: [null] }] }),
+    s => ({ ...s, components: [{ ...s.components[0], name: '' }] }),
+    s => ({ ...s, components: [{ ...s.components[0], type: 'Unsupported' }] }),
+    s => ({ ...s, components: [s.components[0], s.components[0]] }),
+    s => ({ ...s, isSaladBase: 'false' }), s => ({ ...s, carbCombined: 'Maybe' }),
+  ];
+  for (const change of changes) {
+    const days = baseDays(); days[0].items[0].cycleMeal = change(cycleSnapshot());
+    assert.throws(() => plan({ days }), error => error.statusCode === 400 && /Cycle meal/.test(error.message));
+  }
+});
+
+test('sauce and garnish are optional for an otherwise valid breakfast snapshot', () => {
+  const days = baseDays(), snapshot = cycleSnapshot(); snapshot.components = snapshot.components.slice(0, 1);
+  snapshot.mealKind = 'Breakfast'; snapshot.isOatmeal = true;
+  days[0].items[0].mealType = 'breakfast'; days[0].items[0].cycleMeal = snapshot;
+  assert.deepEqual(plan({ days })[0].fields.cycleMeal, snapshot);
+});
+
+
+test('blank or malformed explicit titles fail clearly before item writes', async t => {
+  const {store,writes}=fixture(t);const before=JSON.stringify(store);
+  for(const title of ['', '   ', null, 42, {}]) {
+    await assert.rejects(saveManagedMenu({menuId,body:{title,days:baseDays(),isPublished:true},buildMealName,mergeUploadedSnackPools:()=>{}}),error=>error.statusCode===400&&error.message==='Enter a menu title before saving or publishing.');
+    assert.equal(writes.length,0);assert.equal(JSON.stringify(store),before);
+  }
+});
+
+test('a missing title on a new menu gets a friendly validation response', async t => {
+  const {writes}=fixture(t);
+  await assert.rejects(saveManagedMenu({body:{startDate,endDate,days:baseDays()},buildMealName,mergeUploadedSnackPools:()=>{}}),error=>error.statusCode===400&&error.message==='Enter a menu title before saving or publishing.');
+  assert.equal(writes.length,0);
+});
+
+test('publish-only updates preserve an existing title, and explicit titles are trimmed', async t => {
+  const {store}=fixture(t);
+  await saveManagedMenu({menuId,body:{isPublished:true},buildMealName,mergeUploadedSnackPools:()=>{}});
+  assert.equal(store.menu.title,'Original');assert.equal(store.menu.isPublished,true);
+  await saveManagedMenu({menuId,body:{title:'  Revised menu  '},buildMealName,mergeUploadedSnackPools:()=>{}});
+  assert.equal(store.menu.title,'Revised menu');
+});

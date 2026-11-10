@@ -34,6 +34,7 @@ import supyService from '../services/supyService.js';
 import { withKitchenPreparation, preparationHasFailures, kitchenPreparationFailure } from '../services/kitchenPreparation.js';
 import { matterSelectionIdentity, matterSelectionFilter, normalizeMatterEmail } from '../services/matterKitchenIdentity.js';
 import { resolveMenuAllergyProfile } from '../services/menuAllergyProfileService.js';
+import { validatedMenuSelections } from '../services/menuSelectionValidation.js';
 import { getPartnerKitchenOrders } from '../services/partnerKitchenOrders.js';
 import { syncMenuSelectionMainMealsToPartnerMenu } from '../services/menuSelectionPartnerSync.js';
 import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, validateRequiredResumeDates, expandSaturdaySkips } from '../services/matterPauseResumeService.js';
@@ -3188,6 +3189,8 @@ router.post('/customers/:email/select-meals', async (req, res) => {
   try {
     const { email } = req.params;
     const { weeklyMenuId, selections, macros, skippedDates, subscriptionId, pauseDecisions } = req.body;
+    if (!Array.isArray(selections) || selections.some(sel => !sel || typeof sel !== 'object' || Array.isArray(sel))) return res.status(400).json({ success: false, message: 'Could not save your selections.' });
+    if (!isValidObjectId(weeklyMenuId)) return res.status(409).json({ success: false, message: 'Could not save your selections.' });
     const cleanEmail = String(email || '').trim();
     // Logged onto the MenuSelectionRecord below — the customer-facing sign-in
     // (subscription-profile) resolves identity from this exact Matter
@@ -3259,8 +3262,9 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     const resumeError = validateRequiredResumeDates({ skippedDateKeys, decisions: [...pauseDecisionByDate.values()], alreadyPaused });
     if (resumeError) return res.status(400).json({ success: false, message: resumeError });
 
-    // Explicitly map selections to ensure quantity is preserved
-    const mappedSelections = (selections || []).filter((sel) => !skippedDateKeys.includes(toDayKey(sel.date))).map(sel => ({
+    // Validate before any selection or pause write, using the stored menu and verified profile.
+    const checkedSelections = await validatedMenuSelections({ menuId: weeklyMenuId, nutrition: matterSub, selections: Array.isArray(selections) ? selections.filter(sel => !skippedDateKeys.includes(toDayKey(sel.date))) : selections });
+    const mappedSelections = checkedSelections.map(sel => ({
       date: sel.date,
       mealType: sel.mealType,
       menuItemId: toMenuItemId(sel.menuItemId),
@@ -3273,17 +3277,20 @@ router.post('/customers/:email/select-meals', async (req, res) => {
       sauceChoice: sel.sauceChoice,
       manualProteinType: String(sel.manualProteinType || '').trim().toLowerCase(),
       quantity: Number(sel.quantity) || 1,  // Explicitly convert to number
+      carbVegPreference: sel.carbVegPreference || undefined,
       carbVegAction: sel.carbVegAction || undefined,
       carbVegConflict: sel.carbVegConflict?.length ? sel.carbVegConflict : undefined,
       carbConflict: sel.carbConflict?.length ? sel.carbConflict : undefined,
       vegConflict: sel.vegConflict?.length ? sel.vegConflict : undefined,
-      // Sauce/garnish exclusion matches never reach the customer — this flag
-      // is computed client-side (handleMealSelect) and just passed through
-      // here for Kitchen List to surface to staff.
+      keptCarbConflict: sel.keptCarbConflict?.length ? sel.keptCarbConflict : undefined,
+      keptVegConflict: sel.keptVegConflict?.length ? sel.keptVegConflict : undefined,
+      // Conflict flags are recomputed from stored components, never trusted from the browser.
       needsSauceChange: !!sel.needsSauceChange,
       needsGarnishChange: !!sel.needsGarnishChange,
       sauceConflict: sel.sauceConflict?.length ? sel.sauceConflict : undefined,
-      garnishConflict: sel.garnishConflict?.length ? sel.garnishConflict : undefined
+      garnishConflict: sel.garnishConflict?.length ? sel.garnishConflict : undefined,
+      preferenceConflict: sel.preferenceConflict?.length ? sel.preferenceConflict : undefined,
+      exclusionConflict: sel.exclusionConflict?.length ? sel.exclusionConflict : undefined
     }));
 
     console.log('Mapped selections with quantity:', mappedSelections.map(s => ({ 
@@ -3421,7 +3428,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
 
   } catch (error) {
     console.error('Error selecting meals:', error);
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
       message: error.message
     });
@@ -3593,10 +3600,11 @@ router.patch('/:menuId/selections/:email/meal-remarks', protect, async (req, res
 router.put('/:menuId/selections/:email', protect, async (req, res) => {
   try {
     const { menuId } = req.params;
+    if (!isValidObjectId(menuId)) return res.status(409).json({ success: false, message: 'Could not save your selections.' });
     const email = decodeURIComponent(req.params.email).trim();
     const { selections } = req.body;
 
-    if (!Array.isArray(selections)) {
+    if (!Array.isArray(selections) || selections.some(sel => !sel || typeof sel !== 'object' || Array.isArray(sel))) {
       return res.status(400).json({ success: false, message: 'selections must be an array' });
     }
 
@@ -3605,7 +3613,18 @@ router.put('/:menuId/selections/:email', protect, async (req, res) => {
 
     const safeEmailRegex = new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i');
 
-    const normalizedSelections = selections.map((sel) => ({
+    const recordFilter = { weeklyMenuId: menuId, ...(req.body.matterCustomerId ? { matterCustomerId: String(req.body.matterCustomerId) } : { email: safeEmailRegex }) };
+    const existingRecord = await MenuSelectionRecord.findOne(recordFilter).lean();
+    if (!existingRecord) return res.status(404).json({ success: false, message: 'Saved selection not found. Refresh before editing.' });
+    const profileEmail = existingRecord.matterEmail || existingRecord.email;
+    const nutrition = await matterApiService.getKitchenNutrition({ email: profileEmail });
+    if (!nutrition || (existingRecord.matterCustomerId
+      ? String(nutrition.customer_id || '') !== String(existingRecord.matterCustomerId)
+      : String(nutrition.customer_email || '').trim().toLowerCase() !== String(profileEmail || '').trim().toLowerCase())) {
+      return res.status(409).json({ success: false, message: 'Could not save your selections.' });
+    }
+    const checkedSelections = await validatedMenuSelections({ menuId, selections, nutrition, staffRecord: existingRecord });
+    const normalizedSelections = checkedSelections.map((sel) => sel.isAutoAssigned ? sel : ({
       date: sel.date,
       mealType: sel.mealType,
       menuItemId: toMenuItemId(sel.menuItemId),
@@ -3618,21 +3637,25 @@ router.put('/:menuId/selections/:email', protect, async (req, res) => {
       sauceChoice: sel.sauceChoice,
       manualProteinType: String(sel.manualProteinType || '').trim().toLowerCase(),
       quantity: Number(sel.quantity) || 1,
+      carbVegPreference: sel.carbVegPreference || undefined,
       carbVegAction: sel.carbVegAction,
       carbVegConflict: sel.carbVegConflict,
       carbConflict: sel.carbConflict,
       vegConflict: sel.vegConflict,
+      keptCarbConflict: sel.keptCarbConflict,
+      keptVegConflict: sel.keptVegConflict,
       needsSauceChange: !!sel.needsSauceChange,
       needsGarnishChange: !!sel.needsGarnishChange,
       sauceConflict: sel.sauceConflict,
       garnishConflict: sel.garnishConflict,
       remark: String(sel.remark || '').trim(),
+      preferenceConflict: sel.preferenceConflict?.length ? sel.preferenceConflict : undefined,
       exclusionConflict: Array.isArray(sel.exclusionConflict) ? sel.exclusionConflict : [],
       isAutoAssigned: !!sel.isAutoAssigned
     }));
 
     const record = await MenuSelectionRecord.findOneAndUpdate(
-      { weeklyMenuId: menuId, ...(req.body.matterCustomerId ? { matterCustomerId: String(req.body.matterCustomerId) } : { email: safeEmailRegex }) },
+      recordFilter,
       {
         $set: {
           selectedMeals: normalizedSelections,
@@ -3649,7 +3672,7 @@ router.put('/:menuId/selections/:email', protect, async (req, res) => {
     return res.json({ success: true, message: 'Selection updated successfully', record });
   } catch (error) {
     console.error('Error updating selection (admin override):', error);
-    return res.status(500).json({ success: false, message: error.message });
+    return res.status(error.statusCode || 500).json({ success: false, message: error.message });
   }
 });
 

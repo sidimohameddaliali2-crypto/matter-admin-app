@@ -195,3 +195,17 @@ test('switching through Snack restores the complete main-meal draft', () => {
   expect(onSave.mock.calls[0][0].components.map(c => c.id).sort()).toEqual(['dressing', 'protein', 'vegetable']);
   expect(onSave.mock.calls[0][0].components.flatMap(c => c.exclusions).sort()).toEqual(['Coriander', 'Dairy', 'Nuts', 'Soy']);
 });
+
+
+test('exclusion labels use title case while saving retains every original phrase', () => {
+  const flags = ['RAW ONION', 'DRAGON FRUIT', 'glUTen', 'ALL NUTS'];
+  const meal = { id: 'display-format', name: 'Display test', category: 'MAIN CHX', components: [component('p', 'Protein', 'Chicken', flags)] };
+  const onSave = render(meal);
+  for (const label of ['Raw Onion', 'Dragon Fruit', 'Gluten', 'All Nuts']) expect(host.textContent).toContain(label);
+  expect(host.textContent).not.toContain('RAW ONION'); expect(host.textContent).not.toContain('DRAGON FRUIT');
+  click('Save preview draft');
+  expect(onSave.mock.calls[0][0].components[0].exclusions).toEqual(flags);
+  act(() => host.querySelector('button[aria-label="Remove exclusion Raw Onion"]').click());
+  click('Save preview draft');
+  expect(onSave.mock.calls[1][0].components[0].exclusions).toEqual(flags.slice(1));
+});
