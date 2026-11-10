@@ -4,6 +4,7 @@ import Menu from '../models/WeeklyMenu.js';
 import Item from '../models/MenuItem.js';
 import Selection from '../models/MenuSelectionRecord.js';
 import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
+import { validateCycleMealSnapshot } from './menuComponentSnapshot.js';
 
 const fail = (message, statusCode = 400, conflicts) => {
   throw Object.assign(new Error(message), { statusCode, ...(conflicts ? { conflicts } : {}) });
@@ -67,6 +68,7 @@ export const planManagedMenu = ({ days, existingItems = [], selections = [], sta
         allergens: (Array.isArray(input.allergens) ? input.allergens : String(input.allergens || '').split(',')).map(value => String(value).trim()).filter(Boolean),
         garnish: input.garnish || '', carbs: input.carbs || '', veg: input.veg || '', sauce: input.sauce || '',
         portionType: input.portionType || '', rotationCategory: input.rotationCategory || '',
+        ...(input.cycleMeal !== undefined ? { cycleMeal: validateCycleMealSnapshot(input.cycleMeal) } : original?.cycleMeal !== undefined ? { cycleMeal: validateCycleMealSnapshot(original.cycleMeal) } : {}),
         usedForCorePlan: input.usedForCorePlan === undefined ? !!original?.usedForCorePlan : input.usedForCorePlan,
         ...Object.fromEntries(['portionIngredients', 'carbIngredients', 'vegIngredients', 'sauceIngredients'].map(key => [key, Array.isArray(input[key]) ? input[key] : []])),
       };

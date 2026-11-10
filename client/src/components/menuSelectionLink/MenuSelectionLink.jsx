@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/api';
+import { evaluateComponentSelection } from '../../constants/componentSelectionRules';
 import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
 import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm, allergenMatchesAny } from '../../constants/exclusionList';
 import { toSentenceCase } from '../../utils/textFormat';
@@ -210,7 +211,7 @@ function buildRealModel(weeklyMenu, profile) {
       // sauce/garnish included — a real allergy must always block, no matter
       // which component it's hiding in.
       const allergenMatchTokens = Array.from(
-        new Set([...declaredAllergens, ...intoleranceTokens, ...proteinTokens, ...carbTokens, ...vegTokens, ...sauceTokens, ...garnishTokens])
+        new Set([...declaredAllergens, ...intoleranceTokens, ...proteinTokens, ...carbTokens, ...vegTokens, ...sauceTokens, ...garnishTokens, ...(item.cycleMeal?.components || []).flatMap(c => [c.name, ...(c.exclusions || [])])])
       );
       // Soft-warn set (vs the customer's exclusion phrases) — portion/carb/veg
       // only. A sauce or garnish exclusion match is never shown to the
@@ -539,6 +540,13 @@ const MenuSelectionLink = ({ token }) => {
     (m) => {
       if (!account) return null;
 
+      if (!preview) {
+        const rule = evaluateComponentSelection(m.item, account.exclusionPhrases || [], account.allergensLc || []);
+        if (rule.allergies.length) return { kind: 'allergen', items: rule.allergies.map(titleCase) };
+        if (rule.wholeMeal || rule.publicConflicts.length) return { kind: 'exclusion', items: rule.publicConflicts, matchedCarb: rule.matchedCarb, matchedVeg: rule.matchedVeg, wholeMeal: rule.wholeMeal, hidden: !rule.publicConflicts.length };
+        return null;
+      }
+
       // Hard block using complete ingredient phrases, including hidden tags.
       const allergenTokens = preview ? m.allergens || [] : m.allergenMatchTokens || [];
       const al = account.allergensLc.filter((allergy) => allergenMatchesAny(allergy, allergenTokens));
@@ -579,6 +587,7 @@ const MenuSelectionLink = ({ token }) => {
   // before it goes out (mirrors MenuSelection.jsx's sauceGarnishFlags).
   const computeSauceGarnishFlags = useCallback(
     (m) => {
+      if (!preview) return evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []).flags;
       const exclusionPhrases = preview ? [] : (account?.exclusionPhrases || []);
       const matchedSauce = matchAgainstExclusions(m.sauceNames || [], exclusionPhrases);
       const matchedGarnish = matchAgainstExclusions(m.garnishNames || [], exclusionPhrases);
@@ -598,6 +607,8 @@ const MenuSelectionLink = ({ token }) => {
   // and stashed per meal key so doSubmit can attach them to the selection.
   const addWithCap = useCallback(
     (m, extraFlags = {}) => {
+      const rule = !preview && evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []);
+      if (rule && (rule.wholeMeal || rule.allergies.length)) return false;
       const dayTotal = (model?.meals || [])
         .filter((mm) => mm.dayIndex === m.dayIndex)
         .reduce((a, mm) => a + (qty[mm.key] || 0), 0);
@@ -606,10 +617,10 @@ const MenuSelectionLink = ({ token }) => {
         return false;
       }
       bump(m.key, 1);
-      setMealFlags((s) => ({ ...s, [m.key]: { ...computeSauceGarnishFlags(m), ...extraFlags } }));
+      setMealFlags((s) => ({ ...s, [m.key]: { ...extraFlags, ...computeSauceGarnishFlags(m) } }));
       return true;
     },
-    [bump, computeSauceGarnishFlags, flash, model, qty, target]
+    [account, preview, bump, computeSauceGarnishFlags, flash, model, qty, target]
   );
 
   const openAllergen = useCallback(
@@ -638,9 +649,10 @@ const MenuSelectionLink = ({ token }) => {
 
   const openExclusion = useCallback(
     (m, conflict) => {
+      if (conflict.hidden) return;
       const items = conflict.items || [];
       const carbVegNames = [...(conflict.matchedCarb || []), ...(conflict.matchedVeg || [])];
-      const hasCarbVeg = carbVegNames.length > 0;
+      const hasCarbVeg = !conflict.wholeMeal && carbVegNames.length > 0;
 
       const carbVegFlags = (action) => ({
         carbVegAction: action,
@@ -669,6 +681,7 @@ const MenuSelectionLink = ({ token }) => {
               },
               {
                 label: 'Keep as is',
+                disabled: !preview,
                 kind: 'primary',
                 onClick: () => {
                   setModal(null);
@@ -681,6 +694,7 @@ const MenuSelectionLink = ({ token }) => {
               { label: 'Replace with another', kind: 'secondary', onClick: () => setModal(null) },
               {
                 label: 'Keep selection',
+                disabled: !!conflict.wholeMeal,
                 kind: 'primary',
                 onClick: () => {
                   setModal(null);
@@ -698,7 +712,7 @@ const MenuSelectionLink = ({ token }) => {
     (m) => {
       const c = conflictOf(m);
       if (c && c.kind === 'allergen') return openAllergen(c.items);
-      if (c && c.kind === 'exclusion' && !acknowledged[m.key]) return openExclusion(m, c);
+      if (c && c.kind === 'exclusion' && (c.wholeMeal || !acknowledged[m.key])) return openExclusion(m, c);
       addWithCap(m);
     },
     [acknowledged, addWithCap, conflictOf, openAllergen, openExclusion]
@@ -719,6 +733,8 @@ const MenuSelectionLink = ({ token }) => {
       flash(`Remove ${blockedMeal.name} before submitting: it conflicts with your allergy profile.`);
       return;
     }
+    const wholeMealConflict = !preview && (model?.meals || []).some(m => qty[m.key] > 0 && !skipped[m.dayIndex] && evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []).wholeMeal);
+    if (wholeMealConflict) { flash('Could not save your selections.'); return; }
     if (preview) {
       setLockedSkipDays(skipped);
       setStep('done');
@@ -739,6 +755,7 @@ const MenuSelectionLink = ({ token }) => {
           // carbVegAction/carbConflict/vegConflict (from the exclusion modal)
           // and needsSauceChange/needsGarnishChange (silent) — see addWithCap.
           ...(mealFlags[m.key] || {}),
+          ...(!preview ? evaluateComponentSelection(m.item, account.exclusionPhrases || [], account.allergensLc || []).flags : {}),
         });
       });
       const skippedDates = [...new Set([
@@ -945,11 +962,11 @@ const MenuSelectionLink = ({ token }) => {
             selectable: !blocked && !deadlineLockedToday,
             qty: q,
             minusDisabled: q === 0 || deadlineLockedToday,
-            plusDisabled: dayFull || deadlineLockedToday,
+            plusDisabled: dayFull || deadlineLockedToday || !!conflict?.wholeMeal,
             onCard: () => {
               if (deadlineLockedToday) return;
               if (blocked) return openAllergen(conflict.items);
-              if (warned && !acknowledged[m.key]) return openExclusion(m, conflict);
+              if (warned && (conflict.wholeMeal || !acknowledged[m.key])) return openExclusion(m, conflict);
             },
             onPlus: () => tryAdd(m),
             onMinus: () => bump(m.key, -1),
@@ -1476,6 +1493,7 @@ const MenuSelectionLink = ({ token }) => {
                 key={i}
                 className="btn"
                 onClick={a.onClick}
+                disabled={!!a.disabled}
                 style={{
                   fontSize: 13.5,
                   fontWeight: a.kind === 'danger' ? 600 : 400,

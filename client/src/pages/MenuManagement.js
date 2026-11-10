@@ -45,6 +45,7 @@ import api from '../utils/api';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
 import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
 import { copyManagedMenuItem, managedMenuPayload } from '../utils/managedMenuItems';
+import { importSavedCycleMenu } from '../utils/cycleMenuImport';
 import { MENU_EXCEL_HEADERS, parseCorePlanFlag, corePlanExcelValue } from '../utils/menuExcelCore';
 import SupyRecipeSearch from '../components/SupyRecipeSearch';
 import IngredientTagEditor from '../components/IngredientTagEditor';
@@ -118,6 +119,7 @@ const MenuManagement = () => {
   const [selectedMenu, setSelectedMenu] = useState(null);
   const [copiedLink, setCopiedLink] = useState(null);
   const [weeklyItems, setWeeklyItems] = useState([]);
+  const [cycleWeek, setCycleWeek] = useState('Week 1');
   const [selectionMenuId, setSelectionMenuId] = useState(null);
   const [menuSelections, setMenuSelections] = useState([]);
   const [selectionLoading, setSelectionLoading] = useState(false);
@@ -660,6 +662,7 @@ const MenuManagement = () => {
 
   const closeCreateForm = () => {
     setShowCreateForm(false);
+    setCycleWeek('Week 1');
     setEditingMenuId(null);
     setEditingSlot(null);
     setUploadError(null);
@@ -674,6 +677,15 @@ const MenuManagement = () => {
       selectionDeadlines: []
     });
     setWeeklyItems([]);
+  };
+
+  const handleImportCycleMenu = () => {
+    if (editingMenuId) return;
+    try {
+      const days = importSavedCycleMenu({ storage: sessionStorage, week: cycleWeek, startDate: formData.startDate, endDate: formData.endDate });
+      if (weeklyItems.some(day => day.items?.length) && !window.confirm('Replace the meals in this unsaved menu draft?')) return;
+      setWeeklyItems(days); setEditingSlot(null); setUploadError(null);
+    } catch (err) { setUploadError(err.message); }
   };
 
   // publish=false → save/update as a draft (matches the design's "Save draft").
@@ -743,7 +755,8 @@ const MenuManagement = () => {
           sauceIngredients: Array.isArray(item.sauceIngredients) ? item.sauceIngredients : [],
           portionType: item.portionType || '',
           rotationCategory: item.rotationCategory || '',
-          usedForCorePlan: !!item.usedForCorePlan
+          usedForCorePlan: !!item.usedForCorePlan,
+          ...(item.cycleMeal !== undefined ? { cycleMeal: JSON.parse(JSON.stringify(item.cycleMeal)) } : {})
         });
       });
     });
@@ -1713,6 +1726,7 @@ const MenuManagement = () => {
                   />
                   <input
                     type="date"
+                    aria-label="Menu start date"
                     value={formData.startDate}
                     onChange={(e) => setFormData({ ...formData, startDate: e.target.value })}
                     required
@@ -1720,6 +1734,7 @@ const MenuManagement = () => {
                   />
                   <input
                     type="date"
+                    aria-label="Menu end date"
                     value={formData.endDate}
                     onChange={(e) => setFormData({ ...formData, endDate: e.target.value })}
                     required
@@ -1727,6 +1742,13 @@ const MenuManagement = () => {
                   />
                 </div>
               </div>
+
+              {!editingMenuId && <div className="border border-dashed border-matter-neutral-300 rounded-lg p-4 bg-matter-neutral-100">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div><p className="font-semibold text-matter-navy">Create from Cycle Menu</p><p className="text-xs text-matter-neutral-600">Copy a saved cycle week from this browser tab into a new Monday–Sunday menu draft.</p></div>
+                  <div className="flex gap-2"><select aria-label="Cycle week" value={cycleWeek} onChange={event => setCycleWeek(event.target.value)} className="px-3 py-2 text-sm bg-white border border-matter-neutral-300 rounded-lg"><option>Week 1</option><option>Week 2</option></select><button type="button" onClick={handleImportCycleMenu} className="px-3 py-2 text-sm bg-matter-navy text-white rounded-lg hover:bg-matter-blueblack">Create from Cycle Menu</button></div>
+                </div>
+              </div>}
 
               <div className="border border-dashed border-matter-neutral-300 rounded-lg p-4 bg-matter-neutral-100">
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -2054,6 +2076,11 @@ const MenuManagement = () => {
                                 </div>
                               </div>
                             )}
+
+                            {editingItem.cycleMeal && editingItem.mealType !== 'snack' && <label className="flex items-center gap-2 cursor-pointer">
+                              <input type="checkbox" aria-label="Carb combined with veg" checked={editingItem.cycleMeal.carbCombined === 'Yes'} onChange={event => updateEditingField('cycleMeal', { ...editingItem.cycleMeal, carbCombined: event.target.checked ? 'Yes' : 'No' })} className="w-4 h-4 rounded"/>
+                              <span className="text-xs text-matter-neutral-700">Carb combined with veg</span>
+                            </label>}
 
                             <div>
                               <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">

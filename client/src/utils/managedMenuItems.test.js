@@ -15,3 +15,10 @@ test('publish is included in the same payload as edited dishes and preserves ite
   expect(payload).toMatchObject({ title: 'Menu', days, isPublished: true });
   expect(managedMenuPayload({ title: 'Menu' }, days, false)).not.toHaveProperty('isPublished');
 });
+
+
+test('copying a cycle-backed dish deep-copies nested component notes and exclusions', () => {
+  const item = { menuItemId: 'original', cycleMeal: { id: 'cycle', components: [{ id: 'protein', exclusions: ['Nuts'], preparation: { note: 'Original' } }] } };
+  const copy = copyManagedMenuItem(item); copy.cycleMeal.components[0].exclusions.push('Dairy'); copy.cycleMeal.components[0].preparation.note = 'Changed';
+  expect(item.cycleMeal.components[0]).toEqual({ id: 'protein', exclusions: ['Nuts'], preparation: { note: 'Original' } });
+});
