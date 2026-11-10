@@ -189,6 +189,7 @@ router.post('/import-deliveries', protect, authorize(['admin', 'super_admin', 'd
     const summary = await importMatterDeliveriesForDate(date);
     res.status(summary.complete === false ? 503 : 200).json({ success: summary.complete !== false, message: summary.complete === false ? 'Delivery import is incomplete; no complete result is available.' : undefined, data: summary });
   } catch (error) {
+    if (error.code === 'MATTER_IMPORT_BUSY' || error.statusCode === 400) return res.status(error.statusCode).json({ success: false, message: error.message });
     console.error('Matter API import-deliveries error:', error.response?.data || error.message);
     res.status(500).json({ success: false, message: describeMatterApiError(error) || 'Failed to import deliveries from Matter', error: error.response?.data || error.message });
   }

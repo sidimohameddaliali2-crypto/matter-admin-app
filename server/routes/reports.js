@@ -309,7 +309,7 @@ router.get('/', protect, async (req, res) => {
         $gte: start,
         $lt: endExclusive
       }
-    }).populate('driver', 'profile');
+    }).populate('driver', 'profile.firstName profile.lastName profile.colorCode');
 
     // Calculate metrics
     const totalDeliveries = deliveries.length;

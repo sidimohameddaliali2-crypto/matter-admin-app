@@ -1,11 +1,11 @@
 import axios from 'axios';
-import mongoose from 'mongoose';
+import { scheduleWork, withScheduledWork } from '../services/scheduledWork.js';
+import { toBusinessDateKey } from '../utils/businessDate.js';
 import Bag from '../models/Bag.js';
 import Delivery from '../models/Delivery.js';
 import FlaggedAlert from '../models/FlaggedAlert.js';
 
 const DEFAULT_THRESHOLD = parseInt(process.env.FLAGGED_BAG_THRESHOLD || '3', 10);
-const DEFAULT_RUN_HOURS = parseInt(process.env.FLAGGED_ALERT_HOUR || '8', 10); // local hour to attempt
 
 function buildCustomerKey(customerId, customerName) {
   if (customerId && String(customerId).trim()) return String(customerId).trim().toLowerCase();
@@ -81,14 +81,18 @@ async function sendSlackMessage(payloadText) {
   await axios.post(webhookUrl, { text: payloadText }, { timeout: 8000 });
 }
 
-export async function runFlaggedNotifierOnce(threshold = DEFAULT_THRESHOLD) {
+export const runFlaggedNotifierOnce = (threshold = DEFAULT_THRESHOLD) =>
+  withScheduledWork('flagged-notifier', context => notifyFlaggedCustomers(threshold, context));
+
+async function notifyFlaggedCustomers(threshold, { assertOwned }) {
   try {
     const flagged = await findFlaggedCustomers(threshold);
     if (!Array.isArray(flagged) || flagged.length === 0) return { sent: 0 };
 
-    let sentCount = 0;
+    let sentCount = 0, failed = 0;
 
     for (const c of flagged) {
+      await assertOwned();
       const key = c.key;
 
       // check if a collection task already exists for this customer
@@ -98,7 +102,7 @@ export async function runFlaggedNotifierOnce(threshold = DEFAULT_THRESHOLD) {
       // check last sent timestamp
       const existing = await FlaggedAlert.findOne({ key }).exec();
       const today = new Date();
-      const alreadySentToday = existing && existing.lastSent && existing.lastSent.toDateString() === today.toDateString();
+      const alreadySentToday = existing && existing.lastSent && toBusinessDateKey(existing.lastSent) === toBusinessDateKey(today);
       if (alreadySentToday) continue; // already sent today
 
       // Prepare payload
@@ -114,17 +118,24 @@ export async function runFlaggedNotifierOnce(threshold = DEFAULT_THRESHOLD) {
       if (bagIds.length > 0) textLines.push(`*Bag IDs:* ${bagIds.slice(0, 20).join(', ')}${bagIds.length > 20 ? ' (and more...)' : ''}`);
 
       try {
+        await assertOwned();
+        // Incoming webhooks offer no exactly-once acknowledgement protocol:
+        // a process crash after Slack accepts but before lastSent is stored
+        // can still cause a retry. The shared lease prevents concurrent sends.
         await sendSlackMessage(textLines.join('\n'));
+        await assertOwned();
         sentCount++;
 
         // upsert flagged alert record
         await FlaggedAlert.findOneAndUpdate({ key }, { key, customerName: name, customerId: id, lastSent: new Date() }, { upsert: true }).exec();
       } catch (err) {
+        if (err.code === 'WORK_LEASE_LOST') throw err;
+        failed++;
         console.error('Failed to send Slack alert for', key, err.message);
       }
     }
 
-    return { sent: sentCount };
+    return { sent: sentCount, failed, complete: failed === 0 };
   } catch (err) {
     console.error('Error in flagged notifier:', err.message);
     throw err;
@@ -132,13 +143,6 @@ export async function runFlaggedNotifierOnce(threshold = DEFAULT_THRESHOLD) {
 }
 
 export function startFlaggedNotifier(intervalMs = 24 * 60 * 60 * 1000, threshold = DEFAULT_THRESHOLD) {
-  // run once immediately
-  runFlaggedNotifierOnce(threshold).catch(err => console.error(err));
-
-  // schedule repeating
-  const id = setInterval(() => {
-    runFlaggedNotifierOnce(threshold).catch(err => console.error(err));
-  }, intervalMs);
-
-  return () => clearInterval(id);
+  return scheduleWork({ name: 'flagged-customer-alerts', intervalMs,
+    run: () => runFlaggedNotifierOnce(threshold) });
 }

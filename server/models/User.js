@@ -12,6 +12,14 @@ const userSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  // Missing values on existing accounts are version zero. Password changes
+  // advance this counter without imposing periodic logins on drivers.
+  sessionVersion: {
+    type: Number,
+    default: 0,
+    min: 0,
+    validate: Number.isSafeInteger
+  },
   role: {
     type: String,
     enum: ['super_admin', 'admin', 'manager', 'dispatcher', 'driver', 'store_keeper', 'viewer', 'yellowblock_user', 'kitchen'],
@@ -164,6 +172,9 @@ const userSchema = new mongoose.Schema({
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
   this.password = await bcrypt.hash(this.password, 12);
+  // Use an atomic increment: concurrent password changes must each revoke the
+  // preceding sessions, even when both loaded the same account version.
+  if (!this.isNew) this.$inc('sessionVersion', 1);
   next();
 });
 

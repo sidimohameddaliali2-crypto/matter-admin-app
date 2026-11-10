@@ -6,14 +6,17 @@ import { getDirections } from '../services/googleDirectionsService.js';
 import { addressForDriver } from '../services/reverseGeocode.js';
 import { mapWithLimit } from '../utils/concurrency.js';
 
+import { hasStaffPermission, driverResponse, driverProjection, requireDriverRead, requireStaffPermission } from '../services/staffAccessPolicy.js';
+
 const router = express.Router();
+router.use(protect);
+const driverAdmin = requireStaffPermission('drivers');
 
 // Get all drivers
-router.get('/', protect, async (req, res) => {
+router.get('/', requireDriverRead({ directory: true }), async (req, res) => {
   try {
-    const drivers = await User.find({ role: 'driver' })
-      .select('-password')
-      .populate('profile')
+    const drivers = await User.find({ role: 'driver', ...(req.user.role === 'driver' ? { _id: req.user._id || req.user.id } : {}) })
+      .select(driverProjection(req.user))
       .lean();
 
     const today = new Date();
@@ -65,7 +68,7 @@ router.get('/', protect, async (req, res) => {
       const allTime = allTimeByDriver.get(driverKey) || { complaintsCount: 0 };
 
       return {
-        ...driver,
+        ...driverResponse(driver, req.user),
         todayDeliveries: today.deliveriesCount,
         deliveriesCount: today.deliveriesCount,
         tasksCount: today.tasksCount,
@@ -88,7 +91,7 @@ router.get('/', protect, async (req, res) => {
 });
 
 // Get driver locations for live map (must be declared before :id route)
-router.get('/locations', protect, async (req, res) => {
+router.get('/locations', requireDriverRead({ location: true }), async (req, res) => {
   try {
     const includeInactive = req.query.includeInactive === 'true';
 
@@ -96,8 +99,7 @@ router.get('/locations', protect, async (req, res) => {
       role: 'driver',
       ...(includeInactive ? {} : { isActive: true })
     })
-      .select('-password')
-      .select('email profile location isActive kpi lastLogin updatedAt createdAt')
+      .select(driverProjection(req.user, { location: true, operational: true }))
       .lean();
 
     const driverLocations = await mapWithLimit(drivers, 5, async (driver) => {
@@ -116,7 +118,7 @@ router.get('/locations', protect, async (req, res) => {
       return {
         _id: driver._id,
         email: driver.email,
-        profile: driver.profile || {},
+        profile: driverResponse(driver, req.user, { operational: true }).profile,
         isActive: driver.isActive,
         kpi: driver.kpi || {},
         lastLogin: driver.lastLogin,
@@ -140,7 +142,7 @@ router.get('/locations', protect, async (req, res) => {
 
 // One driver's last reported position and its street address (the app sends
 // coordinates only; the address is looked up server-side).
-router.get('/:id/location', protect, async (req, res) => {
+router.get('/:id/location', requireDriverRead({ location: true }), async (req, res) => {
   try {
     const isOwnLocation = String(req.user.id || req.user._id) === String(req.params.id);
     if (req.user.role === 'driver' && !isOwnLocation) {
@@ -174,14 +176,14 @@ router.get('/:id/location', protect, async (req, res) => {
 });
 
 // Update driver location (drivers can update themselves, admins can update any driver)
-router.put('/:id/location', protect, async (req, res) => {
+router.put('/:id/location', async (req, res) => {
   try {
     const driverId = req.params.id;
 
     const canUpdate =
       req.user.role === 'super_admin' ||
-      req.user.role === 'admin' ||
-      req.user.id === driverId;
+      (req.user.role === 'admin' && hasStaffPermission(req.user, 'drivers')) ||
+      (req.user.role === 'driver' && req.user.id === driverId);
 
     if (!canUpdate) {
       return res.status(403).json({ message: 'You do not have permission to update this driver location' });
@@ -207,7 +209,7 @@ router.put('/:id/location', protect, async (req, res) => {
           }
         }
       },
-      { new: true, select: '_id email profile isActive kpi location' }
+      { new: true, select: driverProjection(req.user, { location: true, operational: true }) }
     );
 
     if (!driver) {
@@ -217,7 +219,7 @@ router.put('/:id/location', protect, async (req, res) => {
     res.json({
       success: true,
       driverId: driver._id,
-      driver,
+      driver: driverResponse(driver, req.user, { location: true, operational: true }),
       location: driver.location
     });
   } catch (error) {
@@ -230,14 +232,14 @@ router.put('/:id/location', protect, async (req, res) => {
 // mobile Route Navigator screen (driver's live position + remaining stops,
 // in the dispatch-assigned visit order). Proxies Google Directions so the
 // API key stays server-side — the mobile app never holds it directly.
-router.post('/:id/route-directions', protect, async (req, res) => {
+router.post('/:id/route-directions', async (req, res) => {
   try {
     const driverId = req.params.id;
 
     const canView =
       req.user.role === 'super_admin' ||
-      req.user.role === 'admin' ||
-      req.user.id === driverId;
+      (req.user.role === 'admin' && hasStaffPermission(req.user, 'drivers')) ||
+      (req.user.role === 'driver' && req.user.id === driverId);
 
     if (!canView) {
       return res.status(403).json({ message: 'You do not have permission to request directions for this driver' });
@@ -261,11 +263,10 @@ router.post('/:id/route-directions', protect, async (req, res) => {
 });
 
 // Get driver by ID
-router.get('/:id', protect, async (req, res) => {
+router.get('/:id', requireDriverRead(), async (req, res) => {
   try {
     const driver = await User.findById(req.params.id)
-      .select('-password')
-      .populate('profile');
+      .select(driverProjection(req.user));
 
     if (!driver || driver.role !== 'driver') {
       return res.status(404).json({ message: 'Driver not found' });
@@ -290,7 +291,7 @@ router.get('/:id', protect, async (req, res) => {
       .limit(30);
 
     const driverWithStats = {
-      ...driver.toObject(),
+      ...driverResponse(driver, req.user),
       todayDeliveries: todayDeliveries.map(d => ({
         id: d._id,
         customer: d.customerName,
@@ -324,7 +325,7 @@ router.get('/:id', protect, async (req, res) => {
 });
 
 // Get weekly delivery statistics
-router.get('/:id/stats/weekly', protect, async (req, res) => {
+router.get('/:id/stats/weekly', requireDriverRead(), async (req, res) => {
   try {
     const driver = await User.findById(req.params.id);
     if (!driver || driver.role !== 'driver') {
@@ -394,7 +395,7 @@ router.get('/:id/stats/weekly', protect, async (req, res) => {
 });
 
 // Get monthly delivery statistics
-router.get('/:id/stats/monthly', protect, async (req, res) => {
+router.get('/:id/stats/monthly', requireDriverRead(), async (req, res) => {
   try {
     const driver = await User.findById(req.params.id);
     if (!driver || driver.role !== 'driver') {
@@ -466,7 +467,7 @@ router.get('/:id/stats/monthly', protect, async (req, res) => {
 });
 
 // Get delivery statistics for custom date range
-router.get('/:id/stats', protect, async (req, res) => {
+router.get('/:id/stats', requireDriverRead(), async (req, res) => {
   try {
     const { startDate, endDate } = req.query;
     
@@ -522,7 +523,7 @@ router.get('/:id/stats', protect, async (req, res) => {
 });
 
 // Create new driver
-router.post('/', protect, admin, async (req, res) => {
+router.post('/', admin, driverAdmin, async (req, res) => {
   try {
     const {
       email, password, firstName, lastName, phone, status, colorCode, picture,
@@ -567,15 +568,15 @@ router.post('/', protect, admin, async (req, res) => {
     await driver.save();
 
     // Return driver without password
-    const driverResponse = await User.findById(driver._id).select('-password');
-    res.status(201).json(driverResponse);
+    const driverResponseSafe = driverResponse(await User.findById(driver._id).select('-password'), req.user);
+    res.status(201).json(driverResponseSafe);
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 // Update driver
-router.put('/:id', protect, admin, async (req, res) => {
+router.put('/:id', admin, driverAdmin, async (req, res) => {
   try {
     const { firstName, lastName, phone, status, email, colorCode, profile } = req.body;
 
@@ -599,7 +600,11 @@ router.put('/:id', protect, admin, async (req, res) => {
       }
     });
 
-    if (profile && typeof profile === 'object') {
+    const allowedProfileFields = ['firstName', 'lastName', 'phone', 'status', 'colorCode', 'picture', 'licenseNumber', 'licenseExpiry', 'nationalId', 'assignedZone', 'shiftTiming', 'vehicleId', 'vehicleType', 'vehiclePaper', 'stopCapacity', 'truckoomVehicleNo', 'baseSalary', 'contractType', 'joiningDate', 'vacation', 'deductions'];
+    if (profile !== undefined && (!profile || typeof profile !== 'object' || Array.isArray(profile) || Object.keys(profile).some(key => !allowedProfileFields.includes(key)))) {
+      return res.status(400).json({ message: 'Invalid driver profile fields' });
+    }
+    if (profile) {
       Object.entries(profile).forEach(([field, value]) => {
         if (value !== undefined) {
           driver.profile[field] = value;
@@ -610,14 +615,14 @@ router.put('/:id', protect, admin, async (req, res) => {
     await driver.save();
 
     const updatedDriver = await User.findById(driver._id).select('-password');
-    res.json(updatedDriver);
+    res.json(driverResponse(updatedDriver, req.user));
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
 // Disable/enable driver
-router.patch('/:id/status', protect, admin, async (req, res) => {
+router.patch('/:id/status', admin, driverAdmin, async (req, res) => {
   try {
     const { isActive } = req.body;
 
@@ -626,6 +631,7 @@ router.patch('/:id/status', protect, admin, async (req, res) => {
       return res.status(404).json({ message: 'Driver not found' });
     }
 
+    if (typeof isActive !== 'boolean') return res.status(400).json({ message: 'isActive must be a boolean' });
     driver.isActive = isActive;
     await driver.save();
 
@@ -636,28 +642,6 @@ router.patch('/:id/status', protect, admin, async (req, res) => {
 });
 
 
-// Add this route to your existing driver routes
-router.post('/returns',  async (req, res) => {
-  try {
-    const { bagId, reason, notes, location, driverId, driverName } = req.body;
-
-    console.log('Bag return request:', req.body);
-
-    // For now, just return success to test
-    // Later you'll add database logic here
-    res.status(200).json({
-      message: 'Bag returned successfully',
-      bagId: bagId,
-      status: 'returned',
-      timestamp: new Date().toISOString(),
-      returnId: 'temp-' + Date.now()
-    });
-
-  } catch (error) {
-    console.error('Return bag error:', error);
-    res.status(500).json({ message: 'Server error during bag return' });
-  }
-});
 // Helper functions
 
 // score/avgLateTime/accuracyRate/updateRate now come from the month-to-date
@@ -673,7 +657,7 @@ async function getComplaintsCount(driverId) {
 }
 
 // DEBUG endpoint - check deliveries with drivers
-router.get('/debug/deliveries', protect, admin, async (req, res) => {
+router.get('/debug/deliveries', admin, driverAdmin, async (req, res) => {
   try {
     const deliveries = await Delivery.find({})
       .select('_id customerId customerName driver scheduledTime status')

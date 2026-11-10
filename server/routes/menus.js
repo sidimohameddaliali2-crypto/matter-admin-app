@@ -13,6 +13,8 @@ import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 import MenuSelectionArchive from '../models/MenuSelectionArchive.js';
 import { excludeRecreatedArchivedAliases } from '../services/archivedMenuAliases.js';
 import { protect } from '../middleware/auth.js';
+import { customerProfileRead, customerProfileWrite, customerMenuAccess, menuProfileAccess, activeCustomerMenu, validateCustomerSelections } from '../middleware/menuAccess.js';
+import { menuSessions, normalizeMenuEmail } from '../services/menuCustomerAuth.js';
 import { isMatterCoreDoubleDay } from '../utils/matterCoreDelivery.js';
 import { appendKitchenMeals } from '../services/kitchenSelectionWrite.js';
 import { kitchenDateUnavailable } from '../services/kitchenDeliveryEligibility.js';
@@ -40,6 +42,18 @@ import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, va
 
 
 const router = express.Router();
+
+router.post('/customer-auth/session', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const { menuId, shareToken, email } = req.body;
+    if (typeof shareToken !== 'string' || !shareToken || shareToken.length > 256) return res.status(400).json({ success: false, message: 'Open your menu link before signing in.' });
+    await activeCustomerMenu(menuId, shareToken);
+    res.json({ success: true, data: await menuSessions.start(email, menuId) });
+  } catch (error) {
+    res.status(error.statusCode || 503).json({ success: false, message: error.statusCode ? error.message : 'Menu sign-in is unavailable. Please try again later.' });
+  }
+});
 
 // Read-only production feed for both Kitchen List and Kitchen Counting.
 router.get('/kitchen-partner-orders', protect, (req, res, next) => {
@@ -204,7 +218,7 @@ const normalizeKitchenMacros = (rawMacros) => {
  * for that specific menu from MenuSelectionRecord (historical). Falls back to
  * customer.selectedMeals when no MenuSelectionRecord exists yet (e.g. old data).
  */
-router.get('/customers/:customerId/meal-profile', async (req, res) => {
+router.get('/customers/:customerId/meal-profile', ...customerProfileRead, async (req, res) => {
   try {
     const { customerId } = req.params;
     const { email, menuId } = req.query;
@@ -412,7 +426,7 @@ router.get('/customers/:customerId/meal-profile', async (req, res) => {
  * linked internal Customer allergy profile. Identity, entitlements and
  * dietary exclusions remain Matter-owned.
  */
-router.get('/customers/:email/subscription-profile', async (req, res) => {
+router.get('/customers/:email/subscription-profile', menuProfileAccess, async (req, res) => {
   try {
     const resolvedEmail = String(req.query.email || req.params.email || '').trim();
     const { menuId } = req.query;
@@ -437,6 +451,10 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
         success: false,
         message: 'We could not find an account under this email. Kindly contact customer service.'
       });
+    }
+
+    if (req.menuCustomer && normalizeMenuEmail(nutrition.customer_email) !== req.menuCustomer.email) {
+      return res.status(409).json({ success: false, message: 'Your subscription account changed. Please enter your email again.' });
     }
 
     const identity = matterSelectionIdentity(nutrition);
@@ -487,7 +505,7 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
  * GET /api/customers/:customerId/filemaker-layouts
  * Fetch raw FileMaker layout data for a customer (Customer, Leads, Orders)
  */
-router.get('/customers/:customerId/filemaker-layouts', async (req, res) => {
+router.get('/customers/:customerId/filemaker-layouts', ...customerProfileWrite, async (req, res) => {
   try {
     const { customerId } = req.params;
     const { email } = req.query;
@@ -598,7 +616,7 @@ router.get('/customers/:customerId/filemaker-layouts', async (req, res) => {
  * POST /api/customers/:customerId/meal-profile
  * Update customer meal preferences
  */
-router.post('/customers/:customerId/meal-profile', async (req, res) => {
+router.post('/customers/:customerId/meal-profile', ...customerProfileWrite, async (req, res) => {
   try {
     const { customerId } = req.params;
     const {
@@ -688,7 +706,7 @@ router.post('/customers/:customerId/meal-profile', async (req, res) => {
  * GET /api/customers/:customerId/complete-profile
  * Fetch COMPLETE customer profile (DB only)
  */
-router.get('/customers/:customerId/complete-profile', async (req, res) => {
+router.get('/customers/:customerId/complete-profile', ...customerProfileWrite, async (req, res) => {
   try {
     const { customerId } = req.params;
     const { email } = req.query;
@@ -742,7 +760,7 @@ router.get('/customers/:customerId/complete-profile', async (req, res) => {
  * GET /api/customers/:customerId/filemaker-raw
  * Fetch raw data placeholder (external API disabled)
  */
-router.get('/customers/:customerId/filemaker-raw', async (req, res) => {
+router.get('/customers/:customerId/filemaker-raw', ...customerProfileWrite, async (req, res) => {
   try {
     const { customerId } = req.params;
     const { email, startDate, endDate } = req.query;
@@ -3144,7 +3162,7 @@ router.post('/items', protect, async (req, res) => {
  * this preview).
  * Body: { dates: ["YYYY-MM-DD", ...] }
  */
-router.post('/customers/:email/skip-pause-preview', async (req, res) => {
+router.post('/customers/:email/skip-pause-preview', customerMenuAccess, async (req, res) => {
   try {
     const cleanEmail = String(req.params.email || '').trim();
     const dates = Array.isArray(req.body?.dates) ? req.body.dates.map(toDayKey).filter(Boolean) : [];
@@ -3157,6 +3175,9 @@ router.post('/customers/:email/skip-pause-preview', async (req, res) => {
       matterSub = await matterApiService.getKitchenNutrition({ email: cleanEmail });
     } catch (matterError) {
       console.error('skip-pause-preview: Matter lookup failed for', cleanEmail, '-', matterError.message);
+    }
+    if (req.menuCustomer && matterSub && normalizeMenuEmail(matterSub.customer_email) !== req.menuCustomer.email) {
+      return res.status(409).json({ success: false, message: 'Your subscription account changed. Please enter your email again.' });
     }
     const preview = await previewSkipPauses({
       email: cleanEmail,
@@ -3184,7 +3205,7 @@ router.post('/customers/:email/skip-pause-preview', async (req, res) => {
  * POST /api/customers/:email/select-meals
  * Customer selects meals from weekly menu
  */
-router.post('/customers/:email/select-meals', async (req, res) => {
+router.post('/customers/:email/select-meals', customerMenuAccess, async (req, res) => {
   try {
     const { email } = req.params;
     const { weeklyMenuId, selections, macros, skippedDates, subscriptionId, pauseDecisions } = req.body;
@@ -3233,6 +3254,12 @@ router.post('/customers/:email/select-meals', async (req, res) => {
       return res.status(matterError.statusCode || 502).json({ success: false, message: matterError.statusCode === 409 ? matterError.message : 'Could not verify your Matter subscription. Please retry before submitting.' });
     }
     if (!matterSub) return res.status(409).json({ success: false, message: 'A verified Matter subscription is required to submit meals.' });
+
+    if (req.menuCustomer) {
+      if (normalizeMenuEmail(matterSub.customer_email) !== req.menuCustomer.email) return res.status(409).json({ success: false, message: 'Your subscription account changed. Please enter your email again.' });
+      const selectionError = validateCustomerSelections(req.customerMenu, matterSub, selections);
+      if (selectionError) return res.status(400).json({ success: false, message: selectionError });
+    }
 
     const identity = matterSelectionIdentity(matterSub);
     if (req.body.matterCustomerId && String(req.body.matterCustomerId) !== identity.matterCustomerId) return res.status(409).json({ success: false, message: 'Your Matter account changed. Sign in again before submitting.' });

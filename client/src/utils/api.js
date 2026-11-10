@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const resolveApiBaseUrl = () => {
+export const resolveApiBaseUrl = () => {
   if (process.env.REACT_APP_API_URL) {
     const envUrl = process.env.REACT_APP_API_URL;
     if (typeof window !== 'undefined') {

@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { protect } from '../middleware/auth.js';
+import { protect, admin } from '../middleware/auth.js';
 import { PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { getUploadToSpaces, getS3Client } from '../config/spaces.js';
 
@@ -139,7 +139,7 @@ router.post('/delivery-photo', protect, (req, res, next) => {
 });
 
 // Upload bag tag logo (shared)
-router.post('/bag-tag-logo', protect, (req, res, next) => {
+router.post('/bag-tag-logo', protect, admin, (req, res, next) => {
   const USE_SPACES = Boolean(process.env.SPACES_KEY && process.env.SPACES_SECRET && process.env.SPACES_BUCKET);
 
   const upload = USE_SPACES

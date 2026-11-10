@@ -1,3 +1,4 @@
+import { mockScheduledWork } from '../testSupport/scheduledWorkFixture.js';
 import test from 'node:test';
 import fs from 'node:fs';
 import vm from 'node:vm';
@@ -102,11 +103,13 @@ test('comparison reports before/after without modifying jobs, corrections or his
   }
 });
 
-test('reimport reports existing-job conflicts without writes or another stop', async () => {
+test('reimport reports existing-job conflicts without writes or another stop', async t => {
+  mockScheduledWork(t);
   const original = { discover: matter.findSubscriptionsWithDeliveryOnDate, find: Delivery.findOne, update: Delivery.updateOne, create: Delivery.create };
   matter.findSubscriptionsWithDeliveryOnDate = async () => [sub];
   Delivery.findOne = (query) => {
-    assert.equal(query.matterSubscriptionId, 'fixture');
+    assert.equal(query.$or[1].matterSubscriptionId, 'fixture');
+    assert.equal(query.$or[0].matterImportKey, JSON.stringify(['fixture', '2026-10-20']));
     assert.equal(query.matterSource, undefined);
     return { select: async () => ({ _id: 'existing', customerName: 'Fixture', status: 'pending', addressId: '1' }) };
   };

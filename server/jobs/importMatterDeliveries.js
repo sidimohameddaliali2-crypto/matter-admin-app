@@ -1,3 +1,5 @@
+import { scheduleDailyWork } from '../services/scheduledWork.js';
+import { businessOffsetMs } from '../utils/businessDate.js';
 import { importMatterDeliveriesForDate } from '../services/matterDeliveryImportService.js';
 
 // Owner (2026-09-22, refined same day: "the Wednesday one [should import]
@@ -5,8 +7,8 @@ import { importMatterDeliveriesForDate } from '../services/matterDeliveryImportS
 // Matter subscription platform every morning, so dispatchers have the whole
 // day to review/assign drivers (via Optimize Routes) before the very early
 // (~1-2 AM) departure, instead of the schedule only existing on Matter's
-// side. Runs once daily at RUN_HOUR local time (setTimeout-then-setInterval,
-// same pattern as jobs/recalculateDriverKpis.js), PLUS once immediately on
+// side. Runs once daily at RUN_HOUR local time through the shared scheduler,
+// PLUS a calendar-day startup catch-up on
 // every server start — found the hard way (2026-09-22): the KPI job's
 // "wait for the next occurrence" pattern means a server that starts (or
 // restarts) any time after RUN_HOUR simply misses that whole day's import,
@@ -14,7 +16,7 @@ import { importMatterDeliveriesForDate } from '../services/matterDeliveryImportS
 // meant Wednesday's schedule never got imported at all, and the next run —
 // Wednesday 6 AM — would have imported Thursday's, not backfilled
 // Wednesday's). The import is idempotent (see matterDeliveryImportService's
-// dedup checks), so an extra run on every restart is harmless — it just
+// dedup checks and unique identity), so a catch-up after restart is harmless — it just
 // re-confirms nothing changed — while guaranteeing a missed 6 AM never
 // leaves a day genuinely empty.
 
@@ -59,18 +61,11 @@ export function startImportMatterDeliveriesJob() {
     return;
   }
 
-  // Startup catch-up — see the comment above for why.
-  runImportMatterDeliveriesOnce();
-
-  const now = new Date();
-  const nowLocal = new Date(now.getTime() + TIMEZONE_OFFSET_MINUTES * 60 * 1000);
-  const nextRun = new Date(nowLocal);
-  nextRun.setHours(RUN_HOUR, 0, 0, 0);
-  if (nowLocal >= nextRun) nextRun.setDate(nextRun.getDate() + 1);
-  const msUntilNextRun = nextRun - nowLocal;
-
-  setTimeout(() => {
-    runImportMatterDeliveriesOnce();
-    setInterval(runImportMatterDeliveriesOnce, 24 * 60 * 60 * 1000);
-  }, msUntilNextRun);
+  // Keep the startup catch-up, but complete it only once per shared daily slot.
+  return scheduleDailyWork({ name: 'matter-delivery-import', hour: RUN_HOUR, startupOffsetMs: businessOffsetMs(),
+    run: async () => {
+      const summary = await runImportMatterDeliveriesOnce();
+      if (summary.complete === false) throw new Error('Matter import incomplete; retry required');
+      return summary;
+    } });
 }

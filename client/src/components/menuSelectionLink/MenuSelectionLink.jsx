@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/api';
+import menuCustomerApi from '../../utils/menuCustomerApi';
 import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
 import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm, allergenMatchesAny } from '../../constants/exclusionList';
 import { toSentenceCase } from '../../utils/textFormat';
@@ -281,6 +282,15 @@ const MenuSelectionLink = ({ token }) => {
   const [step, setStep] = useState('signin'); // signin | menu | done
   const [email, setEmail] = useState('');
   const [emailError, setEmailError] = useState('');
+  const [signingIn, setSigningIn] = useState(false);
+  const [menuSession, setMenuSession] = useState('');
+  const authGeneration = useRef(0);
+  useEffect(() => {
+    authGeneration.current += 1;
+    setMenuSession('');
+    setAccount(null); setStep('signin'); setSigningIn(false);
+    return () => { authGeneration.current += 1; };
+  }, [token]);
   const [account, setAccount] = useState(null); // normalized customer
   const [day, setDay] = useState(0);
   const [qty, setQty] = useState({});
@@ -375,6 +385,7 @@ const MenuSelectionLink = ({ token }) => {
 
   /* -- sign in -- */
   const signIn = useCallback(async () => {
+    if (signingIn) return;
     const v = email.trim().toLowerCase();
     if (!v) return setEmailError('Enter your email address to continue.');
     if (v.indexOf('@') < 1 || v.indexOf('.') < 0) return setEmailError("That doesn't look like a valid email.");
@@ -399,16 +410,26 @@ const MenuSelectionLink = ({ token }) => {
       return;
     }
 
+    const generation = authGeneration.current;
     try {
+      setSigningIn(true);
       setEmailError('');
+      let session = menuSession;
+      if (!session) {
+        const started = await menuCustomerApi.post('/menus/customer-auth/session', { email: v, menuId: rawMenu?._id, shareToken: token });
+        if (generation !== authGeneration.current) return;
+        session = started.data.data.token;
+        setMenuSession(session);
+      }
       // Resolves identity/plan data straight from Matter by exact email —
       // not internal Customer Management matching — so a typed email either
       // matches a real subscription or gets a clear "contact customer
       // service" error, never a guessed/fuzzy match to someone else's data.
-      const res = await api.get(
+      const res = await menuCustomerApi.get(
         `/menus/customers/${encodeURIComponent(v)}/subscription-profile`,
-        { params: { email: v, menuId: rawMenu?._id } }
+        { params: { menuId: rawMenu?._id }, headers: { 'X-Menu-Session': session } }
       );
+      if (generation !== authGeneration.current) return;
       const profile = res.data?.data;
       if (!profile) throw new Error('not found');
 
@@ -467,6 +488,8 @@ const MenuSelectionLink = ({ token }) => {
       setDay(firstAvailableDayIndex(built.dayKeys, rawMenu?.selectionDeadlines));
       setStep('menu');
     } catch (err) {
+      if (generation !== authGeneration.current) return;
+      if (err.response?.status === 401) setMenuSession('');
       // Prefer the server's own message (e.g. "We could not find an account
       // under this email. Kindly contact customer service.") over a generic
       // client-side fallback, since meal-profile no longer guesses at a
@@ -477,8 +500,10 @@ const MenuSelectionLink = ({ token }) => {
           ? 'We could not find an account under this email. Kindly contact customer service.'
           : 'Could not load your plan. Please try again.')
       );
+    } finally {
+      if (generation === authGeneration.current) setSigningIn(false);
     }
-  }, [email, preview, rawMenu]);
+  }, [email, preview, rawMenu, signingIn, menuSession, token]);
 
   /* -- selection helpers -- */
   const dayKeys = model?.dayKeys || [];
@@ -745,14 +770,14 @@ const MenuSelectionLink = ({ token }) => {
         ...expandSaturdaySkips(dayKeys.filter((_, i) => skipped[i]), account.deliveryDates || dayKeys),
         ...(pauseDecisions || []).map((d) => d.date),
       ])];
-      const res = await api.post(`/menus/customers/${encodeURIComponent(account.email)}/select-meals`, {
+      const res = await menuCustomerApi.post(`/menus/customers/${encodeURIComponent(account.email)}/select-meals`, {
         weeklyMenuId: rawMenu._id,
         selections,
         skippedDates,
         matterCustomerId: account.matterCustomerId || undefined,
         subscriptionId: account.subscriptionId || undefined,
         ...(pauseDecisions ? { pauseDecisions } : {}),
-      });
+      }, { headers: { 'X-Menu-Session': menuSession } });
       if (res.data?.success) {
         const failedPauses = (res.data.pauseResults || []).filter((p) => p.pauseStatus === 'failed');
         if (failedPauses.length) {
@@ -779,7 +804,7 @@ const MenuSelectionLink = ({ token }) => {
     } finally {
       setSubmitting(false);
     }
-  }, [account, conflictOf, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped]);
+  }, [account, conflictOf, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped, menuSession]);
 
   // Fetches available dates for the currently-skipped days and opens
   // the pause-confirmation calendar. Never calls select-meals itself — the
@@ -789,9 +814,10 @@ const MenuSelectionLink = ({ token }) => {
     setPausePreviewLoading(true);
     setSkipPauseReview({ pauses: skippedDateKeys.map((date) => ({ date, alreadyPaused: false, resumeDate: null })) });
     try {
-      const res = await api.post(`/menus/customers/${encodeURIComponent(account.email)}/skip-pause-preview`, {
+      const res = await menuCustomerApi.post(`/menus/customers/${encodeURIComponent(account.email)}/skip-pause-preview`, {
+        menuId: rawMenu._id,
         dates: skippedDateKeys,
-      });
+      }, { headers: { 'X-Menu-Session': menuSession } });
       const pauses = res.data?.data?.pauses;
       setSkipPauseReview({ ...res.data?.data, pauses: Array.isArray(pauses) && pauses.length ? pauses : skippedDateKeys.map((date) => ({ date, alreadyPaused: false, resumeDate: null })) });
     } catch (err) {
@@ -802,7 +828,7 @@ const MenuSelectionLink = ({ token }) => {
     } finally {
       setPausePreviewLoading(false);
     }
-  }, [account, flash]);
+  }, [account, rawMenu, menuSession]);
 
   const handleConfirmPauseReview = useCallback((decisions) => {
     doSubmit(decisions);
@@ -844,6 +870,8 @@ const MenuSelectionLink = ({ token }) => {
   const resetAll = useCallback(() => {
     setStep('signin');
     setAccount(null);
+    authGeneration.current += 1;
+    setMenuSession(''); setSigningIn(false);
     setEmail('');
     setEmailError('');
     setQty({});
@@ -1099,8 +1127,10 @@ const MenuSelectionLink = ({ token }) => {
           id="msl-email"
           className="input"
           type="email"
+          autoComplete="email"
+          disabled={signingIn}
           value={email}
-          onChange={(e) => { setEmail(e.target.value); setEmailError(''); }}
+          onChange={(e) => { authGeneration.current += 1; setEmail(e.target.value); setEmailError(''); setMenuSession(''); }}
           onKeyDown={(e) => { if (e.key === 'Enter') signIn(); }}
           placeholder="you@example.com"
           style={{ fontSize: 16 }}
@@ -1110,8 +1140,8 @@ const MenuSelectionLink = ({ token }) => {
         <div style={{ fontSize: 13, color: 'var(--color-accent-700)', marginTop: 8 }}>{emailError}</div>
       ) : null}
 
-      <button className="btn btn-primary btn-block" onClick={signIn} style={{ marginTop: 20, padding: 15 }}>
-        Continue
+      <button className="btn btn-primary btn-block" disabled={signingIn} onClick={signIn} style={{ marginTop: 20, padding: 15 }}>
+        {signingIn ? 'Please wait…' : 'Continue'}
       </button>
 
       {preview ? (

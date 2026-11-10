@@ -1,25 +1,22 @@
 import express from 'express';
-import jwt from 'jsonwebtoken';
 import { body, validationResult } from 'express-validator';
 import User, { effectivePermissions } from '../models/User.js';
 import { authenticate, admin } from '../middleware/auth.js';
+import { generateStaffToken, disconnectStaffSessions } from '../services/staffSessionService.js';
+
+import { staffResponse, requireStaffPermission } from '../services/staffAccessPolicy.js';
 
 const router = express.Router();
 
-// Generate JWT Token
-// No `expiresIn` — sessions never expire (drivers and dispatchers stay
-// logged in indefinitely; a token is only invalidated by explicit logout
-// or by the account being deactivated, checked on every request in
-// middleware/auth.js's `protect`).
-const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET);
-};
+// No `expiresIn`: drivers and dispatchers retain long-running sessions.
+// Owner (2026-10-29): password changes revoke old session versions, checked
+// by the shared HTTP and Socket.IO authentication middleware.
 
 // @desc    Register user
 // @route   POST /api/auth/register
 // Staff accounts are provisioned by admins; public registration allowed role escalation.
 // @access  Admin
-router.post('/register', authenticate, admin, [
+router.post('/register', authenticate, admin, requireStaffPermission('users'), [
   body('email').isEmail().normalizeEmail(),
   body('password').isLength({ min: 6 }),
   body('firstName').notEmpty().trim(),
@@ -63,7 +60,7 @@ router.post('/register', authenticate, admin, [
     });
 
     // Generate token
-    const token = generateToken(user._id);
+    const token = generateStaffToken(user);
 
     res.status(201).json({
       success: true,
@@ -147,7 +144,7 @@ router.post('/login', [
     await user.save();
 
     // Generate token
-    const token = generateToken(user._id);
+    const token = generateStaffToken(user);
     console.log('✅ Login successful for user:', email);
 
     res.json({
@@ -228,7 +225,7 @@ router.put('/profile', authenticate, async (req, res) => {
     res.json({
       success: true,
       message: 'Profile updated successfully',
-      data: { user }
+      data: { user: staffResponse(user) }
     });
   } catch (error) {
     console.error('Update profile error:', error);
@@ -271,6 +268,9 @@ router.put('/change-password', authenticate, [
     // Update password
     user.password = newPassword;
     await user.save();
+    // Closing the user's room also reaches other PM2 workers through the
+    // Socket.IO Redis adapter. A reconnect must authenticate the new version.
+    disconnectStaffSessions(req.app.get('io'), user._id);
 
     res.json({
       success: true,

@@ -1,3 +1,5 @@
+import { scheduleWork } from '../services/scheduledWork.js';
+import { createHash } from 'node:crypto';
 import truckoomApiService from '../services/truckoomApiService.js';
 import User from '../models/User.js';
 import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
@@ -12,7 +14,7 @@ import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
 // forever").
 const RECORD_INTERVAL_MS = parseInt(process.env.VEHICLE_LOCATION_RECORD_INTERVAL_MS || '', 10) || 60 * 1000;
 
-async function recordOnce() {
+export async function recordVehicleLocationsOnce({ assertOwned, slot }, intervalMs = RECORD_INTERVAL_MS) {
   if (!truckoomApiService.isConfigured()) return;
 
   try {
@@ -31,6 +33,9 @@ async function recordOnce() {
     const docs = fleet
       .filter((v) => Number.isFinite(v.latitude) && Number.isFinite(v.longitude))
       .map((v) => ({
+        // Deterministic Mongo _id also protects a retry after a partial batch
+        // or a crash before the scheduler can mark its slot complete.
+        _id: createHash('sha256').update(JSON.stringify(['vehicle-sample', intervalMs, slot, v.vehicleNo])).digest('hex').slice(0, 24),
         vehicleNo: v.vehicleNo,
         driver: driverIdByVehicleNo.get(v.vehicleNo) || null,
         latitude: v.latitude,
@@ -40,14 +45,17 @@ async function recordOnce() {
       }));
 
     if (docs.length > 0) {
-      await VehicleLocationHistory.insertMany(docs);
+      await assertOwned();
+      await VehicleLocationHistory.bulkWrite(docs.map(doc => ({ updateOne: {
+        filter: { _id: doc._id }, update: { $setOnInsert: doc }, upsert: true,
+      } })), { ordered: false });
     }
   } catch (error) {
     console.error('Vehicle location recording error:', error.message);
+    throw error;
   }
 }
 
 export function startRecordVehicleLocationsJob(intervalMs = RECORD_INTERVAL_MS) {
-  recordOnce();
-  return setInterval(recordOnce, intervalMs);
+  return scheduleWork({ name: 'vehicle-location-recording', intervalMs, run: context => recordVehicleLocationsOnce(context, intervalMs) });
 }

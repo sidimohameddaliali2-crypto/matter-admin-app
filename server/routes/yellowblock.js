@@ -580,7 +580,7 @@ router.get('/products', async (req, res) => {
 router.get('/drivers', async (req, res) => {
   try {
     const drivers = await User.find({ role: 'driver', isActive: true })
-      .select('profile name email')
+      .select('profile.firstName profile.lastName profile.phone profile.colorCode name email')
       .lean();
 
     res.json({ success: true, drivers });
