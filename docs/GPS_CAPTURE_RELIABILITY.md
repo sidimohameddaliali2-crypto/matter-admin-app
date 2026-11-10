@@ -58,3 +58,15 @@ On repeated failures, inspect bounded failure codes and deployment health first.
 ## Follow-up review status (2026-11-10)
 
 Independent review found and fixed impossible-jump taint loss across uncertainty barriers and receipt decoding after native/lean Mongo readback. See the [follow-up qualification record](GPS_CHANGE_IMPACT.md#independent-follow-up-qualification--2026-11-10) and [isolated database evidence](GPS_DATABASE_REVIEW.md#isolated-recovery-evidence-2026-11-10). Local recovery and fixture evidence do not qualify actual deployment configuration, staging journeys or the separate reporting importer. **Keep this PR in draft; deployment is not ready until the remaining acceptance gates are satisfied.**
+
+## Prioritized scope after review — 2026-11-10
+
+This candidate is restricted to GPS collection, source retention and clocks, interrupted capture recovery, GPS quality interpretation and the saved-data API consumed by the separate reporting importer. It retains the original GPS assessment when replacing it and does not infer physical handover from GPS.
+
+The source is PR52 `da07026` integrated with main `54f598d`, plus the reviewed recovery harness and current-main fixture repairs at code checkpoint `a68b715`. A fresh isolated server run passed 730/730 across 91 files. The entire client tree is identical to main. There are no photo-upload, return-bag, offline-submission, completion-retry or live-map-label UI changes in this candidate. Those separately discovered workflow fixes are parked outside this release.
+
+All ten qualified GPS producer/model/API module hashes still match the successful actual-Mongo source-to-report integration. The ten-group GPS crash/election recovery run used this same code checkpoint. The separate reporting importer remains at `afafb50`, with report format, original findings/grades/history and prior publications preserved. These are local qualification results, not production acceptance.
+
+Next gates are to bind the running API to its actual Mongo database and account; qualify full indexes, durability and capacity against the enabled fleet/schedule; and establish an approved operational backup with a tested isolated restore. The reporting database and referenced private archives also require qualified backup coverage. Preserve existing pauses and budgets. After separate deployment approval, reconcile a closed Dubai delivery day and verify repeat exports before promoting a new reporting publication.
+
+The unrelated photo, bag and device-workflow work is not a prerequisite for this GPS data release. Existing dependent workflows remain compatibility concerns; no new camera or bag feature is bundled here. Keep PR52 in draft until the GPS-specific operational gates pass. No production merge, deployment, collection activation or report publication is authorized.
