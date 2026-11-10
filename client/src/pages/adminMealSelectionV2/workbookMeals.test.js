@@ -79,3 +79,34 @@ test('cycle assignments decide Main or Sub and keep breakfast and snacks separat
 test('a salad base is displayed as the meal vegetable component', () => {
   expect(componentName({ components: [{ type: 'Salad', name: 'Test salad' }] }, 'Vegetable')).toBe('Test salad');
 });
+
+
+test('optional NO TOPPINGS and NO SAUCE markers do not require component rows', () => {
+  const workbook = sheets();
+  workbook.Meals[1][workbook.Meals[0].indexOf('Garnish')] = 'NO TOPPINGS';
+  workbook.Meals[1][workbook.Meals[0].indexOf('Sauce')] = 'NO SAUCE';
+  workbook.Components = workbook.Components.filter(row => !['Garnish', 'Sauce'].includes(row[1]));
+  const meal = parseMealWorkbook(workbook)[0];
+  expect(meal.components.map(c => c.type)).toEqual(['Protein', 'Sauce 2']);
+  expect(meal.components[0].exclusions).toEqual(['Egg', 'Beans']);
+  expect(componentName(meal, 'Garnish')).toBe('NO TOPPINGS');
+  expect(componentName(meal, 'Sauce')).toBe('NO SAUCE');
+});
+
+test('Sauce 2 / extras header is matched and its exclusions preserved', () => {
+  const workbook = sheets();
+  workbook.Meals[0][workbook.Meals[0].indexOf('Sauce 2')] = 'Sauce 2 / extras';
+  expect(parseMealWorkbook(workbook)[0].components.find(c => c.type === 'Sauce 2')).toMatchObject({ name: 'Test dressing', exclusions: ['Dairy'] });
+  workbook.Components = workbook.Components.filter(row => row[1] !== 'Sauce 2');
+  expect(() => parseMealWorkbook(workbook)).toThrow('Sauce 2');
+});
+
+test('missing actual garnish detail still blocks import', () => {
+  const workbook = sheets(); workbook.Components = workbook.Components.filter(row => row[1] !== 'Garnish');
+  expect(() => parseMealWorkbook(workbook)).toThrow('Garnish');
+});
+
+test('conflicting second-sauce columns block rather than choosing one silently', () => {
+  const workbook = sheets(); workbook.Meals[0].push('Sauce 2 / extras'); workbook.Meals[1].push('Different sauce');
+  expect(() => parseMealWorkbook(workbook)).toThrow('conflicting second-sauce');
+});
