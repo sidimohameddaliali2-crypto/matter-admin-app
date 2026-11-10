@@ -237,7 +237,7 @@ const response = () => ({ statusCode: 200, status(code) { this.statusCode = code
 test('the API synchronizes partner dishes only after a published menu commits, and never after a failed save', async (t) => {
   const { store } = fixture(t);
   const events = [];
-  t.mock.method(PartnerItem, 'findOne', async () => { assert.equal(store.committed, true); events.push('partner-read-after-commit'); return null; });
+  t.mock.method(PartnerItem, 'findOne', () => ({ sort: async () => { assert.equal(store.committed, true); events.push('partner-read-after-commit'); return null; } }));
   t.mock.method(PartnerItem, 'create', async () => ({ _id: new mongoose.Types.ObjectId() }));
   t.mock.method(Partner, 'find', () => ({ select() { return this; }, lean: async () => [] }));
   t.mock.method(console, 'error', () => {});
@@ -255,7 +255,7 @@ test('the API synchronizes partner dishes only after a published menu commits, a
 
 test('partner-sync failure after commit reports a saved-menu warning instead of implying the menu rolled back', async (t) => {
   const { store } = fixture(t);
-  t.mock.method(PartnerItem, 'findOne', async () => { throw new Error('Partner source unavailable'); });
+  t.mock.method(PartnerItem, 'findOne', () => ({ sort: async () => { throw new Error('Partner source unavailable'); } }));
   t.mock.method(console, 'error', () => {});
   const res = response();
   await handler('/:id', 'put')({ params: { id: menuId }, user: { _id: new mongoose.Types.ObjectId() }, body: { isPublished: true } }, res);
