@@ -139,3 +139,41 @@ This specifically closes the previous harness gap: archive readback alone did no
 The restart step also waits for the previous test `mongod` child's `close` event before starting its replacement. This avoids a Windows test-tool race where delayed pipe closure could reject the replacement's startup listener. Startup failures remain failures; assertions are not retried or suppressed.
 
 Final linkage-harness verification passed eight assertion groups on three consecutive normal runs, including restart and restore plus the negative controls. The full explicit offline server suite also passed 682/682 tests across 89 files with non-loopback TCP connections blocked. No application behavior, live data, provider usage, deployment or reporting-importer code changed.
+
+### Local process-loss and replica-failover qualification
+
+The optional `--faults` mode extends the same synthetic harness to three local
+WiredTiger replica members. It requires an already installed `mongod` binary and
+disables runtime downloads. It accepts no external database URI. Run it with
+existing tooling and the installed binary, for example from a POSIX shell:
+
+```sh
+MONGOMS_RUNTIME_DOWNLOAD=false node server/scripts/qualifyGpsRecovery.mjs \
+  /absolute/path/to/mongodb-memory-server/index.js \
+  --faults /absolute/path/to/mongod
+```
+
+The new checks use only process handles created by this harness:
+
+- A separate Node capture worker saves an acknowledged history-row prefix and
+  waits. The parent sends `SIGKILL`, verifies the signal, lets its lease expire,
+  and proves a different owner recovers the complete immutable batch with all
+  source links intact. The child does not release the lease before exiting.
+- A three-member replica set saves a majority-acknowledged history prefix. The
+  harness kills its current primary with `SIGKILL`, verifies a different member
+  becomes writable primary, fences the previous batch owner, and checks exact
+  row identities, original receipt content, clocks and batch membership after
+  completion on the surviving members.
+
+This mode passed ten assertion groups using Node 24.21.0, the existing MongoDB
+7.0.14 binary and mongodb-memory-server 10.4.3 on macOS. No dependencies or
+MongoDB binaries were installed or downloaded. The earlier logical BSON restore
+checks still cover their original three batches; the two additional fault-test
+batches are verified against independent originals after recovery, not claimed
+as an operational backup restore.
+
+Process loss on a local machine is not abrupt host/power loss, a network
+partition, geographic failover, disk corruption or the deployed Atlas topology.
+The test does not identify the deployed application credential, inspect actual
+backup policy, restore an operational backup, measure production capacity or
+approve deployment. The default single-member qualification remains available.

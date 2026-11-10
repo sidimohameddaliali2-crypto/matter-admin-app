@@ -4,7 +4,17 @@ import { pathToFileURL } from 'node:url';
 import { isAbsolute, join, dirname, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
+import { fork } from 'node:child_process';
+import { access } from 'node:fs/promises';
 const toolingPath = process.argv[2];
+const faultMode = process.argv[3] === '--faults';
+const systemBinary = process.argv[4];
+if (process.argv[3] && !faultMode) throw new Error('Unknown qualification mode');
+if (faultMode) {
+  if (!isAbsolute(systemBinary || '')) throw new Error('Fault qualification requires an existing absolute mongod binary path');
+  await access(systemBinary);
+  process.env.MONGOMS_RUNTIME_DOWNLOAD = 'false';
+}
 if (!toolingPath || !isAbsolute(toolingPath)) throw new Error('Supply an absolute mongodb-memory-server/index.js path');
 const { MongoMemoryReplSet } = await import(pathToFileURL(toolingPath).href);
 import mongoose from 'mongoose';
@@ -108,9 +118,9 @@ async function linkedSnapshot(db) {
 async function verifyDatabaseLinks(db) { const snapshot = await linkedSnapshot(db); verifyLinks(snapshot); return snapshot; }
 const evidence=[];
 try {
- rs=await MongoMemoryReplSet.create({replSet:{count:1,ip:'127.0.0.1',storageEngine:'wiredTiger'}});
+ rs=await MongoMemoryReplSet.create({...(faultMode?{binary:{systemBinary}}:{}),replSet:{count:faultMode?3:1,ip:'127.0.0.1',storageEngine:'wiredTiger',...(faultMode?{configSettings:{electionTimeoutMillis:2000}}:{})}});
  const uri=rs.getUri('qualification');
- assert.match(uri,/^mongodb:\/\/127\.0\.0\.1:\d+\/qualification\?/); // newly spawned loopback-only database
+ assert.match(uri,/^mongodb:\/\/127\.0\.0\.1:\d+(?:,127\.0\.0\.1:\d+)*\/qualification\?/); // newly spawned loopback-only database
  await mongoose.connect(uri,{autoIndex:true}); await Promise.all([Batch.init(),History.init(),Receipt.init()]);
  const [a,b]=await Promise.all([store().claimTick(new Date(time)),store().claimTick(new Date(time))]);
  assert.equal([a,b].filter(Boolean).length,1); evidence.push('competing workers: exactly one claim');
@@ -215,7 +225,62 @@ try {
  changedBatch.payloadSha256 = hash(changedBatch.payload);
  assert.throws(() => verifyLinks(changedQuality), /original normalized field changed: qualityFlags/);
  evidence.push('negative controls reject missing batch/receipt inventories, wrong source-row index, changed hash, coherent receipt substitution and normalized-field mutation');
- console.log(JSON.stringify({passed:evidence,notes:['single-node local replica set; synthetic fault injection after actual Mongo writes','graceful mongod restart; abrupt host crash and production backup tooling not tested']},null,2));
+ if(faultMode){
+  // All process handles below belong to this harness. Never read a production
+  // PID, accept a remote URI, or change another database's replica configuration.
+  time+=60000;const crashClaim=await store().claimTick(new Date(time));
+  const crashLease=await store().saveBatch(crashClaim,await captureInput('worker-sigkill-response',crashClaim.batchId));
+  const worker=fork(new URL('./qualifyGpsCrashWorker.mjs',import.meta.url),[],{
+   stdio:['ignore','ignore','pipe','ipc'],env:{PATH:process.env.PATH,TMPDIR:process.env.TMPDIR,MONGOMS_RUNTIME_DOWNLOAD:'false'},
+  });
+  let workerDiagnostic='';worker.stderr.on('data',chunk=>{if(workerDiagnostic.length<8192)workerDiagnostic+=chunk;});
+  const workerClosed=new Promise((resolve,reject)=>{worker.once('error',reject);worker.once('close',(code,signal)=>resolve({code,signal}));});
+  try{
+   await new Promise((resolve,reject)=>{
+    const deadline=setTimeout(()=>reject(new Error('Worker prefix acknowledgement timed out: '+workerDiagnostic)),30000);
+    worker.once('error',error=>{clearTimeout(deadline);reject(error);});
+    worker.once('message',message=>{clearTimeout(deadline);message.kind==='prefix-acknowledged'?resolve():reject(new Error('Worker qualification failed: '+message.message));});
+    worker.send({uri:rs.getUri('qualification'),time,lease:crashLease});
+   });
+   assert.equal(await History.countDocuments({captureBatchId:crashLease.batchId}),1);
+   assert.equal(worker.kill('SIGKILL'),true);const stopped=await workerClosed;
+   assert.equal(stopped.code,null);assert.equal(stopped.signal,'SIGKILL');
+  }finally{if(worker.exitCode===null&&worker.signalCode===null){worker.kill('SIGKILL');await workerClosed;}}
+  time+=1001;const takeover=await store().claimPending();assert.equal(takeover.batchId,crashLease.batchId);
+  await store().persistBatch(takeover);await verifyDatabaseLinks(mongoose.connection.db);
+  assert.equal(await History.countDocuments(),12);
+  evidence.push('actual worker SIGKILL after acknowledged prefix: lease takeover restored all 12 exact linked rows');
+
+  time+=60000;const failoverClaim=await store().claimTick(new Date(time));
+  const failoverLease=await store().saveBatch(failoverClaim,await captureInput('primary-sigkill-response',failoverClaim.batchId));
+  const hello=await mongoose.connection.db.admin().command({hello:1});
+  assert.match(hello.primary,/^127\.0\.0\.1:\d+$/);
+  const victim=rs.servers.find(server=>server.instanceInfo?.port===Number(hello.primary.split(':')[1]));assert.ok(victim);
+  const processToKill=victim.instanceInfo.instance.mongodProcess;assert.ok(processToKill?.pid);
+  const primaryClosed=new Promise((resolve,reject)=>{processToKill.once('error',reject);processToKill.once('close',(code,signal)=>resolve({code,signal}));});
+  const normalWrite=History.bulkWrite.bind(History);let interrupted=false;
+  History.bulkWrite=async(operations,options)=>{
+   await normalWrite(operations,options);
+   if(!interrupted){interrupted=true;assert.equal(processToKill.kill('SIGKILL'),true);const stopped=await primaryClosed;assert.equal(stopped.signal,'SIGKILL');throw new Error('Synthetic primary loss after majority prefix');}
+  };
+  try{await assert.rejects(store().persistBatch(failoverLease),/Synthetic primary loss after majority prefix/);}finally{History.bulkWrite=normalWrite;}
+  const electionDeadline=Date.now()+45000;let elected=null;
+  while(Date.now()<electionDeadline){
+   try{const current=await mongoose.connection.db.admin().command({hello:1},{maxTimeMS:5000});if(current.isWritablePrimary&&current.primary!==hello.primary){elected=current.primary;break;}}catch{}
+   await new Promise(resolve=>setTimeout(resolve,250));
+  }
+  assert.ok(elected,'A surviving local replica did not become primary');
+  time+=1001;const promoted=await store().claimPending();assert.equal(promoted.batchId,failoverLease.batchId);
+  await assert.rejects(store().persistBatch(failoverLease),{code:'CAPTURE_LEASE_LOST'});
+  await store().persistBatch(promoted);await verifyDatabaseLinks(mongoose.connection.db);assert.equal(await History.countDocuments(),15);
+  evidence.push('actual primary SIGKILL: surviving replicas elected a different primary and recovered all 15 exact linked rows');
+  // This library retains a stopped ChildProcess handle after an external kill.
+  // Clear only that confirmed-dead harness-owned handle so normal cleanup can
+  // remove its temporary data directory without touching any running process.
+  assert.equal(processToKill.signalCode,'SIGKILL');
+  await victim.stop({doCleanup:false,force:false});victim.instanceInfo.instance.mongodProcess=undefined;
+ }
+ console.log(JSON.stringify({passed:evidence,notes:[faultMode?'three-node local replica set; actual worker and primary process SIGKILL after majority writes':'single-node local replica set; synthetic fault injection after actual Mongo writes','logical BSON restore; abrupt host/power failure and production backup tooling not tested']},null,2));
 } finally {
  try { await mongoose.disconnect(); }
  finally { try { await rs?.stop(); } finally { const resolvedScratch=await realpath(scratch);
