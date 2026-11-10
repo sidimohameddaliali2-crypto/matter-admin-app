@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 import Menu from '../models/WeeklyMenu.js';
 import { resolveMenuAllergyProfile } from './menuAllergyProfileService.js';
-import { evaluateComponentSelection } from '../../client/src/constants/componentSelectionRules/index.js';
+import { evaluateComponentSelection, selectionPreferenceFlags } from '../../client/src/constants/componentSelectionRules/index.js';
 
 const failure = () => Object.assign(new Error('Could not save your selections.'), { statusCode: 409 });
 const idOf = value => String(value?._id || value || '');
@@ -63,18 +63,13 @@ export function validateMenuSelections({ menu, selections, exclusions = [], alle
     const choices = validateComponentChoices(item, selection);
     const result = evaluateComponentSelection(item, exclusions, allergies);
     if (result.allergies.length) throw failure();
-    // Preference conflicts warn rather than block. A whole-meal conflict must
-    // not be turned into a separate carb/veg replacement (especially mixtures).
-    const flags = { ...result.flags };
-    if (result.wholeMeal) {
-      delete flags.carbVegAction;
-      if (flags.carbVegConflict.length) flags.carbVegAction = 'kept';
-    }
-    const actualExclusionConflict = result.wholeMeal
-      ? [...new Set([...result.publicConflicts, ...flags.carbVegConflict])] : [];
+    // Preserve the explicit Keep/Replace choice separately from private salad
+    // routing. Legacy clients supply only carbVegAction.
+    const preference = selection.carbVegPreference !== undefined ? selection.carbVegPreference : selection.carbVegAction;
+    const flags = selectionPreferenceFlags(result, preference);
     // Clear all client claims first. Only the stored item and profile decide flags.
-    const { carbVegAction, carbVegConflict, carbConflict, vegConflict, needsSauceChange, needsGarnishChange, sauceConflict, garnishConflict, exclusionConflict, ...input } = selection;
-    return { ...input, ...choices, date, mealType: type, menuItemId: idOf(item), mealName: item.mealName, quantity, ...flags, exclusionConflict: actualExclusionConflict };
+    const { carbVegPreference, carbVegAction, carbVegConflict, carbConflict, vegConflict, needsSauceChange, needsGarnishChange, sauceConflict, garnishConflict, exclusionConflict, preferenceConflict, ...input } = selection;
+    return { ...input, ...choices, date, mealType: type, menuItemId: idOf(item), mealName: item.mealName, quantity, ...flags };
   });
 }
 

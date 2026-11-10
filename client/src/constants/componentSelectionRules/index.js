@@ -50,7 +50,7 @@ export function evaluateComponentSelection(item, exclusions = [], allergies = []
   return {
     allergies: unique(allergyMatches), wholeMeal,
     publicConflicts: unique([...ex.filter(exclusion => publicTerms.some(value => exclusionMatchesTerm(exclusion, value))), ...generalOnly]),
-    matchedCarb: matched.carb, matchedVeg: matched.veg,
+    matchedCarb: matched.carb, matchedVeg: matched.veg, hiddenVegConflict: matched.salad,
     flags: {
       ...(carbVegConflict.length ? { carbVegAction: 'replace' } : {}),
       carbVegConflict, carbConflict: matched.carb, vegConflict,
@@ -58,4 +58,38 @@ export function evaluateComponentSelection(item, exclusions = [], allergies = []
       sauceConflict: matched.sauce, garnishConflict: matched.garnish,
     },
   };
+}
+
+
+// A customer preference is independent of the kitchen action: keeping a public
+// carb/veg does not cancel the private replacement of salad or its dressing.
+export function selectionPreferenceFlags(result, preference) {
+  if (preference !== undefined && !['kept', 'replace'].includes(preference)) {
+    throw Object.assign(new Error('Could not save your selections.'), { statusCode: 409 });
+  }
+  const flags = { ...result.flags };
+  let preferenceConflict = [];
+  if (result.wholeMeal) {
+    delete flags.carbVegAction;
+    if (flags.carbVegConflict.length) flags.carbVegAction = 'kept';
+    preferenceConflict = unique([...result.publicConflicts, ...flags.carbVegConflict]);
+    flags.carbConflict = [];
+    flags.vegConflict = [];
+    flags.carbVegConflict = [];
+  } else if (preference === 'kept') {
+    const hidden = unique(result.hiddenVegConflict || []);
+    preferenceConflict = [...result.publicConflicts];
+    if (hidden.length) {
+      flags.carbVegAction = 'replace';
+      flags.carbConflict = [];
+      flags.vegConflict = hidden;
+      flags.carbVegConflict = hidden;
+    } else {
+      if (flags.carbVegConflict.length) flags.carbVegAction = 'kept';
+      flags.carbConflict = [];
+      flags.vegConflict = [];
+      flags.carbVegConflict = [];
+    }
+  }
+  return { ...flags, preferenceConflict, exclusionConflict: [], ...(preference !== undefined ? { carbVegPreference: preference } : {}) };
 }

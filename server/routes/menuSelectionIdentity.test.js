@@ -77,7 +77,7 @@ test('customer save allows a portion preference warning but recomputes its confl
   state.item.cycleMeal.components[0].exclusions = ['Nuts'];
   const res = await post([submitted({ carbVegAction: 'replace', exclusionConflict: [] })]);
   assert.equal(res.statusCode, 200); assert.equal(state.writes.length, 1);
-  const saved=state.writes[0].update.$set.selectedMeals[0];assert.deepEqual(saved.exclusionConflict,['Nuts']);assert.equal(saved.carbVegAction,undefined);
+  const saved=state.writes[0].update.$set.selectedMeals[0];assert.deepEqual(saved.preferenceConflict,['Nuts']);assert.deepEqual(saved.exclusionConflict || [],[]);assert.equal(saved.carbVegAction,undefined);
 }));
 test('customer save recomputes private salad replacement flags', () => withSelectionFixtures(async state => {
   state.item.cycleMeal.components.push({ id: 's', type: 'Sauce 2', name: 'Dressing', exclusions: ['Nuts'] }, { id: 'v', type: 'Salad', name: 'Slaw', exclusions: [] });
@@ -98,7 +98,7 @@ test('customer save rejects forged dish identity/date/name and malformed selecti
 test('admin save uses saved identity profile and recomputes flags', () => withSelectionFixtures(async state => {
   state.item.cycleMeal.components.push({ id: 'c', type: 'Carb', name: 'Rice', exclusions: ['Nuts'] });
   const res = response(); await adminHandler({ params: { menuId, email: 'storage@example.invalid' }, body: { selections: [submitted({ carbVegAction: 'kept', carbConflict: [] })] } }, res);
-  assert.equal(res.statusCode, 200); assert.equal(state.profileEmail, 'website@example.invalid'); assert.equal(state.writes[0].update.$set.selectedMeals[0].carbVegAction, 'replace');
+  assert.equal(res.statusCode, 200); assert.equal(state.profileEmail, 'website@example.invalid'); assert.equal(state.writes[0].update.$set.selectedMeals[0].carbVegAction, 'kept');
 }));
 test('admin cannot save against a mismatched verified Matter identity', () => withSelectionFixtures(async state => {
   state.nutrition.customer_id = 'different'; const res = response(); await adminHandler({ params: { menuId, email: 'storage@example.invalid' }, body: { selections: [submitted()] } }, res);
@@ -134,5 +134,28 @@ test('customer and admin save mixed preferences as warnings without trusting rep
   const choices=submitted({carbVegAction:'replace',exclusionConflict:['Fake']});
   assert.equal((await post([choices])).statusCode,200);
   const admin=response();await adminHandler({params:{menuId,email:'storage@example.invalid'},body:{selections:[choices]}},admin);assert.equal(admin.statusCode,200);
-  for(const write of state.writes){const saved=write.update.$set.selectedMeals[0];assert.equal(saved.carbVegAction,'kept');assert.deepEqual(saved.exclusionConflict,['Gluten','Coriander']);assert.deepEqual(saved.carbConflict,['Gluten']);assert.deepEqual(saved.vegConflict,['Coriander']);}
+  for(const write of state.writes){const saved=write.update.$set.selectedMeals[0];assert.equal(saved.carbVegAction,'kept');assert.deepEqual(saved.preferenceConflict,['Gluten','Coriander']);assert.deepEqual(saved.exclusionConflict || [],[]);assert.deepEqual(saved.carbConflict || [],[]);assert.deepEqual(saved.vegConflict || [],[]);assert.deepEqual(saved.carbVegConflict || [],[]);}
+}));
+
+
+test('customer and admin persist Keep choice separately from private salad replacement through schema roundtrip', () => withSelectionFixtures(async state => {
+  state.nutrition.exclusions=['Dairy'];
+  state.item.cycleMeal.components.push({id:'c',type:'Carb',name:'Rice',exclusions:['Dairy']},{id:'v',type:'Salad',name:'Slaw',exclusions:[]},{id:'s',type:'Sauce 2',name:'Dressing',exclusions:['Dairy']});
+  const choices=submitted({carbVegPreference:'kept',carbVegAction:'kept',carbConflict:[],vegConflict:[]});
+  assert.equal((await post([choices])).statusCode,200);
+  const admin=response();await adminHandler({params:{menuId,email:'storage@example.invalid'},body:{selections:[choices]}},admin);assert.equal(admin.statusCode,200);
+  for(const write of state.writes){
+    const saved=write.update.$set.selectedMeals[0];assert.equal(saved.carbVegPreference,'kept');assert.equal(saved.carbVegAction,'replace');assert.deepEqual(saved.carbConflict || [],[]);assert.deepEqual(saved.vegConflict,['Dairy']);
+    const record=new Record({weeklyMenuId:menuId,email:'website@example.invalid',selectedMeals:[saved]});assert.equal(record.validateSync(),undefined);assert.equal(record.toObject().selectedMeals[0].carbVegPreference,'kept');assert.deepEqual(record.toObject().selectedMeals[0].preferenceConflict,['Dairy']);assert.deepEqual(record.toObject().selectedMeals[0].exclusionConflict,[]);
+  }
+}));
+
+test('customer and admin allow Keep for separate public carb but reject malformed preferences and allergies', () => withSelectionFixtures(async state => {
+  state.nutrition.exclusions=['Dairy'];state.item.cycleMeal.components.push({id:'c',type:'Carb',name:'Rice',exclusions:['Dairy']});
+  const choices=submitted({carbVegPreference:'kept',preferenceConflict:['Fake'],exclusionConflict:['Fake']});assert.equal((await post([choices])).statusCode,200);
+  const admin=response();await adminHandler({params:{menuId,email:'storage@example.invalid'},body:{selections:[choices]}},admin);assert.equal(admin.statusCode,200);
+  for(const write of state.writes){const saved=write.update.$set.selectedMeals[0];assert.equal(saved.carbVegAction,'kept');assert.equal(saved.carbVegPreference,'kept');assert.deepEqual(saved.carbConflict || [],[]);assert.deepEqual(saved.vegConflict || [],[]);assert.deepEqual(saved.carbVegConflict || [],[]);assert.deepEqual(saved.preferenceConflict,['Dairy']);assert.deepEqual(saved.exclusionConflict || [],[]);}
+  const before=state.writes.length;
+  assert.equal((await post([submitted({carbVegPreference:{}})])).statusCode,409);
+  state.allergies=[{matterCustomerId:'permanent',allergies:['Dairy']}];assert.equal((await post([choices])).statusCode,409);assert.equal(state.writes.length,before);
 }));

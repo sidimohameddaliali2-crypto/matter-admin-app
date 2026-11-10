@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/api';
-import { evaluateComponentSelection } from '../../constants/componentSelectionRules';
+import { evaluateComponentSelection, selectionPreferenceFlags } from '../../constants/componentSelectionRules';
 import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
 import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm, allergenMatchesAny } from '../../constants/exclusionList';
 import { toTitleCase } from '../../utils/textFormat';
@@ -457,6 +457,7 @@ const MenuSelectionLink = ({ token }) => {
 
       // preload a previously submitted selection for this menu
       const preQty = {};
+      const preFlags = {};
       const alreadySubmitted =
         profile.hasSubmittedForRequestedMenu ||
         (profile.currentWeekMenu && rawMenu?._id && String(profile.currentWeekMenu) === String(rawMenu._id));
@@ -464,10 +465,15 @@ const MenuSelectionLink = ({ token }) => {
         profile.selectedMeals.forEach((sm) => {
           const itemId = String(sm.menuItemId?._id || sm.menuItemId || '');
           const k = `${toDateKey(sm.date)}::${String(sm.mealType || '').toLowerCase()}::${itemId}`;
-          if (itemId) preQty[k] = (preQty[k] || 0) + (Number(sm.quantity) || 1);
+          if (itemId) {
+            preQty[k] = (preQty[k] || 0) + (Number(sm.quantity) || 1);
+            const preference = sm.carbVegPreference || sm.carbVegAction;
+            if (['kept', 'replace'].includes(preference)) preFlags[k] = { carbVegPreference: preference };
+          }
         });
       }
       setQty(preQty);
+      setMealFlags(preFlags);
       const savedSkipDates = new Set((profile.skippedDays || []).map((d) => toDateKey(d.date || d)));
       const savedSkips = Object.fromEntries(built.dayKeys.map((key, i) => [i, savedSkipDates.has(key)]));
       setSkipped(savedSkips);
@@ -596,10 +602,10 @@ const MenuSelectionLink = ({ token }) => {
   // flag through to Kitchen List so staff know to swap that component
   // before it goes out (mirrors MenuSelection.jsx's sauceGarnishFlags).
   const computeSauceGarnishFlags = useCallback(
-    (m) => {
+    (m, preference) => {
       if (!preview) {
         const result = evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []);
-        return { ...result.flags, ...(result.wholeMeal && result.flags.carbVegConflict.length ? { carbVegAction: 'kept' } : {}), exclusionConflict: result.wholeMeal ? [...new Set([...result.publicConflicts, ...result.flags.carbVegConflict])] : [] };
+        return selectionPreferenceFlags(result, preference);
       }
       const exclusionPhrases = preview ? [] : (account?.exclusionPhrases || []);
       const matchedSauce = matchAgainstExclusions(m.sauceNames || [], exclusionPhrases);
@@ -630,7 +636,7 @@ const MenuSelectionLink = ({ token }) => {
         return false;
       }
       bump(m.key, 1);
-      setMealFlags((s) => ({ ...s, [m.key]: { ...extraFlags, ...computeSauceGarnishFlags(m) } }));
+      setMealFlags((s) => ({ ...s, [m.key]: { ...extraFlags, ...computeSauceGarnishFlags(m, extraFlags.carbVegAction ?? s[m.key]?.carbVegPreference) } }));
       return true;
     },
     [account, preview, bump, computeSauceGarnishFlags, flash, model, qty, target]
@@ -664,7 +670,7 @@ const MenuSelectionLink = ({ token }) => {
     (m, conflict) => {
       if (conflict.hidden) return;
       const items = (conflict.items || []).map(toTitleCase);
-      const carbVegNames = [...(conflict.matchedCarb || []), ...(conflict.matchedVeg || [])];
+      const carbVegNames = [...new Set([...(conflict.matchedCarb || []), ...(conflict.matchedVeg || [])].map(toTitleCase))];
       const hasCarbVeg = !conflict.wholeMeal && carbVegNames.length > 0;
 
       const carbVegFlags = (action) => ({
@@ -694,7 +700,7 @@ const MenuSelectionLink = ({ token }) => {
               },
               {
                 label: 'Keep as is',
-                disabled: !preview,
+                disabled: false,
                 kind: 'primary',
                 onClick: () => {
                   setModal(null);
@@ -766,7 +772,7 @@ const MenuSelectionLink = ({ token }) => {
           // carbVegAction/carbConflict/vegConflict (from the exclusion modal)
           // and needsSauceChange/needsGarnishChange (silent) — see addWithCap.
           ...(mealFlags[m.key] || {}),
-          ...(!preview ? computeSauceGarnishFlags(m) : {}),
+          ...(!preview ? computeSauceGarnishFlags(m, mealFlags[m.key]?.carbVegPreference) : {}),
         });
       });
       const skippedDates = [...new Set([

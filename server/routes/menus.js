@@ -3277,6 +3277,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
       sauceChoice: sel.sauceChoice,
       manualProteinType: String(sel.manualProteinType || '').trim().toLowerCase(),
       quantity: Number(sel.quantity) || 1,  // Explicitly convert to number
+      carbVegPreference: sel.carbVegPreference || undefined,
       carbVegAction: sel.carbVegAction || undefined,
       carbVegConflict: sel.carbVegConflict?.length ? sel.carbVegConflict : undefined,
       carbConflict: sel.carbConflict?.length ? sel.carbConflict : undefined,
@@ -3286,6 +3287,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
       needsGarnishChange: !!sel.needsGarnishChange,
       sauceConflict: sel.sauceConflict?.length ? sel.sauceConflict : undefined,
       garnishConflict: sel.garnishConflict?.length ? sel.garnishConflict : undefined,
+      preferenceConflict: sel.preferenceConflict?.length ? sel.preferenceConflict : undefined,
       exclusionConflict: sel.exclusionConflict?.length ? sel.exclusionConflict : undefined
     }));
 
@@ -3633,6 +3635,7 @@ router.put('/:menuId/selections/:email', protect, async (req, res) => {
       sauceChoice: sel.sauceChoice,
       manualProteinType: String(sel.manualProteinType || '').trim().toLowerCase(),
       quantity: Number(sel.quantity) || 1,
+      carbVegPreference: sel.carbVegPreference || undefined,
       carbVegAction: sel.carbVegAction,
       carbVegConflict: sel.carbVegConflict,
       carbConflict: sel.carbConflict,
@@ -3642,6 +3645,7 @@ router.put('/:menuId/selections/:email', protect, async (req, res) => {
       sauceConflict: sel.sauceConflict,
       garnishConflict: sel.garnishConflict,
       remark: String(sel.remark || '').trim(),
+      preferenceConflict: sel.preferenceConflict?.length ? sel.preferenceConflict : undefined,
       exclusionConflict: Array.isArray(sel.exclusionConflict) ? sel.exclusionConflict : [],
       isAutoAssigned: !!sel.isAutoAssigned
     }));

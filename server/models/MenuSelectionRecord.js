@@ -73,6 +73,8 @@ const menuSelectionRecordSchema = new mongoose.Schema({
       default: 1,
       min: 1
     },
+    // Explicit customer choice; actual kitchen action can still replace a private salad.
+    carbVegPreference: { type: String, enum: ['kept', 'replace'] },
     carbVegAction: {
       type: String,
       enum: ['kept', 'replace']
@@ -120,6 +122,8 @@ const menuSelectionRecordSchema = new mongoose.Schema({
       type: String,
       default: ''
     },
+    // Acknowledged manual preferences are audit data, never kitchen swap instructions.
+    preferenceConflict: { type: [String], default: undefined },
     // Set by auto-assign only when EVERY dish that day hit the customer's
     // exclusions and it had to give one anyway (a slot is never left empty) —
     // the exclusions this dish clashes with. Shown as "Needs attention" on the
