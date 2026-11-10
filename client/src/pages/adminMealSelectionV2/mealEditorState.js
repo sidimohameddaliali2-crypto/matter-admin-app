@@ -16,6 +16,7 @@ export function editorComponents(meal, kind, isSaladBase) {
   }
   return components.map(c => {
     // Breakfast has no salad section: retain legacy Sauce 2 in its editable extras.
+    if (kind === 'Breakfast' && c.type === 'Salad') return { ...c, type: 'Vegetable' };
     if (kind === 'Breakfast' && c.type === 'Sauce 2') return { ...c, type: 'Extra sauce / topping' };
     return c.type === 'Breakfast' ? { ...c, type: 'Protein' } : c;
   });

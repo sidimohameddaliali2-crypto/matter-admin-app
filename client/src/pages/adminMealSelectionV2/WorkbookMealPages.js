@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Plus, Pencil, ArrowLeft, Upload, FileSpreadsheet, X, Save } from 'lucide-react';
 import { Action, Badge, Panel, SearchBox, Select, Notice, DataTable, Modal } from './components';
@@ -85,6 +85,7 @@ export function MealComposer({ meal, isNew, onSave }) {
     const isSaladBase = mealKind === 'Main meal' && (meal?.isSaladBase ?? Boolean(initial.components.some(c => c.type === 'Sauce 2' || c.type === 'Salad') || /SALAD BASE/i.test(initial.tags || '')));
     return { ...initial, mealKind, mealType: meal ? mealType(meal) : '', isOatmeal: meal?.isOatmeal ?? meal?.category === 'OATS', isSaladBase, components: editorComponents(initial, mealKind, isSaladBase) };
   });
+  const kindDrafts = useRef({});
   const [error, setError] = useState('');
   const [adding, setAdding] = useState(false);
   if (!meal && !isNew) return <Notice>Meal not found. <Link to={`${BASE}/meals`}>Return to meals</Link></Notice>;
@@ -98,8 +99,18 @@ export function MealComposer({ meal, isNew, onSave }) {
   const dressing = form.components.find(c => c.type === 'Sauce 2');
   const snack = form.components.find(c => c.type === 'Snack');
   const changeKind = kind => {
+    if (kind === form.mealKind) return;
     setError(''); setAdding(false);
-    setForm(f => ({ ...f, mealKind: kind, components: kind === 'Snack' ? [{ ...newComponent('Snack'), name: f.name, exclusions: [...new Set(f.components.flatMap(c => c.exclusions || []))] }] : f.components.filter(c => (kind === 'Breakfast' ? ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish', 'Extra sauce / topping'] : ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish', 'Salad', 'Sauce 2', 'Extra sauce / topping']).includes(c.type)), isSaladBase: kind === 'Main meal' && f.isSaladBase }));
+    // Keep complete immutable drafts, including notes, exclusions and removals.
+    kindDrafts.current[form.mealKind] = form;
+    if (kindDrafts.current[kind]) {
+      setForm(kindDrafts.current[kind]);
+      return;
+    }
+    const isSaladBase = kind === 'Main meal' && form.isSaladBase;
+    const types = kind === 'Breakfast' ? ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish', 'Extra sauce / topping'] : ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish', 'Salad', 'Sauce 2', 'Extra sauce / topping'];
+    const components = editorComponents(form, kind, isSaladBase);
+    setForm({ ...form, mealKind: kind, isSaladBase, components: kind === 'Snack' ? components : components.filter(c => types.includes(c.type)) });
   };
   const toggleSalad = checked => setForm(f => {
     if (!checked) return { ...f, isSaladBase: false, components: f.components.filter(c => c.type !== 'Sauce 2').map(c => c.type === 'Salad' ? { ...c, type: 'Vegetable' } : c) };

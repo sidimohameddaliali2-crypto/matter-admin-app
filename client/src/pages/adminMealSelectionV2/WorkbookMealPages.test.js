@@ -144,3 +144,54 @@ test('a migrated breakfast Sauce 2 remains editable and can be explicitly remove
   click('Save preview draft');
   expect(onSave.mock.calls[1][0].components.some(c => c.id === 'second-sauce')).toBe(false);
 });
+
+
+const chooseKind = kind => act(() => [...host.querySelectorAll('input[type="radio"]')].find(input => input.closest('label').textContent === kind).click());
+
+test('Main to Breakfast to Main restores unsaved salad and sauce data', () => {
+  const onSave = render(importedSalad());
+  setInput(inputFor('Salad name'), 'Edited salad draft');
+  chooseKind('Breakfast'); chooseKind('Main meal');
+  expect(inputFor('Salad name').value).toBe('Edited salad draft');
+  click('Save preview draft');
+  expect(onSave).toHaveBeenCalledTimes(1);
+  const saved = onSave.mock.calls[0][0];
+  expect(saved.isSaladBase).toBe(true);
+  expect(saved.components.find(c => c.id === 'vegetable')).toMatchObject({ type: 'Salad', name: 'Edited salad draft', exclusions: ['Coriander', 'Nuts'], notes: 'Original salad notes' });
+  expect(saved.components.find(c => c.id === 'dressing')).toMatchObject({ type: 'Sauce 2', name: 'Original dressing', exclusions: ['Soy'] });
+});
+
+test('saving after switching a salad meal to Breakfast keeps converted components editable', () => {
+  const onSave = render(importedSalad());
+  chooseKind('Breakfast');
+  expect([...host.querySelectorAll('input')].some(input => input.value === 'Original salad')).toBe(true);
+  expect([...host.querySelectorAll('input')].some(input => input.value === 'Original dressing')).toBe(true);
+  click('Save preview draft');
+  expect(onSave).toHaveBeenCalledTimes(1);
+  const saved = onSave.mock.calls[0][0];
+  expect(saved.components.find(c => c.id === 'vegetable')).toMatchObject({ type: 'Vegetable', name: 'Original salad', exclusions: ['Coriander', 'Nuts'], notes: 'Original salad notes' });
+  expect(saved.components.find(c => c.id === 'dressing')).toMatchObject({ type: 'Extra sauce / topping', name: 'Original dressing', exclusions: ['Soy'] });
+  expect(saved.isSaladBase).toBe(false);
+});
+
+test('each kind retains its own edits across repeated switches', () => {
+  const onSave = render(importedSalad());
+  chooseKind('Breakfast');
+  const salad = [...host.querySelectorAll('input')].find(input => input.value === 'Original salad');
+  expect(salad).toBeDefined(); setInput(salad, 'Breakfast vegetables');
+  chooseKind('Main meal'); expect(inputFor('Salad name').value).toBe('Original salad');
+  chooseKind('Breakfast');
+  expect([...host.querySelectorAll('input')].some(input => input.value === 'Breakfast vegetables')).toBe(true);
+  click('Save preview draft');
+  expect(onSave.mock.calls[0][0].components.find(c => c.id === 'vegetable')).toMatchObject({ name: 'Breakfast vegetables', exclusions: ['Coriander', 'Nuts'] });
+});
+
+test('switching through Snack restores the complete main-meal draft', () => {
+  const onSave = render(importedSalad());
+  chooseKind('Snack'); chooseKind('Breakfast'); chooseKind('Main meal');
+  expect(inputFor('Salad name').value).toBe('Original salad');
+  click('Save preview draft');
+  expect(onSave).toHaveBeenCalledTimes(1);
+  expect(onSave.mock.calls[0][0].components.map(c => c.id).sort()).toEqual(['dressing', 'protein', 'vegetable']);
+  expect(onSave.mock.calls[0][0].components.flatMap(c => c.exclusions).sort()).toEqual(['Coriander', 'Dairy', 'Nuts', 'Soy']);
+});
