@@ -132,6 +132,36 @@ test('protein correction commits only after acceptance, serializes whole-record 
   expect(api.put.mock.calls[1][1].selections.find(row=>row.date===friday).manualProteinType).toBe('');
 });
 
+test('saving one correction preserves another generic dish classification, weights and prepared export with ID-only responses', async () => {
+  const source=[
+    {date:friday,mealType:'main',mealName:'House Special',menuItemId:{_id:'dish-one',portionType:'chicken'}},
+    {date:friday,mealType:'main',mealName:'Grandma Roast',menuItemId:{_id:'dish-two',portionType:'beef'}},
+  ];
+  const originalGet=api.get.getMockImplementation();
+  api.get.mockImplementation(async(path,options)=>path.endsWith('/selections')
+    ?{data:{success:true,data:[{email,matterCustomerId:'permanent',selectedMeals:source}]}}
+    :originalGet(path,options));
+  await select(dateSelect(),friday);
+  const mealCard=name=>[...container.querySelectorAll('.kitchen-meal')].find(card=>card.textContent.includes(name));
+  expect(mealCard('Grandma Roast').textContent).toContain('Detected type: Beef');
+  const weights=mealCard('Grandma Roast').querySelector('.kitchen-meal-weights').textContent;
+  const macros=mealCard('Grandma Roast').querySelector('.kitchen-meal-macros').textContent;
+  await act(async()=>downloadButton('Download Day Excel').click());
+  const exportBefore=mockExcelRows.mock.calls.at(-1)[0].find(row=>row.Meal==='Grandma Roast');
+  expect(exportBefore).toBeDefined();
+  const exportsBefore=mockExcelRows.mock.calls.length;
+  // The real PUT returns IDs; use a different order to prevent index-based merging.
+  api.put.mockImplementationOnce(async(url,body)=>({data:{success:true,record:{selectedMeals:[...body.selections].reverse()}}}));
+  await select(mealCard('House Special').querySelector('.kitchen-meal-protein select'),'chicken');
+  expect(mealCard('House Special').querySelector('.kitchen-meal-protein select').value).toBe('chicken');
+  expect(mealCard('Grandma Roast').textContent).toContain('Detected type: Beef');
+  expect(mealCard('Grandma Roast').querySelector('.kitchen-meal-weights').textContent).toBe(weights);
+  expect(mealCard('Grandma Roast').querySelector('.kitchen-meal-macros').textContent).toBe(macros);
+  await act(async()=>downloadButton('Download Day Excel').click());
+  expect(mockExcelRows).toHaveBeenCalledTimes(exportsBefore+1);
+  expect(mockExcelRows.mock.calls.at(-1)[0].find(row=>row.Meal==='Grandma Roast')).toEqual(exportBefore);
+});
+
 test('Kitchen List automatically uses only the active menu and locks the selector', () => {
   const menu = container.querySelector('#kitchen-list-menu');
   expect(menu.value).toBe('menu');

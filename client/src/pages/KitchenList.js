@@ -1220,8 +1220,17 @@ const KitchenList = () => {
       // Commit the displayed correction only after the server has accepted it.
       setMealTypeOverrides(prev => ({ ...prev, [key]: normalizedValue }));
       const savedMeals = response.data.record?.selectedMeals || updatedSelections;
-      setMenuSelections(prev => prev.map(current => sameCustomer(current)
-        ? attachStableMealKeys({ ...current, selectedMeals: savedMeals }) : current));
+      setMenuSelections(prev => prev.map(current => {
+        if (!sameCustomer(current)) return current;
+        // PUT returns bare IDs; retain the loaded classification/Core metadata
+        // used by calculations and exports, matched by item ID rather than order.
+        const loadedItems = new Map((current.selectedMeals || [])
+          .map(saved => saved.menuItemId).filter(item => item && typeof item === 'object' && item._id)
+          .map(item => [String(item._id), item]));
+        const mergedMeals = savedMeals.map(saved => typeof saved.menuItemId === 'string' && loadedItems.has(saved.menuItemId)
+          ? { ...saved, menuItemId: loadedItems.get(saved.menuItemId) } : saved);
+        return attachStableMealKeys({ ...current, selectedMeals: mergedMeals });
+      }));
     } catch (saveError) {
       if (activeSelectionScope.current === scope) setError(saveError.response?.data?.message || saveError.message || 'Failed to save meal type override');
     } finally {
