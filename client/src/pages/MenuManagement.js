@@ -1,4 +1,6 @@
 import MenuSelectionBrowser from '../components/MenuSelectionBrowser';
+import SelectionComponentTags from '../components/SelectionComponentTags';
+import { selectionComponentDetails, selectionHasWarning } from '../utils/selectionComponentDetails';
 import { loadMenuSelectionSummaries, loadMenuSelectionDetails } from '../lib/menuSelectionLoading';
 import React, { useState, useEffect, useRef } from 'react';
 import {
@@ -1358,11 +1360,11 @@ const MenuManagement = () => {
             const height = addTextLines(mealLine, margin + 2, currentY);
             currentY += height;
             currentY += addTextLines(`  P: ${meal.proteinWeight}g | C: ${meal.carbWeight}g | V: ${meal.vegWeight}g`, margin + 4, currentY);
-            if (meal.carbVegAction) {
-              currentY += addTextLines(`  - Carb/Veg action: ${meal.carbVegAction}`, margin + 4, currentY);
-            }
-            if (meal.conflict || meal.carbVegConflict?.length) {
-              const conflictText = meal.conflict ? 'Conflict present' : `Conflicts: ${meal.carbVegConflict.join(', ')}`;
+            selectionComponentDetails(meal).forEach(({ label, detail }) => {
+              currentY += addTextLines(`  - ${label}: ${detail}`, margin + 4, currentY);
+            });
+            if (selectionHasWarning(meal) || meal.carbVegConflict?.length) {
+              const conflictText = selectionHasWarning(meal) ? 'Conflict present' : `Conflicts: ${meal.carbVegConflict.join(', ')}`;
               currentY += addTextLines(`  - ${conflictText}`, margin + 4, currentY);
             }
             if (meal.proteinChoice || meal.carbChoice || meal.vegChoice || meal.sauceChoice) {
@@ -1558,23 +1560,13 @@ const MenuManagement = () => {
 
           if (mealsWithName.length > 0) {
             const totalQty = mealsWithName.reduce((sum, meal) => sum + (meal.quantity || 1), 0);
-            const isReplace = mealsWithName.some(m => m.carbVegAction === 'replace');
-            const isKept    = mealsWithName.some(m => m.carbVegAction === 'kept');
-            const hasCarb   = mealsWithName.some(m => m.carbConflict?.length > 0);
-            const hasVeg    = mealsWithName.some(m => m.vegConflict?.length > 0);
-            let actionLabel = '';
-            if (isReplace || isKept) {
-              const verb = isReplace ? 'Replace' : 'Keep';
-              const what = hasCarb && hasVeg ? 'Carb+Veg' : hasCarb ? 'Carb' : hasVeg ? 'Veg' : 'Carb/Veg';
-              actionLabel = ` [${verb} ${what}]`;
-            }
-            const conflictItems = mealsWithName.find(m => m.carbVegConflict?.length > 0)?.carbVegConflict;
-            const conflictSuffix = conflictItems?.length ? ` (${conflictItems.join(', ')})` : '';
+            const details = [...new Set(mealsWithName.flatMap(selectionComponentDetails).map(({label, detail}) => `${label}: ${detail}`))];
+            const actionLabel = details.length ? ` [${details.join('; ')}]` : '';
             const baseLabel = totalQty > 1 ? `${mealName} x${totalQty}` : mealName;
-            row.push(`${baseLabel}${actionLabel}${conflictSuffix}`);
+            row.push(`${baseLabel}${actionLabel}`);
 
-            // Flag for yellow highlight: meal name contains one of the customer's exclusions
-            const hasConflict = mealsWithName.some((m) => m.conflict);
+            // Include acknowledged component exclusions, even with a generic dish name.
+            const hasConflict = mealsWithName.some(selectionHasWarning);
             if (hasConflict) {
               // rowIdx + 1 because row 0 is the header; mealIdx + 4 for NAME/CUS ID/STATUS/AUTO-ASSIGNED cols
               conflictCells.push({ r: rowIdx + 1, c: mealIdx + 4 });
@@ -2680,7 +2672,7 @@ const MenuManagement = () => {
                                             return (
                                               <div
                                                 key={idx}
-                                                className={`${mealStyle.bg} ${mealStyle.border} border-l-4 rounded-lg p-2.5 ${meal.conflict ? 'ring-2 ring-yellow-400' : ''}`}
+                                                className={`${selectionHasWarning(meal) ? 'bg-yellow-50 ring-2 ring-yellow-400' : mealStyle.bg} ${mealStyle.border} border-l-4 rounded-lg p-2.5`}
                                               >
                                                 <div className="flex items-start gap-2">
                                                   <MealIcon className={`w-4 h-4 mt-0.5 flex-shrink-0 ${mealStyle.text}`} />
@@ -2697,17 +2689,8 @@ const MenuManagement = () => {
                                                           Qty: {meal.quantity}
                                                         </span>
                                                       )}
-                                                      {meal.carbVegAction === 'replace' && (
-                                                        <span className="text-xs font-bold bg-red-100 text-red-700 px-2 py-0.5 rounded-full">
-                                                          🔄 Replace carb/veg
-                                                        </span>
-                                                      )}
-                                                      {meal.carbVegAction === 'kept' && (
-                                                        <span className="text-xs font-bold bg-green-100 text-green-700 px-2 py-0.5 rounded-full">
-                                                          ✓ Keep carb/veg
-                                                        </span>
-                                                      )}
-                                                      {meal.conflict && (
+                                                      <SelectionComponentTags meal={meal} />
+                                                      {meal.conflict && !meal.preferenceConflict?.length && (
                                                         <span className="text-xs font-bold bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full">
                                                           ⚠️ Exclusion
                                                         </span>
@@ -3285,7 +3268,7 @@ const MenuManagement = () => {
                               return (
                                 <div
                                   key={idx}
-                                  className={`${mealStyle.bg} ${mealStyle.border} border-l-4 rounded-lg p-4 shadow-sm`}
+                                  className={`${selectionHasWarning(meal) ? 'bg-yellow-50 ring-2 ring-yellow-400' : mealStyle.bg} ${mealStyle.border} border-l-4 rounded-lg p-4 shadow-sm`}
                                 >
                                   <div className="flex items-start gap-3">
                                     <div className={`${mealStyle.bg} p-2 rounded-lg`}>
@@ -3306,17 +3289,8 @@ const MenuManagement = () => {
                                         <span className={`text-sm font-semibold px-3 py-1 rounded-full ${mealStyle.badge}`}>
                                           {meal.mealType || meal.menuItemId?.mealType || 'meal'}
                                         </span>
-                                        {meal.carbVegAction === 'replace' && (
-                                          <span className="text-sm font-bold bg-red-100 text-red-700 px-3 py-1 rounded-full">
-                                            🔄 Replace carb/veg
-                                          </span>
-                                        )}
-                                        {meal.carbVegAction === 'kept' && (
-                                          <span className="text-sm font-bold bg-green-100 text-green-700 px-3 py-1 rounded-full">
-                                            ✓ Keep carb/veg
-                                          </span>
-                                        )}
-                                        {meal.conflict && (
+                                        <SelectionComponentTags meal={meal} />
+                                        {meal.conflict && !meal.preferenceConflict?.length && (
                                           <span className="text-sm font-bold bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full">
                                             ⚠️ Exclusion
                                           </span>

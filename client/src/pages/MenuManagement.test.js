@@ -11,6 +11,33 @@ const mockExcelRows = jest.fn();
 jest.mock('xlsx-js-style',()=>({utils:{ book_new: () => ({}), aoa_to_sheet: rows => { mockExcelRows(rows); return {}; }, book_append_sheet: () => {} }, writeFile: jest.fn()}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
 
+test.each([
+  [{preferenceConflict:['Coriander'],carbVegAction:'kept'},[]],
+  [{carbVegAction:'replace',carbConflict:['DAIRY'],vegConflict:['MUSHROOM']},['Replace carb: Dairy','Replace veg: Mushroom']],
+  [{carbVegAction:'kept',preferenceConflict:['Dairy'],keptCarbConflict:['DAIRY']},['Keep carb: Dairy']],
+])('saved selection views scope side tags and highlight portion warnings (%s)', async (flags, labels) => {
+  const date='2099-11-02';
+  const meal={date,mealName:'Fixture dish',mealType:'main',menuItemId:'dish',quantity:1,...flags};
+  const customer={_id:'person',firstName:'Test',email:'test@example.invalid',matterCustomerId:'person',selectedMeals:[meal]};
+  api.get.mockImplementation(async url=>({data:{success:true,data:url==='/menus'
+    ?[{_id:'menu',title:'Fixture',startDate:date,endDate:date,meals:[{date,mealType:'main',items:[]}]}]
+    :url.endsWith('/selections')?[customer]:{customer_id:'person',customer_name:'Test',customer_email:customer.email,subscription_id:'sub'}}}));
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const verify=()=>{
+    for(const label of labels)expect(node.textContent).toContain(label);
+    expect(node.textContent).not.toMatch(/Keep carb\/veg|Replace carb\/veg/);
+    if(flags.preferenceConflict?.length)expect(node.querySelector('.bg-yellow-50.ring-yellow-400')).not.toBeNull();
+    if(!labels.length)expect(node.textContent).not.toMatch(/Keep carb|Keep veg|Replace carb|Replace veg/);
+  };
+  try {
+    await act(async()=>root.render(<MenuManagement/>));
+    await act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent==='View selections').click());
+    verify();
+    await act(async()=>node.querySelector('.cursor-pointer.border-2').click());
+    verify();
+  } finally {await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
+});
+
 test('downloaded template includes a TRUE/FALSE Core Plan column and visible guidance', async () => {
   api.get.mockResolvedValue({ data: { success: true, data: [] } });
   mockExcelRows.mockClear();

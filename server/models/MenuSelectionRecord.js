@@ -82,6 +82,9 @@ const menuSelectionRecordSchema = new mongoose.Schema({
     carbVegConflict: [String],
     carbConflict: [String],
     vegConflict: [String],
+    // Display/audit only. Kept matches must never trigger kitchen swaps.
+    keptCarbConflict: { type: [String], default: undefined },
+    keptVegConflict: { type: [String], default: undefined },
     // Set only for mealType: 'snack' — the randomly-assigned ingredient's
     // macros, already divided by that day's snack count.
     snackMacros: {

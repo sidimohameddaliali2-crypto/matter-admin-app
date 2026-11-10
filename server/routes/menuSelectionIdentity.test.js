@@ -134,7 +134,7 @@ test('customer and admin save mixed preferences as warnings without trusting rep
   const choices=submitted({carbVegAction:'replace',exclusionConflict:['Fake']});
   assert.equal((await post([choices])).statusCode,200);
   const admin=response();await adminHandler({params:{menuId,email:'storage@example.invalid'},body:{selections:[choices]}},admin);assert.equal(admin.statusCode,200);
-  for(const write of state.writes){const saved=write.update.$set.selectedMeals[0];assert.equal(saved.carbVegAction,'kept');assert.deepEqual(saved.preferenceConflict,['Gluten','Coriander']);assert.deepEqual(saved.exclusionConflict || [],[]);assert.deepEqual(saved.carbConflict || [],[]);assert.deepEqual(saved.vegConflict || [],[]);assert.deepEqual(saved.carbVegConflict || [],[]);}
+  for(const write of state.writes){const saved=write.update.$set.selectedMeals[0];assert.equal(saved.carbVegAction,undefined);assert.equal(saved.carbVegPreference,undefined);assert.deepEqual(saved.preferenceConflict,['Gluten','Coriander']);assert.deepEqual(saved.exclusionConflict || [],[]);assert.deepEqual(saved.carbConflict || [],[]);assert.deepEqual(saved.vegConflict || [],[]);assert.deepEqual(saved.carbVegConflict || [],[]);}
 }));
 
 
@@ -146,7 +146,9 @@ test('customer and admin persist Keep choice separately from private salad repla
   const admin=response();await adminHandler({params:{menuId,email:'storage@example.invalid'},body:{selections:[choices]}},admin);assert.equal(admin.statusCode,200);
   for(const write of state.writes){
     const saved=write.update.$set.selectedMeals[0];assert.equal(saved.carbVegPreference,'kept');assert.equal(saved.carbVegAction,'replace');assert.deepEqual(saved.carbConflict || [],[]);assert.deepEqual(saved.vegConflict,['Dairy']);
+    assert.deepEqual(saved.keptCarbConflict,['Dairy']);
     const record=new Record({weeklyMenuId:menuId,email:'website@example.invalid',selectedMeals:[saved]});assert.equal(record.validateSync(),undefined);assert.equal(record.toObject().selectedMeals[0].carbVegPreference,'kept');assert.deepEqual(record.toObject().selectedMeals[0].preferenceConflict,['Dairy']);assert.deepEqual(record.toObject().selectedMeals[0].exclusionConflict,[]);
+    assert.deepEqual(record.toObject().selectedMeals[0].keptCarbConflict,['Dairy']);
   }
 }));
 

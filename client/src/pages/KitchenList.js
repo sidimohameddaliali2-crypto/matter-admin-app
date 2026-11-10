@@ -267,6 +267,7 @@ const normalizeSelectionForSave = (meal) => ({
   sauceChoice: meal?.sauceChoice,
   manualProteinType: String(meal?.manualProteinType || '').trim().toLowerCase(),
   quantity: Number(meal?.quantity) || 1,
+  carbVegPreference: meal?.carbVegPreference,
   carbVegAction: meal?.carbVegAction,
   carbVegConflict: meal?.carbVegConflict,
   carbConflict: meal?.carbConflict,

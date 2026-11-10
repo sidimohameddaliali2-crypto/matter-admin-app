@@ -68,7 +68,7 @@ export function validateMenuSelections({ menu, selections, exclusions = [], alle
     const preference = selection.carbVegPreference !== undefined ? selection.carbVegPreference : selection.carbVegAction;
     const flags = selectionPreferenceFlags(result, preference);
     // Clear all client claims first. Only the stored item and profile decide flags.
-    const { carbVegPreference, carbVegAction, carbVegConflict, carbConflict, vegConflict, needsSauceChange, needsGarnishChange, sauceConflict, garnishConflict, exclusionConflict, preferenceConflict, ...input } = selection;
+    const { carbVegPreference, carbVegAction, carbVegConflict, carbConflict, vegConflict, keptCarbConflict, keptVegConflict, needsSauceChange, needsGarnishChange, sauceConflict, garnishConflict, exclusionConflict, preferenceConflict, ...input } = selection;
     return { ...input, ...choices, date, mealType: type, menuItemId: idOf(item), mealName: item.mealName, quantity, ...flags };
   });
 }

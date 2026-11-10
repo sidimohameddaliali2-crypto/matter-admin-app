@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import api from '../../utils/api';
 import { evaluateComponentSelection, selectionPreferenceFlags } from '../../constants/componentSelectionRules';
 import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
+import { isWithinRenewalWindow } from '../../utils/subscriptionRenewal';
 import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm, allergenMatchesAny } from '../../constants/exclusionList';
 import { toTitleCase } from '../../utils/textFormat';
 import MatterLogo from './MatterLogo';
@@ -319,10 +320,16 @@ const MenuSelectionLink = ({ token }) => {
   // the customer confirms it (SkipPauseCalendarModal's onConfirm -> doSubmit).
   const [skipPauseReview, setSkipPauseReview] = useState(null); // Availability and pause dates, without generated resume dates.
   const [pausePreviewLoading, setPausePreviewLoading] = useState(false);
-  // Frozen at the moment of a successful submit (same convention as
-  // lockedSkipDays) so the done screen's Renew button can't drift if the
-  // customer later reopens "Change my selections".
-  const [renewalEligible, setRenewalEligible] = useState(false);
+  // Recheck the renewal window while the page stays open and on return.
+  const [renewalNow, setRenewalNow] = useState(() => Date.now());
+  useEffect(() => {
+    const refresh = () => setRenewalNow(Date.now());
+    const timer = setInterval(refresh, 60_000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => { clearInterval(timer); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); };
+  }, []);
+  const renewalEligible = isWithinRenewalWindow(account?.cycleEndDate, renewalNow);
   const [toast, setToast] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const toastTimer = useRef(null);
@@ -508,7 +515,7 @@ const MenuSelectionLink = ({ token }) => {
   // already filtered to the customer's own Matter calendar + the published
   // menu) on or before the subscription's cycle_end_date — not that raw
   // boundary itself, since it isn't necessarily a delivery day. null when
-  // cycleEndDate is unknown, so neither the banner nor the Renew button show.
+  // cycleEndDate is unknown. Renewal eligibility is checked separately against today.
   const lastCycleDayKey = useMemo(() => {
     if (!account?.cycleEndDate || dayKeys.length === 0) return null;
     // Owner (2026-10-21): the cycle must actually END somewhere within this
@@ -803,7 +810,6 @@ const MenuSelectionLink = ({ token }) => {
         }
         setSkipPauseReview(null);
         setLockedSkipDays(skipped);
-        setRenewalEligible(!!lastCycleDayKey);
         setStep('done');
       } else {
         flash(res.data?.message || 'Could not save your selections.');
@@ -888,7 +894,6 @@ const MenuSelectionLink = ({ token }) => {
     setModal(null);
     setSkipPauseReview(null);
     setPausePreviewLoading(false);
-    setRenewalEligible(false);
     setDay(0);
   }, []);
 
@@ -1322,7 +1327,7 @@ const MenuSelectionLink = ({ token }) => {
         </div>
       )}
 
-      {!skippedToday && dayKeys[day] === lastCycleDayKey && (
+      {renewalEligible && !skippedToday && dayKeys[day] === lastCycleDayKey && (
         <div style={{ padding: '18px 22px 0' }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, background: 'var(--color-accent-200)', borderRadius: 'var(--radius-lg)', padding: '14px 16px' }}>
             <div>

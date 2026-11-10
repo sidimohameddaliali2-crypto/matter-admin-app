@@ -91,7 +91,9 @@ test('a portion preference warns and allows keeping the meal without changing sa
   expect(button('Keep selection').disabled).toBe(false);
   await click(button('Keep selection'));await click(button('Submit my week'));
   expect(api.post).toHaveBeenCalledTimes(1);
-  expect(api.post.mock.calls[0][1].selections[0]).toMatchObject({mealName:'Private fixture meal',preferenceConflict:['Coriander'],exclusionConflict:[]});
+  const saved=api.post.mock.calls[0][1].selections[0];
+  expect(saved).toMatchObject({mealName:'Private fixture meal',preferenceConflict:['Coriander'],exclusionConflict:[],keptCarbConflict:[],keptVegConflict:[]});
+  expect(saved.carbVegAction).toBeUndefined();expect(saved.carbVegPreference).toBeUndefined();
 });
 
 test.each(['portion','mixed'])('restored %s preference conflicts can submit with computed warning flags', async scenario => {
@@ -100,7 +102,7 @@ test.each(['portion','mixed'])('restored %s preference conflicts can submit with
   await signIn(item,{mealExclusion:'Coriander',hasSubmittedForRequestedMenu:true,selectedMeals:[{date:DELIVERY_DATE,mealType:'main',menuItemId:'private-item',quantity:1}]});
   await click(button('Submit my week'));
   expect(api.post).toHaveBeenCalledTimes(1);expect(api.post.mock.calls[0][1].selections[0].preferenceConflict).toContain('Coriander');
-  if(scenario==='mixed')expect(api.post.mock.calls[0][1].selections[0].carbVegAction).toBe('kept');
+  expect(api.post.mock.calls[0][1].selections[0].carbVegAction).toBeUndefined();
 });
 
 test('separate carb and vegetable conflicts retain existing messages and submit replacement flags', async () => {
@@ -184,7 +186,7 @@ test('Keep as is is enabled for carb/veg preferences and saves the kept choice',
   expect(node.querySelector('.dialog-body').textContent).not.toContain('Dairy, Dairy');
   await click(button('Keep as is'));await click(button('+',card()));await click(button('Submit my week'));
   const saved=api.post.mock.calls[0][1].selections[0];
-  expect(saved).toMatchObject({quantity:2,carbVegAction:'kept',carbVegPreference:'kept',carbConflict:[],vegConflict:[],exclusionConflict:[],preferenceConflict:['Dairy']});
+  expect(saved).toMatchObject({quantity:2,carbVegAction:'kept',carbVegPreference:'kept',carbConflict:[],vegConflict:[],keptCarbConflict:['Dairy'],keptVegConflict:['Dairy'],exclusionConflict:[],preferenceConflict:['Dairy']});
   expect(kitchenMealChanges(saved)).toBe('');
   expect(kitchenMealWarnings(saved)).toEqual([]);
 });
@@ -199,4 +201,17 @@ test('keeping a public carb conflict still silently replaces a private salad dre
   const item=cycleItem([privateComponent('p','Protein'),privateComponent('c','Carb',['Dairy']),privateComponent('v','Salad'),privateComponent('s','Sauce 2',['Dairy'])]);item.cycleMeal.isSaladBase=true;
   await signIn(item,{mealExclusion:'Dairy'});await click(button('+',card()));await click(button('Keep as is'));await click(button('Submit my week'));
   expect(api.post.mock.calls[0][1].selections[0]).toMatchObject({carbVegPreference:'kept',carbVegAction:'replace',carbConflict:[],vegConflict:['Dairy']});
+});
+
+
+test.each([['2099-10-21',false],['2026-11-13',true],['2026-11-14',false],[null,false],['2026-11-09',false]])('Renew button depends on remaining subscription days, not menu dates (%s)', async (end, visible) => {
+  const clock=jest.spyOn(Date,'now').mockReturnValue(new Date('2026-11-10T08:00:00Z').getTime());
+  try {
+    await signIn(cycleItem([privateComponent('p','Protein')]), {cycleEndDate:end});
+    if(end===DELIVERY_DATE)expect([...node.querySelectorAll('a')].some(a=>a.textContent.trim()==='Renew')).toBe(false);
+    await click(button('+',card()));await click(button('Submit my week'));
+    expect(api.post).toHaveBeenCalledTimes(1);
+    const renewal=[...node.querySelectorAll('a')].find(a=>a.textContent.trim()==='Renew my subscription');
+    expect(Boolean(renewal)).toBe(visible);
+  } finally { clock.mockRestore(); }
 });

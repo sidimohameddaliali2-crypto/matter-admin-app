@@ -67,16 +67,18 @@ export function selectionPreferenceFlags(result, preference) {
   if (preference !== undefined && !['kept', 'replace'].includes(preference)) {
     throw Object.assign(new Error('Could not save your selections.'), { statusCode: 409 });
   }
-  const flags = { ...result.flags };
+  const flags = { ...result.flags, keptCarbConflict: [], keptVegConflict: [] };
   let preferenceConflict = [];
   if (result.wholeMeal) {
     delete flags.carbVegAction;
-    if (flags.carbVegConflict.length) flags.carbVegAction = 'kept';
     preferenceConflict = unique([...result.publicConflicts, ...flags.carbVegConflict]);
     flags.carbConflict = [];
     flags.vegConflict = [];
     flags.carbVegConflict = [];
   } else if (preference === 'kept') {
+    // Audit kept sides separately: carbConflict/vegConflict are kitchen swaps.
+    flags.keptCarbConflict = [...result.matchedCarb];
+    flags.keptVegConflict = [...result.matchedVeg];
     const hidden = unique(result.hiddenVegConflict || []);
     preferenceConflict = [...result.publicConflicts];
     if (hidden.length) {
@@ -91,5 +93,6 @@ export function selectionPreferenceFlags(result, preference) {
       flags.carbVegConflict = [];
     }
   }
-  return { ...flags, preferenceConflict, exclusionConflict: [], ...(preference !== undefined ? { carbVegPreference: preference } : {}) };
+  const hasPublicSides = !result.wholeMeal && (result.matchedCarb.length || result.matchedVeg.length);
+  return { ...flags, preferenceConflict, exclusionConflict: [], ...(hasPublicSides && preference !== undefined ? { carbVegPreference: preference } : {}) };
 }

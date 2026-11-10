@@ -3282,6 +3282,8 @@ router.post('/customers/:email/select-meals', async (req, res) => {
       carbVegConflict: sel.carbVegConflict?.length ? sel.carbVegConflict : undefined,
       carbConflict: sel.carbConflict?.length ? sel.carbConflict : undefined,
       vegConflict: sel.vegConflict?.length ? sel.vegConflict : undefined,
+      keptCarbConflict: sel.keptCarbConflict?.length ? sel.keptCarbConflict : undefined,
+      keptVegConflict: sel.keptVegConflict?.length ? sel.keptVegConflict : undefined,
       // Conflict flags are recomputed from stored components, never trusted from the browser.
       needsSauceChange: !!sel.needsSauceChange,
       needsGarnishChange: !!sel.needsGarnishChange,
@@ -3640,6 +3642,8 @@ router.put('/:menuId/selections/:email', protect, async (req, res) => {
       carbVegConflict: sel.carbVegConflict,
       carbConflict: sel.carbConflict,
       vegConflict: sel.vegConflict,
+      keptCarbConflict: sel.keptCarbConflict,
+      keptVegConflict: sel.keptVegConflict,
       needsSauceChange: !!sel.needsSauceChange,
       needsGarnishChange: !!sel.needsGarnishChange,
       sauceConflict: sel.sauceConflict,

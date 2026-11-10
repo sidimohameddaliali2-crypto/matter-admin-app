@@ -98,13 +98,13 @@ test('empty/omitted overrides remain valid but malformed override types reject',
 });
 
 
-test('mixed preference conflicts save as kept with actual flags rather than component replacements', () => {
+test('mixed preference conflicts save warnings without side choices or replacements', () => {
   for (const type of ['Vegetable', 'Salad']) {
     const dish = item([c('p','Protein','Roast'),c('c','Carb','Rice',['Gluten']),c('v',type,'Slaw',['Coriander'])]);
     dish.cycleMeal.carbCombined='Yes';
     const mixed = {meals:[{date:'2099-11-02',mealType:'main',items:[dish]}]};
     const [saved]=validateMenuSelections({menu:mixed,selections:[{...selection,carbVegAction:'replace',exclusionConflict:['Fake']}],exclusions:['Gluten','Coriander']});
-    assert.equal(saved.carbVegAction,'kept');assert.deepEqual(saved.preferenceConflict,['Gluten','Coriander']);assert.deepEqual(saved.exclusionConflict,[]);
+    assert.equal(saved.carbVegAction,undefined);assert.equal(saved.carbVegPreference,undefined);assert.deepEqual(saved.keptCarbConflict,[]);assert.deepEqual(saved.keptVegConflict,[]);assert.deepEqual(saved.preferenceConflict,['Gluten','Coriander']);assert.deepEqual(saved.exclusionConflict,[]);
     assert.deepEqual(saved.carbConflict,[]);assert.deepEqual(saved.vegConflict,[]);assert.deepEqual(saved.carbVegConflict,[]);
     assert.throws(()=>validateMenuSelections({menu:mixed,selections:[{...selection,exclusionAcknowledged:true}],exclusions:['Gluten','Coriander'],allergies:['Gluten']}),{statusCode:409});
   }
@@ -119,6 +119,8 @@ test('Keep as is persists for public carb and vegetable conflicts without trusti
       const [saved]=validateMenuSelections({menu:local,selections:[{...selection,...request,carbConflict:['Fake'],vegConflict:['Fake']}],exclusions:['Dairy']});
       assert.equal(saved.carbVegAction,'kept');assert.equal(saved.carbVegPreference,'kept');
       assert.deepEqual(saved.preferenceConflict,['Dairy']);assert.deepEqual(saved.exclusionConflict,[]);assert.deepEqual(saved.carbConflict,[]);assert.deepEqual(saved.vegConflict,[]);assert.deepEqual(saved.carbVegConflict,[]);assert.ok(!JSON.stringify(saved).includes('Fake'));
+      assert.deepEqual(saved.keptCarbConflict,type==='Carb'?['Dairy']:[]);
+      assert.deepEqual(saved.keptVegConflict,type==='Vegetable'?['Dairy']:[]);
       const [reopened]=validateMenuSelections({menu:local,selections:[saved],exclusions:['Dairy']});
       assert.equal(reopened.carbVegAction,'kept');assert.equal(reopened.carbVegPreference,'kept');
     }
@@ -155,7 +157,7 @@ test('kept preferences cannot produce kitchen replacement markers from conflict-
   for (const combined of ['No','Yes']) {
     const dish=item([c('c','Carb','Rice',['Gluten']),c('v','Vegetable','Peas',['Coriander'])]);dish.cycleMeal.carbCombined=combined;
     const result=evaluate(dish,['Gluten','Coriander']);const flags=selectionPreferenceFlags(result,'kept');
-    assert.equal(flags.carbVegAction,'kept');
+    assert.equal(flags.carbVegAction,combined==='Yes'?undefined:'kept');
     assert.deepEqual(flags.carbConflict,[]);assert.deepEqual(flags.vegConflict,[]);assert.deepEqual(flags.carbVegConflict,[]);
     assert.deepEqual(flags.preferenceConflict,['Gluten','Coriander']);assert.deepEqual(flags.exclusionConflict,[]);
     assert.deepEqual(result.flags.carbConflict,['Gluten']);assert.deepEqual(result.flags.vegConflict,['Coriander']);
@@ -168,4 +170,15 @@ test('manual audit preferences are separate from mandatory kitchen-swap conflict
   assert.deepEqual(kept.preferenceConflict,['Peas']);assert.deepEqual(kept.exclusionConflict,[]);
   const [safe] = validateMenuSelections({menu,selections:[{...selection,preferenceConflict:['Fake'],exclusionConflict:['Fake']}]});
   assert.deepEqual(safe.preferenceConflict,[]);assert.deepEqual(safe.exclusionConflict,[]);
+});
+
+test('portion warnings drop old or forged side choices and kept-side claims', () => {
+  const portionMenu={meals:[{date:'2099-11-02',mealType:'main',items:[item([c('p','Protein','Roast',['Dairy'])])]}]};
+  for (const preference of ['kept','replace']) {
+    const [saved]=validateMenuSelections({menu:portionMenu,selections:[{...selection,carbVegPreference:preference,keptCarbConflict:['Fake'],keptVegConflict:['Fake']}],exclusions:['Dairy']});
+    assert.equal(saved.carbVegPreference,undefined);assert.equal(saved.carbVegAction,undefined);
+    assert.deepEqual(saved.keptCarbConflict,[]);assert.deepEqual(saved.keptVegConflict,[]);
+    assert.deepEqual(saved.preferenceConflict,['Dairy']);
+    assert.deepEqual(validateMenuSelections({menu:portionMenu,selections:[saved],exclusions:['Dairy']})[0],saved);
+  }
 });
