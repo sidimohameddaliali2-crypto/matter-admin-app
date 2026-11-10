@@ -54,3 +54,7 @@ If evidence is incomplete, retain it and label the affected conclusion as unavai
 Pending saved batches are retried automatically in bounded work per poll. Abandoned ticks without a saved payload become failed; the system does not fetch today's position and label it as an old observation. Capture status exposes recorded outcomes, not a guaranteed schedule or fleet inventory.
 
 On repeated failures, inspect bounded failure codes and deployment health first. Keep evidence collections and pending batches intact. Any manual replay, retention policy, destructive cleanup or change to the collection schedule requires a separately reviewed procedure. Rolling code back must not delete appended evidence; verify older code's tolerance of additive fields and null positions before switching versions.
+
+## Follow-up review status (2026-11-10)
+
+Independent review found and fixed impossible-jump taint loss across uncertainty barriers and receipt decoding after native/lean Mongo readback. See the [follow-up qualification record](GPS_CHANGE_IMPACT.md#independent-follow-up-qualification--2026-11-10) and [isolated database evidence](GPS_DATABASE_REVIEW.md#isolated-recovery-evidence-2026-11-10). Local recovery and fixture evidence do not qualify actual deployment configuration, staging journeys or the separate reporting importer. **Keep this PR in draft; deployment is not ready until the remaining acceptance gates are satisfied.**

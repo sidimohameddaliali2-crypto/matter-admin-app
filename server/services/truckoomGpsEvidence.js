@@ -48,7 +48,11 @@ export function createGpsEvidenceStore({ store = TruckoomGpsReceipt,
 
 export function decodeGpsReceipt(receipt) {
   if (receipt.encoding !== 'gzip-json-v1' || receipt.payloadBytes > MAX_JSON_BYTES) throw error('GPS_ARCHIVE_INVALID_RECEIPT');
-  const bytes = gunzipSync(Buffer.from(receipt.payload), { maxOutputLength: MAX_JSON_BYTES });
+  // Lean/native Mongo reads return BSON Binary, while hydrated documents and
+  // fixture inputs expose Buffer. Buffer.from(Binary) silently yields no bytes.
+  const payload = receipt.payload?._bsontype === 'Binary'
+    ? receipt.payload.value(true) : receipt.payload;
+  const bytes = gunzipSync(Buffer.from(payload), { maxOutputLength: MAX_JSON_BYTES });
   if (bytes.length !== receipt.payloadBytes || digest(bytes) !== receipt.payloadSha256) throw error('GPS_ARCHIVE_HASH_MISMATCH');
   return JSON.parse(bytes);
 }

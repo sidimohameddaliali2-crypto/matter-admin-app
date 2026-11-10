@@ -133,3 +133,18 @@ No staging or production application, real browser/device journey, real database
 The deployment workflow runs when `main` is pushed and supports manual dispatch on `main`. It installs server/client dependencies, builds the client and restarts the API. Creating a PR does not validate deployment. Merging to `main` is a production action and must follow the deployment acceptance checklist.
 
 Before promotion, confirm the actual process count, database durability/index configuration, rollback path and backup/restore proof in the owning environment. The repository's example process configuration is not production evidence. Rollback must preserve appended evidence and existing reviews. Unrelated pre-existing findings belong in a separate backlog rather than expanding this GPS patch without a reviewed reason.
+
+## Independent follow-up qualification — 2026-11-10
+
+A second review started from candidate `a697d41b24f8857ebe41b73708fa35368126e5db` with separate database/recovery, GPS interpretation and application compatibility reviewers. It independently found and fixed two defects:
+
+- An unusable observation cleared impossible-jump destination taint, allowing unchanged later coordinates to support a false visit. Taint now survives uncertainty barriers until a usable changed position; regression fixtures cover six barrier types and valid movement recovery.
+- Receipt decoding failed for BSON Binary payloads returned by native/lean Mongo reads. The decoder now handles both BSON Binary and hydrated Buffer payloads, with BSON round-trip and real database readback coverage.
+
+Using Node 22.20.0, the final explicit server run covered 89 fixture files and 682 tests: **679 passed, three failed**. The unchanged base covered 84 files and 604 tests: **601 passed, the same three failed**. The two manual-coordinate failures arise from missing mocks for database reads in unchanged address-edit hooks. The menu-save failure arises from mocking `findOne()` as a Promise although unchanged code calls query `.sort()`. Temporary diagnostic mock repairs passed all four targeted checks, including the intended synchronization error case; the original fixtures were restored and these unrelated changes are not included in this PR.
+
+The GPS evaluator/history/synchronization group passed 80/80 after its regression was first observed failing. Application compatibility routes passed 25/25, and the existing tracker-card suite passed 8/8. The isolated Mongo recovery and logical restore evidence, its reproducible harness and its limits are recorded in [database review](GPS_DATABASE_REVIEW.md#isolated-recovery-evidence-2026-11-10).
+
+**Deployment recommendation: not ready.** This follow-up did not have an authorized staging connection or deployment/database administration connection. Actual process count, live schema/index options, write concern/journaling configuration, role permissions, storage growth and operational backup arrangements remain unverified. Real staging journeys for maps/fallback, both assignment paths, photos/retry/offline sync, edits and saved reload, plus the separate reporting importer and late-recovery reconciliation, remain acceptance gates. Repository workflow/configuration review and fixture coverage do not close those gates. No production data, provider calls, historical reports, collection pauses, merges or deployments were changed.
+
+The follow-up client production build (`npm run build`) also passed with normal compiler and lint checks using its own locked dependency installation. It emitted browser-data currency and bundle-size advisories; no checks were disabled. Build output remained in the isolated checkout. `git diff --check` passed before the follow-up commit.

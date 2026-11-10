@@ -126,3 +126,27 @@ test('an invalid saved radius cannot create an outside-position warning', () => 
     assert.equal(result.needsReview,false);
   }
 });
+
+test('quality barriers do not rehabilitate an unchanged impossible-jump destination', () => {
+  const barriers = [
+    [point(6,25.1,{longitude:null})],
+    [point(6),point(6,25.11)],
+    [point(6,25.1,{recordedAt:point(5).gpsTime})],
+    [point(6,25.1,{driverMappingState:'ambiguous_current_mapping'})],
+    [point(6,25.1,{qualityFlags:['unmatched_driver_mapping']})],
+    [point(6,25.1,{qualityFlags:['missing_observation_receipt']})],
+  ];
+  for (const barrier of barriers) {
+    const result = evaluate([point(4,26.1),point(5),...barrier,point(7),point(8)],7);
+    assert.equal(result.status,'incomplete_events');
+    assert.equal(result.arrivedAt,null);
+    assert.ok(result.gpsQualityReasons.includes('jump_plateau'));
+  }
+});
+
+test('a usable changed position can end jump-destination taint after a quality barrier', () => {
+  const result = evaluate([point(4,26.1),point(5),point(6,25.1,{longitude:null}),
+    point(7,25.1001),point(8,25.1001)],7);
+  assert.equal(result.status,'gps_visit_observed');
+  assert.equal(+result.arrivedAt,+point(7).gpsTime);
+});

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import mongoose from 'mongoose';
 import { createGpsEvidenceStore, decodeGpsReceipt, scopedLiveGpsPayload, scopedHistoryGpsPayload } from './truckoomGpsEvidence.js';
 const input = { kind: 'live', scope: { company: 'Fixture' }, requestStartedAt: '2026-01-01T00:00:00Z', responseReceivedAt: '2026-01-01T00:00:01Z', payload: { rows: [{ GPSActualTime: null, Latitude: 'invalid' }] } };
 test('retains rejected source fields before normalization and restores hash-bound bytes', async () => {
@@ -22,4 +23,14 @@ test('oversize payloads fail before writing a Mongo document', async () => {
   let calls = 0; const retain = createGpsEvidenceStore({ available: () => true, store: { create: async () => { calls++; } } });
   await assert.rejects(retain({ ...input, payload: 'x'.repeat(32 * 1024 * 1024) }), { code: 'GPS_ARCHIVE_RESPONSE_TOO_LARGE' });
   assert.equal(calls, 0);
+});
+
+test('decodes native and lean Mongo BSON binary after backup/readback', async () => {
+  let saved;
+  const retain = createGpsEvidenceStore({ available: () => true, store: { create: async docs => { saved = docs[0]; } } });
+  await retain(input);
+  const restored = mongoose.mongo.BSON.deserialize(mongoose.mongo.BSON.serialize(saved));
+  assert.equal(restored.payload._bsontype, 'Binary');
+  assert.deepEqual(decodeGpsReceipt(restored), input.payload);
+  assert.throws(() => decodeGpsReceipt({ ...restored, payloadSha256: '0'.repeat(64) }), { code: 'GPS_ARCHIVE_HASH_MISMATCH' });
 });

@@ -31,7 +31,7 @@ The method checks the original GPS clock and coordinates before comparing them w
 - A fix later than its original source-response receipt or evaluation cutoff is excluded from timed support. Reading a cache or sampling it again later does not repair that clock conflict. Historical cache rows without an original receipt remain uncertain until a fresh response supplies one.
 - Invalid coordinates and contradictory positions at the same GPS time interrupt support.
 - An explicitly ambiguous driver mapping remains uncertain. Same-vehicle observations with missing or different driver mappings interrupt support instead of disappearing between matching observations.
-- A movement over 500 metres with an implied speed above 180 km/h taints both endpoints. Repeated fixes at that jump destination remain tainted until the position changes.
+- A movement over 500 metres with an implied speed above 180 km/h taints both endpoints. Repeated fixes at that jump destination remain tainted until a usable position changes. An intervening invalid, conflicting, future-clock or assignment-uncertain observation does not clear that taint.
 - A gap longer than five minutes separates observation segments. An outside position after the gap cannot close an earlier sampled entry.
 
 The distance, speed and gap values are conservative screening parameters, not guarantees of tracker accuracy or continuous presence. A configured customer radius must be positive and finite. Existing saved customer radii are preserved; the application default is 60 metres.

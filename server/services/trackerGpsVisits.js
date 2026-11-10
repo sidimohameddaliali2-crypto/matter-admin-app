@@ -57,7 +57,9 @@ function observations(points, pin, radiusMetres, asOf) {
   });
   let previous = null, jumpDestination = null;
   for (const row of rows) {
-    if (row.reasons.size) { previous = null; jumpDestination = null; continue; }
+    // An unusable row breaks speed continuity, but cannot establish movement
+    // away from a tainted jump destination. Only a usable changed position can.
+    if (row.reasons.size) { previous = null; continue; }
     if (jumpDestination && row.latitude === jumpDestination.latitude && row.longitude === jumpDestination.longitude) {
       row.reasons.add('jump_plateau');
     } else jumpDestination = null;

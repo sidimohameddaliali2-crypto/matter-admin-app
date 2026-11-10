@@ -75,3 +75,49 @@ Before promotion, record the actual application revision, process count and data
 - Rollback changes code without deleting retained evidence or resetting completed/pending batches. Review schema compatibility before switching versions.
 
 Offline fixtures exercise failure behavior and Mongoose casting without database writes. They do not replace the real database and restore checks. No live database mutation, index creation or backup change was performed during this review.
+
+## Isolated recovery evidence (2026-11-10)
+
+The explicit harness `server/scripts/qualifyGpsRecovery.mjs` starts its own
+single-node MongoDB replica set on `127.0.0.1` with WiredTiger. It never loads
+application environment files, accepts a database URL, imports server startup,
+or contacts the GPS provider. Its two synthetic namespaces and temporary BSON
+backup are removed when the run finishes. It is deliberately outside fixture
+auto-discovery and requires separate test tooling, without application lockfile
+changes. From the repository root, using PowerShell:
+
+```powershell
+npm install --prefix work/gps-recovery-tooling mongodb-memory-server@11.3.0 --no-audit --no-fund
+$gpsRecoveryTool = (Resolve-Path work/gps-recovery-tooling/node_modules/mongodb-memory-server/index.js).Path
+node server/scripts/qualifyGpsRecovery.mjs $gpsRecoveryTool
+```
+
+The initial run used Node 22.20.0 and MongoDB 8.2.6. Six assertion groups passed:
+
+- Concurrent workers produced exactly one claim for a tick.
+- An actual partial prefix write followed by application disconnect/reconnect
+  recovered exactly three deterministic history rows.
+- Actual Mongo writes followed by an injected lost acknowledgement, lease expiry
+  and a new worker recovered exactly six rows across two batches; the stale
+  owner could not complete the batch.
+- An injected lost completion acknowledgement did not reopen the completed batch.
+- A graceful mongod stop/restart retained three complete batches and nine rows.
+- BSON file backup and logical restore into a separate local namespace preserved
+  all nine complete row values and identities, recomputed batch payload hashes,
+  payload membership and source-reference receipt hash/decode.
+
+This exercise found a source-recovery defect: native/lean Mongo reads return a
+BSON `Binary` payload; `Buffer.from(Binary)` produced empty bytes and receipt
+decoding failed with `Z_BUF_ERROR`. The decoder now extracts the BSON bytes
+explicitly. The same real-database harness and a BSON round-trip fixture passed
+after the fix (five archive fixture tests passed).
+
+These are synthetic fault injections after real local writes, not a network
+partition or multi-node failover test. Application restart is represented by a
+fresh store plus disconnect/reconnect; database restart is graceful. The backup
+exercise is logical BSON export/import, not `mongodump`, filesystem recovery or
+the production backup service. Abrupt host failure, deployment-role permissions,
+actual index options, deployed process count, capacity/storage growth, replica
+configuration and production backup/restore remain unverified. Repository PM2
+configuration examples and deployment commands do not establish the actual
+running process topology. Do not treat this evidence as deployment approval.
