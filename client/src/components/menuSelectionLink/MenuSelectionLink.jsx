@@ -3,7 +3,7 @@ import api from '../../utils/api';
 import { evaluateComponentSelection } from '../../constants/componentSelectionRules';
 import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
 import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm, allergenMatchesAny } from '../../constants/exclusionList';
-import { toSentenceCase } from '../../utils/textFormat';
+import { toSentenceCase, toTitleCase } from '../../utils/textFormat';
 import MatterLogo from './MatterLogo';
 import SkipPauseCalendarModal from './SkipPauseCalendarModal';
 import {
@@ -86,6 +86,16 @@ const visibleIngredientNames = (list) =>
     .map((t) => t?.name)
     .filter(Boolean)
     .join(', ');
+
+// Labels only: exclusion checking continues to use the original private snapshot.
+// Salad and its dressing retain their deliberately private display policy.
+const componentDisplayName = (item, type, value) => {
+  const name = String(value || '').trim();
+  const components = item.cycleMeal?.components || [];
+  if (!name || type === 'Vegetable' && (item.cycleMeal?.isSaladBase || components.some(c => c.type === 'Salad'))) return name;
+  const flags = [...new Set(components.filter(c => c.type === type).flatMap(c => c.exclusions || []).map(flag => toTitleCase(String(flag).trim())).filter(Boolean))];
+  return flags.length ? `${name} (w/ ${flags.join(', ')})` : name;
+};
 
 // Every ingredient's own display name (unfiltered by visible, like
 // tagTokens) — used to report exactly which carb/veg/sauce/garnish
@@ -239,8 +249,8 @@ function buildRealModel(weeklyMenu, profile) {
         name: item.mealName || 'Meal',
         sub: subParts.join(' · '),
         proteinText: [String(item.proteinSource || '').trim(), visibleIngredientNames(item.portionIngredients)].filter(Boolean).join(' — '),
-        carbText: [String(item.carbs || '').trim(), visibleIngredientNames(item.carbIngredients)].filter(Boolean).join(' — '),
-        vegText: [String(item.veg || '').trim(), visibleIngredientNames(item.vegIngredients)].filter(Boolean).join(' — '),
+        carbText: [componentDisplayName(item, 'Carb', item.carbs), visibleIngredientNames(item.carbIngredients)].filter(Boolean).join(' — '),
+        vegText: [componentDisplayName(item, 'Vegetable', item.veg), visibleIngredientNames(item.vegIngredients)].filter(Boolean).join(' — '),
         sauceText: [String(item.sauce || '').trim(), visibleIngredientNames(item.sauceIngredients)].filter(Boolean).join(' — '),
         allergens: allergensDisplay,
         allergenMatchTokens,

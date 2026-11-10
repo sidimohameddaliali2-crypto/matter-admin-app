@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import api from '../../utils/api';
 import MenuSelectionLink, { buildRealModel, expandSaturdaySkips } from './MenuSelectionLink';
 import { allergenMatchesAny } from '../../constants/exclusionList';
+import { evaluateComponentSelection } from '../../constants/componentSelectionRules';
 
 jest.mock('../../utils/api', () => ({ get: jest.fn(), post: jest.fn() }));
 
@@ -130,4 +131,31 @@ test('a breakfast with no sauce or garnish remains selectable and submits normal
   const item=cycleItem([privateComponent('breakfast','Breakfast')],{mealType:'breakfast',proteinSource:'Breakfast portion',carbs:'',veg:'',sauce:''});item.cycleMeal.mealKind='Breakfast';
   await signIn(item);await click(button('+',card()));await click(button('Submit my week'));
   expect(api.post).toHaveBeenCalledTimes(1);expect(api.post.mock.calls[0][1].selections[0]).toMatchObject({mealType:'breakfast',needsSauceChange:false,needsGarnishChange:false});
+});
+
+
+test('only carb and ordinary veg names gain title-cased w/ exclusion labels without changing checked data', () => {
+  const item = cycleItem([
+    privateComponent('p', 'Protein', ['DAIRY']),
+    privateComponent('c', 'Carb', ['GLUTEN', 'Dairy', 'GLUTEN']),
+    privateComponent('v', 'Vegetable', ['RAW ONION', 'CORIANDER']),
+    privateComponent('s', 'Sauce', ['NUTS']),
+  ]);
+  const before = JSON.parse(JSON.stringify(item));
+  const rules = evaluateComponentSelection(item, ['Raw Onion', 'Gluten']);
+  const meal = modelFor(item).meals[0];
+  expect(meal.proteinText).toBe('Chicken portion');
+  expect(meal.carbText).toBe('Rice name (w/ Gluten, Dairy)');
+  expect(meal.vegText).toBe('Vegetable name (w/ Raw Onion, Coriander)');
+  expect(meal.sauceText).toBe('Sauce name');
+  expect(item).toEqual(before);
+  expect(item.carbIngredients).toBeUndefined(); expect(item.vegIngredients).toBeUndefined();
+  expect(evaluateComponentSelection(item, ['Raw Onion', 'Gluten'])).toEqual(rules);
+  expect(rules.flags).toMatchObject({ carbVegAction: 'replace', carbConflict: ['GLUTEN'], vegConflict: ['RAW ONION'] });
+});
+
+test('empty exclusions and legacy hidden ingredients do not create w/ labels', () => {
+  const item = cycleItem([privateComponent('c','Carb'),privateComponent('v','Vegetable')], { carbIngredients: [{name:'Hidden ingredient',visible:false}] });
+  const meal = modelFor(item).meals[0];
+  expect(meal.carbText).toBe('Rice name'); expect(meal.vegText).toBe('Vegetable name');
 });
