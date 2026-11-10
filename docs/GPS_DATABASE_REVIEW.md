@@ -125,3 +125,17 @@ running process topology. Do not treat this evidence as deployment approval.
 ### Additional existing-access checks
 
 The existing local database connection was subsequently located and used for read-only schema/type, complete existing index-option, privilege, replica/storage and bounded growth checks. Private operational results are intentionally excluded from this repository. This narrows the initial access limitation but does not establish the deployed runtime principal, all durability defaults, production backup arrangements or capacity under the added retention load. No live index or collection was created. Deployment and staging acceptance gates remain open; see the impact record's existing-access follow-up.
+
+### Row-to-original-response linkage through recovery
+
+The recovery harness now creates three distinct scoped source receipts **before** saving their capture batches. It runs the actual live normalizer and capture classifier, includes unusable GPS fields, and deliberately makes source-row indexes differ from capture-row indexes by retaining an unidentifiable source row and excluding an out-of-scope company. Independent originals are held by the test, separately from the saved database and backup.
+
+At application reconnect/partial recovery, lost-acknowledgement recovery, graceful database restart and logical restore, every saved observation must resolve through its batch membership and `sourceReceipt.receiptId` to the correct archived response. Assertions compare receipt IDs, hashes, source-row indexes, scope and original request/response clocks; decode and hash the archived content; compare it with the independent original response; replay its selected source row; and compare every normalized saved field with the independent pre-write original. All nine observations must retain their deterministic identities and exactly three complete batches must remain after restart/restore.
+
+In-memory negative controls prove the verifier rejects a missing receipt, a wrong source-row index, a changed reference hash, substitution of another valid receipt even when row/batch references and the batch hash are updated together, and a normalized quality-field mutation even with a recomputed batch hash. These controls leave the restored evidence intact.
+
+This specifically closes the previous harness gap: archive readback alone did not establish that restored history rows still referenced their own original responses. It is source-link recovery verification, not a replay of saved delivery assessments or the downstream reporting importer. The existing single-node, graceful-restart and logical-backup limitations still apply.
+
+The restart step also waits for the previous test `mongod` child's `close` event before starting its replacement. This avoids a Windows test-tool race where delayed pipe closure could reject the replacement's startup listener. Startup failures remain failures; assertions are not retried or suppressed.
+
+Final linkage-harness verification passed eight assertion groups on three consecutive normal runs, including restart and restore plus the negative controls. The full explicit offline server suite also passed 682/682 tests across 89 files with non-loopback TCP connections blocked. No application behavior, live data, provider usage, deployment or reporting-importer code changed.
