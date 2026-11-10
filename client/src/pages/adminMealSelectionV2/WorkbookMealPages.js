@@ -7,13 +7,14 @@ import { CYCLE_DAYS, MEAL_TYPES, mealType, mealFormat, dietaryFlags, componentNa
 import WeeklyCycleBoard from './WeeklyCycleBoard';
 import ComponentExclusions from './ComponentExclusions';
 import { editorComponents } from './mealEditorState';
+import { toTitleCase } from '../../utils/textFormat';
 
 const BASE = '/admin/meal-selection-v2';
 const componentLabel = type => type === 'Sauce 2' ? 'Salad dressing (optional)' : type;
 const ADAPTATIONS = ['Not reviewed', 'Dairy-free option available.', 'Gluten-free option available.', 'Dairy- and gluten-free option available.', 'Nut-free option available.', 'No dairy-free option.', 'No gluten-free option.', 'No nut-free option.', 'No dairy- and gluten-free option.', 'No dairy- and nut-free option.', 'No gluten- and nut-free option.', 'No dairy-, gluten- and nut-free option.'];
 const kindOf = meal => mealFormat(meal) === 'Main' ? 'Main meal' : mealFormat(meal);
 const newComponent = type => ({ id: `component-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, type, name: '', exclusions: [], notes: '', adaptation: 'Not reviewed' });
-const Chips = ({ values, tone = 'grey', empty = 'No flags recorded' }) => values.length ? <span className="av2-badges">{values.map(value => <Badge key={value} tone={tone}>{value}</Badge>)}</span> : <small>{empty}</small>;
+const Chips = ({ values, tone = 'grey', empty = 'No flags recorded' }) => values.length ? <span className="av2-badges">{values.map(value => <Badge key={value} tone={tone}>{toTitleCase(value)}</Badge>)}</span> : <small>{empty}</small>;
 
 function PageHeading({ title, subtitle, children }) {
   return <div className="av2-page-heading"><div><h1>{title}</h1><p>{subtitle}</p></div><div className="av2-actions">{children}</div></div>;
