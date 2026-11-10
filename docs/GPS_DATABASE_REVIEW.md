@@ -121,3 +121,7 @@ actual index options, deployed process count, capacity/storage growth, replica
 configuration and production backup/restore remain unverified. Repository PM2
 configuration examples and deployment commands do not establish the actual
 running process topology. Do not treat this evidence as deployment approval.
+
+### Additional existing-access checks
+
+The existing local database connection was subsequently located and used for read-only schema/type, complete existing index-option, privilege, replica/storage and bounded growth checks. Private operational results are intentionally excluded from this repository. This narrows the initial access limitation but does not establish the deployed runtime principal, all durability defaults, production backup arrangements or capacity under the added retention load. No live index or collection was created. Deployment and staging acceptance gates remain open; see the impact record's existing-access follow-up.
