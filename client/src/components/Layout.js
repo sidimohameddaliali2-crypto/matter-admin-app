@@ -1,7 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
-import { motion, AnimatePresence } from 'framer-motion';
 import {
   LayoutDashboard,
   Users,
@@ -71,6 +70,7 @@ const NAV_ITEMS = [
 
 const Layout = ({ children }) => {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const mobileNavigation = useRef(null);
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState({});
   const dispatch = useDispatch();
@@ -78,6 +78,32 @@ const Layout = ({ children }) => {
   const location = useLocation();
   const compactInbox = /^\/customer-service(?:\/chats)?\/?$/.test(location.pathname);
   const { user } = useSelector(state => state.auth);
+
+  useEffect(() => {
+    const dialog = mobileNavigation.current;
+    if (sidebarOpen) {
+      if (!dialog.open) dialog.showModal();
+    } else if (dialog.open) {
+      dialog.close();
+    }
+  }, [sidebarOpen]);
+
+  useEffect(() => {
+    const desktop = window.matchMedia('(min-width: 1024px)');
+    const closeOnDesktop = () => { if (desktop.matches) setSidebarOpen(false); };
+    desktop.addEventListener('change', closeOnDesktop);
+    return () => desktop.removeEventListener('change', closeOnDesktop);
+  }, []);
+
+  useEffect(() => { setSidebarOpen(false); }, [location.pathname]);
+
+  useEffect(() => {
+    if (!compactInbox) return undefined;
+    const previousTitle = document.title;
+    const inboxTitle = 'Customer service inbox · Matter';
+    document.title = inboxTitle;
+    return () => { if (document.title === inboxTitle) document.title = previousTitle; };
+  }, [compactInbox]);
 
   // Check if a nav item should be visible for the current user.
   // Permission wins: a page keyed with `permission` shows iff that permission is
@@ -119,7 +145,7 @@ const Layout = ({ children }) => {
   const headerLabel = currentPageName === 'Dashboard' ? 'Operations' : currentPageName;
 
   const renderGroups = (onLinkClick) => (
-    <nav className="mo-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-1">
+    <nav aria-label="Main" className="mo-sidebar-scroll flex-1 min-h-0 overflow-y-auto px-3 py-3 space-y-1">
       {navigationGroups.map((group) => {
         const isCollapsed = !!collapsedGroups[group.label];
         return (
@@ -166,8 +192,11 @@ const Layout = ({ children }) => {
 
   return (
     <div className="flex h-screen bg-gray-50 overflow-x-hidden">
+      <a href="#main-content" className="mo-skip-link">{compactInbox ? 'Skip to inbox' : 'Skip to main content'}</a>
       {/* Desktop persistent sidebar */}
       <div
+        id="desktop-navigation"
+        inert={!desktopSidebarOpen}
         className={`hidden lg:block h-screen flex-shrink-0 overflow-hidden border-transparent transition-all duration-200 ease-in-out ${
           desktopSidebarOpen ? 'lg:w-64 border-r' : 'lg:w-0 border-r-0'
         }`}
@@ -179,6 +208,7 @@ const Layout = ({ children }) => {
               onClick={() => setDesktopSidebarOpen(false)}
               className="p-1 rounded-md text-white/70 hover:bg-white/10 hover:text-white"
               title="Collapse menu"
+              aria-label="Collapse menu"
             >
               <Menu className="w-6 h-6" />
             </button>
@@ -187,45 +217,34 @@ const Layout = ({ children }) => {
         </div>
       </div>
 
-      {/* Mobile overlay sidebar */}
-      <AnimatePresence>
-        {sidebarOpen && (
-          <>
-            {/* Overlay */}
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 z-[1000] bg-black bg-opacity-50 lg:hidden"
+      {/* A separate mobile dialog keeps native modality out of the desktop sidebar. */}
+      <dialog
+        ref={mobileNavigation}
+        id="mobile-navigation"
+        aria-label="Main navigation"
+        className="mo-mobile-navigation mo-chrome-font"
+        onCancel={() => setSidebarOpen(false)}
+        onClose={() => setSidebarOpen(false)}
+        onClick={event => { if (event.target === event.currentTarget) setSidebarOpen(false); }}
+      >
+        <div className="flex flex-col h-full">
+          <div className="flex items-center justify-between flex-shrink-0 px-4 py-4">
+            <img src="/images/matter-logo24-white.png" alt="MATTER" className="h-6 w-auto" />
+            <button
               onClick={() => setSidebarOpen(false)}
-            />
-
-            {/* Sidebar */}
-            <motion.div
-              initial={{ x: -256 }}
-              animate={{ x: 0 }}
-              exit={{ x: -256 }}
-              transition={{ type: "spring", bounce: 0, duration: 0.3 }}
-              className="mo-chrome-font fixed inset-y-0 left-0 z-[1001] w-64 bg-[#0b1630] shadow-xl flex flex-col lg:hidden"
+              className="p-1 rounded-md text-white"
+              aria-label="Close menu"
+              autoFocus
             >
-              <div className="flex items-center justify-between flex-shrink-0 px-4 py-4">
-                <img src="/images/matter-logo24-white.png" alt="MATTER" className="h-6 w-auto" />
-                <button
-                  onClick={() => setSidebarOpen(false)}
-                  className="p-1 rounded-md text-white"
-                >
-                  <X className="w-6 h-6" />
-                </button>
-              </div>
-
-              {renderGroups(() => setSidebarOpen(false))}
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
+              <X className="w-6 h-6" />
+            </button>
+          </div>
+          {renderGroups(() => setSidebarOpen(false))}
+        </div>
+      </dialog>
 
       {/* Main content */}
-      <div className="flex flex-col flex-1 overflow-hidden">
+      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         {/* Header */}
         <header style={compactInbox?{height:60,paddingTop:8,paddingBottom:8}:undefined} className={`${compactInbox?'cs-shell-header ':''}mo-chrome-font mo-app-header relative z-40 flex items-center justify-between flex-wrap gap-x-4 flex-shrink-0 px-6 py-4 bg-[#0b1630] border-b border-white/10 text-white`}>
           <div className="flex items-center">
@@ -233,6 +252,9 @@ const Layout = ({ children }) => {
               onClick={() => setSidebarOpen(true)}
               className="p-1 rounded-md lg:hidden text-white"
               title="Open menu"
+              aria-label="Open menu"
+              aria-controls="mobile-navigation"
+              aria-expanded={sidebarOpen}
             >
               <Menu className="w-6 h-6" />
             </button>
@@ -241,11 +263,14 @@ const Layout = ({ children }) => {
                 onClick={() => setDesktopSidebarOpen(true)}
                 className="hidden lg:block p-1 rounded-md text-white/70 hover:bg-white/10 hover:text-white"
                 title="Open menu"
+                aria-label="Open menu"
+                aria-controls="desktop-navigation"
+                aria-expanded={desktopSidebarOpen}
               >
                 <Menu className="w-6 h-6" />
               </button>
             )}
-            {compactInbox ? <div className="cs-shell-brand" style={{display:'flex',alignItems:'center',gap:22,marginLeft:12}}><img src="/images/matter-logo24-white.png" alt="MATTER" style={{height:28,width:'auto',objectFit:'contain'}}/><span style={{borderLeft:'1px solid #ffffff55',paddingLeft:22,fontSize:20}}>Inbox</span></div> : headerLabel && (
+            {compactInbox ? <div className="cs-shell-brand" style={{display:'flex',alignItems:'center',gap:22,marginLeft:12}}><img src="/images/matter-logo24-white.png" alt="MATTER" style={{height:28,width:'auto',objectFit:'contain'}}/><h1 id="customer-service-inbox-heading" className="cs-inbox-heading">Inbox</h1></div> : headerLabel && (
               <span className="ml-3 pl-3 border-l border-white/20 text-[11px] tracking-[0.18em] uppercase text-white/80">
                 {headerLabel}
               </span>
@@ -278,6 +303,7 @@ const Layout = ({ children }) => {
                 onClick={handleLogout}
                 className="p-2 text-white/70 hover:text-white"
                 title="Logout"
+                aria-label="Logout"
               >
                 <LogOut className="w-5 h-5" />
               </button>
@@ -286,7 +312,7 @@ const Layout = ({ children }) => {
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-y-auto overflow-x-hidden bg-gray-50">
+        <main id="main-content" tabIndex={-1} aria-labelledby={compactInbox ? 'customer-service-inbox-heading' : undefined} className="flex-1 overflow-y-auto overflow-x-hidden bg-gray-50">
           <div className="h-full">
             {children}
           </div>
