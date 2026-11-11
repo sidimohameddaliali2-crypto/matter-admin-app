@@ -3,6 +3,7 @@ import axios from 'axios';
 import dotenv from 'dotenv';
 import { cacheGet, cacheSet } from '../config/cache.js';
 import { createTruckoomLiveCache, normalizeTruckoomLiveData } from './truckoomLiveData.js';
+import { retainGpsResponse, scopedLiveGpsPayload, scopedHistoryGpsPayload } from './truckoomGpsEvidence.js';
 import { alertDataRows } from './truckoomAlertData.js';
 
 dotenv.config();
@@ -27,7 +28,7 @@ dotenv.config();
 // all of them.
 
 const FLEET_CACHE_TTL_SECONDS = 60;
-const FLEET_CACHE_KEY = 'truckoom:fleet:vehicles:v2';
+const FLEET_CACHE_KEY = 'truckoom:fleet:vehicles:v3';
 
 class TruckoomApiService {
   constructor() {
@@ -36,6 +37,7 @@ class TruckoomApiService {
     this.password = process.env.TRUCKOOM_PASSWORD;
     this.companyName = process.env.TRUCKOOM_COMPANY_NAME;
     this.cachedLiveData = createTruckoomLiveCache();
+    this.retainGpsResponse = retainGpsResponse;
   }
 
   assertConfigured() {
@@ -64,18 +66,22 @@ class TruckoomApiService {
     try { return await this.accessTokenPromise; } finally { this.accessTokenPromise = null; }
   }
 
-  async geofenceRequest(method, body, retry = true, beforeDispatch) {
+  async geofenceRequest(method, body, retry = true, beforeDispatch, afterResponse) {
     const token = await this.getAccessToken();
     if (beforeDispatch) await beforeDispatch(body);
+    const requestStartedAt = new Date();
     const { data } = await axios.post(`${this.baseURL}?token=${method}`, body,
-      { headers: { 'auth-code': token }, timeout: 15000 });
+      { headers: { 'auth-code': token }, timeout: 15000,
+        ...(method === 'getVehicleTrackLogs' ? { maxContentLength: 32 * 1024 * 1024 } : {}) });
+    const sourceReceipt = afterResponse ? await afterResponse(data, requestStartedAt, new Date(), body) : null;
     if (Number(data?.result) !== 1) {
       if (retry && /token|auth-code/i.test(data?.message || '')) {
         this.accessToken = null;
-        return this.geofenceRequest(method, body, false, beforeDispatch);
+        return this.geofenceRequest(method, body, false, beforeDispatch, afterResponse);
       }
       throw new Error(`Truckoom ${method} failed`);
     }
+    if (sourceReceipt && Array.isArray(data.data)) Object.defineProperty(data.data, 'sourceReceipt', { value: sourceReceipt });
     return data.data;
   }
 
@@ -136,7 +142,10 @@ class TruckoomApiService {
   async getVehicleTrackLogs(vehicleNo, startDate, endDate, { beforeDispatch } = {}) {
     return this.geofenceRequest('getVehicleTrackLogs', {
       vehicle_no: String(vehicleNo), start_date: startDate, end_date: endDate,
-    }, false, beforeDispatch); // Never retry inside the three-minute limit.
+    }, false, beforeDispatch, (payload, requestStartedAt, responseReceivedAt, dispatchedBody) => this.retainGpsResponse({
+      kind: 'history', scope: { vehicleNo: String(vehicleNo), startDate: dispatchedBody.start_date, endDate: dispatchedBody.end_date },
+      requestStartedAt, responseReceivedAt, payload: scopedHistoryGpsPayload(payload, vehicleNo),
+    })); // Never retry inside the three-minute limit.
   }
 
   async deleteCustomerGeofence(id) {
@@ -166,12 +175,25 @@ class TruckoomApiService {
   /** New token-based live data, shared at most once a minute across workers. */
   async getVehicleLocations() {
     this.assertConfigured();
-    return this.cachedLiveData(async () => {
+    return this.cachedLiveData(async beforeDispatch => {
       const token = await this.getAccessToken();
+      await beforeDispatch?.();
+      const requestStartedAt = new Date();
       const { data } = await axios.post(`${this.baseURL}?token=getTokenBaseLiveData&ProjectId=49`,
-        { company_names: '', format: 'json' }, { headers: { 'auth-code': token }, timeout: 20000 });
+        { company_names: '', format: 'json' }, { headers: { 'auth-code': token }, timeout: 20000, maxContentLength: 32 * 1024 * 1024 });
       if (/token|auth-code/i.test(data?.root?.error || '')) this.accessToken = null;
-      return normalizeTruckoomLiveData(data, this.companyName);
+      let sourceReceipt = null;
+      try {
+        sourceReceipt = await this.retainGpsResponse({ kind: 'live', scope: { company: this.companyName },
+          requestStartedAt, responseReceivedAt: new Date(), payload: scopedLiveGpsPayload(data, this.companyName) });
+      } catch {
+        // Preserve the operational live view. The recorder rejects this snapshot
+        // as unarchived and records a failed tick instead of claiming evidence.
+      }
+      const vehicles = normalizeTruckoomLiveData(data, this.companyName).map(row => ({ ...row, sourceReceipt }));
+      Object.defineProperties(vehicles, { sourceReceipt: { value: sourceReceipt },
+        captureEvidenceStatus: { value: sourceReceipt ? 'retained' : 'unavailable' } });
+      return vehicles;
     });
   }
 
@@ -184,16 +206,25 @@ class TruckoomApiService {
    */
   async getFleetStatus() {
     const cached = await cacheGet(FLEET_CACHE_KEY);
-    if (cached) return cached;
+    if (cached?.vehicles) {
+      Object.defineProperties(cached.vehicles, { sourceReceipt: { value: cached.sourceReceipt || null },
+        captureEvidenceStatus: { value: cached.captureEvidenceStatus || 'unverified_cache' } });
+      return cached.vehicles;
+    }
 
     const [vehicles, locations] = await Promise.all([
       this.getCompanyVehicles(),
       this.getVehicleLocations(),
     ]);
-    const locationByVehicleNo = new Map(locations.map((l) => [l.vehicleNo, l]));
+    const locationsByVehicle = new Map();
+    for (const location of locations) {
+      const candidates = locationsByVehicle.get(location.vehicleNo) || [];
+      candidates.push(location); locationsByVehicle.set(location.vehicleNo, candidates);
+    }
 
     const fleet = vehicles.map((v) => {
-      const loc = locationByVehicleNo.get(v.vehicleNo);
+      const candidates = locationsByVehicle.get(v.vehicleNo) || [];
+      const loc = candidates.length === 1 ? candidates[0] : null;
       return {
         vehicleNo: v.vehicleNo,
         imei: v.imei,
@@ -202,16 +233,25 @@ class TruckoomApiService {
         latitude: Number.isFinite(loc?.latitude) ? loc.latitude : null,
         longitude: Number.isFinite(loc?.longitude) ? loc.longitude : null,
         gpsTime: loc?.gpsTime || null,
+        rawGpsTime: loc?.rawGpsTime || null,
+        rawTrackerServerTime: loc?.rawTrackerServerTime || null,
         trackerServerTime: loc?.trackerServerTime || null,
         speedKph: loc?.speedKph ?? null,
         ignition: loc?.ignition || null,
         trackerStatus: loc?.trackerStatus || null,
         address: loc?.address || null,
         locationSource: loc?.locationSource || null,
+        rawCoordinates: loc?.rawCoordinates || null,
+        sourceRow: loc?.sourceRow ?? null,
+        sourceReceipt: loc?.sourceReceipt || candidates[0]?.sourceReceipt || locations.sourceReceipt || null,
+        sourceQualityFlags: candidates.length > 1 ? ['conflicting_live_vehicle_rows'] : [],
       };
     });
 
-    await cacheSet(FLEET_CACHE_KEY, fleet, FLEET_CACHE_TTL_SECONDS);
+    const sourceReceipt = locations.sourceReceipt || locations[0]?.sourceReceipt || null;
+    const captureEvidenceStatus = locations.captureEvidenceStatus || (sourceReceipt ? 'retained' : 'unverified_cache');
+    Object.defineProperties(fleet, { sourceReceipt: { value: sourceReceipt }, captureEvidenceStatus: { value: captureEvidenceStatus } });
+    await cacheSet(FLEET_CACHE_KEY, { vehicles: fleet, sourceReceipt, captureEvidenceStatus }, FLEET_CACHE_TTL_SECONDS);
     return fleet;
   }
 }

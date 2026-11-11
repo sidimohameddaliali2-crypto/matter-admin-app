@@ -9,7 +9,7 @@ import mongoose from 'mongoose';
 // "keep forever"). driver is a point-in-time snapshot of whichever User was
 // mapped to this vehicleNo at the moment it was recorded (via
 // User.profile.truckoomVehicleNo) — kept even if that mapping later changes,
-// so old points still show who was driving at the time.
+// as a dated configuration observation; this does not prove who physically drove.
 const vehicleLocationHistorySchema = new mongoose.Schema({
   vehicleNo: {
     type: String,
@@ -23,11 +23,11 @@ const vehicleLocationHistorySchema = new mongoose.Schema({
   },
   latitude: {
     type: Number,
-    required: true,
+    default: null,
   },
   longitude: {
     type: Number,
-    required: true,
+    default: null,
   },
   recordedAt: {
     type: Date,
@@ -35,6 +35,21 @@ const vehicleLocationHistorySchema = new mongoose.Schema({
     default: Date.now,
   },
   gpsTime: Date,
+  captureBatchId: String,
+  captureRow: Number,
+  sourceReceipt: mongoose.Schema.Types.Mixed,
+  sourceRow: Number,
+  trackerServerTime: Date,
+  rawGpsTime: String,
+  rawTrackerServerTime: String,
+  speedKph: Number,
+  ignition: String,
+  trackerStatus: String,
+  locationSource: String,
+  fixAgeMs: Number,
+  qualityFlags: [String],
+  driverCandidates: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  driverMappingState: String,
 });
 
 vehicleLocationHistorySchema.index({ vehicleNo: 1, recordedAt: 1 });

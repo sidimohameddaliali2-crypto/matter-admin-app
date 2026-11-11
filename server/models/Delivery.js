@@ -252,9 +252,13 @@ deliveryType: {
     checkedAt: Date,
     evidenceSource: String,
     gpsSampleCount: Number,
+    gpsMethod: String,
+    gpsQualityReasons: [String],
     errorStage: String,
     errorCode: String,
   },
+  // One server-owned pre-quality-method GPS result, preserved across proof resets.
+  trackerVisitGpsBaseline: { recordedAt: Date, evidence: mongoose.Schema.Types.Mixed },
   timeline: [{
     status: String,
     timestamp: {

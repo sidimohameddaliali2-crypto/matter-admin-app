@@ -154,7 +154,8 @@ test('addressId: audit line lists exactly which deliveries received the pin; rep
   assert.deepEqual(first.calls.updateMany[0], second.calls.updateMany[0]);
 });
 
-test('editing the address text drops the stale addressId (pre-save hook)', async () => {
+test('editing the address text drops the stale addressId (pre-save hook)', async t => {
+  t.mock.method(Delivery, 'findById', () => ({ select: () => ({ lean: async () => ({ address: 'Old', addressId: '1042' }) }) }));
   const doc = new Delivery({ customerId: 'C', customerName: 'N', scheduledTime: new Date(), address: 'Old', addressId: '1042' });
   doc.isNew = false;
   doc.$__reset?.();
@@ -174,7 +175,8 @@ test('editing the address text drops the stale addressId (pre-save hook)', async
   assert.equal(kept.addressId, '1042');
 });
 
-test('update-style address edits ($set.address) also drop the stale addressId, unless the same write sets one', async () => {
+test('update-style address edits ($set.address) also drop the stale addressId, unless the same write sets one', async t => {
+  t.mock.method(Delivery, 'findOne', () => ({ select: () => ({ lean: async () => ({ address: 'Old', addressId: '1042' }) }) }));
   const run = async (update) => {
     const query = Delivery.findOneAndUpdate({ _id: '6a1bbd6a925161da6ed226e9' }, update); // built, never executed
     await new Promise((resolve, reject) => {

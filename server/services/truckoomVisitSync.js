@@ -3,7 +3,7 @@ import Delivery from '../models/Delivery.js';
 import CustomerGeofence from '../models/CustomerGeofence.js';
 import TrackerSyncLease from '../models/TrackerSyncLease.js';
 import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
-import { gpsVisitEvents } from './trackerGpsVisits.js';
+import { evaluateGpsVisit, gpsFixTime, GPS_VISIT_METHOD } from './trackerGpsVisits.js';
 import truckoomHistory from './truckoomHistoryService.js';
 import truckoom from './truckoomApiService.js';
 import { resolveDeliveryCoordinatesCached } from './geocoding.js';
@@ -79,7 +79,8 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
     for (const delivery of deliveries) {
       await renew();
       const previous = delivery.trackerVisit || {};
-      let visit = { ...previous, checkedAt: now, needsReview: false, errorStage: null, errorCode: null };
+      let visit = { ...previous, checkedAt: now, needsReview: false, errorStage: null, errorCode: null,
+        gpsMethod: null, gpsQualityReasons: [] };
       let stage = 'resolve_pin';
       try {
         const pin = await resolveDeliveryCoordinatesCached(delivery);
@@ -146,6 +147,7 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
           let matched = events.filter(e => e.vehicleNo === String(visit.vehicleNo) && e.name === visit.geofenceName);
           visit.evidenceSource = 'truckoom_alerts';
           visit.gpsSampleCount = 0;
+          let gpsEvaluation = null;
           if (!matched.length && visit.vehicleNo) {
             stage = 'gps_history';
             const pathKey = `${visit.vehicleNo}:${+start}`;
@@ -153,9 +155,20 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
             // itself, because many customer stops share a vehicle/day.
             if (!gpsPaths.has(pathKey)) gpsPaths.set(pathKey, Promise.resolve(VehicleLocationHistory.find({
               vehicleNo: visit.vehicleNo, recordedAt: { $gte: start, $lt: end },
-            }).select('latitude longitude gpsTime recordedAt driver').lean()));
-            const path = (await gpsPaths.get(pathKey)).filter(p => String(p.driver || '') === String(visit.driverId || driverId)
-              && +(new Date(p.gpsTime || p.recordedAt)) >= +start && +(new Date(p.gpsTime || p.recordedAt)) < +end);
+            }).select('latitude longitude gpsTime recordedAt sourceReceipt driver driverCandidates driverMappingState qualityFlags').lean()));
+            const expectedDriver = String(visit.driverId || driverId);
+            const path = (await gpsPaths.get(pathKey)).filter(p => {
+              const at = gpsFixTime(p.gpsTime);
+              // Retain missing-clock observations as uncertainty, never receipt-time fixes.
+              return !at || +at >= +start && +at < +end;
+            }).map(p => {
+              const matches = expectedDriver && (String(p.driver || '') === expectedDriver
+                || p.driverMappingState === 'ambiguous_current_mapping'
+                  && p.driverCandidates?.some(id => String(id) === expectedDriver));
+              // Same-vehicle evidence must not disappear between two matching
+              // driver samples. Keep the assignment uncertainty as a barrier.
+              return matches ? p : { ...p, qualityFlags: [...(p.qualityFlags || []), 'unmatched_driver_mapping'] };
+            });
             // Share one historical API result across every stop on this vehicle/day.
             // Truckoom logs identify the vehicle, so use the delivery's frozen vehicle
             // snapshot; do not rewrite local points or invent a driver association.
@@ -163,20 +176,25 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
               truckoomHistory.getPoints(visit.vehicleNo, start, end, now).catch(() => []));
             const historical = await historicalPaths.get(pathKey);
             // Cached history may end before a recent stop. Keep fresh local
-            // samples too; gpsVisitEvents deduplicates and sorts actual GPS times.
-            const samples = [...historical, ...path];
-            matched = gpsVisitEvents(samples, { lat: visit.lat, lng: visit.lng }, visit.radiusMetres || CUSTOMER_RADIUS_METRES);
-            if (samples.length) { visit.evidenceSource = 'truckoom_gps_samples'; visit.gpsSampleCount = samples.length; }
+            // samples too, but evaluate observations separately from real geofence events.
+            const samples = [...historical, ...path].filter(p => {
+              const at = gpsFixTime(p.gpsTime);
+              return !at || +at >= +start && +at < +end;
+            });
+            if (samples.length) {
+              visit.evidenceSource = 'truckoom_gps_samples'; visit.gpsSampleCount = samples.length;
+              gpsEvaluation = evaluateGpsVisit({ points: samples, pin: { lat: visit.lat, lng: visit.lng },
+                radiusMetres: visit.radiusMetres ?? CUSTOMER_RADIUS_METRES,
+                photoCapturedAt: delivery.proof?.photoCapturedAt, photoSource: delivery.proof?.photoSource,
+                start, end, asOf: now });
+            }
           }
-          visit = { ...visit, ...evaluateTrackerVisit({
+          visit = { ...visit, ...(gpsEvaluation || evaluateTrackerVisit({
             events: matched,
             photoCapturedAt: delivery.proof?.photoCapturedAt, photoSource: delivery.proof?.photoSource,
             start, end,
-          }) };
-          if (visit.evidenceSource === 'truckoom_gps_samples') {
-            if (visit.status === 'inside_window') visit.status = 'gps_visit_observed';
-            if (visit.status === 'outside_window') visit.status = 'gps_window_review';
-          } else if (alertsUnavailable && !matched.length && vehicleNo && visit.status !== 'missing_photo_time') visit.status = alertErrorCode === 'ARCHIVE_WRITE_FAILED' ? 'verification_error' : 'tracker_error';
+          })) };
+          if (visit.evidenceSource !== 'truckoom_gps_samples' && alertsUnavailable && !matched.length && vehicleNo && visit.status !== 'missing_photo_time') visit.status = alertErrorCode === 'ARCHIVE_WRITE_FAILED' ? 'verification_error' : 'tracker_error';
           if (alertsUnavailable) { visit.errorStage = alertErrorCode === 'ARCHIVE_WRITE_FAILED' ? 'event_archive' : 'alerts'; visit.errorCode = alertErrorCode; }
           if (!vehicleNo) visit.status = 'no_tracker';
         }
@@ -203,7 +221,15 @@ async function saveVisit(delivery, visit, io) {
   // If proof, pin, or assignment changed during the external calls, retry next
   // cycle instead of attaching a verdict based on an obsolete snapshot.
   const filter = { _id: delivery._id, updatedAt: delivery.updatedAt };
-  const result = await Delivery.updateOne(filter, { $set: { trackerVisit: visit } });
+  const previous = delivery.trackerVisit;
+  // Keep the pre-migration GPS result once, rather than growing history every poll.
+  // This is server-owned evidence and is saved atomically with the replacement.
+  const updates = { trackerVisit: visit };
+  if (previous?.evidenceSource === 'truckoom_gps_samples' && previous.gpsMethod !== GPS_VISIT_METHOD
+    && !delivery.trackerVisitGpsBaseline?.evidence) {
+    updates.trackerVisitGpsBaseline = { recordedAt: visit.checkedAt, evidence: previous };
+  }
+  const result = await Delivery.updateOne(filter, { $set: updates });
   // A tracker refresh must not trigger the normal "delivery completed" toasts.
   if (result.modifiedCount && io) io.emit('delivery:trackerVisit', { _id: delivery._id, trackerVisit: visit });
 }

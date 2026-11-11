@@ -52,6 +52,7 @@ test('history date selects the Dubai day, returns UTC times and preserves saved 
   assert.deepEqual(response.body.data[0].location,{lat:25.1,lng:55.2});
   assert.equal(response.body.data[0].driverId,driver);
   assert.equal(response.body.data[0].source,'server_recorded_gps');
+  assert.equal('capture' in response.body.data[0],false);
   assert.equal(User.find.mock.callCount(),0);
   assert.equal(truckoom.getFleetStatus.mock.callCount(),0);
 });
@@ -116,4 +117,40 @@ test('database failures return a safe error without leaking credentials or conne
   const response=await request({vehicleNo:'71592',date:'2026-11-01'});
   assert.equal(response.status,500);
   assert.equal(response.body.message,'Failed to fetch recorded GPS history');
+});
+
+test('new capture metadata is optional, keeps all clocks distinct and never remaps driver identity',async t=>{
+ setup(t,[{_id:'point-metadata',vehicleNo:'71592',driver:null,latitude:25,longitude:55,gpsTime:new Date('2026-11-01T01:00:00Z'),recordedAt:new Date('2026-11-01T02:00:00Z'),trackerServerTime:new Date('2026-11-01T01:59:50Z'),rawGpsTime:'01-11-2026 05:00:00',speedKph:0,trackerStatus:'STOP',driverMappingState:'ambiguous_current_mapping',driverCandidates:[driver],qualityFlags:['last_known_fix_older_than_5m'],fixAgeMs:3600000}]);
+ const response=await request({vehicleNo:'71592',date:'2026-11-01'});assert.equal(response.status,200);const p=response.body.data[0];assert.equal(p.driverId,null);assert.equal(new Date(p.gpsTime).toISOString(),'2026-11-01T01:00:00.000Z');assert.equal(new Date(p.recordedAt).toISOString(),'2026-11-01T02:00:00.000Z');assert.equal(new Date(p.capture.trackerServerTime).toISOString(),'2026-11-01T01:59:50.000Z');assert.equal(p.capture.speedKph,0);assert.equal(p.capture.physicalDriverIdentityConfirmed,false);assert.equal(User.find.mock.callCount(),0);assert.equal(truckoom.getFleetStatus.mock.callCount(),0);
+});
+
+test('saved export preserves receipt and batch references without exposing raw payload', async t => {
+  setup(t, [{ _id: 'fixture', vehicleNo: 'V1', latitude: null, longitude: null, captureBatchId: 'batch', captureRow: 2,
+    sourceReceipt: { receiptId: 'receipt', sha256: 'a'.repeat(64), kind: 'live', responseReceivedAt: '2026-01-01T00:00:00Z', payload: 'private-payload' }, sourceRow: 3 }]);
+  const result = await request({ vehicleNo: 'V1', date: '2026-01-01' }); const p = result.body.data[0];
+  assert.equal(p.location, null); assert.equal(p.capture.batchId, 'batch'); assert.equal(p.capture.batchRow, 2); assert.equal(p.capture.sourceRow, 3);
+  assert.equal(p.capture.sourceReceipt.receiptId, 'receipt'); assert.ok(!JSON.stringify(result).includes('private-payload'));
+});
+
+test('capture health distinguishes saved batches from full-day position coverage', async t => {
+  setup(t); const { default: Batch } = await import('../models/VehicleLocationCaptureBatch.js');
+  const q = { sort: () => q, limit: () => q, select: fields => { assert.equal(fields, 'tickAt state payload.summary failureCode'); return q; }, lean: async () => [
+    { state: 'complete', payload: { summary: { storedRows: 2, unusablePositionRows: 1, missingFixClock: 1, mappingAvailable: false } } },
+    { state: 'pending', failureCode: 'CAPTURE_FAILED' }, { state: 'failed', failureCode: 'GPS_ARCHIVE_UNAVAILABLE' },
+  ] };
+  t.mock.method(Batch, 'find', () => q);
+  const call = key => new Promise((resolve, reject) => router.handle({ method: 'GET', url: '/locations/capture-status', query: { date: '2026-01-01' }, headers: key ? { 'x-api-key': key } : {} }, { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { resolve({ status: this.statusCode, body }); } }, reject));
+  assert.equal((await call(null)).status, 401); assert.equal(Batch.find.mock.callCount(), 0);
+  const { body } = await call('fixture-key'); assert.equal(body.data.states.pending, 1); assert.equal(body.data.states.failed, 1);
+  assert.equal(body.data.totals.storedRows, 2); assert.equal(body.data.completeDayVerified, false); assert.equal(body.data.expectedFleetVerified, false);
+});
+
+test('external live API preserves conflicting mappings as unknown', async t => {
+  t.mock.method(User, 'find', () => ({ select: () => ({ lean: async () => [
+    { _id: 'a'.repeat(24), profile: { truckoomVehicleNo: 'V1' } }, { _id: 'b'.repeat(24), profile: { truckoomVehicleNo: 'V1' } },
+  ] }) }));
+  t.mock.method(truckoom, 'getFleetStatus', async () => [{ vehicleNo: 'V1', latitude: 25, longitude: 55 }]);
+  const handler = router.stack.find(layer => layer.route?.path === '/locations').route.stack.at(-1).handle;
+  let body; await handler({}, { json: value => { body = value; } });
+  assert.equal(body.data[0].driver, null); assert.equal(body.data[0].driverMappingState, 'ambiguous_current_mapping');
 });

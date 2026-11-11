@@ -79,6 +79,21 @@ test('wrong vehicle or geofence alerts never verify a photo', async t => {
   assert.equal(fixture.writes[0].update.$set.trackerVisit.status, 'awaiting_events');
 });
 
+test('an invalid saved radius cannot silently become a default GPS match', async t => {
+  const fixture = setup(t);
+  fixture.fence.radiusMetres = 0;
+  t.mock.method(truckoom, 'getAlertData', async () => []);
+  t.mock.method(truckoomHistory, 'getPoints', async () => [{
+    latitude: 25.1, longitude: 55.2, gpsTime: fixture.row.proof.photoCapturedAt,
+  }]);
+  await syncCustomerTrackerVisits({ now: fixture.now });
+  const visit = fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.radiusMetres, 0);
+  assert.equal(visit.status, 'incomplete_events');
+  assert.deepEqual(visit.gpsQualityReasons, ['invalid_radius']);
+  assert.equal(visit.needsReview, false);
+});
+
 test('API failure is unverified and the worker lease is released', async t => {
   const fixture = setup(t);
   t.mock.method(truckoom, 'getAlertData', async () => { throw new Error('Unavailable'); });
@@ -272,8 +287,8 @@ test('vehicle GPS supplies labelled visit evidence when the vendor supplies no c
   const fixture = setup(t);
   const { startOfDay } = getBusinessDayBounds(fixture.now);
   const base = +startOfDay + 5*60*60000;
-  const points = [[-60000,25.11],[0,25.1],[60000,25.1],[600000,25.11]].map(([offset,lat]) => ({
-    latitude:lat,longitude:55.2,driver:'driver1',recordedAt:new Date(base+offset),
+  const points = [[-60000,25.11],[0,25.1],[60000,25.1],[300000,25.1],[540000,25.1],[600000,25.11]].map(([offset,lat]) => ({
+    latitude:lat,longitude:55.2,driver:'driver1',gpsTime:new Date(base+offset),recordedAt:new Date(base+offset),
   }));
   t.mock.method(truckoom,'getAlertData',async()=>[]);
   t.mock.method(VehicleLocationHistory,'find',()=>({select:()=>({lean:async()=>points})}));
@@ -320,7 +335,8 @@ test('historical vendor GPS fills visits missing from local recording and is sha
   t.mock.method(Delivery, 'find', () => ({populate: () => ({lean: async () => [fixture.row, {...fixture.row, _id: 'second'}]})}));
   t.mock.method(truckoomHistory, 'getPoints', async vehicle => {
     assert.equal(vehicle, 'V1');
-    return [{latitude:25.1,longitude:55.2,gpsTime:at(300)}, {latitude:25.2,longitude:55.2,gpsTime:at(310)}];
+    return [{latitude:25.1,longitude:55.2,gpsTime:at(300)},
+      {latitude:25.1,longitude:55.2,gpsTime:at(305)}, {latitude:25.2,longitude:55.2,gpsTime:at(310)}];
   });
   await syncCustomerTrackerVisits({now:fixture.now});
   assert.equal(truckoomHistory.getPoints.mock.callCount(),1);
@@ -340,6 +356,7 @@ test('history transport failure preserves locally sampled GPS and never becomes 
   const start = getBusinessDayBounds(fixture.now).startOfDay;
   t.mock.method(VehicleLocationHistory, 'find', () => ({select: () => ({lean: async () => [
     {driver:'driver1',latitude:25.1,longitude:55.2,gpsTime:new Date(+start+300*60000)},
+    {driver:'driver1',latitude:25.1,longitude:55.2,gpsTime:new Date(+start+305*60000)},
     {driver:'driver1',latitude:25.2,longitude:55.2,gpsTime:new Date(+start+310*60000)},
   ]})}));
   await syncCustomerTrackerVisits({now:fixture.now});
@@ -357,6 +374,7 @@ test('cached historical GPS does not hide a later locally recorded customer visi
   ]);
   t.mock.method(VehicleLocationHistory,'find',()=>({select:()=>({lean:async()=>[
     {driver:'driver1',latitude:25.1,longitude:55.2,gpsTime:at(300)},
+    {driver:'driver1',latitude:25.1,longitude:55.2,gpsTime:at(305)},
     {driver:'driver1',latitude:25.2,longitude:55.2,gpsTime:at(310)},
   ]})}));
   await syncCustomerTrackerVisits({now:fixture.now});
@@ -393,3 +411,146 @@ test('the worker does not request future UTC windows at Dubai midnight',async t=
  assert.equal(fixture.dates.length,1);
  assert.ok(fixture.dates.every(({to})=>to<+now));
 });
+
+function gpsOnly(t, fixture, points) {
+  t.mock.method(truckoom, 'getAlertData', async () => []);
+  t.mock.method(VehicleLocationHistory, 'find', () => ({select: () => ({lean: async () => points})}));
+}
+
+test('full sync keeps receipt-only GPS untimed and preserves the original GPS verdict once', async t => {
+  const fixture = setup(t);
+  const start = getBusinessDayBounds(fixture.now).startOfDay;
+  const at = minutes => new Date(+start + minutes * 60000);
+  const previous = { geofenceId:'G1',geofenceName:fixture.identity.name,businessDate:fixture.identity.businessDate,
+    vehicleNo:'V1',driverId:'driver1',lat:25.1,lng:55.2,radiusMetres:60,
+    evidenceSource:'truckoom_gps_samples',status:'gps_visit_observed',arrivedAt:at(300),departedAt:at(310) };
+  fixture.row.trackerVisit = previous;
+  gpsOnly(t, fixture, [
+    {driver:'driver1',latitude:25.1,longitude:55.2,gpsTime:null,recordedAt:at(300)},
+    {driver:'driver1',latitude:25.2,longitude:55.2,gpsTime:null,recordedAt:at(310)},
+  ]);
+  await syncCustomerTrackerVisits({now:fixture.now});
+  const corrected = fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(corrected.status,'incomplete_events');
+  assert.equal(corrected.gpsMethod,'gps-observations-v2');
+  assert.equal(corrected.arrivedAt,null);
+  assert.equal(corrected.departedAt,null);
+  const baseline=fixture.writes[0].update.$set.trackerVisitGpsBaseline;
+  assert.deepEqual(baseline.evidence,previous);
+  assert.equal(+fixture.writes[0].filter.updatedAt,+fixture.row.updatedAt);
+  fixture.row.trackerVisit = corrected;
+  fixture.row.trackerVisitGpsBaseline = baseline;
+  await syncCustomerTrackerVisits({now:fixture.now});
+  assert.equal(fixture.writes[1].update.$set.trackerVisitGpsBaseline,undefined);
+  assert.deepEqual(fixture.row.trackerVisitGpsBaseline.evidence,previous);
+});
+
+test('full sync cannot verify a photo inside a long GPS observation gap', async t => {
+  const fixture=setup(t),start=getBusinessDayBounds(fixture.now).startOfDay;
+  gpsOnly(t,fixture,[
+    {driver:'driver1',latitude:25.1,longitude:55.2,gpsTime:new Date(+start+300*60000)},
+    {driver:'driver1',latitude:25.2,longitude:55.2,gpsTime:new Date(+start+310*60000)},
+  ]);
+  await syncCustomerTrackerVisits({now:fixture.now});
+  const visit=fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.status,'incomplete_events');
+  assert.equal(visit.needsReview,false);
+  assert.ok(visit.gpsQualityReasons.includes('observation_gap'));
+});
+
+test('full sync preserves an ambiguous candidate for the frozen driver as uncertainty', async t => {
+  const fixture=setup(t),start=getBusinessDayBounds(fixture.now).startOfDay;
+  gpsOnly(t,fixture,[{driver:null,driverCandidates:['driver1','driver2'],driverMappingState:'ambiguous_current_mapping',
+    latitude:25.1,longitude:55.2,gpsTime:new Date(+start+305*60000)}]);
+  await syncCustomerTrackerVisits({now:fixture.now});
+  const visit=fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.status,'incomplete_events');
+  assert.ok(visit.gpsQualityReasons.includes('ambiguous_driver_mapping'));
+});
+
+for (const mapping of [
+  { driver: null, driverMappingState: 'unavailable' },
+  { driver: null, driverMappingState: 'unmapped' },
+  { driver: 'driver2', driverMappingState: 'current_mapping_snapshot' },
+]) test(`same-vehicle ${mapping.driverMappingState} assignment cannot disappear inside a GPS bracket (${mapping.driver})`, async t => {
+  const fixture = setup(t), start = getBusinessDayBounds(fixture.now).startOfDay;
+  const position = minute => ({ driver: 'driver1', latitude: 25.1, longitude: 55.2,
+    gpsTime: new Date(+start + minute * 60000) });
+  gpsOnly(t, fixture, [position(304), { ...position(305), ...mapping }, position(306)]);
+  await syncCustomerTrackerVisits({ now: fixture.now });
+  const visit = fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.status, 'incomplete_events');
+  assert.ok(visit.gpsQualityReasons.includes('unmatched_driver_mapping'));
+  assert.equal(visit.needsReview, false);
+});
+
+test('full sync uses original source receipt when a fleet fix is sampled later', async t => {
+  const fixture = setup(t), photo = fixture.row.proof.photoCapturedAt;
+  gpsOnly(t, fixture, [{ driver: 'driver1', latitude: 25.1, longitude: 55.2, gpsTime: photo,
+    recordedAt: fixture.now, sourceReceipt: { responseReceivedAt: new Date(+photo - 60000).toISOString() } }]);
+  await syncCustomerTrackerVisits({ now: fixture.now });
+  const visit = fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.status, 'incomplete_events');
+  assert.ok(visit.gpsQualityReasons.includes('future_fix_time'));
+  assert.ok(VehicleLocationHistory.find.mock.calls[0]);
+});
+
+test('conflicting cached and sampled fixes cannot silently select a convenient position', async t => {
+  const fixture=setup(t),start=getBusinessDayBounds(fixture.now).startOfDay;
+  const gpsTime=new Date(+start+305*60000);
+  gpsOnly(t,fixture,[{driver:'driver1',latitude:25.1,longitude:55.2,gpsTime}]);
+  t.mock.method(truckoomHistory,'getPoints',async()=>[{latitude:25.2,longitude:55.2,gpsTime}]);
+  await syncCustomerTrackerVisits({now:fixture.now});
+  const visit=fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.status,'incomplete_events');
+  assert.ok(visit.gpsQualityReasons.includes('conflicting_coordinates'));
+});
+
+test('a failure during the first migration refresh still retains the previous GPS evidence', async t => {
+  const fixture=setup(t);
+  fixture.row.trackerVisit={geofenceId:'G1',geofenceName:fixture.identity.name,businessDate:fixture.identity.businessDate,
+    vehicleNo:'V1',driverId:'driver1',lat:25.1,lng:55.2,evidenceSource:'truckoom_gps_samples',status:'gps_visit_observed'};
+  const previous={...fixture.row.trackerVisit};
+  t.mock.method(TrackerGeofenceEvent,'find',()=>({lean:async()=>{throw new Error('archive unavailable');}}));
+  await syncCustomerTrackerVisits({now:fixture.now});
+  const visit=fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.status,'verification_error');
+  assert.deepEqual(fixture.writes[0].update.$set.trackerVisitGpsBaseline.evidence,previous);
+});
+
+test('GPS method and prior evidence survive model casting without changing real geofence fields', async t => {
+  const fixture=setup(t);
+  const evidence={evidenceSource:'truckoom_gps_samples',status:'gps_visit_observed'};
+  const doc=new Delivery({trackerVisit:{status:'incomplete_events',gpsMethod:'gps-observations-v2',
+    gpsQualityReasons:['observation_gap']},trackerVisitGpsBaseline:{recordedAt:fixture.now,evidence}});
+  const saved=doc.toObject().trackerVisit;
+  assert.equal(saved.gpsMethod,'gps-observations-v2');
+  assert.deepEqual(saved.gpsQualityReasons,['observation_gap']);
+  assert.deepEqual(doc.toObject().trackerVisitGpsBaseline.evidence,evidence);
+});
+
+for (const rejection of ['invalid coordinates','missing GPS clock']) {
+  test(`history normalization preserves ${rejection} through full photo comparison`, async t => {
+    const fixture=setup(t);
+    t.mock.method(truckoom,'getAlertData',async()=>[]);
+    const { normalizeTrackLogs }=await import('./truckoomHistoryService.js');
+    const {startOfDay:start,endOfDayExclusive:end}=getBusinessDayBounds(fixture.now);
+    const row={vehicleNumber:'V1',latitude:25.1,longitude:55.2};
+    const invalid=rejection==='invalid coordinates'
+      ? {...row,latitude:999,timestamp:'06-11-2026 05:05:00 AM'}
+      : {...row,timestamp:'unavailable'};
+    const normalized=normalizeTrackLogs([
+      {...row,timestamp:'06-11-2026 05:04:00 AM'},invalid,
+      {...row,timestamp:'06-11-2026 05:06:00 AM'},
+    ],'V1',start,end);
+    assert.equal(normalized.qualityObservations.length,1);
+    t.mock.method(truckoomHistory,'getPoints',async()=>[...normalized,...normalized.qualityObservations]);
+    await syncCustomerTrackerVisits({now:fixture.now});
+    const visit=fixture.writes[0].update.$set.trackerVisit;
+    assert.equal(visit.status,'incomplete_events');
+    assert.equal(visit.needsReview,false);
+    assert.equal(visit.arrivedAt,null);
+    assert.equal(visit.departedAt,null);
+    assert.ok(visit.gpsQualityReasons.includes(rejection==='invalid coordinates'?'invalid_coordinates':'missing_or_invalid_fix_time'));
+  });
+}

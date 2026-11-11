@@ -8,5 +8,7 @@ const schema = new mongoose.Schema({
   nextRequestAt: Date,
   fetchedAt: Date,
   vehicles: [mongoose.Schema.Types.Mixed],
+  sourceReceipt: mongoose.Schema.Types.Mixed,
+  captureEvidenceStatus: String,
 });
 export default mongoose.model('TruckoomLiveSnapshot', schema);

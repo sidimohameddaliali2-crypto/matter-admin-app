@@ -62,18 +62,33 @@ test('menu sign-in reads only Internal allergies; identity and saved selections 
   assert.equal(list.body.data[0].matterCustomerId, '42');
 });
 
-test('staff selection edits and deletion never mirror changes onto Internal customers', async (t) => {
+test('staff selection edits read only the allergy profile and never mirror changes onto Internal customers', async (t) => {
   blockInternal(t);
-  t.mock.method(Menu, 'findById', () => query({ _id: 'menu' }));
+  const menuId = '507f1f77bcf86cd799439012';
+  const allergyRead = t.mock.method(Customer, 'find', (filter) => {
+    assert.deepEqual(filter, { $or: [
+      { matterCustomerId: '42' }, { matterSubscriptionId: 'renewal' },
+      { email: /^website@example\.invalid$/i },
+    ] });
+    return { select(fields) {
+      assert.equal(fields, 'allergies email matterCustomerId matterSubscriptionId');
+      return { lean: async () => [{ matterCustomerId: '42', allergies: [] }] };
+    } };
+  });
+  t.mock.method(Menu, 'findById', () => query({ _id: menuId, meals: [] }));
   t.mock.method(Menu, 'findByIdAndUpdate', async () => ({}));
+  t.mock.method(Record, 'findOne', () => query({ matterCustomerId: '42', email: 'old-storage@example.invalid', selectedMeals: [] }));
+  t.mock.method(matter, 'getKitchenNutrition', async () => source);
   t.mock.method(Record, 'findOneAndUpdate', async (filter) => { assert.equal(filter.matterCustomerId, '42'); return { matterCustomerId: '42' }; });
   t.mock.method(Record, 'findOneAndDelete', async () => ({})); t.mock.method(Record, 'countDocuments', async () => 0);
   const res = response();
-  await route('/:menuId/selections/:email', 'put')({ params: { menuId: 'menu', email: 'old-storage@example.invalid' }, body: { matterCustomerId: '42', selections: [] } }, res);
-  assert.equal(res.body.success, true);
+  await route('/:menuId/selections/:email', 'put')({ params: { menuId, email: 'old-storage@example.invalid' }, body: { matterCustomerId: '42', selections: [] } }, res);
+  assert.equal(res.body.success, true, JSON.stringify(res.body));
+  assert.equal(allergyRead.mock.callCount(), 1);
   const deleted = response();
-  await route('/:menuId/selections/:email', 'delete')({ params: { menuId: 'menu', email: 'old-storage@example.invalid' } }, deleted);
+  await route('/:menuId/selections/:email', 'delete')({ params: { menuId, email: 'old-storage@example.invalid' } }, deleted);
   assert.equal(deleted.body.success, true);
+  assert.equal(allergyRead.mock.callCount(), 1);
 });
 
 test('selections GET suppresses only an approved archived alias and never recreates or deletes records', async (t) => {

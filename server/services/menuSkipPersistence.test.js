@@ -29,6 +29,7 @@ test('the menu profile restores a submission consisting entirely of skipped days
 });
 
 test('an incomplete set of resume dates is rejected before saving meals or writing any Matter pauses', async (t) => {
+  const menuId = '507f1f77bcf86cd799439012';
   const customer = { _id: 'customer', email: 'customer@example.com' };
   t.mock.method(matter, 'getKitchenNutrition', async () => ({ subscription_id: 'current', customer_name: 'Customer', customer_id: 'matter-person', customer_email: 'customer@example.com' }));
   t.mock.method(matter, 'getSubscription', async () => ({ data: { subscription_id: 'current', cycle_end_date: '2026-11-11', delivery_schedule: [
@@ -45,7 +46,7 @@ test('an incomplete set of resume dates is rejected before saving meals or writi
   let status;
   const res = { json: (value) => { response = value; }, status: (value) => { status = value; return res; } };
   await handler({ params: { email: 'customer@example.com' }, body: {
-    weeklyMenuId: 'menu', selections: [], skippedDates: ['2026-10-28', '2026-10-30', '2026-10-31'],
+    weeklyMenuId: menuId, selections: [], skippedDates: ['2026-10-28', '2026-10-30', '2026-10-31'],
     pauseDecisions: [
       { date: '2026-10-28', action: 'pause', resumeDate: '2026-11-12' },
       { date: '2026-10-30', action: 'pause', resumeDate: '2026-11-13' },
@@ -58,7 +59,7 @@ test('an incomplete set of resume dates is rejected before saving meals or writi
   assert.equal(pause.mock.callCount(), 0);
   // An older client cannot submit Saturday without a replacement for Sunday.
   await handler({ params: { email: 'customer@example.com' }, body: {
-    weeklyMenuId: 'menu', selections: [], skippedDates: ['2026-10-31'],
+    weeklyMenuId: menuId, selections: [], skippedDates: ['2026-10-31'],
     pauseDecisions: [{ date: '2026-10-31', action: 'pause', resumeDate: '2026-11-12' }],
   } }, res);
   assert.equal(status, 400);

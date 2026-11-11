@@ -4,6 +4,12 @@ import TruckoomLiveSnapshot from '../models/TruckoomLiveSnapshot.js';
 import { parseTruckoomAlertTime } from './truckoomVisitRules.js';
 
 const INTERVAL = 60000;
+const withReceipt = (storedVehicles, receipt, status) => {
+  const vehicles = [...storedVehicles];
+  if (status) Object.defineProperty(vehicles, 'captureEvidenceStatus', { value: status, configurable: true });
+  if (receipt) Object.defineProperty(vehicles, 'sourceReceipt', { value: receipt, configurable: true });
+  return vehicles;
+};
 
 export function parseTruckoomGpsTime(value) {
   // Same dd-MM-yyyy format as alerts, but GPS values are UAE wall-clock time.
@@ -20,7 +26,7 @@ function number(value) {
 export function normalizeTruckoomLiveData(payload, companyName) {
   const rows = payload?.root?.VehicleData;
   if (!Array.isArray(rows)) throw new Error('Truckoom live data unavailable or rate limited');
-  return rows.filter(row => row.Company === companyName).map(row => {
+  return rows.filter(row => row?.Company === companyName).map((row, sourceRow) => {
     const latitude = number(row.Latitude);
     const longitude = number(row.Longitude);
     const fix = latitude != null && longitude != null && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180
@@ -29,7 +35,10 @@ export function normalizeTruckoomLiveData(payload, companyName) {
       vehicleNo: String(row.Vehicle_No || '').trim(), imei: row.Imeino || null,
       deviceName: row.Vehicle_Name || null, vehicleType: row.Vehicletype || null,
       latitude: fix ? latitude : null, longitude: fix ? longitude : null,
+      rawCoordinates: { latitude, longitude }, sourceRow,
       gpsTime: parseTruckoomGpsTime(row.GPSActualTime),
+      rawGpsTime: typeof row.GPSActualTime === 'string' ? row.GPSActualTime : null,
+      rawTrackerServerTime: typeof row.Datetime === 'string' ? row.Datetime : null,
       trackerServerTime: parseTruckoomGpsTime(row.Datetime),
       speedKph: number(row.Speed), ignition: ['ON', 'OFF'].includes(row.IGN) ? row.IGN : null,
       trackerStatus: row.Status || null, address: row.Location && row.Location !== '--' ? row.Location : null,
@@ -58,7 +67,7 @@ export function createTruckoomLiveCache({ store = TruckoomLiveSnapshot,
       if (shared) {
         const snapshot = await store.findById('fleet').lean();
         if (recent(snapshot)) {
-          cached = snapshot.vehicles; fetchedAt = +new Date(snapshot.fetchedAt);
+          cached = withReceipt(snapshot.vehicles, snapshot.sourceReceipt, snapshot.captureEvidenceStatus); fetchedAt = +new Date(snapshot.fetchedAt);
           return cached;
         }
         try {
@@ -69,7 +78,7 @@ export function createTruckoomLiveCache({ store = TruckoomLiveSnapshot,
           if (error.code !== 11000) throw error;
           const latest = await store.findById('fleet').lean();
           if (!recent(latest)) throw new Error('Truckoom live refresh already in progress; retry shortly');
-          cached = latest.vehicles; fetchedAt = +new Date(latest.fetchedAt);
+          cached = withReceipt(latest.vehicles, latest.sourceReceipt, latest.captureEvidenceStatus); fetchedAt = +new Date(latest.fetchedAt);
           return cached;
         }
       } else if (now < nextRequestAt) {
@@ -77,14 +86,29 @@ export function createTruckoomLiveCache({ store = TruckoomLiveSnapshot,
       }
       nextRequestAt = now + 2 * INTERVAL;
       try {
-        const vehicles = await fetchLive();
+        const beforeDispatch = async () => {
+          const checkedAt = clock();
+          if (checkedAt >= nextRequestAt) throw new Error('Truckoom live reservation expired');
+          const expiresAt = checkedAt + 2 * INTERVAL;
+          if (shared) {
+            const renewed = await store.updateOne({ _id: 'fleet', requestId,
+              nextRequestAt: { $gt: new Date(checkedAt) } }, { $set: { nextRequestAt: new Date(expiresAt) } });
+            if (!renewed?.matchedCount || expiresAt - clock() < INTERVAL) throw new Error('Truckoom live reservation expired');
+          }
+          nextRequestAt = expiresAt;
+        };
+        await beforeDispatch();
+        const vehicles = await fetchLive(beforeDispatch);
         const completedAt = clock();
         // Count the cooldown after completion. Starting it before token/network
         // latency can put consecutive upstream calls less than 60 seconds apart.
         nextRequestAt = completedAt + INTERVAL;
-        if (shared) await store.updateOne({ _id: 'fleet', requestId }, { $set: {
-          vehicles, fetchedAt: new Date(completedAt), nextRequestAt: new Date(nextRequestAt),
-        } });
+        if (shared) {
+          const published = await store.updateOne({ _id: 'fleet', requestId }, { $set: {
+            vehicles, sourceReceipt: vehicles.sourceReceipt || null, captureEvidenceStatus: vehicles.captureEvidenceStatus || 'unverified_cache', fetchedAt: new Date(completedAt), nextRequestAt: new Date(nextRequestAt),
+          } });
+          if (!published?.matchedCount) throw new Error('Truckoom live ownership changed');
+        }
         cached = vehicles; fetchedAt = completedAt;
         return vehicles;
       } catch (error) {

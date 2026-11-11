@@ -15,6 +15,8 @@ test('parses real live-data envelope, filters company, preserves zero speed and 
   assert.equal(rows[0].vehicleNo, 'V1');
   assert.equal(rows[0].latitude, 25.1);
   assert.equal(rows[0].gpsTime, '2026-10-23T06:58:09.000Z');
+  assert.equal(rows[0].rawGpsTime, row.GPSActualTime);
+  assert.equal(rows[0].rawTrackerServerTime, row.Datetime);
   assert.equal(rows[0].speedKph, 0);
   assert.equal(rows[0].ignition, 'OFF');
   assert.equal(rows[0].address, 'Saved tracker address');
@@ -78,7 +80,7 @@ test('separate PM2 workers share a Mongo snapshot without Redis', async () => {
       snapshot = { ...snapshot, ...update.$set };
       return snapshot;
     },
-    updateOne: async (_query, update) => { snapshot = { ...snapshot, ...update.$set }; },
+    updateOne: async (_query, update) => { snapshot = { ...snapshot, ...update.$set }; return { matchedCount: 1 }; },
   };
   const options = { store, sharedAvailable: () => true, clock: () => now };
   const worker1 = createTruckoomLiveCache(options);
@@ -109,6 +111,7 @@ test('vehicle service calls token-based Project 49 endpoint with the correct hea
   t.after(() => { truckoom.cachedLiveData = original; });
   truckoom.cachedLiveData = createTruckoomLiveCache({ sharedAvailable: () => false });
   t.mock.method(truckoom, 'assertConfigured', () => {});
+  t.mock.method(truckoom, 'retainGpsResponse', async () => ({ receiptId: 'fixture', sha256: 'a'.repeat(64), kind: 'live', responseReceivedAt: '2026-01-01T00:00:00Z' }));
   t.mock.method(truckoom, 'getAccessToken', async () => 'fixture-token');
   t.mock.method(axios, 'post', async (url, body, config) => {
     assert.ok(url.endsWith('?token=getTokenBaseLiveData&ProjectId=49'));
@@ -118,4 +121,45 @@ test('vehicle service calls token-based Project 49 endpoint with the correct hea
   });
   const [vehicle] = await truckoom.getVehicleLocations();
   assert.equal(vehicle.locationSource, 'truckoom_live_data');
+});
+
+test('archive failure keeps the operational live view explicitly ineligible for capture', async t => {
+  const service = new truckoom.constructor(); service.companyName = 'OURS';
+  t.mock.method(service, 'assertConfigured', () => {});
+  t.mock.method(service, 'getAccessToken', async () => 'fixture-token');
+  t.mock.method(service, 'retainGpsResponse', async () => { throw Error('archive failure'); });
+  t.mock.method(axios, 'post', async () => ({ data: payload }));
+  service.cachedLiveData = createTruckoomLiveCache({ sharedAvailable: () => false });
+  const locations = await service.getVehicleLocations();
+  assert.equal(locations[0].latitude, 25.1); assert.equal(locations.captureEvidenceStatus, 'unavailable');
+});
+
+test('empty fleet response keeps its receipt through another worker shared cache', async () => {
+  let snapshot, requests = 0; const receipt = { receiptId: 'fixture-empty' };
+  const store = {
+    findById: () => ({ lean: async () => snapshot }),
+    findOneAndUpdate: async (_filter, update) => { snapshot = { ...update.$set }; return snapshot; },
+    updateOne: async (_filter, update) => { snapshot = { ...snapshot, ...update.$set }; return { matchedCount: 1 }; },
+  };
+  const opts = { store, sharedAvailable: () => true, clock: () => 100000 };
+  await createTruckoomLiveCache(opts)(async () => { requests++; const rows = []; Object.defineProperties(rows, { sourceReceipt: { value: receipt }, captureEvidenceStatus: { value: 'retained' } }); return rows; });
+  const cached = await createTruckoomLiveCache(opts)(async () => { requests++; return []; });
+  assert.equal(requests, 1); assert.equal(cached.length, 0); assert.deepEqual(cached.sourceReceipt, receipt); assert.equal(cached.captureEvidenceStatus, 'retained');
+});
+
+test('lost live lease after authentication prevents dispatch', async () => {
+  let time = 100000, renewals = 0, dispatches = 0;
+  const store = { findById: () => ({ lean: async () => null }), findOneAndUpdate: async () => ({}),
+    updateOne: async () => ({ matchedCount: ++renewals === 1 ? 1 : 0 }) };
+  const cache = createTruckoomLiveCache({ store, sharedAvailable: () => true, clock: () => time });
+  await assert.rejects(cache(async beforeDispatch => { time += 15000; await beforeDispatch(); dispatches++; return []; }), /reservation expired/);
+  assert.equal(dispatches, 0);
+});
+
+test('duplicate live vehicle rows stay ambiguous instead of choosing the last position', async t => {
+  const service = new truckoom.constructor();
+  t.mock.method(service, 'getCompanyVehicles', async () => [{ vehicleNo: 'V1' }]);
+  t.mock.method(service, 'getVehicleLocations', async () => [{ vehicleNo: 'V1', latitude: 25, longitude: 55 }, { vehicleNo: 'V1', latitude: 26, longitude: 55 }]);
+  const [result] = await service.getFleetStatus();
+  assert.equal(result.latitude, null); assert.deepEqual(result.sourceQualityFlags, ['conflicting_live_vehicle_rows']);
 });

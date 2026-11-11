@@ -227,6 +227,64 @@ An empty `data` array means no saved points match, not that the vehicle was
 stationary. The separate Truckoom historical API cache is not included here.
 Invalid filters return 400; storage failures return a generic 500 response.
 
+New captures can include an optional `capture` object. Legacy rows can omit it:
+
+| Field | Meaning |
+|---|---|
+| `trackerServerTime`, `rawGpsTime`, `rawTrackerServerTime` | Separate provider clocks and original clock strings. Null is unknown; never substitute `recordedAt` for `gpsTime`. |
+| `speedKph`, `ignition`, `trackerStatus`, `locationSource` | Provider context. Zero speed is retained. None alone proves why a fix repeated. |
+| `qualityFlags`, `fixAgeMs` | Capture-time screening and fix age relative to collection. A later export does not make old evidence fresh. |
+| `driverMappingState`, `driverCandidates` | Current configuration observed at capture: unique, ambiguous, unmapped or unavailable. Candidate IDs do not prove physical driver identity. |
+| `sourceReceipt`, `sourceRow` | Allowlisted source receipt reference/hash/clock and scoped live-response row position when known. The compressed payload is not exposed. |
+| `batchId`, `batchRow` | Durable capture batch and row identity, useful for reconciliation and retry diagnosis. |
+| `physicalDriverIdentityConfirmed` | Always false for this capture-time mapping. |
+
+Known vehicles with unusable positions remain in history with `location: null`
+and quality metadata. Consumers must retain these as uncertainty markers rather
+than draw a map pin or connect surrounding points across them. Repeated readings
+remain separate observations. Deduplicate imports using `id`; count distinct
+usable fixes separately. A unique mapping is labeled `current_mapping_snapshot`;
+multiple candidates produce `ambiguous_current_mapping` and no chosen driver.
+Live staff and external location responses also expose `driverMappingState`.
+
+Pagination is an offset-based read, not a frozen snapshot. Counts and pages can
+change while late captures are recovered. Export closed windows, reconcile IDs
+and totals, and repeat after pending captures settle. A driver-filtered export
+does not include unmapped/ambiguous observations; use independently verified
+vehicle scope for coverage checks.
+
+### `GET /api/external/drivers/locations/capture-status`
+
+Uses the same API key. Requires one `date=YYYY-MM-DD` Dubai business day and
+reads saved batch outcomes only; it makes no provider request.
+
+The response includes `range` filtered by `tickAt` and `data` containing:
+
+- `ticksSeen` and `states`: counts of `collecting`, `pending`, `complete`,
+  `failed` and unknown states.
+- `totals`: completed-batch `storedRows`, `unusablePositionRows`,
+  `missingFixClock` and `mappingUnavailableTicks`.
+- `failureCodes`: bounded failure categories, without raw identities or data.
+- `truncated`: true if more than 2,000 tick records match; reject that result
+  as a complete accounting.
+- `dayClosed`: whether the requested business day has ended.
+- `expectedFleetVerified: false` and `completeDayVerified: false`: callers
+  must compare the enabled schedule and independently expected vehicles.
+
+No records does not prove collection was enabled or successful. A `complete`
+batch means its saved rows were acknowledged, not that every expected vehicle
+had a new usable fix. This endpoint and history pagination are not one atomic
+snapshot. Invalid dates return 400; database failures return 500.
+
+The separate staff `GET /api/truckoom/history` retains its existing fields and
+adds `gpsTime`, optional `capture`, `range.filteredBy: recordedAt` and
+`pagination: { limit: 10000, returned, truncated }`. Invalid positions are null.
+It is capped and does not provide the external endpoint's multi-page contract;
+do not use a truncated staff response as a complete reporting input.
+
+See [GPS reliability review and rollout](GPS_CAPTURE_RELIABILITY.md) for the
+acceptance procedure and the distinction between observations and delivery proof.
+
 ## Notes
 
 - Read-only: there is no write/update endpoint on this API. Delivery updates

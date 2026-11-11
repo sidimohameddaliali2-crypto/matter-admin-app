@@ -1,8 +1,10 @@
 import express from 'express';
+import { captureMetadata, driverMappings, CAPTURE_FIELDS } from '../services/vehicleLocationView.js';
 import User from '../models/User.js';
 import truckoomApiService from '../services/truckoomApiService.js';
 import { apiKeyAuth } from '../middleware/apiKeyAuth.js';
 import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
+import VehicleLocationCaptureBatch from '../models/VehicleLocationCaptureBatch.js';
 import { getBusinessDayBounds, isDateKey, resolveBusinessDateRange } from '../utils/businessDate.js';
 
 // Read-only driver-location API for the same external/third-party consumers
@@ -59,7 +61,7 @@ router.get('/locations/history', async (req, res) => {
     const [rows, total] = await Promise.all([
       VehicleLocationHistory.find(filter).sort({ recordedAt: 1, _id: 1 })
         .skip((Number(page) - 1) * Number(limit)).limit(Number(limit))
-        .select('_id vehicleNo driver latitude longitude gpsTime recordedAt').lean(),
+        .select('_id vehicleNo driver latitude longitude gpsTime recordedAt ' + CAPTURE_FIELDS).lean(),
       VehicleLocationHistory.countDocuments(filter),
     ]);
     const data = rows.map(point => ({
@@ -71,6 +73,7 @@ router.get('/locations/history', async (req, res) => {
         ? { lat: point.latitude, lng: point.longitude } : null,
       gpsTime: point.gpsTime || null, recordedAt: point.recordedAt,
       source: 'server_recorded_gps',
+      ...(captureMetadata(point) ? { capture: captureMetadata(point) } : {}),
     }));
     res.json({ success: true, data,
       range: { from: range.start, toExclusive: range.endExclusive, filteredBy: 'recordedAt' },
@@ -79,6 +82,39 @@ router.get('/locations/history', async (req, res) => {
   } catch {
     res.status(500).json({ success: false, message: 'Failed to fetch recorded GPS history' });
   }
+});
+
+// Collection health is separate from position freshness and delivery coverage.
+// Raw payloads, driver identities and coordinates never leave this projection.
+router.get('/locations/capture-status', async (req, res) => {
+  const { date } = req.query;
+  if (typeof date !== 'string' || !isDateKey(date)) return res.status(400).json({ success: false, message: 'Provide date as YYYY-MM-DD' });
+  const { startOfDay, endOfDayExclusive } = getBusinessDayBounds(date);
+  try {
+    const batches = await VehicleLocationCaptureBatch.find({ tickAt: { $gte: startOfDay, $lt: endOfDayExclusive } })
+      .sort({ tickAt: 1, _id: 1 }).limit(2001)
+      .select('tickAt state payload.summary failureCode').lean();
+    const states = { collecting: 0, pending: 0, complete: 0, failed: 0, unknown: 0 };
+    const totals = { storedRows: 0, unusablePositionRows: 0, missingFixClock: 0, mappingUnavailableTicks: 0 };
+    const failureCodes = {};
+    for (const batch of batches.slice(0, 2000)) {
+      const state = Object.hasOwn(states, batch.state) ? batch.state : 'unknown'; states[state]++;
+      const summary = batch.payload?.summary || {};
+      if (state === 'complete') {
+        for (const key of ['storedRows', 'unusablePositionRows', 'missingFixClock']) totals[key] += Number.isSafeInteger(summary[key]) ? summary[key] : 0;
+        if (summary.mappingAvailable === false) totals.mappingUnavailableTicks++;
+      }
+      if (batch.failureCode) {
+        const code = /^[A-Z0-9_]{1,64}$/.test(batch.failureCode) ? batch.failureCode : 'CAPTURE_FAILED';
+        failureCodes[code] = (failureCodes[code] || 0) + 1;
+      }
+    }
+    res.json({ success: true, range: { from: startOfDay, toExclusive: endOfDayExclusive, filteredBy: 'tickAt' },
+      data: { ticksSeen: Math.min(batches.length, 2000), states, totals, failureCodes,
+        truncated: batches.length > 2000, dayClosed: endOfDayExclusive <= new Date(),
+        expectedFleetVerified: false, completeDayVerified: false,
+        meaning: 'Recorded capture outcomes only; compare with the enabled schedule and expected fleet.' } });
+  } catch { res.status(500).json({ success: false, message: 'Failed to fetch GPS capture status' }); }
 });
 
 // @desc    Every tracked vehicle's live GPS location, with the driver it's
@@ -95,15 +131,15 @@ router.get('/locations', async (req, res) => {
         .lean(),
     ]);
 
-    const driverByVehicleNo = new Map(
-      drivers.filter((d) => d.profile?.truckoomVehicleNo).map((d) => [d.profile.truckoomVehicleNo, d])
-    );
+    const mappingByVehicleNo = driverMappings(drivers);
 
     const data = fleet.map((v) => {
-      const driver = driverByVehicleNo.get(v.vehicleNo);
+      const mapping = mappingByVehicleNo.get(v.vehicleNo);
+      const driver = mapping?.driver;
       return {
         vehicleNo: v.vehicleNo,
         vehicleType: v.vehicleType,
+        driverMappingState: mapping?.state || 'unmapped',
         location: Number.isFinite(v.latitude) && Number.isFinite(v.longitude)
           ? { lat: v.latitude, lng: v.longitude }
           : null,
