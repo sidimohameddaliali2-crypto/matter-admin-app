@@ -10,7 +10,8 @@ import { body, validationResult } from 'express-validator';
 import Delivery from '../models/Delivery.js';
 import DeliveryChange from '../models/DeliveryChange.js';
 import Bag from '../models/Bag.js';
-import User from '../models/User.js';
+import User, { effectivePermissions } from '../models/User.js';
+import { customerListStatsPipeline } from '../services/customerListStats.js';
 import Customer from '../models/Customer.js';
 import { protect, authorize, admin } from '../middleware/auth.js'; // Fixed import
 import { upload, handleUploadError } from '../middleware/upload.js';
@@ -1235,6 +1236,24 @@ async function annotateWeekendCombo(delivery) {
   }
   return delivery;
 }
+
+// Customer-list counters. GET /deliveries caps a page at 500 oldest rows and
+// then combines weekend stops, so the customers page cannot count from that
+// list. This groups every delivery by customer with no limit.
+// GET /api/deliveries/customer-list-stats
+router.get('/customer-list-stats', async (req, res) => {
+  try {
+    if (!effectivePermissions(req.user).customers) {
+      return res.status(403).json({ success: false, message: 'Not authorized to access customers' });
+    }
+    const stats = await Delivery.aggregate(customerListStatsPipeline());
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: stats });
+  } catch (error) {
+    console.error('Customer list stats error:', error);
+    res.status(500).json({ success: false, message: 'Error fetching customer list stats' });
+  }
+});
 
 // Monthly delivery count grouped by customerId
 // GET /api/deliveries/monthly-count?dateFrom=2026-05-01&dateTo=2026-05-31
