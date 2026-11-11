@@ -10,7 +10,7 @@ import { body, validationResult } from 'express-validator';
 import Delivery from '../models/Delivery.js';
 import DeliveryChange from '../models/DeliveryChange.js';
 import Bag from '../models/Bag.js';
-import User from '../models/User.js';
+import User, { effectivePermissions } from '../models/User.js';
 import Customer from '../models/Customer.js';
 import { protect, authorize, admin } from '../middleware/auth.js'; // Fixed import
 import { upload, handleUploadError } from '../middleware/upload.js';
@@ -22,6 +22,7 @@ import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 import { recalculateDriverKPI } from '../services/driverKpiService.js';
 import { businessRangeBounds, getTimingOverview, getTimingRecords } from '../services/deliveryTimingHistory.js';
 import { businessOffsetMs, getBusinessDayBounds, isDateKey, setBusinessTimeOfDay } from '../utils/businessDate.js';
+import { renewalUsagePipeline } from '../services/renewalUsage.js';
 import { protectMatterRevenueInput } from '../middleware/matterRevenueInput.js';
 import { fillProofAddressInBackground, resolveProofAddressWithin } from '../services/proofLocationAddress.js';
 import { recordProofReceipt } from '../services/truckoomVisitRules.js';
@@ -1235,6 +1236,27 @@ async function annotateWeekendCombo(delivery) {
   }
   return delivery;
 }
+
+// Renewal allowance counts. GET /deliveries caps a page at 500 oldest rows and
+// then combines weekend stops, so the renewal screen cannot count from that
+// list. This groups every non-cancelled delivery by customer with no limit.
+// GET /api/deliveries/renewal-usage
+router.get('/renewal-usage', async (req, res) => {
+  try {
+    if (!effectivePermissions(req.user).renewal) {
+      return res.status(403).json({ success: false, message: 'Not authorized to access renewal' });
+    }
+    const usage = await Delivery.aggregate(renewalUsagePipeline({
+      dateFrom: req.query.dateFrom,
+      dateTo: req.query.dateTo,
+    }));
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: usage });
+  } catch (error) {
+    console.error('Renewal usage error:', error);
+    res.status(500).json({ success: false, message: 'Error fetching renewal usage' });
+  }
+});
 
 // Monthly delivery count grouped by customerId
 // GET /api/deliveries/monthly-count?dateFrom=2026-05-01&dateTo=2026-05-31

@@ -18,7 +18,7 @@ const URGENCY = [
 
 const urgencyStyle = (remaining, notRenewed) => {
   if (notRenewed)      return { badge: 'bg-rose-100 text-rose-700',    row: 'bg-rose-50/30' };
-  if (remaining === 0) return { badge: 'bg-red-100 text-red-700',      row: 'bg-red-50/40' };
+  if (remaining <= 0)  return { badge: 'bg-red-100 text-red-700',      row: 'bg-red-50/40' };
   if (remaining <= 3)  return { badge: 'bg-orange-100 text-orange-700', row: 'bg-orange-50/30' };
   return                      { badge: 'bg-yellow-100 text-yellow-700', row: '' };
 };
@@ -37,19 +37,21 @@ export default function Renewal() {
   const fetchData = useCallback(async () => {
     setLoading(true); setError(null);
     try {
-      const today2 = new Date().toISOString().slice(0, 10);
-      const [custRes, delRes] = await Promise.all([
+      const [custRes, usageRes] = await Promise.all([
         api.get('/customers', { params: { limit: 10000 } }),
-        api.get('/deliveries', { params: { dateFrom: '2020-01-01', dateTo: today2, limit: 50000 } }),
+        api.get('/deliveries/renewal-usage'),
       ]);
 
       const dbCustomers = custRes.data?.data || [];
-      const deliveries  = delRes.data?.data?.deliveries || [];
+      const usageByCustomer = new Map(
+        (usageRes.data?.data || []).map(row => [row.customerId, row])
+      );
 
       const map = new Map();
 
       dbCustomers.forEach(c => {
         const id = c.customerId || c._id;
+        const usage = usageByCustomer.get(id);
         map.set(id, {
           customerId:    id,
           customerName:  `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Unknown',
@@ -59,21 +61,9 @@ export default function Renewal() {
           cycleDuration: c.cycleDuration || 0,
           amountPaid:    c.amountPaid || '',
           discount:      c.discount || '',
-          totalDeliveries: 0,
-          lastDeliveryDate: null,
+          totalDeliveries: usage?.used || 0,
+          lastDeliveryDate: usage?.lastScheduledTime || null,
         });
-      });
-
-      deliveries.forEach(d => {
-        const c = map.get(d.customerId);
-        if (!c) return;
-        if (d.status !== 'cancelled') c.totalDeliveries++;
-        if (d.scheduledTime) {
-          const dt = new Date(d.scheduledTime);
-          if (!c.lastDeliveryDate || dt > new Date(c.lastDeliveryDate)) {
-            c.lastDeliveryDate = d.scheduledTime;
-          }
-        }
       });
 
       const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -89,7 +79,7 @@ export default function Renewal() {
         })
         .map(c => {
           const total = Number(c.cycleDuration) || 0;
-          const remaining = Math.max(0, total - c.totalDeliveries);
+          const remaining = total - c.totalDeliveries;
           let notRenewed = false;
           if (c.planStartDate) {
             const end = new Date(new Date(c.planStartDate).getTime() + total * 86400000);
@@ -110,38 +100,6 @@ export default function Renewal() {
         });
 
       setCustomers(renewal);
-
-      // For not-renewed customers with no lastDeliveryDate, fetch their delivery history individually
-      const missing = renewal.filter(c => c.notRenewed && !c.lastDeliveryDate);
-      if (missing.length > 0) {
-        const updates = await Promise.all(
-          missing.map(async c => {
-            try {
-              const res = await api.get('/deliveries', {
-                params: { customerId: c.customerId, limit: 500, page: 1 }
-              });
-              const delivs = res.data?.data?.deliveries || [];
-              const lastDate = delivs
-                .filter(d => d.status !== 'cancelled' && d.scheduledTime)
-                .reduce((max, d) => {
-                  const t = new Date(d.scheduledTime).getTime();
-                  return t > max ? t : max;
-                }, 0);
-              return { customerId: c.customerId, lastDeliveryDate: lastDate ? new Date(lastDate).toISOString() : null };
-            } catch {
-              return { customerId: c.customerId, lastDeliveryDate: null };
-            }
-          })
-        );
-        setCustomers(prev => prev.map(c => {
-          const upd = updates.find(u => u.customerId === c.customerId);
-          if (!upd) return c;
-          const lastDeliveryDate = upd.lastDeliveryDate;
-          // Recompute displayDate now that we have the real lastDeliveryDate
-          const displayDate = c.notRenewed ? (lastDeliveryDate || null) : c.displayDate;
-          return { ...c, lastDeliveryDate, displayDate };
-        }));
-      }
       setLastUpdated(new Date());
     } catch (e) {
       setError(e.response?.data?.message || 'Failed to load data');
@@ -156,7 +114,7 @@ export default function Renewal() {
   const counts = useMemo(() => ({
     all:         customers.length,
     not_renewed: customers.filter(c => c.notRenewed).length,
-    expired:     customers.filter(c => !c.notRenewed && c.remaining === 0).length,
+    expired:     customers.filter(c => !c.notRenewed && c.remaining <= 0).length,
     critical:    customers.filter(c => !c.notRenewed && c.remaining >= 1 && c.remaining <= 3).length,
     warning:     customers.filter(c => !c.notRenewed && c.remaining >= 4 && c.remaining <= 6).length,
   }), [customers]);
@@ -177,7 +135,7 @@ export default function Renewal() {
   const filtered = useMemo(() => {
     let list = [...customers];
     if (filter === 'not_renewed') list = list.filter(c => c.notRenewed);
-    if (filter === 'expired')     list = list.filter(c => !c.notRenewed && c.remaining === 0);
+    if (filter === 'expired')     list = list.filter(c => !c.notRenewed && c.remaining <= 0);
     if (filter === 'critical')    list = list.filter(c => !c.notRenewed && c.remaining >= 1 && c.remaining <= 3);
     if (filter === 'warning')     list = list.filter(c => !c.notRenewed && c.remaining >= 4 && c.remaining <= 6);
     if (monthFilter) {
@@ -278,8 +236,9 @@ export default function Renewal() {
       : <ChevronDown className="w-3 h-3 text-indigo-500" />;
   };
 
-  const Th = ({ k, children, className = '' }) => (
+  const Th = ({ k, children, className = '', title }) => (
     <th
+      title={title}
       onClick={() => toggleSort(k)}
       className={`px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide cursor-pointer select-none hover:text-gray-700 ${className}`}
     >
@@ -408,7 +367,7 @@ export default function Renewal() {
                   <Th k="customerName">Customer</Th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Phone</th>
                   <Th k="cycleDuration" className="text-right">Cycle</Th>
-                  <Th k="totalDeliveries" className="text-right">Used</Th>
+                  <Th k="totalDeliveries" className="text-right" title="Non-cancelled deliveries counted toward the cycle. Not proof of handover.">Used</Th>
                   <Th k="remaining" className="text-right">Days Left</Th>
                   <th className="px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">Last Day</th>
                   <th className="px-4 py-3" />
