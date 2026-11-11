@@ -17,7 +17,18 @@ test('resumed Matter delivery preserves the pause history and audits reconciliat
   assert.equal(await kitchenDateUnavailable(record, date, { active_delivery_dates: [] }), true);
 });
 
-test('an unresolved pause request cannot be treated as a historical resume', async () => {
+test('an unresolved pause does not suppress an active delivery or get rewritten as resumed', async (t) => {
   const date = '2026-10-30';
-  assert.equal(await kitchenDateUnavailable({ skippedDays: [{ date, pauseStatus: 'pending' }] }, date, { active_delivery_dates: [date] }), true);
+  const writes = [];
+  t.mock.method(Record, 'updateOne', async (...args) => { writes.push(args); return { modifiedCount: 1 }; });
+  const nutrition = { active_delivery_dates: [date], subscription_id: 'current' };
+  for (const pauseStatus of ['pending', 'failed']) {
+    const record = { _id: 'record', skippedDays: [{ _id: 'pause', date, pauseStatus }] };
+    assert.equal(await kitchenDateUnavailable(record, date, nutrition), false);
+    assert.equal(record.skippedDays[0].resumedAt, undefined);
+    assert.equal(await kitchenDateUnavailable({ skippedDays: [{ date, pauseStatus }] }, date, {}), false);
+  }
+  assert.equal(writes.length, 0);
+  assert.equal(await kitchenDateUnavailable({ skippedDays: [{ date, pauseStatus: 'success' }] }, date, {}), true);
+  assert.equal(await kitchenDateUnavailable({ skippedDays: [{ date }] }, date, {}), true);
 });
