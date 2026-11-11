@@ -31,21 +31,26 @@ jobs:
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
           DO_SSH_KEY: ${{ secrets.DO_SSH_KEY }}
           DO_SSH_PASSPHRASE: ${{ secrets.DO_SSH_PASSPHRASE }}
+          MATTER_CS_RUNTIME_B64: ${{ secrets.MATTER_CS_RUNTIME_B64 }}
         run: |
           set -e
           if [ -z "$DO_HOST" ]; then echo "DO_HOST is missing"; exit 1; fi
           if [ -z "$DO_USER" ]; then echo "DO_USER is missing"; exit 1; fi
           if [ -z "$DO_APP_PATH" ]; then echo "DO_APP_PATH is missing"; exit 1; fi
           if [ -z "$DO_SSH_KEY" ]; then echo "DO_SSH_KEY is missing"; exit 1; fi
+          if [ -z "$MATTER_CS_RUNTIME_B64" ]; then echo "Customer Service connection secret is missing"; exit 1; fi
 
       - name: Deploy over SSH
         uses: appleboy/ssh-action@v1.2.0
+        env:
+          MATTER_CS_RUNTIME_B64: ${{ secrets.MATTER_CS_RUNTIME_B64 }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           script_stop: true
+          envs: MATTER_CS_RUNTIME_B64
           script: |
             set -e
             cd ${{ secrets.DO_APP_PATH }}
@@ -76,9 +81,16 @@ jobs:
             npm run build
             cd ..
 
+            echo "[5/7] Verify canonical Customer Service and existing staff access"
+            node server/scripts/customerServiceDeploy.js --apply
+            unset MATTER_CS_RUNTIME_B64
+
             echo "[6/7] Restart API with PM2"
             pm2 delete matter-delivery-api 2>/dev/null || true
             pm2 start npm --name matter-delivery-api -- start --prefix server
 
             echo "[7/7] Save PM2 process list"
             pm2 save
+
+            echo "[7/7] Verify existing app health and canonical Customer Service readiness"
+            node server/scripts/customerServiceDeploy.js --verify

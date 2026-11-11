@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+**/node_modules
 
 # Environment files (contain secrets)
 .env
@@ -31,3 +32,5 @@ Thumbs.db
 
 # Misc
 tmp/
+.private/
+work/

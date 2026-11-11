@@ -1,0 +1,86 @@
+// Fictional media, isolated random database, real built UI and authenticated routes.
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import {pathToFileURL} from 'node:url';
+import {resolve} from 'node:path';
+import {once} from 'node:events';
+import {mkdir} from 'node:fs/promises';
+import express from 'express';
+import mongoose from 'mongoose';
+import jwt from 'jsonwebtoken';
+import User,{effectivePermissions} from '../models/User.js';
+import Staff from '../models/ServiceStaffProfile.js';
+import Message from '../models/ServiceMessage.js';
+import Conversation from '../models/ServiceConversation.js';
+import Issue from '../models/ServiceIssue.js';
+import Review from '../models/ServiceReview.js';
+import {ingestServiceBatch} from '../services/customerServiceCapture.js';
+import {createServiceMediaRouter} from '../routes/customerServiceMedia.js';
+import {protect} from '../middleware/auth.js';
+import service from '../routes/customerService.js';
+import data from '../routes/customerServiceData.js';
+assert.equal(process.env.CUSTOMER_SERVICE_TEST_ISOLATED,'true');
+assert.ok(process.env.CUSTOMER_SERVICE_TEST_MONGODB_URI,'Explicit isolated database required');
+const dbName=`matter_service_media_test_${randomUUID().replaceAll('-','')}`;
+process.env.JWT_SECRET=randomUUID();
+let server,browser;
+const wav=Buffer.alloc(44+16000*2);wav.write('RIFF',0);wav.writeUInt32LE(wav.length-8,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(8000,24);wav.writeUInt32LE(16000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(wav.length-44,40);for(let i=0;i<16000;i++)wav.writeInt16LE(Math.round(Math.sin(i*2*Math.PI*440/8000)*1000),44+i*2);
+const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6z7sAAAAASUVORK5CYII=','base64');
+try {
+ await mongoose.connect(process.env.CUSTOMER_SERVICE_TEST_MONGODB_URI,{dbName,autoIndex:false,serverSelectionTimeoutMS:5000});
+ assert.equal(mongoose.connection.name,dbName);assert.ok((await mongoose.connection.db.admin().command({hello:1})).setName);
+ for(const model of Object.values(mongoose.models)){await model.createCollection();if(model.modelName!=='Customer')await model.createIndexes();}
+ const users=await User.create(['Media supervisor','Unassigned reviewer'].map((name,i)=>({email:`media-${i}@fixture.invalid`,password:randomUUID(),role:'admin',isActive:true,profile:{firstName:name,lastName:'Fixture'}})));
+ await Staff.create(users.map((user,i)=>({userId:user._id,displayName:user.profile.firstName,mode:i?'reviewer':'supervisor',enabled:true,availableMinutes:i?60:0})));
+ const messages=['audio','image'].map((type,i)=>({externalMessageId:`media-${type}`,externalConversationId:'media-thread',customerName:'Fictional media customer',authorType:'customer',authorName:'Fictional customer',type,text:'',sentAt:new Date(Date.now()+i).toISOString()}));
+ const batch={source:'gallabox',scope:'fixture-account:fixture-channel',messages,actor:users[0]};
+ await ingestServiceBatch({...batch,requestId:randomUUID()});
+ const issue=await Issue.findOne().lean();
+ // Saved review state must survive a later refresh of retrieval metadata.
+ await Review.updateOne({issueId:issue._id},{$set:{status:'submitted',draft:{summary:'Saved review'},revisions:[{sourceRevision:issue.sourceRevision,summary:'Saved judgment',verdict:'insufficient',at:new Date()}]}});
+ const before=JSON.stringify({conversation:await Conversation.findOne().lean(),issue:await Issue.findById(issue._id).lean(),review:await Review.findOne().lean()});
+ const enriched=messages.map(m=>({...m,sourceMetadata:{media:{url:`https://files.gallabox.com/fixture-account/${m.type==='audio'?'voice.wav':'image.png'}`,mimeType:m.type==='audio'?'audio/wav':'image/png'}}}));
+ const refreshed=await ingestServiceBatch({...batch,messages:enriched,requestId:randomUUID()});
+ assert.equal(refreshed.inserted,0);assert.equal(refreshed.duplicates,2);
+ assert.equal(JSON.stringify({conversation:await Conversation.findOne().lean(),issue:await Issue.findById(issue._id).lean(),review:await Review.findOne().lean()}),before,'Metadata refresh preserves source revisions and all saved review state');
+ assert.equal(await Message.countDocuments({mediaState:'available'}),2);
+ await Message.create({source:'gallabox',scope:batch.scope,externalMessageId:'internal-note-fixture',externalConversationId:'media-thread',conversationId:issue.conversationId,authorType:'staff',authorName:'Fixture colleague',internalNote:true,type:'text',text:'Private fixture note',sentAt:new Date(Date.now()+1000)});
+ await Review.updateOne({issueId:issue._id},{$set:{status:'in_review',reviewerId:users[0]._id,leaseUntil:new Date(Date.now()+15*60*1000)}});
+ let failAudio=true,providerCalls=0;
+ const mediaProvider=async(url,options)=>{providerCalls++;assert.equal(options.method,'GET');assert.equal(options.redirect,'error');assert.equal(options.headers.apiKey,undefined);if(url.endsWith('voice.wav'))return failAudio?new Response('expired',{status:403}):new Response(wav,{headers:{'content-type':'audio/wav'}});if(url.endsWith('image.png'))return new Response(png,{headers:{'content-type':'image/png'}});throw new Error('Unexpected fixture URL');};
+ const app=express();app.use(express.json());app.get('/api/auth/me',protect,(req,res)=>res.json({success:true,data:{user:{...req.user.toObject(),permissions:effectivePermissions(req.user)}}}));app.use('/api/customer-service',createServiceMediaRouter({fetchImpl:mediaProvider}));app.use('/api/customer-service',data);app.use('/api/customer-service',service);app.use(express.static(resolve('../client/build')));app.get('*',(req,res)=>res.sendFile(resolve('../client/build/index.html')));
+ server=app.listen(0,'127.0.0.1');await once(server,'listening');const base=`http://127.0.0.1:${server.address().port}`;
+ const token=user=>jwt.sign({id:String(user._id)},process.env.JWT_SECRET,{algorithm:'HS256',expiresIn:'15m'});
+ const audioMessage=await Message.findOne({type:'audio'}).lean();const endpoint=`${base}/api/customer-service/issues/${issue._id}/messages/${audioMessage._id}/media`;
+ const outsider=await fetch(endpoint,{headers:{Authorization:`Bearer ${token(users[1])}`}});assert.equal(outsider.status,403);assert.equal(providerCalls,0,'Unauthorized media makes no provider request');
+ assert.equal((await fetch(endpoint)).status,401);
+ const {chromium}=await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{})});const context=await browser.newContext();
+ await context.addInitScript(({token,user})=>{localStorage.setItem('token',token);localStorage.setItem('user',JSON.stringify(user));window.revokedMedia=[];const original=URL.revokeObjectURL.bind(URL);URL.revokeObjectURL=url=>{window.revokedMedia.push(url);original(url);};},{token:token(users[0]),user:JSON.parse(JSON.stringify(users[0]))});
+ const page=await context.newPage();const requests=[];page.on('request',r=>requests.push(r.url()));
+ await page.goto(`${base}/customer-service/reviews`);await page.getByRole('button',{name:'Load audio',exact:true}).click();await page.getByRole('alert').filter({hasText:/unavailable or expired/}).waitFor();
+ await page.getByText('Private fixture note',{exact:true}).waitFor();
+ assert.equal(await page.locator('.cs-message-meta').filter({hasText:'Internal note'}).count(),1);assert.equal(await page.locator('.cs-wait').count(),0,'Internal note never stops the customer reply clock');
+ assert.ok(!(await page.locator('.cs-evidence').innerText()).includes('Private fixture note'),'Internal note cannot be selected as grading evidence');
+ await page.getByLabel('Follow-up needed',{exact:true}).check();assert.equal(await page.getByLabel('Customer promise message',{exact:true}).locator('option').count(),1,'Private note cannot be a customer promise');
+ assert.equal(await page.getByRole('button',{name:'Today',exact:true}).getAttribute('aria-pressed'),'true');
+ failAudio=false;await page.getByRole('button',{name:'Retry attachment',exact:true}).click();
+ await page.waitForFunction(()=>document.querySelector('audio')?.readyState>=2);
+ assert.match(await page.locator('audio').getAttribute('src'),/^blob:/);
+ await page.locator('audio').evaluate(async el=>{await el.play();});await page.waitForFunction(()=>document.querySelector('audio')?.currentTime>0.2);await page.locator('audio').evaluate(el=>el.pause());
+ // Images load automatically when the attachment enters the viewport. The
+ // old button disappears after successful loading; waiting to click it races
+ // the actual product behavior. Require decoded, rendered private image bytes.
+ await page.getByAltText('Captured message attachment').waitFor({state:'visible'});
+ await page.waitForFunction(()=>{const image=document.querySelector('img[alt="Captured message attachment"]');return image?.complete&&image.naturalWidth>0&&image.getBoundingClientRect().height>0;});
+ assert.match(await page.getByAltText('Captured message attachment').getAttribute('src'),/^blob:/);
+ assert.equal(await page.getByRole('button',{name:'Load image',exact:true}).count(),0,'Visible images are already loaded without a manual click');
+ await mkdir('/tmp/service-evidence',{recursive:true});await page.screenshot({path:'/tmp/service-evidence/media-playback.png',fullPage:true});
+ const detail=await fetch(`${base}/api/customer-service/issues/${issue._id}`,{headers:{Authorization:`Bearer ${token(users[0])}`}}).then(r=>r.text());assert.ok(!detail.includes('files.gallabox.com'));assert.ok(!requests.some(url=>url.includes('files.gallabox.com')),'Browser never requests provider URLs');
+ const mediaResponse=await fetch(endpoint,{headers:{Authorization:`Bearer ${token(users[0])}`}});assert.equal(mediaResponse.status,200);assert.match(mediaResponse.headers.get('cache-control'),/no-store/);assert.equal(mediaResponse.headers.get('x-content-type-options'),'nosniff');
+ await page.getByRole('navigation',{name:'Customer service pages'}).getByRole('link',{name:'Summary',exact:true}).click();await page.waitForFunction(()=>window.revokedMedia.length>=2);
+ await page.goto(`${base}/customer-service/reviews`);await page.getByRole('button',{name:'Load audio',exact:true}).waitFor();assert.equal(await page.locator('audio').count(),0,'Reload never restores a private media blob');
+ console.log('PASS: internal note labeled/excluded from reply clocks, grading and promises; Today defaults; real audio playback advances, image decodes, expired source retry succeeds, issue-scoped outsider denied, no provider URLs/cache, blobs revoked, reload resets playback, metadata-only refresh preserves revisions/reviews.');
+} finally {
+ await browser?.close();if(server){server.closeAllConnections?.();await new Promise(resolve=>server.close(resolve));}
+ if(mongoose.connection.name===dbName)for(const {name}of await mongoose.connection.db.listCollections().toArray())await mongoose.connection.db.collection(name).drop();await mongoose.disconnect();
+}

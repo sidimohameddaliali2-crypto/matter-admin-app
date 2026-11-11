@@ -6,6 +6,7 @@
 // loadEnv.js for the full explanation.
 import './loadEnv.js';
 import path from 'path';
+import {mountCustomerServiceInAdmin} from './services/customerServiceAdminMount.js';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -199,6 +200,7 @@ import { initRedis, getRedisClient } from './config/cache.js';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { setupMongooseSlowQueryMonitoring } from './middleware/slowQueryLogger.js';
 // Routes middleware
+mountCustomerServiceInAdmin({app,onError:()=>console.error('Customer service is unavailable while its Supabase connection is verified. Other app routes remain available.')});
 app.use('/api/mobile', mobileUpdatesRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users/drivers', driverRoutes); // Allow driver routes under /api/users/drivers

@@ -1,0 +1,99 @@
+import {cloudInbox,decodeCloudRecord} from './customerServiceCloudStore.js';
+import {readCloudEvidence,cloudConversationIdsInRange} from './customerServiceCloudEvidence.js';
+import XLSX from 'xlsx';
+import ServiceIssue from '../models/ServiceIssue.js';
+import ServiceReview from '../models/ServiceReview.js';
+import ServiceAction from '../models/ServiceAction.js';
+import { SERVICE_TAXONOMY_VERSION } from '../config/customerServiceCategories.js';
+import ServiceMessage from '../models/ServiceMessage.js';
+import ServiceStaffProfile from '../models/ServiceStaffProfile.js';
+import ServiceCaptureBatch from '../models/ServiceCaptureBatch.js';
+import { captureRange, safeSheetText } from './customerServiceCaptureFormat.js';
+
+const id=v=>String(v?._id||v||'');
+export const SERVICE_REPORT_ISSUE_LIMIT=10000;
+async function latestCapture(){
+ if(!cloudInbox())return ServiceCaptureBatch.findOne({status:'completed'}).sort({createdAt:-1}).lean();
+ const rows=await cloudInbox().store.query("SELECT COALESCE(jsonb_agg(r),'[]') FROM(SELECT kind,id,payload,sha256 FROM gallabox_private.inbox_record WHERE kind='servicecapturebatches' AND body->>'status'='completed' ORDER BY body->>'createdAt' DESC,id LIMIT 1) r;");
+ return rows.length?decodeCloudRecord(rows[0]):null;
+}
+export async function getServiceIssueFilter({userId,supervise,filters={}}) {
+  const range=captureRange(filters);
+  let filter={};
+  if(filters.categoryId) filter.categoryIds=String(filters.categoryId);
+  if(filters.q) {
+    const escaped=String(filters.q).slice(0,200).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+    filter.$or=['customerName','customerId','summary'].map(key=>({[key]:{$regex:escaped,$options:'i'}}));
+  }
+  if(range.from) {
+    const conversations=cloudInbox()?await cloudConversationIdsInRange(range):await ServiceMessage.distinct('conversationId',{sentAt:{$gte:range.from,$lt:range.to}});
+    if(conversations.length>10000) throw Object.assign(new Error('Narrow the report date range'),{statusCode:422});
+    filter.$and=[{$or:[{episodeFrom:{$lt:range.to},episodeTo:{$gte:range.from}},{episodeFrom:null,conversationId:{$in:conversations}}]}];
+  }
+  if(!supervise) {
+    const [ownReviews,ownActions]=await Promise.all([ServiceReview.distinct('issueId',{reviewerId:userId}),ServiceAction.distinct('issueId',{ownerId:userId})]);
+    filter._id={$in:[...ownReviews,...ownActions]};
+  }
+  return filter;
+}
+export async function getServiceSnapshot({userId,supervise,filters={}}) {
+  const filter=await getServiceIssueFilter({userId,supervise,filters});
+  const issues=await ServiceIssue.find(filter).sort({updatedAt:-1}).limit(SERVICE_REPORT_ISSUE_LIMIT+1).lean();
+  if(issues.length>SERVICE_REPORT_ISSUE_LIMIT) throw Object.assign(new Error(`Report exceeds ${SERVICE_REPORT_ISSUE_LIMIT} issues; narrow the date range`),{statusCode:422});
+  const issueIds=issues.map(x=>x._id);
+  const [reviews,actions,profiles,capture]=await Promise.all([
+    ServiceReview.find({issueId:{$in:issueIds},...(!supervise?{reviewerId:userId}:{})}).lean(),
+    ServiceAction.find({issueId:{$in:issueIds},...(!supervise?{ownerId:userId}:{})}).lean(),
+    ServiceStaffProfile.find(supervise?{enabled:true}:{userId}).populate('userId','profile.firstName profile.lastName isActive').lean(),
+    supervise?latestCapture():null,
+  ]);
+  const scopedReviews=supervise?reviews:reviews.map(r=>({...r,draft:id(r.reviewerId)===id(userId)?r.draft:{},revisions:(r.revisions||[]).filter(rev=>id(rev.actorId||r.reviewerId)===id(userId))}));
+  return {issues,reviews:scopedReviews,actions,profiles,capture,supervise,asOf:new Date().toISOString(),filters};
+}
+export function summarizeServiceSnapshot(snapshot) {
+  const {issues,reviews,actions,profiles,capture,asOf}=snapshot;
+  const open=actions.filter(a=>a.status!=='completed');
+  const overdue=a=>[a.dueAt,a.promisedDueAt].filter(Boolean).some(d=>new Date(d)<new Date(asOf));
+  const workload=profiles.map(p=>{
+    const user=p.userId;const own=reviews.filter(r=>id(r.reviewerId)===id(user));
+    const submitted=reviews.map(r=>({r,revisions:(r.revisions||[]).filter(rev=>id(rev.actorId||r.reviewerId)===id(user))})).filter(item=>item.revisions.length);
+    const name=p.displayName||`${user?.profile?.firstName||''} ${user?.profile?.lastName||''}`.trim()||'Staff';
+    return {userId:id(user),displayName:name,availableMinutes:p.availableMinutes||0,assigned:own.length,
+      reviewed:submitted.length,remaining:own.filter(r=>['pending','assigned','in_review'].includes(r.status)).length,
+      needsEvidence:own.filter(r=>r.status==='awaiting_evidence').length,historicalSubmissions:submitted.reduce((n,item)=>n+item.revisions.length,0),
+      openActions:open.filter(a=>id(a.ownerId)===id(user)).length,overdueActions:open.filter(a=>id(a.ownerId)===id(user)&&overdue(a)).length};
+  });
+  const latest=r=>r.revisions?.[r.revisions.length-1]||{};
+  const quality={};
+  for(const sample of ['baseline','targeted']) {
+    const assessed=reviews.filter(r=>r.sampleType===sample&&r.status==='submitted'&&!r.stale&&!latest(r).provisional&&['good','needs_work'].includes(latest(r).verdict));
+    quality[sample]={assessed:assessed.length,good:assessed.filter(r=>latest(r).verdict==='good').length,needsWork:assessed.filter(r=>latest(r).verdict==='needs_work').length};
+  }
+  return {asOf,reviewWorkload:workload,actions:{open:open.length,overdue:open.filter(overdue).length,unassigned:open.filter(a=>!a.ownerId).length},
+    quality,coverage:{eligible:issues.length,reviewed:new Set(reviews.filter(r=>r.revisions?.length).map(r=>id(r.issueId))).size,insufficient:reviews.filter(r=>latest(r).verdict==='insufficient').length,provisional:reviews.filter(r=>latest(r).provisional).length,stale:reviews.filter(r=>r.stale).length},
+    capture:{lastSuccessAt:capture?.createdAt||null,from:capture?.from||null,to:capture?.to||null,status:capture?(capture.source==='gallabox'?'Gallabox capture; see automatic sync status for progress. Historical coverage remains partial':'Dated import; live coverage not verified'):snapshot.supervise===false?'Source capture details available to supervisor':'No capture yet'}};
+}
+const clean=rows=>rows.map(row=>Object.fromEntries(Object.entries(row).map(([k,v])=>[k,typeof v==='string'?safeSheetText(v):v??''])));
+export async function buildServiceWorkbook(snapshot) {
+  const {issues,reviews,actions}=snapshot;const report=summarizeServiceSnapshot(snapshot);
+  const issueMap=new Map(issues.map(i=>[id(i),i]));
+  const range=captureRange(snapshot.filters);
+  const messageFilter={$or:issues.map(i=>({conversationId:i.conversationId,...(i.episodeFrom&&i.episodeTo?{sentAt:{$gte:i.episodeFrom,$lte:i.episodeTo}}:{})}))};
+  if(!issues.length) messageFilter._id={$in:[]};
+  if(!issues.length) delete messageFilter.$or;
+  if(range.from) messageFilter.$and=[{sentAt:{$gte:range.from,$lt:range.to}}];
+  const messages=cloudInbox()?await readCloudEvidence(messageFilter):await ServiceMessage.find(messageFilter).sort({sentAt:1,_id:1}).limit(50001).lean();
+  if(messages.length>50000) throw Object.assign(new Error('Export exceeds 50000 messages; narrow the date range'),{statusCode:422});
+  const book=XLSX.utils.book_new();
+  const sheets={
+    Summary:[{Metric:'Generated at',Value:report.asOf},{Metric:'Display timezone',Value:'Asia/Dubai; source timestamps exported as UTC ISO instants'},{Metric:'Taxonomy version',Value:SERVICE_TAXONOMY_VERSION},{Metric:'Scope',Value:snapshot.filters?.from?`${snapshot.filters.from} to ${snapshot.filters.to}`:'All captured dates'},{Metric:'Unique issues',Value:issues.length},{Metric:'Reviewed issues',Value:report.coverage.reviewed},{Metric:'Open actions',Value:report.actions.open},{Metric:'Overdue actions',Value:report.actions.overdue},{Metric:'Unassigned actions',Value:report.actions.unassigned},{Metric:'Capture',Value:report.capture.status}],
+    Problems:issues.map(i=>({Issue:id(i),Customer:i.customerName,CustomerID:i.customerId,Categories:(i.categoryIds||[]).join('; '),Outcome:i.outcome,Summary:i.summary,OpenActions:actions.filter(a=>id(a.issueId)===id(i)&&a.status!=='completed').length,Actions:actions.filter(a=>id(a.issueId)===id(i)).map(a=>`${id(a)}: ${a.description} [${a.status}] Owner ${id(a.ownerId)||'Unassigned'} Due ${a.dueAt?new Date(a.dueAt).toISOString():'Not set'}`).join('\n')})),
+    Customers:[...new Map(issues.map(i=>[i.customerId||id(i),{CustomerID:i.customerId,Customer:i.customerName}])).values()],
+    'Customer chats':messages.map(m=>({EvidenceMessageID:id(m),MessageID:m.externalMessageId,ConversationID:m.externalConversationId,SentAt:new Date(m.sentAt).toISOString(),Author:m.authorName,AuthorType:m.authorType,Type:m.type,Text:m.text,MediaState:m.mediaState})),
+    'Review evidence':reviews.flatMap(r=>(r.revisions?.length?r.revisions:[{}]).map(revision=>({Review:id(r),Issue:id(r.issueId),Customer:issueMap.get(id(r.issueId))?.customerName,Reviewer:id(revision.actorId||r.reviewerId),Status:r.status,Verdict:revision.verdict,Stale:!!r.stale,Summary:revision.summary,EvidenceMessageIDs:(revision.evidenceMessageIds||[]).map(id).join('; '),ReviewedAt:revision.at?new Date(revision.at).toISOString():''}))),
+    'Action history':actions.flatMap(a=>(a.history?.length?a.history:[{}]).map(h=>({Action:id(a),Issue:id(a.issueId),Owner:Object.hasOwn(h,'ownerId')?id(h.ownerId):a.history?.length?'':id(a.ownerId),Due:h.dueAt?new Date(h.dueAt).toISOString():'',PromisedDue:a.promisedDueAt?new Date(a.promisedDueAt).toISOString():'',Status:h.status||a.status,At:h.at?new Date(h.at).toISOString():'',Actor:id(h.actorId),Reason:h.reason,Note:h.note,Evidence:JSON.stringify(h.evidence||{})}))),
+  };
+  for(const [name,rows] of Object.entries(sheets)) XLSX.utils.book_append_sheet(book,XLSX.utils.json_to_sheet(clean(rows.length?rows:[{Status:'No records in this scope'}])),name);
+  book.Workbook={Sheets:book.SheetNames.map((name,i)=>({name,Hidden:i<4?0:1}))};
+  return XLSX.write(book,{type:'buffer',bookType:'xlsx'});
+}

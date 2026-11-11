@@ -1,0 +1,44 @@
+.cs-chat-shell{height:100%;min-height:0;display:flex;flex-direction:column}
+.cs-compact-inbox .cs-chat-shell>.cs-inbox{height:auto;flex:1;min-height:0}
+.cs-qa-toolbar{position:relative;display:flex;gap:8px;align-items:center;flex-wrap:wrap;flex:none;padding:8px 12px;background:#f0f4e6;border-bottom:1px solid #d5ddc9;z-index:25}
+.cs-qa-toolbar>strong{margin-right:auto;font-size:14px;white-space:nowrap}
+.cs-qa-toolbar>strong span{display:block;font-size:11px;font-weight:400;color:#536047}
+.matter-cs .cs-qa-toolbar>select{width:auto;max-width:230px;min-width:100px;font-size:13px;padding:6px 8px;min-height:32px}
+.matter-cs .cs-qa-toolbar>button{font-size:13px;padding:7px 10px;min-height:32px}
+.cs-qa-toolbar>p[role=alert]{width:100%;margin:0;color:#8b281d;font-size:13px}
+.cs-qa-guide{position:absolute;right:12px;top:calc(100% + 6px);width:min(560px,calc(100vw - 24px));max-height:70vh;overflow:auto;background:white;border:1px solid #cdd4be;border-radius:10px;box-shadow:0 12px 36px #0b153026;padding:18px;z-index:30;font-size:14px;line-height:1.5}
+.cs-qa-guide-title{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.cs-qa-guide ol{padding-left:22px;margin:12px 0}.cs-qa-guide li{margin:7px 0}.cs-qa-guide p{margin:10px 0;font-size:14px}
+.cs-qa-case{border-top:1px solid #e0e3d9;padding-top:12px}.cs-qa-events{display:grid;gap:7px}.matter-cs .cs-qa-events button{justify-content:flex-start;text-align:left;font-size:13px;padding:9px}
+.cs-customer-excerpt{margin:0;padding:10px 12px;border-left:3px solid #d5e6ae;background:#f2f3ee;border-radius:6px;overflow-wrap:anywhere}
+.cs-customer-excerpt>span{font-size:12px;font-weight:650;color:#536047}.cs-customer-excerpt>p{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;margin:4px 0 0;font-size:14px;line-height:1.5}
+.cs-linked-evidence{background:#f2f7e9;border:1px solid #dce7c7;border-radius:8px;padding:10px 12px;display:grid;gap:8px}
+.cs-linked-evidence p{display:grid;gap:2px;margin:0;font-size:13px}.cs-linked-evidence span{color:#536047;font-size:12px;overflow-wrap:anywhere}
+.cs-request-work .cs-promise-time,.cs-request-work .cs-handoff-status{font-size:13px;line-height:1.4;margin:0 0 12px}.cs-handoff-status{color:#34531f}
+.cs-readable-history ol{list-style:none;padding:0;display:grid;gap:12px}.cs-readable-history li{border-left:2px solid #d6e2bf;padding:0 0 3px 12px;display:grid;gap:4px}.cs-readable-history span{font-size:12px;color:#536047}.cs-readable-history p{margin:0!important;font-size:13px!important}.cs-readable-history small{font-size:12px;color:#586278}
+.cs-customer-summary{padding:0 0 14px;margin:0 0 16px;border-bottom:1px solid #dadfd1;display:grid;gap:5px;font-size:14px}
+.cs-customer-summary>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:10px}.cs-customer-summary strong{font-size:16px}.cs-customer-summary p{margin:0!important;font-size:13px!important;color:#536047}.cs-customer-summary p span{text-transform:capitalize}
+.cs-customer-summary button{background:transparent!important;border:0!important;padding:3px 0!important;min-height:0;font-size:13px;justify-content:space-between;gap:6px;text-align:left}
+.cs-customer-summary .cs-previous-request button{width:100%;display:flex;align-items:baseline;flex-wrap:wrap}.cs-previous-request span{text-decoration:underline;text-underline-offset:3px}.cs-previous-request time{font-size:12px;color:#586278;white-space:nowrap}
+.cs-issue-activity{border-top:1px solid #dadfd1;margin-top:18px;padding-top:14px}.cs-issue-activity h4{margin:0 0 10px;font-size:15px}.cs-issue-activity ol{margin:0;gap:12px}.cs-issue-activity li>strong{font-size:13px}.cs-issue-activity li>span{font-size:12px}
+.cs-customer-summary+.cs-work-heading{margin-top:0}.cs-context-tools>h4{margin:0 0 10px}
+.cs-compact-inbox .cs-sandbox-shell .cs-action-fields{gap:9px}
+.cs-sandbox-shell .cs-action-classification{gap:8px}
+.cs-compact-inbox .cs-sandbox-shell .cs-action-fields>label:not(.cs-action-check),.cs-sandbox-shell .cs-action-classification>label{display:grid;grid-template-columns:108px minmax(0,1fr);align-items:center;gap:8px;font-size:13px!important}
+.cs-compact-inbox .cs-sandbox-shell .cs-topic-action input:not([type=checkbox]):not([type=radio]),.cs-compact-inbox .cs-sandbox-shell .cs-topic-action select{min-height:34px;padding:6px 8px;font-size:13px;width:100%;min-width:0}
+.cs-compact-inbox .cs-sandbox-shell .cs-kind-choice label{padding:7px;font-size:13px!important}
+.cs-type-buttons{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;border:0;margin:0;padding:0;min-width:0}.matter-cs .cs-type-buttons button{min-height:36px;padding:7px 3px;font-size:13px;white-space:nowrap;min-width:0}.cs-type-buttons button[aria-pressed=true]{background:#e3f6b3;border-color:#b2d276}
+@media(max-width:400px){.matter-cs .cs-type-buttons button{font-size:12px;padding:7px 2px}}
+.cs-compact-inbox .cs-sandbox-shell .cs-universal-actions button{min-height:36px;padding:7px 4px;font-size:13px}
+.cs-compact-inbox .cs-sandbox-shell .cs-customer-excerpt>p{-webkit-line-clamp:2;font-size:13px;line-height:1.5}
+.cs-sandbox-shell .cs-action-save{position:sticky;bottom:0;z-index:2;background:#fafaf6;padding:8px 0;border-top:1px solid #e0e3d9}
+.matter-cs .cs-sandbox-shell .cs-primary{background:#ddf78b;border-color:#d0e88a;color:#0b1530}
+.cs-detail-picker{position:relative;display:grid;gap:5px;min-width:0}.cs-detail-picker>label{font-size:13px;font-weight:600}
+.cs-detail-choices{position:absolute;top:100%;left:0;right:0;z-index:9;max-height:260px;overflow:auto;background:#fff;border:1px solid #b8c3aa;border-radius:8px;padding:6px;box-shadow:0 5px 16px #11143c1a}
+.cs-detail-choices .cs-picker-group{padding:6px;margin:0!important;font-size:12px!important;font-weight:650;color:#536047}.matter-cs .cs-detail-choices button{width:100%;justify-content:flex-start;text-align:left;border:0;background:transparent;padding:7px 9px;min-height:32px;font-size:13px}.cs-detail-choices button[aria-selected=true]{background:#edf4dd}
+.cs-issue-overview{display:grid;gap:6px;margin:18px 0 0;padding:14px 0 0;border-top:1px solid #dadfd1}.cs-issue-overview>strong{font-size:13px;color:#536047}.cs-issue-overview button,.cs-mobile-issue-summary button{display:grid!important;gap:3px;text-align:left;justify-content:stretch!important;width:100%;padding:8px!important;border:1px solid #d8ddcf!important;background:#fff!important;font-size:12px!important;min-width:0;overflow-wrap:anywhere}.cs-issue-overview button[aria-pressed=true],.cs-mobile-issue-summary button[aria-pressed=true]{background:#f0f5e4!important;border-color:#adc581!important}.cs-overview-title{display:flex;justify-content:space-between;gap:8px;font-weight:650;font-size:13px}.cs-overview-title em,.cs-draft-marker{font-style:normal;color:#6b4f19;font-size:12px}
+.cs-mobile-issue-summary{display:none}.cs-outcome-details blockquote{border-left:2px solid #b8c994;padding-left:10px;margin:8px 0;font-size:13px;overflow-wrap:anywhere}.cs-outcome-message{display:grid;gap:5px}.cs-outcome-message button{justify-self:start;font-size:13px;padding:5px 9px;margin:2px 0 7px}.cs-outcome-details>h4{margin:10px 0;font-size:14px}
+.cs-compact-inbox .cs-message-actions{position:absolute;right:0;bottom:-14px;display:flex;gap:6px}.cs-compact-inbox .cs-message-actions .cs-message-request{position:static!important;margin:0}.matter-cs .cs-message-reopen{font-size:11px;padding:3px 6px;background:#fff}.cs-evidence-target{outline:2px solid #658b24;outline-offset:5px;border-radius:8px}
+@media(max-width:1150px){.cs-mobile-issue-summary{display:grid;gap:5px;flex:none;padding:8px 10px;max-height:170px;overflow:auto;border-bottom:1px solid #d8ddcf;background:#f5f7ee}.cs-mobile-issue-summary>strong{font-size:12px}.cs-mobile-issue-summary button{padding:6px 8px!important;gap:2px}.cs-mobile-issue-summary .cs-overview-title{font-size:13px}.cs-mobile-issue-summary button span{font-size:12px;line-height:1.35}}
+@media(min-width:1151px){.cs-compact-inbox .cs-sandbox-shell .cs-inbox-detail{grid-template-columns:minmax(0,1fr) clamp(330px,29vw,400px)}.cs-sandbox-shell .cs-context-tools{right:400px}.cs-sandbox-shell .cs-request-work{background:#fafaf6}.cs-qa-guide{right:420px}}
+@media(max-width:700px){.cs-qa-toolbar{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:6px;padding:7px 10px}.cs-qa-toolbar>strong{grid-column:1/-1;margin:0}.cs-qa-toolbar>strong span{display:inline;margin-left:8px}.matter-cs .cs-qa-toolbar>select{max-width:none;width:100%;min-width:0}.matter-cs .cs-qa-toolbar>button{width:100%}.cs-qa-guide{right:6px;width:calc(100vw - 20px)}.cs-sandbox-shell .cs-inbox-contact .cs-owner-line{white-space:normal}}

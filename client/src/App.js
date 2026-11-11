@@ -55,6 +55,7 @@ import Layout from './components/Layout';
 import { SocketProvider } from './contexts/SocketContext';
 
 const AdminMealSelectionV2 = React.lazy(() => import('./pages/adminMealSelectionV2/AdminMealSelectionV2'));
+const CustomerService = React.lazy(() => import('./pages/customerService/CustomerService'));
 
 
 // Protected Route Component
@@ -135,6 +136,7 @@ const getFirstAvailablePath = (user) => {
     { path: '/deliveries', permission: 'deliveries' },
     { path: '/reports', permission: 'reports' },
     { path: '/customers', permission: 'customers' },
+    { path: '/customer-service/chats', permission: 'customer_service' },
     { path: '/bags', permission: 'bags' },
     { path: '/events', permission: 'events' },
     { path: '/complaints', permission: 'complaints' },
@@ -434,6 +436,11 @@ function App() {
               </ProtectedRoute>
             } />
 
+            <Route path="/customer-service/*" element={
+              <ProtectedRoute allowDispatchers allowStoreKeepers allowKitchen>
+                <PermissionBasedRoute permission="customer_service"><Layout><React.Suspense fallback={<div role="status" className="p-6">Loading customer service…</div>}><CustomerService /></React.Suspense></Layout></PermissionBasedRoute>
+              </ProtectedRoute>
+            } />
             <Route path="/complaints" element={
               <ProtectedRoute>
                 <PermissionBasedRoute permission="complaints">
