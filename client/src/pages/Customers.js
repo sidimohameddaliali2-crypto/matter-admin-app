@@ -467,22 +467,26 @@ const Customers = () => {
       setIsLoading(true);
       setError(null);
 
-      // Fetch all customers from database (includes imported ones)
-      const customersResponse = await api.get('/customers', { params: { limit: 10000 } });
+      // Counts come from an uncapped aggregate. GET /deliveries still supplies
+      // customers who exist only on a delivery, but that list is capped at 500
+      // oldest rows and combines weekend stops, so it must not be counted.
+      const [customersResponse, statsResponse, deliveriesResponse] = await Promise.all([
+        api.get('/customers', { params: { limit: 10000 } }),
+        api.get('/deliveries/customer-list-stats'),
+        api.get('/deliveries', { params: { page: 1, limit: 5000 } }),
+      ]);
       const dbCustomers = customersResponse.data?.data || [];
 
-      // Fetch customers from deliveries
-      const deliveriesResponse = await api.get('/deliveries', {
-        params: {
-          page: 1,
-          limit: 5000
-        }
-      });
-
+      if (!statsResponse.data?.success) {
+        throw new Error('Failed to load customer delivery stats');
+      }
       if (!deliveriesResponse.data?.success) {
         throw new Error('Failed to load deliveries');
       }
 
+      const statsByCustomer = new Map(
+        (statsResponse.data?.data || []).map(row => [row.customerId, row])
+      );
       const deliveries = deliveriesResponse.data?.data?.deliveries || [];
       
       // Create a map of customers from both sources
@@ -548,27 +552,17 @@ const Customers = () => {
         }
       });
 
-      // Calculate statistics from deliveries (cancelled deliveries do not count toward totalDeliveries)
-      deliveries.forEach(delivery => {
-        const customer = customerMap.get(delivery.customerId);
-        if (customer) {
-          if (delivery.status !== 'cancelled') customer.totalDeliveries++;
-          if (delivery.scheduledTime) {
-            const dt = new Date(delivery.scheduledTime);
-            if (!customer.lastDeliveryDate || dt > new Date(customer.lastDeliveryDate)) {
-              customer.lastDeliveryDate = delivery.scheduledTime;
-            }
-          }
-          if (delivery.status === 'delivered') {
-            customer.completedDeliveries++;
-          } else if (delivery.status === 'pending' || delivery.status === 'assigned' || delivery.status === 'picked_up') {
-            customer.pendingDeliveries++;
-          }
-          if (delivery.lateMinutes && delivery.lateMinutes > 0) {
-            customer.lateDeliveries++;
-            customer.totalLateMinutes += delivery.lateMinutes;
-          }
-        }
+      // Cancelled rows do not count toward totalDeliveries. The aggregate owns
+      // that rule; do not recompute it from the capped delivery page.
+      customerMap.forEach(customer => {
+        const stats = statsByCustomer.get(customer.customerId);
+        if (!stats) return;
+        customer.totalDeliveries = Number(stats.totalDeliveries) || 0;
+        customer.completedDeliveries = Number(stats.completedDeliveries) || 0;
+        customer.pendingDeliveries = Number(stats.pendingDeliveries) || 0;
+        customer.lateDeliveries = Number(stats.lateDeliveries) || 0;
+        customer.totalLateMinutes = Number(stats.totalLateMinutes) || 0;
+        customer.lastDeliveryDate = stats.lastDeliveryDate || null;
       });
 
       const customersList = Array.from(customerMap.values()).sort((a, b) => 
