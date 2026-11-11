@@ -1,7 +1,7 @@
 {
   "version": 1,
   "files": {
-    "integration/cloud/preview-runtime.mjs": "cda75993fb491570fbb88cbd01bf6bbc6d1f55fde71d2f6c9ade0f0a916d87c4",
+    "integration/cloud/preview-runtime.mjs": "dee4f38191eb316a5a5e78e41b78e3d5dff862a5dc8005a16692d05d75129420",
     "integration/cloud/audit-replica.mjs": "ae7db2f5948958b8d6763bc1f69b5db797354ef82851d4a2b71fe723a182b559",
     "integration/cloud/automatic-hosted-preview.mjs": "4c38db3c49c24c38a50ae73e76ab33d690b59594392cbb1d57cc47837926be52",
     "integration/cloud/automatic-preview-publication.mjs": "e3e14f618b792eb74da2b46e0d8d98e532834183a5a1940b4360718aa5121866",
@@ -59,6 +59,7 @@
     "integration/cloud/photo-progress.mjs": "5dc7f0a7149acac88b9158696e130f19f6059725859bf005da87aa7a9973fe2b",
     "integration/cloud/evidence-overlay.mjs": "1b7fffb2b76bc00cd4dd1a02fa9284f54a04ff5a397656688e9e49500492f85a",
     "integration/cloud/recovered-photo-bindings.mjs": "e02da8a89078c29b807e5776818ec7553654ac3678b35bf9ff3a3eaa279e22fb",
+    "integration/cloud/photo-binding-repair.mjs": "435d98b095d2c5d1465fa08e44c52b0421fa38315825d61a5615245940584b24",
     "integration/cloud/direct-visual-review.mjs": "bbea12a771038430d9ff417f59b3d9ffc1a26a6c0f36be144ff41c1deb4c582b",
     "integration/cloud/route-evidence.mjs": "45faa33f54095e178b78ff1c7f3252f64505d398a8919d4c65831e7f6f9b2ed7",
     "integration/cloud/reader-settlement.mjs": "7cfd0cd73ab417155894c7867e785edf4615061f97803f3909cb5b66dd7d5509",
@@ -68,7 +69,6 @@
     "app/src/content/dashboard/upload-location.mjs": "d9a9694ce0697aa00d6bb945f9aad5df58904ff1e2a6bd2b337b37e350e2c376",
     "integration/cloud/worker-budget.mjs": "d61ddb037f4c590257c5dce3e4a9a1e168ba8e3114e0d5e740cc184cfdaea429",
     "integration/private-gps/gps.mjs": "3dc52137eee33b588cb10c42a28f4e78d6f9ed67ff856f4d194139ba397d69c3",
-    "integration/cloud/photo-binding-repair.mjs": "435d98b095d2c5d1465fa08e44c52b0421fa38315825d61a5615245940584b24",
     "app/src/content/dashboard/reporting-model.mjs": "89dc723e8122a7711143321435d1ebdaab1d46eccbb5be3cd537093e09acbe4f",
     "integration/hosted/standalone-files.mjs": "fb5e6dbfdb23aa0b9ada943efaf78b05252efe4aa180af82e26828ddb7cbb984",
     "integration/hosted/archived-state.mjs": "bf94d30af4216f1523bceff73fab89ba369ee1e906ea3709de629c2cb3b68e2d",

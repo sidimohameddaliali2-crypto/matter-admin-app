@@ -28,7 +28,8 @@ export function createImportedAuditRuntime(options){
  const url=new URL(options.origin);if(url.origin!==options.origin||!(url.protocol==='https:'||url.hostname==='127.0.0.1'&&url.protocol==='http:'))throw Error('Invalid audit integration origin');
  return buildPreviewRuntime({...options,roadsKey:null},true);
 }
-async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allowedEmail,additionalAllowedEmails=[],privateRoot,packageOverride,authOverride,stateOverride,transportOverride,roadsKey=process.env.MATTER_PREVIEW_ROADS_KEY,local=false,reviewNamespace=PREVIEW_NAMESPACE,afterResponse,automaticFeed=false,automaticRefresh=false,onAuthenticatedRequest},staffIntegration){
+async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allowedEmail,additionalAllowedEmails=[],privateRoot,packageOverride,authOverride,stateOverride,transportOverride,roadsKey=process.env.MATTER_PREVIEW_ROADS_KEY,local=false,reviewNamespace=PREVIEW_NAMESPACE,afterResponse,automaticFeed=false,automaticRefresh=false,onAuthenticatedRequest,auditImportStatus},staffIntegration){
+ if(auditImportStatus!==undefined&&(!staffIntegration||typeof auditImportStatus!=='function'))throw Error('Trusted audit import status required');
  if(automaticFeed&&!local&&!packageOverride)throw Error('Automatic hosted feed requires a verified package');
  if(local&&!/^http:\/\/127\.0\.0\.1:\d+$/.test(origin))throw Error('Local test must stay loopback-only');
  if(!local&&!staffIntegration&&(authOverride||stateOverride||transportOverride))throw Error('Hosted preview cannot use test adapters');
@@ -55,7 +56,13 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
  const fonts=extractPreviewFonts(read('renderer.private.html').toString());
  const roads=createPreviewRoads({gps,state,config:maps.roads,key:roadsKey,geometryCache:local?undefined:createPreviewRoadCache({rpc})});
  report={...report,roadEvidence:roads.read,fontAsset:fonts.asset,gpsEvidence:async(...args)=>{const evidence=await gps.read(...args),sharedHouseholdStop=await report.householdStopFor(evidence.recordKey);return {...evidence,sharedHouseholdStop,roadDisplayAvailable:false};},mapsAccess:maps.candidateConfiguration?createCandidateMapAccess({stateStore:rawState,allowanceStore:namespaceState(rawState,PREVIEW_NAMESPACE),stateKey:maps.candidateConfiguration.stateKey,origin,config:maps}):createPreviewMapAccess({stateStore:state,config:maps})};
- const status=report.status;report.status=async actor=>({...await status(actor),privatePreview:true,automaticFeed,automaticRefresh,sourceRefreshEnabled:false});
+ const status=report.status;report.status=async actor=>{
+  const result={...await status(actor),privatePreview:true,automaticFeed,automaticRefresh,sourceRefreshEnabled:false};
+  if(auditImportStatus){const value=auditImportStatus();if(!value||!['disabled','not-requested','checking','imported','unchanged','failed','budget-exhausted','superseded'].includes(value.status))throw Error('Invalid audit import status');result.auditImport=value;
+   if(['checking','failed','budget-exhausted','superseded'].includes(value.status))result.error=value.status==='checking'?'New audit evidence is being checked; the saved report is retained.':'New audit evidence could not be refreshed; the saved report is retained.';
+  }
+  return result;
+ };
  const build=json('build.private.json'),photoHints=Object.hasOwn(manifest,'photo-prime.private.json')?json('photo-prime.private.json'):null;let html=null;
  return createCloudHttp({auth,service:report,origin,login,loginPage:passwordLoginHtml,compressPreviewReads:true,afterResponse,onAuthenticatedRequest,mapsEnabled:maps.enabled===true,readerBudget:local?undefined:createReaderBudgetPool({stateStore:rawState}),renderer:async(_actor,_service,url)=>{
   if(!html){let source=fonts.html.replace(build.snapshot.path,'report-data/snapshot-'+build.snapshot.sha256+'.json');source=cloudHtml({html:initializeReportTab(source),priorManifest:build.snapshot,head:{...head,manifest:await report.browserManifest()},generation:head.manifest.sha256});html=addCasePrefetch(addBrowserReadCache(addBrowserRequestQueue(addPrivateEvidenceCache(source.replace('</head>','<script>window.__matterPrivatePreview=true;window.__matterGpsPreview=true;window.__matterAutomaticPreview='+JSON.stringify(automaticRefresh||automaticFeed)+';</script></head>')))));html=addPreviewStartup(addStatusFlight(html),{...(await report.browserManifest()),generation:head.manifest.sha256});}

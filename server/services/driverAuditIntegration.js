@@ -16,7 +16,7 @@ export const auditRoute=pathname=>pathname==='/driver-audit-view'||pathname==='/
 // Disabled by default. No new source collector, model worker, timer, migration,
 // or operational database write is started by mounting this middleware.
 export function createDriverAuditIntegration({db,authenticateStaffToken,env=process.env,dependencies={}}){
- let pending;
+ const clock=dependencies.clock||Date.now;let pending;
  async function initialize(){
   const origin=env.DRIVER_AUDIT_ORIGIN,url=new URL(origin);if(url.origin!==origin||!(url.protocol==='https:'||url.protocol==='http:'&&url.hostname==='127.0.0.1'))throw Error('Explicit audit origin required');
   const auth=dependencies.auth||createDriverAuditAuth({authenticateStaffToken,secret:env.JWT_SECRET,origin});
@@ -30,14 +30,16 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    const counted={readObject:async(key,options)=>{chargeRequest();const body=await archive.readObject(key,options);return (async function*(){for await(const chunk of body){chargeBytes(chunk.length);yield chunk;}})();}};
    return runWithWorkerBudget({reserve:()=>budget.reserve({responseBytes:MAX_READER_BODY_BYTES}),settle:(reservation,value)=>budget.settle(reservation,{...value,extraMicros:readerTransferMicros(usage)})},()=>importAuditReplica({loadSource:async()=>{chargeRequest();const value=await state.read(AUTOMATIC_PREVIEW_HEAD);chargeBytes(Buffer.byteLength(JSON.stringify(value)));return value;},sourceTransport:counted,store}));
   }
-  let importStatus='not-requested',attempt=0,flight;
+  let importStatus='not-requested',attempt=null,flight;
   const refresh=()=>{
-   if(env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'||Date.now()-attempt<60000)return flight;
-   if(flight)return flight;attempt=Date.now();
+   if(env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'||attempt!==null&&clock()-attempt<60000)return flight;
+   if(flight)return flight;attempt=clock();importStatus='checking';
    flight=budgetedImport().then(r=>{importStatus=r.status;}).catch(()=>{importStatus='failed';}).finally(()=>{flight=null;});return flight;
   };
-  const coordinator=createAutomaticHostedPreview({refreshOnRequest:false,loadPointer:async()=>await store.head(),loadPackage:({descriptor})=>loadRemotePreviewPackage({descriptor,transport:store}),createRuntime:({packageOverride,automaticFeed})=>createImportedAuditRuntime({origin,packageOverride,automaticFeed,authOverride:auth,stateOverride:state,transportOverride:archive,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
-  return {origin,auth,coordinator,refresh,getImportStatus:()=>importStatus};
+  const createCoordinator=dependencies.createCoordinator||createAutomaticHostedPreview;
+  const coordinator=createCoordinator({clock,refreshOnRequest:false,loadPointer:async()=>await store.head(),loadPackage:({descriptor})=>loadRemotePreviewPackage({descriptor,transport:store}),createRuntime:({packageOverride,automaticFeed})=>createImportedAuditRuntime({origin,packageOverride,automaticFeed,auditImportStatus:health,authOverride:auth,stateOverride:state,transportOverride:archive,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
+  function health(){const runtime=coordinator.status();return {status:runtime.status==='stale'?'failed':runtime.status==='refreshing'?'checking':env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'?'disabled':importStatus,checkedAt:attempt===null?null:new Date(attempt).toISOString(),servingGeneration:runtime.active?.generation||null};}
+  return {origin,auth,coordinator,refresh,getImportStatus:()=>health().status};
  }
  return async(req,res,next)=>{
   const path=new URL(req.url,'http://audit.invalid').pathname;if(!auditRoute(path))return next();
@@ -61,7 +63,11 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
     if(!['GET','HEAD'].includes(req.method))throw Object.assign(Error('Staff sign-in required'),{status:403});
     res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(req.method==='HEAD'?undefined:'{"connected":true}');return;
    }
-   await context.refresh();await context.coordinator.poll();
+   const update=async()=>{await context.refresh();await context.coordinator.poll();};
+   if(!context.coordinator.status().active)await update();
+   else if(req.method==='GET'&&(path==='/driver-audit-view'||path==='/api/reporting/status'))void update().catch(()=>{});
+   // Existing generations stay available while imports are in flight. In
+   // particular, saving a review must never join a slow source transfer.
    res.setHeader('X-Audit-Import-Status',context.getImportStatus());
    if(path==='/driver-audit-view')req.url='/'+new URL(req.url,context.origin).search;
    return await context.coordinator(req,res);
