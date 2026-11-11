@@ -30,32 +30,61 @@ async function geocodeWithGoogle(address) {
   return null;
 }
 
+const DECIMAL_PAIR = '(-?\\d+\\.\\d+)\\s*,\\s*(-?\\d+\\.\\d+)';
+
+function finiteCoordinate(lat, lng) {
+  const la = parseFloat(lat);
+  const ln = parseFloat(lng);
+  if (!Number.isFinite(la) || !Number.isFinite(ln)) return null;
+  if (Math.abs(la) > 90 || Math.abs(ln) > 180) return null;
+  return { lat: la, lng: ln };
+}
+
+function decodeMapText(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 /**
- * Extract coordinates from Google Maps URL
- * Supports formats like:
- * https://www.google.com/maps/place/Villa+433...@25.1234,55.5678,15z
- * https://maps.google.com/?q=loc:25.1234,55.5678
+ * Extract coordinates from a Google Maps URL.
+ *
+ * The @lat,lng pair is the map viewing centre, not the place. Place links
+ * often carry both, hundreds of metres apart (issue #2, SYNC-04). Prefer the
+ * embedded destination (!3d/!4d), then an explicit destination/q/query/ll or
+ * loc: pair. Use @ only when the link has no destination pair. Short share
+ * links (maps.app.goo.gl) have no coordinates and return null.
  */
 export function extractCoordsFromGoogleMapsUrl(url) {
   if (!url || typeof url !== 'string') return null;
 
   try {
-    // Pattern 1: @lat,lng format
-    const atMatch = url.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
-    if (atMatch) {
-      return {
-        lat: parseFloat(atMatch[1]),
-        lng: parseFloat(atMatch[2])
-      };
+    const text = decodeMapText(url);
+
+    const place = text.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+    if (place) {
+      const coords = finiteCoordinate(place[1], place[2]);
+      if (coords) return coords;
     }
 
-    // Pattern 2: loc:lat,lng format
-    const locMatch = url.match(/loc:(-?\d+\.\d+),(-?\d+\.\d+)/);
-    if (locMatch) {
-      return {
-        lat: parseFloat(locMatch[1]),
-        lng: parseFloat(locMatch[2])
-      };
+    const query = text.match(new RegExp(`[?&](?:destination|daddr|q|query|ll)=(?:loc:)?${DECIMAL_PAIR}`, 'i'));
+    if (query) {
+      const coords = finiteCoordinate(query[1], query[2]);
+      if (coords) return coords;
+    }
+
+    const loc = text.match(new RegExp(`loc:${DECIMAL_PAIR}`, 'i'));
+    if (loc) {
+      const coords = finiteCoordinate(loc[1], loc[2]);
+      if (coords) return coords;
+    }
+
+    const at = text.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+    if (at) {
+      const coords = finiteCoordinate(at[1], at[2]);
+      if (coords) return coords;
     }
 
     return null;
@@ -67,23 +96,17 @@ export function extractCoordsFromGoogleMapsUrl(url) {
 
 /**
  * A pin typed or pasted by a person: either "25.1234, 55.5678" or a full
- * Google Maps link containing the coordinates (@lat,lng, loc:lat,lng, q=lat,lng
- * or the !3d..!4d.. form). Returns { lat, lng } or null. Short share links
- * (maps.app.goo.gl) carry no coordinates and can't be resolved offline, so they
- * return null.
+ * Google Maps link. Destination pairs win over the @ viewing centre; see
+ * extractCoordsFromGoogleMapsUrl. Returns { lat, lng } or null. Short share
+ * links (maps.app.goo.gl) carry no coordinates and can't be resolved offline,
+ * so they return null.
  */
 export function parsePinInput(input) {
   if (!input || typeof input !== 'string') return null;
   const text = input.trim();
   const plain = text.match(/^(-?\d+(?:\.\d+)?)\s*[,;\s]\s*(-?\d+(?:\.\d+)?)$/);
   if (plain) return { lat: parseFloat(plain[1]), lng: parseFloat(plain[2]) };
-  const fromUrl = extractCoordsFromGoogleMapsUrl(text);
-  if (fromUrl) return fromUrl;
-  const q = text.match(/[?&](?:q|query|ll)=(-?\d+\.\d+),(-?\d+\.\d+)/);
-  if (q) return { lat: parseFloat(q[1]), lng: parseFloat(q[2]) };
-  const d = text.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
-  if (d) return { lat: parseFloat(d[1]), lng: parseFloat(d[2]) };
-  return null;
+  return extractCoordsFromGoogleMapsUrl(text);
 }
 
 /**
