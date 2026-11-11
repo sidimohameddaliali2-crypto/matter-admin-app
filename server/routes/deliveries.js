@@ -12,6 +12,7 @@ import DeliveryChange from '../models/DeliveryChange.js';
 import Bag from '../models/Bag.js';
 import User, { effectivePermissions } from '../models/User.js';
 import { customerListStatsPipeline } from '../services/customerListStats.js';
+import { customerDetailUsagePipeline } from '../services/customerDetailUsage.js';
 import Customer from '../models/Customer.js';
 import { protect, authorize, admin } from '../middleware/auth.js'; // Fixed import
 import { upload, handleUploadError } from '../middleware/upload.js';
@@ -1237,6 +1238,37 @@ async function annotateWeekendCombo(delivery) {
   }
   return delivery;
 }
+
+// Customer-detail Days Used. GET /deliveries?customerId caps a page at 500 and
+// then combines weekend stops, so the detail box cannot count that page.
+// Cancelled rows still count. since is the existing plan-start comparison.
+// GET /api/deliveries/customer-detail-usage?customerId=&since=
+router.get('/customer-detail-usage', async (req, res) => {
+  try {
+    if (!effectivePermissions(req.user).customers) {
+      return res.status(403).json({ success: false, message: 'Not authorized to access customers' });
+    }
+    const customerId = typeof req.query.customerId === 'string' ? req.query.customerId.trim() : '';
+    if (!customerId) {
+      return res.status(400).json({ success: false, message: 'customerId is required' });
+    }
+    const since = typeof req.query.since === 'string' ? req.query.since : '';
+    if (since && Number.isNaN(new Date(since).getTime())) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ success: true, data: { customerId, used: 0 } });
+    }
+    const rows = await Delivery.aggregate(customerDetailUsagePipeline({
+      customerId,
+      since: since || undefined,
+    }));
+    const used = Number(rows[0]?.used) || 0;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: { customerId, used } });
+  } catch (error) {
+    console.error('Customer detail usage error:', error);
+    res.status(500).json({ success: false, message: 'Error fetching customer detail usage' });
+  }
+});
 
 // Customer-list counters. GET /deliveries caps a page at 500 oldest rows and
 // then combines weekend stops, so the customers page cannot count from that

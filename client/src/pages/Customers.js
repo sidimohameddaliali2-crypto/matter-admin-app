@@ -21,6 +21,18 @@ const ISSUE_PRIORITY_CLS = {
   high: 'bg-red-100 text-red-700',
 };
 
+// Days Used display. The number comes from the uncapped detail aggregate.
+// Remaining stays clamped at 0, which is this box's existing presentation.
+function customerDetailBalance(cycleDuration, used) {
+  const total = Number(cycleDuration) || 0;
+  if (typeof used !== 'number' || !Number.isFinite(used)) {
+    return { total, used: null, remaining: null, pct: 0, known: false };
+  }
+  const remaining = Math.max(0, total - used);
+  const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
+  return { total, used, remaining, pct, known: true };
+}
+
 function CustomerIssues({ customerId }) {
   const [issues, setIssues] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -315,6 +327,7 @@ const Customers = () => {
   const [error, setError] = useState(null);
   const [selectedCustomer, setSelectedCustomer] = useState(null);
   const [customerDeliveries, setCustomerDeliveries] = useState([]);
+  const [detailUsed, setDetailUsed] = useState(null);
   const [isLoadingDeliveries, setIsLoadingDeliveries] = useState(false);
   const [deliveriesError, setDeliveriesError] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -585,7 +598,8 @@ const Customers = () => {
       setIsLoadingDeliveries(true);
       setDeliveriesError(null);
 
-      // Fetch only this customer's deliveries server-side (avoids 500-record global cap)
+      // History only. This page is still capped at 500 and may combine weekend
+      // stops, so Days Used does not count it.
       const deliveriesResponse = await api.get('/deliveries', {
         params: {
           customerId,
@@ -678,9 +692,42 @@ const Customers = () => {
     fetchCustomerDeliveries(customer.customerId, customer.email);
   };
 
+  useEffect(() => {
+    if (!selectedCustomer?.customerId) {
+      setDetailUsed(null);
+      return undefined;
+    }
+    const customerId = selectedCustomer.customerId;
+    const planStartDate = selectedCustomer.planStartDate;
+    let cancelled = false;
+    setDetailUsed(null);
+    (async () => {
+      try {
+        const params = { customerId };
+        if (planStartDate) {
+          const start = new Date(planStartDate);
+          if (Number.isNaN(start.getTime())) {
+            if (!cancelled) setDetailUsed(0);
+            return;
+          }
+          params.since = start.toISOString();
+        }
+        const response = await api.get('/deliveries/customer-detail-usage', { params });
+        if (cancelled) return;
+        const used = response.data?.data?.used;
+        setDetailUsed(response.data?.success && typeof used === 'number' ? used : null);
+      } catch (error) {
+        console.error('Error fetching customer detail usage:', error);
+        if (!cancelled) setDetailUsed(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedCustomer?.customerId, selectedCustomer?.planStartDate]);
+
   const handleCloseDetail = () => {
     setSelectedCustomer(null);
     setCustomerDeliveries([]);
+    setDetailUsed(null);
     setCustomerProfile(null);
     setFilemakerLayoutsData(null);
     setFilemakerLayoutsError(null);
@@ -1319,12 +1366,8 @@ const Customers = () => {
 
         {/* Cycle Balance */}
         {(() => {
-          const total = Number(selectedCustomer.cycleDuration) || 0;
           const startDate = selectedCustomer.planStartDate ? new Date(selectedCustomer.planStartDate) : null;
-          const used = startDate
-            ? customerDeliveries.filter(d => new Date(d.scheduledTime) >= startDate).length
-            : customerDeliveries.length;
-          const remaining = Math.max(0, total - used);
+          const { total, used, remaining, known } = customerDetailBalance(selectedCustomer.cycleDuration, detailUsed);
           return (
             <div className="grid grid-cols-3 gap-4">
               <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-5 text-center relative">
@@ -1364,13 +1407,13 @@ const Customers = () => {
               </div>
               <div className="bg-gray-50 border border-gray-200 rounded-xl p-5 text-center">
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Days Used</p>
-                <p className="text-4xl font-bold text-gray-700">{used}</p>
+                <p className="text-4xl font-bold text-gray-700">{known ? used : '—'}</p>
                 <p className="text-xs text-gray-400 mt-1">{startDate ? `since ${startDate.toLocaleDateString('en-GB', { day: '2-digit', month: 'short' })}` : 'all time'}</p>
               </div>
-              <div className={`rounded-xl p-5 text-center border ${remaining === 0 ? 'bg-red-50 border-red-200' : remaining <= 5 ? 'bg-orange-50 border-orange-200' : 'bg-green-50 border-green-200'}`}>
-                <p className={`text-xs font-semibold uppercase tracking-wide mb-2 ${remaining === 0 ? 'text-red-500' : remaining <= 5 ? 'text-orange-500' : 'text-green-600'}`}>Remaining</p>
-                <p className={`text-4xl font-bold ${remaining === 0 ? 'text-red-700' : remaining <= 5 ? 'text-orange-600' : 'text-green-700'}`}>{total ? remaining : '—'}</p>
-                <p className={`text-xs mt-1 ${remaining === 0 ? 'text-red-400' : remaining <= 5 ? 'text-orange-400' : 'text-green-500'}`}>{total ? 'days left' : 'no cycle set'}</p>
+              <div className={`rounded-xl p-5 text-center border ${!known ? 'bg-gray-50 border-gray-200' : remaining === 0 ? 'bg-red-50 border-red-200' : remaining <= 5 ? 'bg-orange-50 border-orange-200' : 'bg-green-50 border-green-200'}`}>
+                <p className={`text-xs font-semibold uppercase tracking-wide mb-2 ${!known ? 'text-gray-400' : remaining === 0 ? 'text-red-500' : remaining <= 5 ? 'text-orange-500' : 'text-green-600'}`}>Remaining</p>
+                <p className={`text-4xl font-bold ${!known ? 'text-gray-400' : remaining === 0 ? 'text-red-700' : remaining <= 5 ? 'text-orange-600' : 'text-green-700'}`}>{known && total ? remaining : '—'}</p>
+                <p className={`text-xs mt-1 ${!known ? 'text-gray-400' : remaining === 0 ? 'text-red-400' : remaining <= 5 ? 'text-orange-400' : 'text-green-500'}`}>{known && total ? 'days left' : 'no cycle set'}</p>
               </div>
             </div>
           );
@@ -1574,13 +1617,7 @@ const Customers = () => {
 
         {/* Subscription */}
         {(() => {
-          const total = Number(selectedCustomer.cycleDuration) || 0;
-          const startDate = selectedCustomer.planStartDate ? new Date(selectedCustomer.planStartDate) : null;
-          const used = startDate
-            ? customerDeliveries.filter(d => new Date(d.scheduledTime) >= startDate).length
-            : customerDeliveries.length;
-          const remaining = Math.max(0, total - used);
-          const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
+          const { total, used, remaining, pct, known } = customerDetailBalance(selectedCustomer.cycleDuration, detailUsed);
           return (
             <div className="bg-white rounded-lg border border-gray-200 p-6">
               <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2 mb-4">
@@ -1752,18 +1789,18 @@ const Customers = () => {
                       </div>
                       <div className="text-center">
                         <p className="text-xs text-gray-500 mb-1">Used</p>
-                        <p className="text-xl font-bold text-gray-700">{used}</p>
+                        <p className="text-xl font-bold text-gray-700">{known ? used : '—'}</p>
                       </div>
                       <div className="text-center">
                         <p className="text-xs text-gray-500 mb-1">Remaining</p>
-                        <p className={`text-xl font-bold ${remaining === 0 ? 'text-red-600' : remaining <= 5 ? 'text-orange-500' : 'text-green-600'}`}>{remaining}</p>
+                        <p className={`text-xl font-bold ${!known ? 'text-gray-400' : remaining === 0 ? 'text-red-600' : remaining <= 5 ? 'text-orange-500' : 'text-green-600'}`}>{known ? remaining : '—'}</p>
                       </div>
                     </div>
                     <div className="w-full bg-gray-100 rounded-full h-3">
                       <div className={`h-3 rounded-full transition-all ${pct >= 100 ? 'bg-red-500' : pct >= 80 ? 'bg-orange-400' : 'bg-green-500'}`}
-                        style={{ width: `${pct}%` }} />
+                        style={{ width: `${known ? pct : 0}%` }} />
                     </div>
-                    <p className="text-xs text-gray-400 mt-1 text-right">{pct}% used</p>
+                    <p className="text-xs text-gray-400 mt-1 text-right">{known ? `${pct}% used` : '—'}</p>
                   </div>
                 )}
               </div>
