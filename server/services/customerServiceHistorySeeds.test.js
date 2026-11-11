@@ -1,0 +1,8 @@
+import test from 'node:test';import assert from 'node:assert/strict';import * as XLSX from 'xlsx';
+import {extractHistoryContactSeeds}from './customerServiceHistorySeeds.js';
+const options={accountId:'account',channelId:'channel'};
+const row=(extra={})=>({conversationId:'conversation',accountId:'account',channelId:'channel',contactId:'contact',contactName:'Fixture',updatedAt:'2026-11-05T00:00:00Z',...extra});
+const bytes=rows=>XLSX.write({SheetNames:['worksheet'],Sheets:{worksheet:XLSX.utils.json_to_sheet(rows)}},{type:'buffer',bookType:'xlsx'});
+test('seeds use only explicit matching scope and actual contact/conversation IDs',()=>{const result=extractHistoryContactSeeds(bytes([row(),row({conversationId:'older',updatedAt:'2026-08-01T00:00:00Z'}),row({accountId:'other'}),row({channelId:''}),row({contactId:''})]),options);assert.equal(result.seeds.length,1);assert.equal(result.seeds[0].id,'conversation');assert.deepEqual(result.seeds[0].conversationIds,['conversation','older']);assert.deepEqual([result.report.unrelatedScopeRows,result.report.missingScopeRows,result.report.missingIdentityRows],[1,1,1]);});
+test('conflicting conversation identities are quarantined rather than selecting a contact',()=>{const result=extractHistoryContactSeeds(bytes([row(),row({contactId:'different'})]),options);assert.equal(result.seeds.length,0);assert.equal(result.report.conflictingConversationIds,1);assert.equal(result.report.conflictingRows,2);});
+test('missing configured scope and unrecognized workbook fail closed',()=>{assert.throws(()=>extractHistoryContactSeeds(bytes([row()]),{accountId:'account'}));assert.throws(()=>extractHistoryContactSeeds(bytes([{name:'not native data'}]),options));});

@@ -22,12 +22,14 @@ export const useSocket = () => {
 // their session.
 export const SocketProvider = ({ children }) => {
   const token = useSelector((state) => state.auth.token);
+  const serviceOnly = useSelector((state) => state.auth.user?.serviceOnly === true);
   const [socket, setSocket] = useState(null);
   const [onlineDrivers, setOnlineDrivers] = useState([]);
 
   useEffect(() => {
-    if (!token) {
+    if (!token || serviceOnly) {
       setSocket(null);
+      if (serviceOnly) setOnlineDrivers([]);
       return undefined;
     }
 
@@ -50,7 +52,7 @@ export const SocketProvider = ({ children }) => {
     });
 
     return () => newSocket.close();
-  }, [token]);
+  }, [token, serviceOnly]);
 
   const value = {
     socket,

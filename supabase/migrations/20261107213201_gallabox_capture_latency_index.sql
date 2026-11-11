@@ -1,0 +1,1 @@
+CREATE INDEX inbox_hosted_capture_latency ON gallabox_private.inbox_record ((body#>>'{sourceMetadata,capture,lane}'),(body->>'sentAt')) WHERE kind='servicemessages' AND body#>>'{sourceMetadata,capture,worker}'='supabase';

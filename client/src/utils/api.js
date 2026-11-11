@@ -31,6 +31,7 @@ const api = axios.create({
 api.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token');
+    config.__matterSessionToken = token || null;
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
     }
@@ -44,17 +45,17 @@ api.interceptors.request.use(
 // Handle responses and errors
 api.interceptors.response.use(
   (response) => {
+    const rotated = response.headers?.['x-customer-service-session'];
+    const current = localStorage.getItem('token');
+    if (typeof rotated === 'string' && rotated.startsWith('cs-sb.') && current?.startsWith('cs-sb.') && response.config?.__matterSessionToken === current) localStorage.setItem('token', rotated);
     return response;
   },
   (error) => {
     // Log API errors for debugging
     if (error.response) {
       console.error('API Error:', {
-        url: error.config?.url,
         method: error.config?.method,
-        status: error.response.status,
-        data: error.response.data,
-        headers: error.response.headers
+        status: error.response.status
       });
     }
 
@@ -66,7 +67,8 @@ api.interceptors.response.use(
       const isAuthEndpoint = /\/auth\/(me|profile|change-password|refresh)/.test(requestUrl);
       const isAuthFailureMessage = /not authorized|token failed|no token|user not found|deactivated/i.test(backendMessage);
 
-      if (isAuthEndpoint || isAuthFailureMessage) {
+      const current = localStorage.getItem('token');
+      if (current && error.config?.__matterSessionToken === current && (isAuthEndpoint || isAuthFailureMessage)) {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
         window.location.href = '/login';
@@ -75,7 +77,7 @@ api.interceptors.response.use(
 
     // Handle access denied
     if (error.response?.status === 403) {
-      console.error('Access denied:', error.response.data);
+      console.error('Access denied:', error.response.status);
       // You can show a notification here
     }
 

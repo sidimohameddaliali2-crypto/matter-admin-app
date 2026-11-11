@@ -78,3 +78,7 @@ Every push to `main` triggers the GitHub Action, which SSHes into the DigitalOce
 - Responses usually look like `{ success, message, data }`. Validation uses `express-validator`.
 - Comments often record the owner's request and the date behind non-obvious behavior (e.g. "Owner (2026-09-22): ..."). Keep that context when you edit such code.
 - Git-ignored paths: `client/build/`, `server/uploads/`, `tmp/`, and logs.
+
+## Customer Service review pack maintenance
+
+Before changing Customer Service components, navigation, fields, topics, actions, outcomes, reporting, permissions, policies or integration behaviour, read `docs/customer-service/review-pack-maintenance.md`. As part of the authorized change, update the affected presentation, workflow/data/report maps, source decisions and acceptance checks in the existing shared Matter Logistics / Customer Service folder. Verify current paths and registries rather than relying on launch counts. Preserve stable shared file IDs, staff answers, decisions, evidence and history; version previous results and mark affected checks for retest. Keep local engineering, staff and real provider acceptance separate. Pure refactoring needs an impact check, not a wholesale rewrite. This rule applies while doing authorized work; it is not a background sync or deployment approval.

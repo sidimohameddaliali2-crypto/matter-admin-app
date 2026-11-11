@@ -48,6 +48,7 @@ const NAV_ITEMS = [
   { name: 'Complaints', href: '/complaints', icon: AlertTriangle, permission: 'complaints', group: 'Operations' },
 
   { name: 'Customers', href: '/customers', icon: User, permission: 'customers', group: 'Customers' },
+  { name: 'Customer service', href: '/customer-service/chats', icon: Users, permission: 'customer_service', group: 'Customers' },
   { name: 'Customer Management', href: '/website-subscriptions', icon: Globe, permission: 'website_subscriptions', group: 'Customers' },
   { name: 'Subscription & Sales', href: '/subscription', icon: CreditCard, permission: 'subscription', group: 'Customers' },
   { name: 'Customer Analytics', href: '/customer-analytics', icon: LineChart, permission: 'customer_analytics', group: 'Customers' },
@@ -75,6 +76,7 @@ const Layout = ({ children }) => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const location = useLocation();
+  const compactInbox = /^\/customer-service(?:\/chats)?\/?$/.test(location.pathname);
   const { user } = useSelector(state => state.auth);
 
   // Check if a nav item should be visible for the current user.
@@ -225,7 +227,7 @@ const Layout = ({ children }) => {
       {/* Main content */}
       <div className="flex flex-col flex-1 overflow-hidden">
         {/* Header */}
-        <header className="mo-chrome-font mo-app-header relative z-40 flex items-center justify-between flex-wrap gap-x-4 flex-shrink-0 px-6 py-4 bg-[#0b1630] border-b border-white/10 text-white">
+        <header style={compactInbox?{height:60,paddingTop:8,paddingBottom:8}:undefined} className={`${compactInbox?'cs-shell-header ':''}mo-chrome-font mo-app-header relative z-40 flex items-center justify-between flex-wrap gap-x-4 flex-shrink-0 px-6 py-4 bg-[#0b1630] border-b border-white/10 text-white`}>
           <div className="flex items-center">
             <button
               onClick={() => setSidebarOpen(true)}
@@ -243,7 +245,7 @@ const Layout = ({ children }) => {
                 <Menu className="w-6 h-6" />
               </button>
             )}
-            {headerLabel && (
+            {compactInbox ? <div className="cs-shell-brand" style={{display:'flex',alignItems:'center',gap:22,marginLeft:12}}><img src="/images/matter-logo24-white.png" alt="MATTER" style={{height:28,width:'auto',objectFit:'contain'}}/><span style={{borderLeft:'1px solid #ffffff55',paddingLeft:22,fontSize:20}}>Inbox</span></div> : headerLabel && (
               <span className="ml-3 pl-3 border-l border-white/20 text-[11px] tracking-[0.18em] uppercase text-white/80">
                 {headerLabel}
               </span>

@@ -90,6 +90,7 @@ const userSchema = new mongoose.Schema({
     fleet: { type: Boolean, default: false },
     deliveries: { type: Boolean, default: false },
     customers: { type: Boolean, default: false },
+    customer_service: { type: Boolean, default: false },
     website_subscriptions: { type: Boolean, default: false },
     subscription: { type: Boolean, default: false },
     customer_analytics: { type: Boolean, default: false },
@@ -190,7 +191,7 @@ userSchema.pre('save', function(next) {
 const PERMISSION_KEYS = [
   'dashboard',
   'deliveries', 'drivers', 'fleet', 'delivery_changes', 'bags', 'reports', 'events', 'complaints',
-  'customers', 'website_subscriptions', 'subscription', 'customer_analytics', 'renewal',
+  'customers', 'customer_service', 'website_subscriptions', 'subscription', 'customer_analytics', 'renewal',
   'menus', 'kitchen_list', 'kitchen_counting', 'matter_core',
   'partners',
   'users', 'employees',

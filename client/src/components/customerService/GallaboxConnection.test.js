@@ -1,0 +1,13 @@
+import React,{act} from 'react';
+import {createRoot} from 'react-dom/client';
+import GallaboxConnection from './GallaboxConnection';
+import api from '../../utils/api';
+jest.mock('../../utils/api',()=>({__esModule:true,default:{post:jest.fn(),get:jest.fn()}}));
+global.IS_REACT_ACT_ENVIRONMENT=true;
+let root,container;
+beforeEach(()=>{jest.clearAllMocks();api.get.mockResolvedValue({data:{data:{enabled:false,inserted:0,pending:0,failed:0}}});container=document.createElement('div');document.body.appendChild(container);root=createRoot(container);});
+afterEach(async()=>{await act(async()=>root.unmount());container.remove();});
+const render=()=>act(async()=>root.render(<GallaboxConnection/>));
+test('opening the card never contacts the provider and exposes no credential fields',async()=>{await render();expect(api.post).not.toHaveBeenCalled();expect(container.querySelector('input')).toBeNull();expect(container.textContent).toContain('Not checked');});
+test('verified account remains distinct from conversation capture',async()=>{api.post.mockResolvedValue({data:{data:{state:'account_verified',message:'Account verified; capture unavailable',captureConnected:false}}});await render();await act(async()=>container.querySelector('button').click());expect(container.textContent).toContain('Account verified; capture unavailable');expect(container.textContent).toContain('Automatic sync off');});
+test('failure stays explicit and can be retried',async()=>{api.post.mockRejectedValueOnce(new Error('Connection failed')).mockResolvedValueOnce({data:{data:{state:'not_configured',message:'Set up private configuration',captureConnected:false}}});await render();await act(async()=>container.querySelector('button').click());expect(container.querySelector('[role="alert"]')).toBeTruthy();await act(async()=>container.querySelector('button').click());expect(container.textContent).toContain('Set up private configuration');expect(container.querySelector('[role="alert"]')).toBeNull();});

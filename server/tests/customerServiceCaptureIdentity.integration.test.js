@@ -1,0 +1,41 @@
+import test,{before,after} from 'node:test';
+import assert from 'node:assert/strict';
+import {randomUUID} from 'node:crypto';
+import mongoose from 'mongoose';
+import Contact from '../models/ServiceSourceContact.js';
+import Directory from '../models/ServiceCustomer.js';
+import Conversation from '../models/ServiceConversation.js';
+import Issue from '../models/ServiceIssue.js';
+import Review from '../models/ServiceReview.js';
+import {ingestServiceBatch} from '../services/customerServiceCapture.js';
+const enabled=process.env.CUSTOMER_SERVICE_TEST_ISOLATED==='true'&&!!process.env.CUSTOMER_SERVICE_TEST_MONGODB_URI;
+const dbName=`matter_service_test_${randomUUID().replaceAll('-','')}`;
+before(async()=>{if(!enabled)return;await mongoose.connect(process.env.CUSTOMER_SERVICE_TEST_MONGODB_URI,{dbName,autoIndex:false});assert.ok((await mongoose.connection.db.admin().command({hello:1})).setName);for(const m of Object.values(mongoose.models)){await m.createCollection();if(m.modelName!=='Customer')await m.createIndexes();}});
+after(async()=>{if(!enabled)return;if(mongoose.connection.name===dbName)await mongoose.connection.db.dropDatabase();await mongoose.disconnect();});
+const run=(n,f)=>test(n,{skip:!enabled},f);
+const row={externalMessageId:'m',externalConversationId:'c',sentAt:'2026-11-06T00:00:00Z',type:'text',text:'Fixture',authorType:'customer',sourceMetadata:{externalContactId:'contact'}};
+const ingest=(messages=[row])=>ingestServiceBatch({source:'gallabox',scope:'account:channel',messages,requestId:randomUUID()});
+run('scoped native identity enrichment preserves review and evidence revisions',async()=>{
+ await ingest();const before=await Conversation.findOne().lean(),reviews=JSON.stringify(await Review.find().lean());
+ await Directory.create({customerId:'matter:1',active:true,name:'Directory fixture',source:'fixture',sourceObservedAt:new Date(),sourceCoverage:'partial'});
+ await Contact.create({scope:'account:channel',externalContactId:'contact',customerId:'matter:1',matchState:'matched'});
+ await ingest();const after=await Conversation.findOne().lean();assert.equal(after.customerId,'matter:1');assert.equal(after.sourceMetadata.externalContactId,'contact');assert.equal(after.sourceRevision,before.sourceRevision);assert.equal(JSON.stringify(await Review.find().lean()),reviews);assert.equal((await Issue.findOne().lean()).customerId,'matter:1');
+});
+run('changed contact identity is rejected and inactive or wrong-scope mappings cannot link',async()=>{
+ await assert.rejects(ingest([{...row,sourceMetadata:{externalContactId:'different'}}]),/contact/i);
+ await Contact.create({scope:'other:channel',externalContactId:'other',customerId:'matter:1',matchState:'matched'});
+ await ingest([{...row,externalMessageId:'m2',externalConversationId:'c2',sourceMetadata:{externalContactId:'other'}}]);assert.equal((await Conversation.findOne({externalConversationId:'c2'}).lean()).customerId,'');
+ await Directory.updateMany({},{$set:{active:false}});
+ await ingest([{...row,externalMessageId:'m3',externalConversationId:'c3'}]);assert.equal((await Conversation.findOne({externalConversationId:'c3'}).lean()).customerId,'');
+});
+run('native source capture survives a directory conflict without replacing the saved identity or reviews',async()=>{
+ await Directory.updateOne({customerId:'matter:1'},{$set:{active:true}});
+ await Directory.create({customerId:'matter:2',active:true,name:'Other account fixture',source:'fixture',sourceObservedAt:new Date(),sourceCoverage:'partial'});
+ await Contact.updateOne({scope:'account:channel',externalContactId:'contact'},{$set:{customerId:'matter:2'}});
+ const old=await Conversation.findOne({externalConversationId:'c'}).lean(),before=await Review.find({issueId:(await Issue.findOne({conversationId:old._id}))._id}).lean();
+ const result=await ingest([{...row,externalMessageId:'new-source-evidence',customerName:'Native contact fixture'}]);assert.equal(result.inserted,1);
+ const after=await Conversation.findById(old._id).lean();assert.equal(after.customerId,old.customerId);assert.equal(after.sourceMetadata.captureIdentityConflict.candidateCustomerId,'matter:2');
+ const reviews=await Review.find({_id:{$in:before.map(r=>r._id)}}).lean();assert.deepEqual(reviews.map(r=>r.revisions),before.map(r=>r.revisions));
+ const {getServiceInboxConversation}=await import('../services/customerServiceInbox.js');const actor={_id:new mongoose.Types.ObjectId(),role:'admin',isActive:true};const visible=await getServiceInboxConversation({actor,profile:{userId:actor._id,mode:'reviewer',enabled:true},conversationId:String(old._id)});assert.equal(visible.customerId,null);assert.equal(visible.customerName,'Native contact fixture');assert.equal(visible.identityConflict,true);
+ await assert.rejects(ingest([{...row,externalMessageId:'explicit-conflict',customerId:'matter:2'}]),/conflicting customer IDs/);
+});
