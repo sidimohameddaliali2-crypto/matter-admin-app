@@ -6,6 +6,11 @@
 
 /* AT Lang Gothic in the navy sidebar and header, as in the design. */
 .mo-chrome-font{font-family:'Matter Gothic',Arial,sans-serif}
+.mo-skip-link{position:fixed;top:12px;left:12px;z-index:2000;padding:10px 16px;border-radius:8px;background:#bdf477;color:#0b1630;font-weight:700;transform:translateY(calc(-100% - 24px))}
+.mo-skip-link:focus-visible{transform:none;outline:3px solid #0b1630;outline-offset:3px}
+.mo-mobile-navigation{position:fixed;inset:0 auto 0 0;width:min(16rem,calc(100vw - 2rem));height:100dvh;max-width:none;max-height:none;margin:0;padding:0;border:0;background:#0b1630;color:white;overflow:hidden}
+.mo-mobile-navigation::backdrop{background:rgb(0 0 0 / .5)}
+.mo-mobile-navigation button:focus-visible,.mo-mobile-navigation a:focus-visible{outline:2px solid #bdf477;outline-offset:2px}
 /* Navy header user chip, matching the Matter operations design. Scoped so the shared
    UserAvatar looks unchanged everywhere else (driver lists, profile pages, ...). */
 .mo-user-chip .MuiAvatar-root{background:#2e91f5!important;color:#fff!important;font-weight:600;font-size:15px}
