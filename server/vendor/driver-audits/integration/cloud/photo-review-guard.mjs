@@ -1,0 +1,2 @@
+// Human review history takes priority over any automatic photo proposal.
+export function photoCaseReviewed(row,journal){if(row?.photo?.reviewStatus==='reviewed'||row?.photo?.grade!=null||row?.delivery?.photo_grade!=null)return true;const ids=new Set([`delivery-review:${row?.key}`,...(row?.findings||[]).map(x=>x.issue_id),...(row?.originalFindings||[]).map(x=>x.issue_id),...(row?.legacyReferences||[]).map(x=>x?.['Issue ID'])].filter(Boolean));return (journal?.records?.reportingReviews||[]).some(e=>ids.has(e?.data?.issueId));}

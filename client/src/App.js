@@ -17,6 +17,7 @@ import DeliveryDetail from './pages/DeliveryDetail';
 import AddDelivery from './pages/AddDelivery';
 import BagTracking from './pages/BagOperations';
 import Reports from './pages/Reports';
+import DriverAudits from './pages/DriverAudits';
 import CreateDriver from './pages/CreateDriver';
 import DriverMobile from './pages/DriverMobile';
 import Users from './pages/Users'
@@ -497,6 +498,13 @@ function App() {
                   <Layout>
                     <Reports />
                   </Layout>
+                </PermissionBasedRoute>
+              </ProtectedRoute>
+            } />
+            <Route path="/driver-audits" element={
+              <ProtectedRoute>
+                <PermissionBasedRoute permission="reports">
+                  <Layout><DriverAudits /></Layout>
                 </PermissionBasedRoute>
               </ProtectedRoute>
             } />
