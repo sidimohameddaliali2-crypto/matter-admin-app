@@ -34,3 +34,13 @@ Thumbs.db
 tmp/
 .private/
 work/
+
+# Generated operational exports. Audit scripts recreate this directory locally.
+# The files contain customer identifiers, contact details and locations.
+server/scripts/output/
+
+# Scratch, bytecode and machine-local editor settings
+temp.txt
+*.bak
+**/__pycache__/
+.claude/settings.local.json

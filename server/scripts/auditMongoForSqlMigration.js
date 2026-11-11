@@ -10,6 +10,7 @@
 //
 // Usage: node scripts/auditMongoForSqlMigration.js
 // Output: console summary + scripts/output/mongo-sql-audit.json
+// That directory is gitignored. Do not commit the JSON or the CSV exports.
 
 import '../loadEnv.js';
 import mongoose from 'mongoose';
