@@ -53,6 +53,43 @@ export function getBusinessDayBounds(dateInput) {
   return { startOfDay, endOfDayExclusive: new Date(startOfDay.getTime() + DAY_MS) };
 }
 
+// Calendar date a caller meant: a "YYYY-MM-DD" key as-is, otherwise the
+// business day of the instant. `new Date("2026-10-13")` is UTC midnight,
+// which is still that Dubai date (04:00), so both forms agree.
+export function businessDateKeyOf(value) {
+  if (isDateKey(value)) return value;
+  if (typeof value === 'string' && isDateKey(value.trim())) return value.trim();
+  return toBusinessDateKey(value);
+}
+
+export function addDaysToDateKey(dateKey, days) {
+  if (!isDateKey(dateKey)) return null;
+  const [y, m, d] = dateKey.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
+}
+
+// Inclusive business-day list. weekday is the Dubai calendar weekday
+// (0=Sun..6=Sat), not the UTC weekday of the window start (which is the
+// previous evening). Throws on a missing/invalid date or an inverted range.
+export function eachBusinessDate(startValue, endValue) {
+  const startKey = businessDateKeyOf(startValue);
+  const endKey = businessDateKeyOf(endValue);
+  if (!startKey || !endKey) throw new Error('Invalid date provided');
+  if (endKey < startKey) throw new Error('End date cannot be earlier than start date');
+  const days = [];
+  for (let key = startKey; key <= endKey; key = addDaysToDateKey(key, 1)) {
+    const { startOfDay, endOfDayExclusive } = getBusinessDayBounds(key);
+    days.push({
+      key,
+      weekday: new Date(`${key}T00:00:00.000Z`).getUTCDay(),
+      dayStart: startOfDay,
+      dayEndExclusive: endOfDayExclusive,
+      scheduledDate: new Date(`${key}T00:00:00.000Z`)
+    });
+  }
+  return days;
+}
+
 // Turns a caller-supplied range into [start, endExclusive) UTC bounds.
 // - Date-only "YYYY-MM-DD" values are business dates: start → that day's
 //   business-local 00:00, end → the NEXT business day's 00:00 (exclusive),

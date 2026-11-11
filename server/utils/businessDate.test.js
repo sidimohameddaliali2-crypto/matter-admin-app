@@ -8,7 +8,8 @@ import {
   toBusinessDateKey,
   getBusinessDayBounds,
   resolveBusinessDateRange,
-  isDateKey
+  isDateKey,
+  eachBusinessDate
 } from './businessDate.js';
 
 process.env.LOCAL_TIMEZONE_OFFSET_MINUTES = '240';
@@ -82,6 +83,28 @@ test('getBusinessDayBounds accepts a date key or an instant and agrees', () => {
   const fromInstant = getBusinessDayBounds(new Date('2026-10-12T23:00:00.000Z'));
   assert.equal(iso(fromKey.startOfDay), iso(fromInstant.startOfDay));
   assert.equal(iso(fromKey.endOfDayExclusive), iso(fromInstant.endOfDayExclusive));
+});
+
+test('each business date uses the Dubai day, so Tuesday 03:00 is in and Wednesday 03:00 is out', () => {
+  const [tuesday] = eachBusinessDate('2026-10-13', '2026-10-13');
+  assert.equal(tuesday.key, '2026-10-13');
+  assert.equal(tuesday.weekday, 2);
+  assert.equal(iso(tuesday.dayStart), '2026-10-12T20:00:00.000Z');
+  assert.equal(iso(tuesday.dayEndExclusive), '2026-10-13T20:00:00.000Z');
+  const early = new Date('2026-10-12T23:00:00.000Z');
+  const nextEarly = new Date('2026-10-13T23:00:00.000Z');
+  assert.ok(early >= tuesday.dayStart && early < tuesday.dayEndExclusive);
+  assert.ok(!(nextEarly >= tuesday.dayStart && nextEarly < tuesday.dayEndExclusive));
+  // The window starts Monday evening UTC; the weekday must stay Tuesday.
+  assert.notEqual(tuesday.dayStart.getUTCDay(), tuesday.weekday);
+});
+
+test('each business date rejects an inverted range and accepts a UTC-midnight Date of the same key', () => {
+  assert.throws(() => eachBusinessDate('2026-10-14', '2026-10-13'), /earlier than start/);
+  assert.throws(() => eachBusinessDate('not-a-date', '2026-10-13'), /Invalid date/);
+  const fromDate = eachBusinessDate(new Date('2026-10-13T00:00:00.000Z'), new Date('2026-10-13T00:00:00.000Z'));
+  assert.equal(fromDate.length, 1);
+  assert.equal(fromDate[0].key, '2026-10-13');
 });
 
 test('rejects invalid or inverted ranges', () => {

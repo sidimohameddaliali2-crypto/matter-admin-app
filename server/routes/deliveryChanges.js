@@ -9,7 +9,7 @@ import User from '../models/User.js';
 import { detectAreaFromAddress } from '../config/areas.js';
 import { protect, admin } from '../middleware/auth.js';
 import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
-import { getBusinessDayBounds, setBusinessTimeOfDay, parseTimeOfDay } from '../utils/businessDate.js';
+import { eachBusinessDate, getBusinessDayBounds, setBusinessTimeOfDay, parseTimeOfDay } from '../utils/businessDate.js';
 
 const router = express.Router();
 
@@ -242,32 +242,6 @@ export async function applyChangesToDelivery(delivery, changes) {
 
   const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
-  function normalizeToUTCStart(dateValue) {
-    const date = new Date(dateValue);
-    if (Number.isNaN(date.getTime())) {
-      throw new Error('Invalid date provided');
-    }
-    return new Date(Date.UTC(
-      date.getUTCFullYear(),
-      date.getUTCMonth(),
-      date.getUTCDate(),
-      0, 0, 0, 0
-    ));
-  }
-
-  function normalizeToUTCEnd(dateValue) {
-    const date = new Date(dateValue);
-    if (Number.isNaN(date.getTime())) {
-      throw new Error('Invalid date provided');
-    }
-    return new Date(Date.UTC(
-      date.getUTCFullYear(),
-      date.getUTCMonth(),
-      date.getUTCDate(),
-      23, 59, 59, 999
-    ));
-  }
-
   async function calculateMatchMeta({ customerId, customerPhone, customerName }) {
     let matchConfidence = 0;
     const matchingFields = [];
@@ -312,7 +286,10 @@ export async function applyChangesToDelivery(delivery, changes) {
     return { matchConfidence, matchingFields };
   }
 
-  async function createChangesForDateRange({
+  // Date-only ranges are Dubai business days, same window manual apply uses
+  // (issue #12). UTC-midnight bounds missed a 03:00 Dubai job and caught the
+  // next morning's instead.
+  export async function createChangesForDateRange({
     customerId,
     customerName,
     customerPhone,
@@ -324,32 +301,25 @@ export async function applyChangesToDelivery(delivery, changes) {
     fileReference,
     matchConfidence = 0,
     matchingFields = [],
-    daysOfWeek = [] // optional: filter by weekdays (0=Sun..6=Sat)
+    daysOfWeek = [] // optional: filter by weekdays (0=Sun..6=Sat), Dubai calendar
   }) {
-    const normalizedStart = normalizeToUTCStart(startDate);
-    const normalizedEnd = normalizeToUTCStart(endDate);
-
-    if (normalizedEnd < normalizedStart) {
-      throw new Error('End date cannot be earlier than start date');
-    }
-
-    const inclusiveEnd = normalizeToUTCEnd(endDate);
-    const totalDays = Math.floor((inclusiveEnd.getTime() - normalizedStart.getTime()) / MS_PER_DAY) + 1;
+    const days = eachBusinessDate(startDate, endDate);
+    const totalDays = days.length;
     const isRange = totalDays > 1;
     const batchId = isRange ? new mongoose.Types.ObjectId().toString() : undefined;
-    const rangeStartDate = isRange ? normalizedStart : undefined;
-    const rangeEndDate = isRange ? inclusiveEnd : undefined;
+    const rangeStartDate = isRange ? days[0].scheduledDate : undefined;
+    const rangeEndDate = isRange
+      ? new Date(days[days.length - 1].scheduledDate.getTime() + MS_PER_DAY - 1)
+      : undefined;
 
     const createdChanges = [];
 
     for (let offset = 0; offset < totalDays; offset += 1) {
-      const dayStart = new Date(normalizedStart.getTime() + offset * MS_PER_DAY);
-      const dayEndExclusive = new Date(dayStart.getTime() + MS_PER_DAY);
+      const day = days[offset];
 
-      // If daysOfWeek provided, skip non-matching days
+      // Weekday is the business date, not UTC weekday of 20:00 the evening before.
       if (Array.isArray(daysOfWeek) && daysOfWeek.length > 0) {
-        const dow = dayStart.getUTCDay();
-        if (!daysOfWeek.includes(dow)) {
+        if (!daysOfWeek.includes(day.weekday)) {
           continue;
         }
       }
@@ -357,8 +327,8 @@ export async function applyChangesToDelivery(delivery, changes) {
       const deliveries = await Delivery.find({
         customerId,
         scheduledTime: {
-          $gte: dayStart,
-          $lt: dayEndExclusive
+          $gte: day.dayStart,
+          $lt: day.dayEndExclusive
         }
       });
 
@@ -366,7 +336,7 @@ export async function applyChangesToDelivery(delivery, changes) {
         customerId,
         customerName,
         customerPhone: customerPhone || '',
-        scheduledDate: dayStart,
+        scheduledDate: day.scheduledDate,
         changes,
         reason: reason || 'Manual entry',
         uploadedBy,
@@ -525,25 +495,19 @@ router.get('/pending', protect, async (req, res) => {
       });
     }
 
-    // Parse the date and create date range - ALWAYS use UTC
-    const targetDate = new Date(scheduledDate);
-    
-    // Use UTC to avoid timezone issues
-    const startOfDay = new Date(Date.UTC(
-      targetDate.getUTCFullYear(),
-      targetDate.getUTCMonth(),
-      targetDate.getUTCDate(),
-      0, 0, 0, 0
-    ));
-    
-    const endOfDay = new Date(Date.UTC(
-      targetDate.getUTCFullYear(),
-      targetDate.getUTCMonth(),
-      targetDate.getUTCDate(),
-      23, 59, 59, 999
-    ));
+    // Same Dubai business day as apply and range creation (issue #12).
+    let startOfDay;
+    let endOfDayExclusive;
+    try {
+      ({ startOfDay, endOfDayExclusive } = getBusinessDayBounds(scheduledDate));
+    } catch (error) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid scheduledDate'
+      });
+    }
 
-    console.log('Date range for search:', { startOfDay, endOfDay });
+    console.log('Date range for search:', { startOfDay, endOfDayExclusive });
 
     // First, let's see ALL changes for this customer regardless of status
     const allChangesForCustomer = await DeliveryChange.find({
@@ -562,7 +526,7 @@ router.get('/pending', protect, async (req, res) => {
       customerId: customerId,
       scheduledDate: {
         $gte: startOfDay,
-        $lte: endOfDay
+        $lt: endOfDayExclusive
       },
       $or: [
         { status: 'pending' },
@@ -581,7 +545,7 @@ router.get('/pending', protect, async (req, res) => {
         customerId,
         scheduledDate,
         startOfDay,
-        endOfDay
+        endOfDayExclusive
       }
     });
   } catch (error) {
