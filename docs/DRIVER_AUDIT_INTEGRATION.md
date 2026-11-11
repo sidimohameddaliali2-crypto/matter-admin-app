@@ -8,6 +8,24 @@ The reporting system continues collecting and grading in its existing Supabase-b
 
 The imported package contains the current report, original findings, retained history references, GPS evidence, renderer and immutable file identities. Reports → Open driver audits opens the existing audit interface at `/driver-audit-view` on this app's own origin. It is not a link or frame to an external reporting website, and it does not reimplement the audit design or map.
 
+### Placement and new arrivals
+
+| Existing area | Integration boundary |
+| --- | --- |
+| `/reports` | Keeps the existing Reports & Analytics screen; adds one Open driver audits link. |
+| `/driver-audits` | New Reports-permission entry that establishes the staff audit session. |
+| `/driver-audit-view` | New dedicated audit document using the original reporting design. |
+| Dashboard, deliveries, drivers, fleet, bags, Customer Service, partner/member pages | Existing components, routes and navigation are retained. |
+| `/api/reports`, `/api/auth`, `/api/customer-service`, `/api/staff-reporting` | Existing handlers remain separate from the audit routes. |
+
+The candidate includes the Customer Service merge already on `main`; it must not revert or replace that page. Its new audit route is additive.
+
+The existing offline worker excludes audit documents, sessions, API responses and evidence assets. It removes only previously cached audit entries during activation and preserves the current delivery offline cache. An offline audit request must fail visibly instead of returning an old successful response or the driver-mobile page. Operational delivery/offline handling is unchanged.
+
+When imports are separately enabled, an authenticated audit request checks the published Supabase release at most once per minute per process. Only a complete hash-verified package replaces the active MongoDB pointer. The existing audit's automatic refresh checks for new evidence and preserves the selected filters/view. It defers a report reload while a review has an unsaved draft, is being saved, or an export is running; saved responses remain tied to the original snapshot. Photo proposals refresh through the existing photo table reader. Failed imports retain the prior report and identify the failed refresh. Missing or conflicting evidence stays unresolved.
+
+This does not start a source collector or grading worker. Incoming evidence must first complete the existing Supabase-backed capture, recovery, grading and publication pipeline; its prepared schedules need separate activation. A request-triggered reader is not a promise of unattended minute-by-minute collection.
+
 Large original photographs and retained evidence remain in private Supabase storage and are read through the authenticated server using their verified hashes. This avoids duplicating the full archive into the limited MongoDB allowance. Review responses continue to append to the existing Supabase journal; there is one authoritative review history, not two independently editable copies. Model proposals remain separate from original accepted grades and incident tiers.
 
 ```mermaid

@@ -13,8 +13,10 @@ test('audit staff sessions recheck permission, roles, revocation and CSRF',async
 });
 test('disabled audit integration does not contact a database or alter operations routes',async()=>{
  const middleware=createDriverAuditIntegration({env:{},db:()=>{throw Error('must not run');}});let next=0,status;
- await middleware({url:'/api/deliveries'}, {},()=>next++);assert.equal(next,1);
- await middleware({url:'/driver-audit-view'}, {writeHead:s=>status=s,end:()=>{}},()=>next++);assert.equal(status,503);assert.equal(next,1);
+ const operational=['/','/reports','/deliveries','/drivers','/customer-service','/api/auth/login','/api/deliveries','/api/reports','/api/customer-service','/api/staff-reporting/','/api/partner','/api/member'];
+ for(const enabled of [undefined,'1']){const handler=createDriverAuditIntegration({env:{DRIVER_AUDIT_ENABLED:enabled},db:()=>{throw Error('Existing routes must not initialize audit storage');}});for(const url of operational)await handler({url},{},()=>next++);}
+ assert.equal(next,operational.length*2);
+ await middleware({url:'/driver-audit-view'}, {writeHead:s=>status=s,end:()=>{}},()=>next++);assert.equal(status,503);assert.equal(next,operational.length*2);
  assert.ok(!auditRoute('/api/reports'));assert.ok(auditRoute('/report-data/snapshot-a.json'));
 });
 test('staff-only session handshake, refresh and logout work without a report import or Supabase sign-in',async t=>{
