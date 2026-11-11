@@ -3,6 +3,15 @@
 const CACHE_NAME = 'delivery-tracker-v5-bag-reminders';
 const OFFLINE_URL = '/driver-mobile';
 
+// Audit responses require current staff authorization and generation checks.
+// Leave them to the network and their private HTTP headers, never the driver
+// app's persistent offline cache or navigation fallback.
+const isDriverAuditPath = pathname => pathname === '/driver-audit-view'
+  || pathname === '/api/driver-audits/session'
+  || pathname === '/api/session' || pathname === '/api/session/refresh'
+  || pathname.startsWith('/api/reporting/')
+  || pathname.startsWith('/report-data/') || pathname.startsWith('/report-assets/');
+
 // Assets to cache on install
 const STATIC_ASSETS = [
   // Intentionally exclude '/' (index.html) to avoid sticky old shell
@@ -42,7 +51,15 @@ self.addEventListener('activate', (event) => {
           }
         })
       );
-    }).then(() => {
+    }).then(async () => {
+      // Remove only audit entries left by an earlier worker; retain operational
+      // offline assets and queued delivery requests in the current cache.
+      const cache = await caches.open(CACHE_NAME);
+      const requests = await cache.keys();
+      await Promise.all(requests.filter(request => {
+        const url = new URL(request.url);
+        return url.origin === location.origin && isDriverAuditPath(url.pathname);
+      }).map(request => cache.delete(request)));
       console.log('[Service Worker] Claiming clients');
       return self.clients.claim();
     })
@@ -58,6 +75,8 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== location.origin) {
     return;
   }
+
+  if (isDriverAuditPath(url.pathname)) return;
 
   // Production kitchen inputs and reconciliation must fail when offline.
   // A previously cached successful response cannot establish current Matter data.

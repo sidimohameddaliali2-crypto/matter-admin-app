@@ -37,6 +37,8 @@ import { startCaptureMatterSalesJob } from './jobs/captureMatterSales.js';
 import { startRecordVehicleLocationsJob } from './jobs/recordVehicleLocations.js';
 import { startCustomerTrackerVisitsJob } from './jobs/syncCustomerTrackerVisits.js';
 import { authenticateSocket, registerStaffSocket } from './middleware/socketAuth.js';
+import {authenticateStaffToken} from './middleware/auth.js';
+import {createDriverAuditIntegration} from './services/driverAuditIntegration.js';
 
 // Initialize Spaces after dotenv loads
 initializeSpaces();
@@ -89,6 +91,8 @@ io.use(authenticateSocket);
 app.set('io', io);
 
 // Middleware
+// This handler owns its raw JSON body and existing reporting security headers.
+app.use(createDriverAuditIntegration({db:()=>mongoose.connection.db,authenticateStaffToken}));
 app.use(cors(corsOptions));
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));

@@ -76,6 +76,8 @@ const authSlice = createSlice({
   },
   reducers: {
     logout: (state) => {
+      // Clear the report session together with the existing staff session.
+      fetch('/api/driver-audits/session', {method:'DELETE', credentials:'same-origin', keepalive:true}).catch(()=>{});
       state.user = null;
       state.token = null;
       try {

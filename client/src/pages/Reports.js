@@ -762,6 +762,7 @@ const generatePDF = (data) => {
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Reports & Analytics</h1>
           <p className="text-gray-500">Delivery performance and insights</p>
+          <a href="/driver-audits" className="inline-block mt-2 underline">Open driver audits</a>
         </div>
         {isLoading && (
           <div className="text-sm text-orange-600 font-medium animate-pulse">
