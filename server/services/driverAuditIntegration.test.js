@@ -3,6 +3,36 @@ import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {createDriverAuditIntegration} from './driverAuditIntegration.js';
 
+test('the API document and exact evidence aliases reach the canonical audit handler after authorization',async()=>{
+ const origin='https://app.example.invalid';
+ const seen=[];
+ const coordinator=async(req,res)=>{seen.push(req.url);res.end('ok');};
+ coordinator.status=()=>({status:'ready',active:{generation:'a'.repeat(64)}});
+ coordinator.poll=async()=>{};
+ const handler=createDriverAuditIntegration({
+  env:{DRIVER_AUDIT_ENABLED:'1',DRIVER_AUDIT_ORIGIN:origin},
+  dependencies:{
+   auth:{authenticate:async cookie=>{if(cookie!=='staff')throw Object.assign(Error('Sign in'),{status:401});}},
+   state:{},archive:{},store:{},createCoordinator:()=>coordinator,
+  },
+ });
+ const request=async(url,cookie)=>{
+  let status=200;
+  await handler({method:'GET',url,headers:{host:new URL(origin).host,cookie}},{
+   setHeader(){},writeHead(value){status=value;},end(){},
+  },()=>assert.fail('Expected the audit handler'));
+  return status;
+ };
+ const hash='a'.repeat(64),snapshot=`/report-data/snapshot-${hash}.json?generation=${hash}`,font=`/report-assets/font-${hash}.woff2`;
+ const document='/api/reporting/view?screen=reports&tab=mirror';
+ assert.equal(await request(document),401);
+ assert.equal(await request(document,'staff'),200);
+ assert.equal(await request('/api/reporting'+snapshot,'staff'),200);
+ assert.equal(await request('/api/reporting'+font,'staff'),200);
+ assert.equal(await request('/api/reporting/report-assets/private.json','staff'),200);
+ assert.deepEqual(seen,['/?screen=reports&tab=mirror',snapshot,font,'/api/reporting/report-assets/private.json']);
+});
+
 test('an active audit serves status and review writes during a slow import, then reports failure without losing the report',async t=>{
  let release,reads=0,polls=0,now=100000;
  const held=new Promise(resolve=>release=resolve);

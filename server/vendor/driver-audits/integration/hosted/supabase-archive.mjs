@@ -14,7 +14,12 @@ export function createSupabaseArchiveTransport({secret,fetchImpl=fetch,timeoutMs
  async function readObject(key,{signal,maxBytes=16*1024*1024}={}){
   if(!keyOK(key)||!Number.isSafeInteger(maxBytes)||maxBytes<1||maxBytes>16*1024*1024)throw Error('Invalid archive object request');
   const r=await request('/object/authenticated/'+bucket+'/'+key,{method:'GET',signal});
-  if(r.redirected||!r.ok||Number(r.headers.get('content-length'))>maxBytes){await r.body?.cancel();throw storageError(r.status===429?'storage_rate_limit':r.status>=500?'storage_unavailable':'storage_rejected','Private archive object unavailable');}
+  if(r.redirected||!r.ok||Number(r.headers.get('content-length'))>maxBytes){
+   let missing=r.status===404;
+   if(r.status===400)try{const error=JSON.parse(await bytes(r,16384));missing=error.statusCode==='404'||error.statusCode===404;}catch{}
+   if(!r.bodyUsed)await r.body?.cancel();
+   throw storageError(missing?'storage_not_found':r.status===429?'storage_rate_limit':r.status>=500?'storage_unavailable':'storage_rejected','Private archive object unavailable');
+  }
   return r.body;
  }
  return {readObject,async assertPrivate(){const r=await request('/bucket/'+bucket,{method:'GET'});if(!r.ok||r.redirected){await r.body?.cancel();throw Error('Private archive bucket unavailable');}const b=JSON.parse(await bytes(r,16384));if(b.id!==bucket||b.public!==false)throw Error('Archive bucket must be private');return {bucket,public:false};},

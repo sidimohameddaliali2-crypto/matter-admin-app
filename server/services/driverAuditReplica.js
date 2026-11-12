@@ -11,7 +11,9 @@ export function createDriverAuditReplica(db,{capacityBytes}={}){
   async head(){return (await control.findOne({_id:'head'}))?.head??null;},
   async readObject(key,{maxBytes}={}){
    if(!/^[a-f0-9]{64}\.gz$/.test(key)||!Number.isSafeInteger(maxBytes))throw Error('Invalid audit object request');
-   const doc=await objects.findOne({_id:key}),bytes=payload(doc);
+   const doc=await objects.findOne({_id:key});
+   if(!doc)throw Object.assign(Error('Imported audit object unavailable'),{code:'AUDIT_OBJECT_MISSING'});
+   const bytes=payload(doc);
    if(!bytes||bytes.length>maxBytes||bytes.length!==doc.size||sha(bytes)!==key.slice(0,-3))throw Error('Imported audit object unavailable or corrupt');
    return [Buffer.from(bytes)];
   },

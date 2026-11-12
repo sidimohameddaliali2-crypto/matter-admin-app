@@ -2,6 +2,41 @@ name: Deploy to DigitalOcean
 
 on:
   workflow_dispatch:
+    inputs:
+      operation:
+        description: Production operation
+        type: choice
+        default: deploy
+        options:
+          - deploy
+          - audit-preflight
+          - audit-seed-enable
+          - audit-sync-start
+          - audit-rollback
+      expected_sha:
+        description: Exact reviewed application commit for audit operations
+        type: string
+      audit_manifest_sha256:
+        description: SHA-256 of the approved private audit handoff
+        type: string
+      audit_capacity_bytes:
+        description: Approved MongoDB audit capacity in bytes
+        type: string
+      staff_verified_generation:
+        description: Generation verified by staff before sync
+        type: string
+      staff_verification_reference:
+        description: SHA-256 of the reviewed staff acceptance receipt
+        type: string
+      audit_gc_restore_receipt_sha256:
+        description: Optional SHA-256 of reviewed private restore and rollback evidence for audit replica retention
+        type: string
+      sync_min_free_memory_bytes:
+        description: Minimum free memory from the reviewed isolated sync replay
+        type: string
+      sync_min_free_disk_bytes:
+        description: Minimum free disk from the reviewed isolated sync replay
+        type: string
   push:
     branches:
       - main
@@ -32,28 +67,69 @@ jobs:
           DO_SSH_KEY: ${{ secrets.DO_SSH_KEY }}
           DO_SSH_PASSPHRASE: ${{ secrets.DO_SSH_PASSPHRASE }}
           MATTER_CS_RUNTIME_B64: ${{ secrets.MATTER_CS_RUNTIME_B64 }}
+          OPERATION: ${{ inputs.operation || 'deploy' }}
         run: |
           set -e
           if [ -z "$DO_HOST" ]; then echo "DO_HOST is missing"; exit 1; fi
           if [ -z "$DO_USER" ]; then echo "DO_USER is missing"; exit 1; fi
           if [ -z "$DO_APP_PATH" ]; then echo "DO_APP_PATH is missing"; exit 1; fi
           if [ -z "$DO_SSH_KEY" ]; then echo "DO_SSH_KEY is missing"; exit 1; fi
-          if [ -z "$MATTER_CS_RUNTIME_B64" ]; then echo "Customer Service connection secret is missing"; exit 1; fi
+          if [ "$OPERATION" = deploy ] && [ -z "$MATTER_CS_RUNTIME_B64" ]; then echo "Customer Service connection secret is missing"; exit 1; fi
+
+      - name: Verify reviewed audit operation inputs
+        if: github.event_name == 'workflow_dispatch' && inputs.operation != 'deploy'
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          AUDIT_MANIFEST: ${{ inputs.audit_manifest_sha256 }}
+          AUDIT_CAPACITY: ${{ inputs.audit_capacity_bytes }}
+          STAFF_GENERATION: ${{ inputs.staff_verified_generation }}
+          STAFF_VERIFICATION: ${{ inputs.staff_verification_reference }}
+          GC_RESTORE_RECEIPT: ${{ inputs.audit_gc_restore_receipt_sha256 }}
+          SYNC_MEMORY: ${{ inputs.sync_min_free_memory_bytes }}
+          SYNC_DISK: ${{ inputs.sync_min_free_disk_bytes }}
+          REPORTING_SECRET: ${{ inputs.operation != 'audit-rollback' && secrets.DRIVER_AUDIT_SUPABASE_SECRET || '' }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_SHA" =~ ^[a-f0-9]{40}$ || "$EXPECTED_SHA" != "$GITHUB_SHA" ]]; then
+            echo "The workflow ref must match the exact reviewed commit."
+            exit 1
+          fi
+          if [ -n "$GC_RESTORE_RECEIPT" ] && { [ "$OPERATION" != audit-sync-start ] || [[ ! "$GC_RESTORE_RECEIPT" =~ ^[a-f0-9]{64}$ ]]; }; then
+            echo "Replica retention requires the reviewed restore receipt SHA-256 on audit-sync-start."
+            exit 1
+          fi
+          case "$OPERATION" in
+            audit-rollback) exit 0 ;;
+            audit-preflight|audit-seed-enable|audit-sync-start) ;;
+            *) echo "Invalid audit operation."; exit 1 ;;
+          esac
+          if [[ ! "$AUDIT_MANIFEST" =~ ^[a-f0-9]{64}$ || ! "$AUDIT_CAPACITY" =~ ^[1-9][0-9]*$ || -z "$REPORTING_SECRET" ]]; then
+            echo "The reviewed manifest, capacity, and private reporting credential are required."
+            exit 1
+          fi
+          if [ "$OPERATION" = audit-sync-start ] && [[ ! "$STAFF_GENERATION" =~ ^[a-f0-9]{64}$ || ! "$STAFF_VERIFICATION" =~ ^[a-f0-9]{64}$ || ! "$SYNC_MEMORY" =~ ^[1-9][0-9]*$ || ! "$SYNC_DISK" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Reviewed staff evidence and measured sync host requirements are required."
+            exit 1
+          fi
 
       - name: Deploy over SSH
+        if: github.event_name == 'push' || inputs.operation == 'deploy'
         uses: appleboy/ssh-action@v1.2.0
         env:
           MATTER_CS_RUNTIME_B64: ${{ secrets.MATTER_CS_RUNTIME_B64 }}
+          DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
+          DEPLOY_SHA: ${{ github.sha }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
-          script_stop: true
-          envs: MATTER_CS_RUNTIME_B64
+          envs: MATTER_CS_RUNTIME_B64,DO_APP_PATH,DEPLOY_SHA
           script: |
             set -e
-            cd ${{ secrets.DO_APP_PATH }}
+            cd -- "$DO_APP_PATH"
 
             echo "[0/7] Current directory"
             pwd
@@ -65,10 +141,21 @@ jobs:
 
             echo "[2/7] Fetch latest code"
             git fetch --all --prune
+            if [ "$(git rev-parse origin/main)" != "$DEPLOY_SHA" ]; then
+              echo "Main advanced since this deployment was selected. Use the run for the reviewed current commit."
+              exit 1
+            fi
+
+            sync_paused=0
+            trap 'if [ "$sync_paused" = 1 ]; then echo "The previously supervised audit worker remains paused because deployment or recovery failed."; fi' EXIT
+            if [ -f server/scripts/driverAuditDeploy.js ]; then
+              worker_state=$(DRIVER_AUDIT_DEPLOY_SHA="$(git rev-parse HEAD)" node server/scripts/driverAuditDeploy.js deploy-worker-pause)
+              if [ "$worker_state" = paused ]; then sync_paused=1; fi
+            fi
 
             echo "[3/7] Checkout and pull branch"
             git checkout main
-            git reset --hard origin/main
+            git reset --hard "$DEPLOY_SHA"
 
             echo "[4/7] Install server dependencies"
             cd server
@@ -94,3 +181,39 @@ jobs:
 
             echo "[7/7] Verify existing app health and canonical Customer Service readiness"
             node server/scripts/customerServiceDeploy.js --verify
+            if [ "$sync_paused" = 1 ]; then
+              DRIVER_AUDIT_DEPLOY_SHA="$DEPLOY_SHA" node server/scripts/driverAuditDeploy.js deploy-worker-resume
+              sync_paused=0
+            fi
+
+      - name: Run reviewed driver audit operation
+        if: github.event_name == 'workflow_dispatch' && inputs.operation != 'deploy'
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
+          AUDIT_OPERATION: ${{ inputs.operation }}
+          DRIVER_AUDIT_DEPLOY_SHA: ${{ inputs.expected_sha }}
+          DRIVER_AUDIT_DEPLOY_MANIFEST: ${{ inputs.audit_manifest_sha256 }}
+          DRIVER_AUDIT_DEPLOY_CAPACITY_BYTES: ${{ inputs.audit_capacity_bytes }}
+          DRIVER_AUDIT_DEPLOY_SECRET: ${{ inputs.operation != 'audit-rollback' && secrets.DRIVER_AUDIT_SUPABASE_SECRET || '' }}
+          DRIVER_AUDIT_STAFF_GENERATION: ${{ inputs.staff_verified_generation }}
+          DRIVER_AUDIT_STAFF_VERIFICATION: ${{ inputs.staff_verification_reference }}
+          DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256: ${{ inputs.audit_gc_restore_receipt_sha256 }}
+          DRIVER_AUDIT_SYNC_MIN_MEMORY: ${{ inputs.sync_min_free_memory_bytes }}
+          DRIVER_AUDIT_SYNC_MIN_DISK: ${{ inputs.sync_min_free_disk_bytes }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          command_timeout: 20m
+          envs: DO_APP_PATH,AUDIT_OPERATION,DRIVER_AUDIT_DEPLOY_SHA,DRIVER_AUDIT_DEPLOY_MANIFEST,DRIVER_AUDIT_DEPLOY_CAPACITY_BYTES,DRIVER_AUDIT_DEPLOY_SECRET,DRIVER_AUDIT_STAFF_GENERATION,DRIVER_AUDIT_STAFF_VERIFICATION,DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256,DRIVER_AUDIT_SYNC_MIN_MEMORY,DRIVER_AUDIT_SYNC_MIN_DISK
+          script: |
+            set -e
+            cd -- "$DO_APP_PATH"
+            git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+            if [ "$(git rev-parse origin/main)" != "$DRIVER_AUDIT_DEPLOY_SHA" ] || [ "$(git rev-parse HEAD)" != "$DRIVER_AUDIT_DEPLOY_SHA" ]; then
+              echo "Deploy the exact reviewed current commit before running this audit operation."
+              exit 1
+            fi
+            node server/scripts/driverAuditDeploy.js "$AUDIT_OPERATION"

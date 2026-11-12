@@ -1,5 +1,6 @@
 import {createHmac,timingSafeEqual} from 'node:crypto';
-const cookieName='matter_driver_audit';
+// A pre-upgrade session cannot serve evidence through an older offline worker.
+const cookieName='matter_driver_audit_v2';
 const allowed=new Set(['super_admin','admin','manager','dispatcher','viewer']);
 const writers=new Set(['super_admin','admin','manager','dispatcher']);
 export function createDriverAuditAuth({authenticateStaffToken,secret,origin}){

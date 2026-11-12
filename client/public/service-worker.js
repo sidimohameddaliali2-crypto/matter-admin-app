@@ -217,7 +217,11 @@ async function syncOfflineData() {
 // Message event - handle messages from clients
 self.addEventListener('message', (event) => {
   console.log('[Service Worker] Message received:', event.data);
-  
+
+  if (event.data?.type === 'DRIVER_AUDIT_NETWORK_ONLY') {
+    event.ports[0]?.postMessage('reporting-v1');
+    return;
+  }
   if (event.data && event.data.type === 'SKIP_WAITING') {
     self.skipWaiting();
   }
