@@ -29,7 +29,8 @@ export function createImportedAuditRuntime(options){
  const url=new URL(options.origin);if(url.origin!==options.origin||!(url.protocol==='https:'||url.hostname==='127.0.0.1'&&url.protocol==='http:'))throw Error('Invalid audit integration origin');
  return buildPreviewRuntime({...options,roadsKey:null},true);
 }
-async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allowedEmail,additionalAllowedEmails=[],privateRoot,packageOverride,authOverride,stateOverride,transportOverride,roadsKey=process.env.MATTER_PREVIEW_ROADS_KEY,local=false,reviewNamespace=PREVIEW_NAMESPACE,afterResponse,automaticFeed=false,automaticRefresh=false,onAuthenticatedRequest,auditImportStatus,auditSyncStatus,publicPathPrefix=''},staffIntegration){
+async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allowedEmail,additionalAllowedEmails=[],privateRoot,packageOverride,authOverride,stateOverride,transportOverride,roadsKey=process.env.MATTER_PREVIEW_ROADS_KEY,local=false,reviewNamespace=PREVIEW_NAMESPACE,afterResponse,automaticFeed=false,automaticRefresh=false,onAuthenticatedRequest,auditImportStatus,auditSyncStatus,publicPathPrefix='',remoteReadsBudgeted=false},staffIntegration){
+ if(typeof remoteReadsBudgeted!=='boolean'||remoteReadsBudgeted&&!staffIntegration)throw Error('Trusted remote archive accounting required');
  if(auditImportStatus!==undefined&&(!staffIntegration||typeof auditImportStatus!=='function'))throw Error('Trusted audit import status required');
  if(auditSyncStatus!==undefined&&(!staffIntegration||typeof auditSyncStatus!=='function'))throw Error('Trusted audit sync status required');
  if(publicPathPrefix!==''&&(!staffIntegration||publicPathPrefix!=='/api/reporting'))throw Error('Trusted audit route prefix required');
@@ -76,7 +77,7 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
   return result;
  };
  const build=json('build.private.json'),photoHints=Object.hasOwn(manifest,'photo-prime.private.json')?json('photo-prime.private.json'):null;let html=null;
- return createCloudHttp({auth,service:report,origin,login,loginPage:passwordLoginHtml,compressPreviewReads:true,localFontAssets:staffIntegration,afterResponse,onAuthenticatedRequest,mapsEnabled:maps.enabled===true,readerBudget:local?undefined:createReaderBudgetPool({stateStore:rawState}),renderer:async(_actor,_service,url)=>{
+ return createCloudHttp({auth,service:report,origin,login,loginPage:passwordLoginHtml,compressPreviewReads:true,localFontAssets:staffIntegration,afterResponse,onAuthenticatedRequest,mapsEnabled:maps.enabled===true,readerBudget:local||remoteReadsBudgeted?undefined:createReaderBudgetPool({stateStore:rawState}),renderer:async(_actor,_service,url)=>{
   if(!html){let source=fonts.html.replace(build.snapshot.path,'report-data/snapshot-'+build.snapshot.sha256+'.json');source=cloudHtml({html:initializeReportTab(source),priorManifest:build.snapshot,head:{...head,manifest:await report.browserManifest()},generation:head.manifest.sha256,publicPathPrefix});html=addCasePrefetch(addBrowserReadCache(addBrowserRequestQueue(addPrivateEvidenceCache(source.replace('</head>','<script>window.__matterPrivatePreview=true;window.__matterGpsPreview=true;window.__matterAutomaticPreview='+JSON.stringify(automaticRefresh||automaticFeed)+';</script></head>')))));html=addPreviewStartup(addStatusFlight(html),{...(await report.browserManifest()),generation:head.manifest.sha256,publicPathPrefix});}
   const page=prioritizePreviewStartup(addPreviewPhotoPrime(html,photoHints,url));
   return auditSyncStatus?addDriverAuditSyncStatus(page,await syncStatus()):page;

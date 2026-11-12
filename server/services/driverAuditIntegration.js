@@ -10,6 +10,7 @@ import {loadRemotePreviewPackage} from '../vendor/driver-audits/integration/clou
 import {importAuditReplica} from '../vendor/driver-audits/integration/cloud/audit-replica.mjs';
 import {AUTOMATIC_PREVIEW_HEAD} from '../vendor/driver-audits/integration/cloud/automatic-preview-publication.mjs';
 import {createReaderBudgetPool} from '../vendor/driver-audits/integration/cloud/reader-budget-pool.mjs';
+import {createBudgetedArchiveReader} from '../vendor/driver-audits/integration/cloud/budgeted-archive-reader.mjs';
 import {runWithWorkerBudget} from '../vendor/driver-audits/integration/cloud/worker-budget.mjs';
 import {readerTransferMicros,MAX_READER_BODY_BYTES,MAX_READER_REQUEST_BYTES} from '../vendor/driver-audits/integration/cloud/reader-budget.mjs';
 
@@ -26,13 +27,18 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
   const origin=env.DRIVER_AUDIT_ORIGIN,url=new URL(origin);if(url.origin!==origin||!(url.protocol==='https:'||url.protocol==='http:'&&url.hostname==='127.0.0.1'))throw Error('Explicit audit origin required');
   const auth=dependencies.auth||createDriverAuditAuth({authenticateStaffToken,secret:env.JWT_SECRET,origin});
   const state=dependencies.state||createCloudState({rpc:createHostedRpc({secret:env.DRIVER_AUDIT_SUPABASE_SECRET})});
-  const archive=dependencies.archive||createSupabaseArchiveTransport({secret:env.DRIVER_AUDIT_SUPABASE_SECRET});
+  const rawArchive=dependencies.archive||createSupabaseArchiveTransport({secret:env.DRIVER_AUDIT_SUPABASE_SECRET});
   const store=dependencies.store||createDriverAuditReplica(db(),{capacityBytes:Number(env.DRIVER_AUDIT_CAPACITY_BYTES)});
   let budget=dependencies.budget;
+  const getBudget=()=>budget??=createReaderBudgetPool({stateStore:state,approvedNovemberRelease:true});
+  const archive=createBudgetedArchiveReader({transport:rawArchive,requestBytes:2048+2*Buffer.byteLength(env.DRIVER_AUDIT_SUPABASE_SECRET||''),budget:{
+   reserve:options=>getBudget().reserve(options),
+   settle:(reservation,measurement)=>getBudget().settle(reservation,measurement),
+  }});
   async function budgetedImport(){
-   budget??=createReaderBudgetPool({stateStore:state});
+   getBudget();
    const usage={responseBytes:0,requestBytes:0},chargeRequest=()=>{usage.requestBytes+=2048+2*Buffer.byteLength(env.DRIVER_AUDIT_SUPABASE_SECRET||'');if(usage.requestBytes>MAX_READER_REQUEST_BYTES)throw Error('Audit request allowance exceeded');},chargeBytes=n=>{usage.responseBytes+=n;if(usage.responseBytes>MAX_READER_BODY_BYTES)throw Error('Audit transfer allowance exceeded');};
-   const counted={readObject:async(key,options)=>{chargeRequest();const body=await archive.readObject(key,options);return (async function*(){for await(const chunk of body){chargeBytes(chunk.length);yield chunk;}})();}};
+   const counted={readObject:async(key,options)=>{chargeRequest();const body=await rawArchive.readObject(key,options);return (async function*(){for await(const chunk of body){chargeBytes(chunk.length);yield chunk;}})();}};
    return runWithWorkerBudget({reserve:()=>budget.reserve({responseBytes:MAX_READER_BODY_BYTES}),settle:(reservation,value)=>budget.settle(reservation,{...value,extraMicros:readerTransferMicros(usage)})},()=>importAuditReplica({loadSource:async()=>{chargeRequest();const value=await state.read(AUTOMATIC_PREVIEW_HEAD);chargeBytes(Buffer.byteLength(JSON.stringify(value)));return value;},sourceTransport:counted,store}));
   }
   let importStatus='not-requested',attempt=null,flight;
@@ -42,6 +48,7 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    flight=budgetedImport().then(r=>{importStatus=r.status;}).catch(()=>{importStatus='failed';}).finally(()=>{flight=null;});return flight;
   };
   const createCoordinator=dependencies.createCoordinator||createAutomaticHostedPreview;
+  const createRuntime=dependencies.createRuntime||createImportedAuditRuntime;
   const coordinator=createCoordinator({clock,refreshOnRequest:false,restorePrevious:true,loadPointer:async()=>await store.head(),async loadPackage({descriptor,pointer}){
    const directSnapshot=pointer?.directImport?.version===1;
    const restore=pointer?.restore;
@@ -52,9 +59,9 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
     catch(error){if(!recoverable||error.code!=='AUDIT_OBJECT_MISSING')throw error;return archive.readObject(key,options);}
    }};
    return {...await loadRemotePreviewPackage({descriptor,transport}),directSnapshot};
-  },createRuntime:({packageOverride,automaticFeed})=>createImportedAuditRuntime({origin,publicPathPrefix:reportApi,packageOverride,automaticFeed,
+  },createRuntime:({packageOverride,automaticFeed})=>createRuntime({origin,publicPathPrefix:reportApi,packageOverride,automaticFeed,
    auditImportStatus:health,auditSyncStatus:packageOverride.directSnapshot?()=>readDriverAuditSyncStatus(db(),packageOverride.generation,clock):undefined,
-   authOverride:auth,stateOverride:state,transportOverride:archive,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
+   authOverride:auth,stateOverride:state,transportOverride:archive,remoteReadsBudgeted:true,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
   function health(){const runtime=coordinator.status();return {status:runtime.status==='stale'?'failed':runtime.status==='refreshing'?'checking':env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'?'disabled':importStatus,checkedAt:attempt===null?null:new Date(attempt).toISOString(),servingGeneration:runtime.active?.generation||null};}
   return {origin,auth,coordinator,refresh,getImportStatus:()=>health().status};
  }
