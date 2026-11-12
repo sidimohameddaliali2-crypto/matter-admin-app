@@ -3,6 +3,7 @@ import {completedPhotoDay} from '../hosted/photo-completion.mjs';
 import {createHash} from 'node:crypto';
 import {gunzipSync,createGunzip} from 'node:zlib';
 import {Readable} from 'node:stream';
+import {setImmediate as nextTurn} from 'node:timers/promises';
 import {pinPhotoRows} from '../hosted/generation-photos.mjs';
 import {createPhotoProposalService} from '../hosted/photo-proposals.mjs';
 import {combinedPhotoProgress} from '../hosted/automatic-publication.mjs';
@@ -20,6 +21,32 @@ const sha=x=>createHash('sha256').update(x).digest('hex'),hash=x=>sha(Buffer.fro
 const route=/^report-data\/(detail|history|query|archive|snapshot)-([a-f0-9]{64})\.json$/;
 const generationCache=new Map();
 const photoProgressCache=new Map();
+const photoProgressRetryMs=30_000;
+let photoProgressFlight=false;
+function rememberPhotoProgress(key,value){
+ photoProgressCache.set(key,value);
+ while(photoProgressCache.size>2)photoProgressCache.delete(photoProgressCache.keys().next().value);
+}
+function readDeferredPhotoProgress(key,load){
+ if(!key)return {progress:null,progressStatus:'unavailable'};
+ const cached=photoProgressCache.get(key);
+ if(cached?.status==='ready')return {progress:cached.progress,progressStatus:'ready'};
+ if(cached?.retryAfter>Date.now())return {progress:null,progressStatus:'unavailable'};
+ if(!photoProgressFlight){
+  const entry={status:'pending'};
+  rememberPhotoProgress(key,entry);
+  photoProgressFlight=true;
+  // One serial scan for the process. Requests never queue another generation.
+  void nextTurn().then(load).then(({progress})=>{
+   if(photoProgressCache.get(key)===entry)Object.assign(entry,{status:'ready',progress});
+   photoProgressFlight=false;
+  },()=>{
+   if(photoProgressCache.get(key)===entry)Object.assign(entry,{status:'unavailable',retryAfter:Date.now()+photoProgressRetryMs});
+   photoProgressFlight=false;
+  });
+ }
+ return {progress:null,progressStatus:'pending'};
+}
 const evidenceRevision=p=>hash([p?.evidenceOverlay??null,p?.directVisualReviews??null,p?.recoveredPhotoBindings??null,p?.photoBindingRepair??null,p?.routeEvidence??null]);
 const scheduledTasks=new Set(['delivery','delivery-history','gps','gps-publish','photo-grade']);
 function verifiedScheduleTimestamp(value,deploymentId){
@@ -44,8 +71,9 @@ export function cloudHtml({html,priorManifest,head,generation=head?.manifest?.sh
  const routing=publicPathPrefix?'('+installPublicReportDataPath.toString()+')('+JSON.stringify(publicPathPrefix)+');':'';
  return bindReportManifest(html,priorManifest,head.manifest).replace('</head>','<script>window.__matterReportingGeneration='+JSON.stringify(generation)+';'+routing+'('+hostedSessionBridge.toString()+')();</script></head>');
 }
-export function createCloudReportService({repository,reviewStore,identityStore,now=todayDubai,maxPlainBytes=512*1024*1024,deploymentId,evidenceCache,photoBindingRegistry=null}){
+export function createCloudReportService({repository,reviewStore,identityStore,now=todayDubai,maxPlainBytes=512*1024*1024,deploymentId,evidenceCache,photoBindingRegistry=null,deferredPhotoProgress=false}){
  if(!Number.isSafeInteger(maxPlainBytes)||maxPlainBytes<1||maxPlainBytes>512*1024*1024)throw Error('Invalid report size limit');
+ if(typeof deferredPhotoProgress!=='boolean')throw Error('Invalid photo progress mode');
  if(!repository||typeof repository.getHead!=='function'||typeof repository.readFile!=='function'||!reviewStore||!identityStore)throw Error('Cloud report dependencies required');
  async function routeEvidenceFor(rows){try{const loaded=await loadRouteEvidence(repository);if(!loaded)return {status:'unavailable'};const currentRows=typeof rows==='function'?await rows():rows;return bindRouteEvidence(loaded.artifact,currentRows,loaded.artifactSha256);}catch{return {status:'unavailable'};}}
  async function read(domain,file,maxBytes){const bytes=await repository.readFile(domain,file,{maxBytes});if(!Buffer.isBuffer(bytes)||bytes.length>maxBytes)throw Error('Invalid retained object');return bytes;}
@@ -88,9 +116,68 @@ export function createCloudReportService({repository,reviewStore,identityStore,n
    const merged=results[0].proposals.map((old,i)=>chooseLegacyProposal(old,results[1].proposals[i])),snapshot=await snapshotFor(reportHash),rows=await photoBoundRows(reportHash,snapshot.rows,inventories),pointers=repository.publication?.cloudPhotoResults||{},journal=actor?await reviewStore.read(actor):{records:{reportingReviews:[]}};if(!Array.isArray(journal?.records?.reportingReviews))throw Error('Invalid review journal');
    const completedDays=new Set(),blockedKeys=new Set();for(const inv of inventories){for(const day of inv.queue.completedReportDays||[])completedDays.add(day);for(const item of inv.queue.items)if(inv.proposals?.[item.id]||inv.flags?.[item.id]||inv.attempts?.[item.id]){if(item.recordKey)blockedKeys.add(item.recordKey);if(item.datedRecordKey)blockedKeys.add(item.datedRecordKey);}}
    async function loadCloud(row){const list=pointers[sha(row.key)];if(list===undefined)return null;if(!Array.isArray(list)||photoCaseReviewed(row,journal)||completedPhotoDay(row,completedDays)||blockedKeys.has(row.key))return null;const d=row.delivery||{},binding={recordKey:row.key,urlSha256:sha(d.photo_url||''),proofTimestamp:d.raw_upload??d.upload??null,imageSha256:d.photo_sha256},matches=list.filter(x=>x.bindingSha256===hash(binding));if(matches.length>1)throw Error('Ambiguous cloud photo result');const pointer=matches[0];if(!pointer)return null;if(!hex(pointer.sha256)||pointer.path!=='cloud-photo-results/'+pointer.sha256+'.json')throw Error('Invalid cloud photo result pointer');const bytes=await read('state',pointer.path,65536);if(sha(bytes)!==pointer.sha256)throw Error('Cloud photo result integrity failure');const result=JSON.parse(bytes),b=result.binding;if(result.attemptId!==pointer.attemptId||result.reviewMethod!=='cloud-ai-gateway'||result.reviewMethodVersion!=='cloud-ai-gateway-v1-20261103'||!hex(result.requestSha256)||b?.recordKey!==row.key||b.urlSha256!==binding.urlSha256||b.proofTimestamp!==binding.proofTimestamp||b.imageSha256!==binding.imageSha256||!['proposed','needs_review'].includes(result.status)||result.status==='proposed'&&(!Number.isInteger(result.grade)||result.grade<0||result.grade>3)||result.status==='needs_review'&&result.grade!==null||typeof result.reason!=='string'||!result.reason.trim()||result.reason.length>2000||typeof result.uncertainty!=='string'||result.uncertainty.length>2000||typeof result.reviewerModel!=='string'||!Number.isFinite(Date.parse(result.reviewedAt)))return null;try{await readImage(b.imageSha256);}catch(e){if(e.code==='ENOENT')return null;throw e;}return {recordKey:row.key,status:result.status,...(result.status==='proposed'?{grade:result.grade,imageSha256:b.imageSha256}:{}),reason:result.reason,uncertainty:result.uncertainty,rubricVersion:result.rubricVersion,reviewerModel:result.reviewerModel,reviewMethod:result.reviewMethod,reviewMethodVersion:result.reviewMethodVersion,reviewedAt:result.reviewedAt};}
-   const cacheKey=hex(repository.publication?.catalog?.sha256)?[repository.publication.catalog.sha256,reportHash,hash(journal),hash(photoBindingRegistry),!!actor].join(':'):null;let pending=cacheKey&&photoProgressCache.get(cacheKey);if(!pending){pending=(async()=>{const cloud=new Map(),selected=actor?rows.filter(row=>pointers[sha(row.key)]):[];let cursor=0;await Promise.all(Array.from({length:Math.min(6,selected.length)},async()=>{while(cursor<selected.length){const row=selected[cursor++],result=await loadCloud(row);if(result)cloud.set(row.key,result);}}));const verifiedSourceOnlyImages=new Set(),sourceOnly=rows.filter(row=>row.sourceOnly?.assessmentState==='unavailable'&&hex(row.delivery?.photo_sha256));let imageCursor=0;await Promise.all(Array.from({length:Math.min(6,sourceOnly.length)},async()=>{while(imageCursor<sourceOnly.length){const row=sourceOnly[imageCursor++];try{const b=await readImage(row.delivery.photo_sha256),image=b[0]===255&&b[1]===216&&b[2]===255||b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))||b.toString('ascii',0,4)==='RIFF'&&b.toString('ascii',8,12)==='WEBP';if(image)verifiedSourceOnlyImages.add(row.key);}catch{}}}));return {cloud,progress:currentPhotoProgress({rows,inventories,cloud,journal,verifiedSourceOnlyImages})};})();if(cacheKey){photoProgressCache.set(cacheKey,pending);while(photoProgressCache.size>2)photoProgressCache.delete(photoProgressCache.keys().next().value);}}let computed;try{computed=await pending;}catch(e){if(cacheKey&&photoProgressCache.get(cacheKey)===pending)photoProgressCache.delete(cacheKey);throw e;}const {cloud,progress}=computed;
-   for(let i=0;i<merged.length;i++){const result=cloud.get(merged[i].recordKey);if(result&&['pending','unavailable'].includes(merged[i].status))merged[i]=result;}
-   return {rubricVersion:results[1].rubricVersion||results[0].rubricVersion,progressScope:'current-photo-records',progress,legacyProgress:combinedPhotoProgress(inventories),proposals:merged};
+   const cacheKey=hex(repository.publication?.catalog?.sha256)?[
+    deferredPhotoProgress?'deferred':'blocking',repository.publication.catalog.sha256,reportHash,
+    hash(journal),hash(photoBindingRegistry),hash(pointers),!!actor,
+   ].join(':'):null;
+   const applicable=proposal=>['pending','unavailable'].includes(proposal.status);
+   function mergeCloud(cloud){
+    for(let i=0;i<merged.length;i++){
+     const result=cloud.get(merged[i].recordKey);
+     if(result&&applicable(merged[i]))merged[i]=result;
+    }
+   }
+   async function loadProgress(verifiedCloud=new Map()){
+    const cloud=new Map(verifiedCloud),selected=actor?rows.filter(row=>pointers[sha(row.key)]&&!cloud.has(row.key)):[];
+    async function inspect(items,verify){
+     let cursor=0;
+     await Promise.all(Array.from({length:Math.min(deferredPhotoProgress?1:6,items.length)},async()=>{
+      while(cursor<items.length)await verify(items[cursor++]);
+     }));
+    }
+    await inspect(selected,async row=>{
+     const result=await loadCloud(row);
+     if(result)cloud.set(row.key,result);
+    });
+    const verifiedSourceOnlyImages=new Set();
+    const sourceOnly=rows.filter(row=>row.sourceOnly?.assessmentState==='unavailable'&&hex(row.delivery?.photo_sha256));
+    await inspect(sourceOnly,async row=>{
+     try{
+      const b=await readImage(row.delivery.photo_sha256);
+      const image=b[0]===255&&b[1]===216&&b[2]===255||b.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))||b.toString('ascii',0,4)==='RIFF'&&b.toString('ascii',8,12)==='WEBP';
+      if(image)verifiedSourceOnlyImages.add(row.key);
+     }catch(error){
+      if(deferredPhotoProgress&&error?.code!=='ENOENT')throw error;
+     }
+    });
+    return {cloud,progress:currentPhotoProgress({rows,inventories,cloud,journal,verifiedSourceOnlyImages})};
+   }
+   const response={rubricVersion:results[1].rubricVersion||results[0].rubricVersion,progressScope:'current-photo-records',
+    legacyProgress:combinedPhotoProgress(inventories),proposals:merged};
+   if(deferredPhotoProgress){
+    const requested=new Map(merged.map(proposal=>[proposal.recordKey,proposal]));
+    const requestedRows=rows.filter(row=>requested.has(row.key));
+    if(requestedRows.length!==requested.size||new Set(requestedRows.map(row=>row.key)).size!==requested.size){
+     throw Error('Ambiguous requested photo record');
+    }
+    const selected=actor?requestedRows.filter(row=>applicable(requested.get(row.key))):[];
+    const cloud=new Map(await Promise.all(selected.map(async row=>[row.key,await loadCloud(row)])));
+    mergeCloud(cloud);
+    return {...response,...readDeferredPhotoProgress(cacheKey,()=>loadProgress(cloud))};
+   }
+   let pending=cacheKey&&photoProgressCache.get(cacheKey);
+   if(!pending){
+    pending=loadProgress();
+    if(cacheKey)rememberPhotoProgress(cacheKey,pending);
+   }
+   let computed;
+   try{computed=await pending;}
+   catch(error){
+    if(cacheKey&&photoProgressCache.get(cacheKey)===pending)photoProgressCache.delete(cacheKey);
+    throw error;
+   }
+   mergeCloud(computed.cloud);
+   return {...response,progress:computed.progress};
   }
  };
 }
