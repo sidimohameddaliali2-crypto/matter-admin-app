@@ -30,7 +30,7 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
   const rawArchive=dependencies.archive||createSupabaseArchiveTransport({secret:env.DRIVER_AUDIT_SUPABASE_SECRET});
   const store=dependencies.store||createDriverAuditReplica(db(),{capacityBytes:Number(env.DRIVER_AUDIT_CAPACITY_BYTES)});
   let budget=dependencies.budget;
-  const getBudget=()=>budget??=createReaderBudgetPool({stateStore:state,approvedNovemberRelease:true});
+  const getBudget=()=>budget??=createReaderBudgetPool({stateStore:state,approvedNovemberRelease:true,approvedNovemberSync:true});
   const archive=createBudgetedArchiveReader({transport:rawArchive,requestBytes:2048+2*Buffer.byteLength(env.DRIVER_AUDIT_SUPABASE_SECRET||''),budget:{
    reserve:options=>getBudget().reserve(options),
    settle:(reservation,measurement)=>getBudget().settle(reservation,measurement),

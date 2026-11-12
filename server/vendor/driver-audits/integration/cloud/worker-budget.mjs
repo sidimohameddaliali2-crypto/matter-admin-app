@@ -33,7 +33,7 @@ export function createWorkerBudget({stateStore,clock=Date.now,policy=WORKER_BUDG
   async reserve({reservationMicros=policy.reservationMicros}={}){
    if(!validReservationMicros(reservationMicros,policy))fail('Invalid worker budget reservation amount');
    const id=requestId(),now=clock(),period=currentMonth(now);if(!ID.test(id))fail('Invalid worker budget request');
-   const novemberRelease=key==='reader-budget-release-20261112';
+   const novemberRelease=['reader-budget-release-20261112','reader-budget-sync-20261112'].includes(key);
    if(novemberRelease&&period!=='2026-11')return {allowed:false,period,reason:'release-expired'};
    return mutate('reserve',id,doc=>{
     if(novemberRelease){
@@ -65,16 +65,16 @@ export function createWorkerBudget({stateStore,clock=Date.now,policy=WORKER_BUDG
   },
   async settle(reservation,{elapsedMs,extraMicros=0,preReservationMs=0,accountingBasis,cpuMicros,readerUsage}={}){
    validateReservation(reservation,policy);
-   if(readerUsage!==undefined){if(!['reader-budget','reader-budget-reserve','reader-budget-approved-20261106','reader-budget-release-20261112'].includes(key))fail('Reader usage is not a collector measurement');readerUsage=validateReaderUsage(readerUsage);}
+   if(readerUsage!==undefined){if(!['reader-budget','reader-budget-reserve','reader-budget-approved-20261106','reader-budget-release-20261112','reader-budget-sync-20261112'].includes(key))fail('Reader usage is not a collector measurement');readerUsage=validateReaderUsage(readerUsage);}
    const archiveTransferOnly=accountingBasis==='remote-archive-transfer-v1';
-   if(archiveTransferOnly&&(!['reader-budget','reader-budget-reserve','reader-budget-approved-20261106','reader-budget-release-20261112'].includes(key)||cpuMicros!==undefined||readerUsage!==undefined))fail('Invalid remote archive accounting');
+   if(archiveTransferOnly&&(!['reader-budget','reader-budget-reserve','reader-budget-approved-20261106','reader-budget-release-20261112','reader-budget-sync-20261112'].includes(key)||cpuMicros!==undefined||readerUsage!==undefined))fail('Invalid remote archive accounting');
    if(accountingBasis!==undefined&&!archiveTransferOnly&&(accountingBasis!=='expired-platform-maximum'||!['reader-budget','reader-budget-reserve'].includes(key)||reservation.reservationMicros!==150_000||elapsedMs!==300_000||preReservationMs!==0||extraMicros!==105_614||clock()-reservation.startedAtMs<360_000))fail('Unverified expired reader bound');
    if(!Number.isSafeInteger(preReservationMs)||preReservationMs<0||preReservationMs>policy.maxRunMs||preReservationMs>elapsedMs)fail('Uncertain pre-reservation duration');
    let charge=settledMicros(policy,elapsedMs,extraMicros);
    // A verified archive transfer from a fixed-cost host incurs no Vercel compute.
    // Keep its measured duration in the receipt and charge the bounded transfer.
    if(archiveTransferOnly)charge=extraMicros;
-   if(cpuMicros!==undefined){if(!['reader-budget','reader-budget-reserve','reader-budget-approved-20261106','reader-budget-release-20261112'].includes(key)||accountingBasis!==undefined)fail('Invalid reader compute accounting');charge=readerComputeMicros({elapsedMs,cpuMicros})+extraMicros;}
+   if(cpuMicros!==undefined){if(!['reader-budget','reader-budget-reserve','reader-budget-approved-20261106','reader-budget-release-20261112','reader-budget-sync-20261112'].includes(key)||accountingBasis!==undefined)fail('Invalid reader compute accounting');charge=readerComputeMicros({elapsedMs,cpuMicros})+extraMicros;}
    return mutate('settle',reservation.id,doc=>{
     const r=doc.active[reservation.id];if(!r)return {commit:false,result:{settled:false,reason:'not-active'}};
     if(r.period!==reservation.period||r.startedAtMs!==reservation.startedAtMs||r.reservationMicros!==reservation.reservationMicros)fail('Worker budget reservation mismatch');
