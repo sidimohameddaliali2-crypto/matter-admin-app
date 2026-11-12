@@ -14,6 +14,7 @@ const attemptName = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 // The saved-data replay used 1.32 GB of working space. Retain additional room
 // for a larger capture.
 const minimumBuildBytes = 2560 * 1024 * 1024;
+const buildStartOverheadBytes = 8 * 1024 * 1024;
 
 export function hasDriverAuditBuildSpace(availableBytes) {
   return Number.isSafeInteger(availableBytes) && availableBytes >= minimumBuildBytes;
@@ -111,7 +112,29 @@ export async function pruneDriverAuditWorkspace({root, receiptRoot, retirement, 
     attemptsCompacted++;
   }
   if(abandoned==='plan')return {abandoned:orphaned,retirementDeferred};
+  return {attemptsCompacted, attemptsRetired, retirementDeferred, abandoned:orphaned,
+    ...await pruneArchiveCache(root,{maxCacheBytes})};
+}
+
+// The saved source loader fills this cache only from hash-verified immutable
+// archive objects. A cache miss uses its normal verified archive read.
+export async function reclaimDriverAuditBuildCache(root, availableBytes) {
+  if (!path.isAbsolute(root) || !Number.isSafeInteger(availableBytes) || availableBytes < 0) {
+    throw Error('Invalid audit cache headroom');
+  }
+  if (hasDriverAuditBuildSpace(availableBytes)) return {cacheBytesRemoved:0,cacheAllocatedBytesRemoved:0};
+  return pruneArchiveCache(root,{bytesToReclaim:minimumBuildBytes-availableBytes+buildStartOverheadBytes});
+}
+
+async function pruneArchiveCache(root,{maxCacheBytes=Infinity,bytesToReclaim=0}) {
   const cache = path.join(root, 'archive-cache');
+  for (const directory of [root,cache]) {
+    const stat=await fs.lstat(directory).catch(error=>{
+      if(error.code==='ENOENT')return null;
+      throw error;
+    });
+    if(stat&&!stat.isDirectory())throw Error('Audit cache directory must be a real directory');
+  }
   const cached = [];
   for (const entry of await fs.readdir(cache, {withFileTypes: true}).catch(error => {
     if (error.code === 'ENOENT') return [];
@@ -119,16 +142,18 @@ export async function pruneDriverAuditWorkspace({root, receiptRoot, retirement, 
   })) {
     if (!entry.isFile() || !/^[a-f0-9]{64}\.gz$/.test(entry.name)) continue;
     const file = path.join(cache, entry.name), stat = await fs.lstat(file);
-    if (stat.isFile()) cached.push({file, bytes: stat.size, modified: stat.mtimeMs});
+    if (stat.isFile()) cached.push({file,bytes:stat.size,modified:stat.mtimeMs,allocated:stat.nlink===1?stat.blocks*512:0});
   }
-  let cachedBytes = cached.reduce((sum, file) => sum + file.bytes, 0), cacheBytesRemoved = 0;
+  let cachedBytes = cached.reduce((sum, file) => sum + file.bytes, 0), cacheBytesRemoved = 0, cacheAllocatedBytesRemoved=0;
   for (const entry of cached.sort((left, right) => left.modified - right.modified)) {
-    if (cachedBytes <= maxCacheBytes) break;
+    if (cachedBytes <= maxCacheBytes && cacheAllocatedBytesRemoved >= bytesToReclaim) break;
+    if (cachedBytes <= maxCacheBytes && !entry.allocated) continue;
     await fs.unlink(entry.file);
     cachedBytes -= entry.bytes;
     cacheBytesRemoved += entry.bytes;
+    cacheAllocatedBytesRemoved += entry.allocated;
   }
-  return {attemptsCompacted, attemptsRetired, retirementDeferred, cacheBytesRemoved, cachedBytes, abandoned:orphaned};
+  return {cacheBytesRemoved,cachedBytes,cacheAllocatedBytesRemoved};
 }
 
 async function hashFile(file, compressed = false) {

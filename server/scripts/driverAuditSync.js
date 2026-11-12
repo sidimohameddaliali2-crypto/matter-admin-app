@@ -7,7 +7,7 @@ import {runDriverAuditDirectImport} from '../services/driverAuditDirectImport.js
 import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollection.js';
 import {driverAuditReplicaRetentionStatus,driverAuditRetentionImplementation} from '../services/driverAuditRetention.js';
 import {withDriverAuditWriter} from '../services/driverAuditWriter.js';
-import {hasDriverAuditBuildSpace,pruneDriverAuditWorkspace,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
+import {hasDriverAuditBuildSpace,pruneDriverAuditWorkspace,reclaimDriverAuditBuildCache,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
 import {prunePreviousDriverAuditCopies} from '../services/driverAuditWorkspaceRetirement.js';
 import {pathToFileURL} from 'node:url';
 import {createBudgetedAuditArchive,createBudgetedAuditState} from '../vendor/driver-audits/integration/cloud/driver-audit-archive.mjs';
@@ -163,13 +163,22 @@ async function main(){
        if(error.code==='ENOENT')return freeBuildBytes(root);
        throw error;
       });
-      if(collectReplicas&&!hasDriverAuditBuildSpace(before)){
+      let available=before;
+      if(collectReplicas&&!hasDriverAuditBuildSpace(available)){
        const copies=await withDriverAuditWriter(db,async()=>prunePreviousDriverAuditCopies({
         root:work,receiptRoot,head:await readHead(),stage:await control.findOne({_id:'direct-stage'}),retentionStatus:replicaGcStatus,
        }));
        if(copies==='proof-unavailable')console.warn(JSON.stringify({event:'audit-workspace-retirement-deferred',attempts:1}));
-       else if(copies)console.warn(JSON.stringify({event:'audit-workspace-archive-copies-retired',...copies,
-        freeDiskDeltaBytes:await freeBuildBytes()-before}));
+       else if(copies){
+        available=await freeBuildBytes();
+        console.warn(JSON.stringify({event:'audit-workspace-archive-copies-retired',...copies,
+         freeDiskDeltaBytes:available-before}));
+       }
+      }
+      if(!hasDriverAuditBuildSpace(available)){
+       const reclaimed=await reclaimDriverAuditBuildCache(work,available);
+       if(reclaimed.cacheBytesRemoved)console.warn(JSON.stringify({event:'audit-workspace-cache-reclaimed',...reclaimed,
+        freeDiskDeltaBytes:await freeBuildBytes()-available}));
       }
       return builder.tick();
      },

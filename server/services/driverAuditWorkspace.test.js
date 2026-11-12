@@ -3,7 +3,7 @@ import test from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {pruneDriverAuditWorkspace,requireDriverAuditBuildSpace} from './driverAuditWorkspace.js';
+import {pruneDriverAuditWorkspace,reclaimDriverAuditBuildCache,requireDriverAuditBuildSpace} from './driverAuditWorkspace.js';
 
 test('measured working-space reserve allows retained builds and still blocks an undersized disk', () => {
   assert.doesNotThrow(() => requireDriverAuditBuildSpace(3646214144));
@@ -69,5 +69,26 @@ test('archive cache retention is bounded and preserves unrelated files and symli
   assert.equal(result.cacheBytesRemoved,5);
   assert.equal(await fs.readFile(second,'utf8'),'67890');
   assert.equal(await fs.readFile(path.join(cache,'keep.private'),'utf8'),'keep');
+  assert.equal((await fs.lstat(path.join(cache,'c'.repeat(64)+'.gz'))).isSymbolicLink(),true);
+});
+
+test('disk pressure below the build reserve reclaims only enough of the oldest archive cache',async t=>{
+  const root=await fs.mkdtemp(path.join(os.tmpdir(),'audit-cache-headroom-'));
+  t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const cache=path.join(root,'archive-cache');
+  await fs.mkdir(cache);
+  const old=path.join(cache,'a'.repeat(64)+'.gz'),recent=path.join(cache,'b'.repeat(64)+'.gz');
+  await fs.writeFile(old,Buffer.alloc(9*1024*1024,41));
+  await fs.utimes(old,new Date(0),new Date(0));
+  await fs.writeFile(recent,'cache');
+  const protectedFile=path.join(root,'current.private.json');
+  await fs.writeFile(protectedFile,'active');
+  await fs.symlink(protectedFile,path.join(cache,'c'.repeat(64)+'.gz'));
+  const floor=2560*1024*1024;
+  assert.equal((await reclaimDriverAuditBuildCache(root,floor)).cacheBytesRemoved,0);
+  const result=await reclaimDriverAuditBuildCache(root,floor-4096);
+  assert.equal(result.cacheBytesRemoved,9*1024*1024);
+  assert.equal(await fs.readFile(recent,'utf8'),'cache');
+  assert.equal(await fs.readFile(protectedFile,'utf8'),'active');
   assert.equal((await fs.lstat(path.join(cache,'c'.repeat(64)+'.gz'))).isSymbolicLink(),true);
 });
