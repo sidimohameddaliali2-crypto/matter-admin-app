@@ -64,12 +64,13 @@ async function readFile(file, { optional = false, privateOnly = false } = {}) {
   }
 }
 
-async function atomicWrite(file, text, beforeRename = async () => {}) {
+async function atomicWrite(file, text, beforeRename = async () => {}, { createOnly = false } = {}) {
   const temporary = file + '.' + randomUUID();
   try {
     await fs.writeFile(temporary, text, { mode: 0o600, flag: 'wx' });
     await beforeRename();
-    await fs.rename(temporary, file);
+    if (createOnly) await fs.link(temporary, file);
+    else await fs.rename(temporary, file);
   } finally {
     await fs.rm(temporary, { force: true });
   }
@@ -272,6 +273,7 @@ export async function driverAuditRetentionImplementation(root = serverRoot) {
     'services/driverAuditDirectImport.js',
     'services/driverAuditReplica.js',
     'services/driverAuditWriter.js',
+    'services/driverAuditWorkspace.js',
     'scripts/driverAuditSync.js',
     'vendor/driver-audits/integration/cloud/audit-replica.mjs',
     'vendor/driver-audits/integration/cloud/automatic-hosted-preview.mjs',
@@ -349,48 +351,46 @@ export function checkDriverAuditRetentionHead(head, generations, expected) {
   return identity;
 }
 
-export async function restartDriverAuditRetention({ checkHead, stop, restart, wait, save, writeSettings, writeReceipt }) {
-  let receiptChanged = false;
-  let settingsChanged = false;
-  let restartAttempted = false;
+export async function restartDriverAuditRetention({
+  checkHead, stop, restart, wait, save, writeSettings, writeReceipt, restore, clearTransition,
+}) {
   try {
     await stop();
     await checkHead();
-    receiptChanged = true;
     await writeReceipt(true);
-    settingsChanged = true;
     await writeSettings(true);
-    restartAttempted = true;
     await restart();
     await wait();
     await save();
   } catch (error) {
     try {
-      try {
-        if (restartAttempted) await stop();
-      } finally {
-        try {
-          if (settingsChanged) await writeSettings(false);
-        } finally {
-          if (receiptChanged) await writeReceipt(false);
-        }
-      }
-      await restart();
-      await wait();
-      await save();
+      await restore();
+      await clearTransition();
     } catch {
-      throw new DeploymentError('Audit retention activation failed and restarting the prior GC-off worker could not be confirmed.');
+      throw new DeploymentError('Audit retention activation failed and restarting the prior GC-off worker could not be confirmed. Retry the same operation to recover it.');
     }
     throw error;
   }
+  await clearTransition();
 }
 
 async function enableRetention({ commit, manifest, capacity, secret, root, pmEnv, activeSettings, gcRestoreReceiptSha256, generations }) {
   requireValue(retainedGenerations.test(generations ?? ''), 'Exact current and previous audit generations are required.');
   const config = path.join(root, 'sync.json');
+  const syncReceipt = path.join(root, 'deployment-sync.json');
+  const transitionFile = path.join(root, 'deployment-retention-transition.json');
+  let transitionText = await readFile(transitionFile, { optional: true, privateOnly: true });
+  const transition = transitionText === null ? null : JSON.parse(transitionText);
   const worker = await processEntry(syncName, pmEnv);
-  requireValue(worker?.pm2_env?.status === 'online' && registeredWorkerConfig(worker) === config && Number.isInteger(worker.pm_id),
-    'The reviewed audit sync worker is not running with its pinned configuration.');
+  requireValue(Number.isInteger(worker?.pm_id) && registeredWorkerConfig(worker) === config
+    && (transition || worker.pm2_env.status === 'online'), 'The reviewed audit sync worker does not match its pinned configuration.');
+  if (transitionText !== null) {
+    requireValue(transition?.version === 1 && transition.workerId === worker.pm_id
+      && transition.manifest === manifest && transition.generations === generations
+      && transition.proofSha256 === gcRestoreReceiptSha256 && /^[a-f0-9]{40}$/.test(transition.commit)
+      && typeof transition.priorText === 'string' && Number.isFinite(Date.parse(transition.requestedAt)),
+    'Retry the interrupted audit retention operation with the same reviewed inputs and registered worker.');
+  }
   const checkedWorker = async () => {
     const current = await processEntry(syncName, pmEnv);
     requireValue(current?.pm_id === worker.pm_id && registeredWorkerConfig(current) === config,
@@ -398,44 +398,37 @@ async function enableRetention({ commit, manifest, capacity, secret, root, pmEnv
     return current.pm2_env.status;
   };
 
-  const syncReceipt = path.join(root, 'deployment-sync.json');
-  const priorText = await readFile(syncReceipt, { privateOnly: true });
+  const currentText = await readFile(syncReceipt, { privateOnly: true });
+  const priorText = transition?.priorText ?? currentText;
   const prior = JSON.parse(priorText);
   const enabled = await jsonFile(path.join(root, 'deployment-enabled.json'));
   const seed = await jsonFile(path.join(root, 'seed.json'));
-  const durable = await readDurableSettings();
+  const checkedSettings = async () => {
+    const durable = await readDurableSettings();
+    requireValue(durable.MONGODB_URI === process.env.MONGODB_URI && ['0', '1'].includes(durable[gcKey])
+      && Object.entries(activeSettings).every(([key, value]) => key === gcKey || durable[key] === value && process.env[key] === value),
+    'The persisted audit worker settings changed.');
+    return durable[gcKey];
+  };
+  const gcSetting = await checkedSettings();
   requireValue(prior.manifest === manifest && prior.generation === seed?.pointer?.generation
     && sha256.test(prior.staffVerificationSha256) && Number.isFinite(Date.parse(prior.supervisedAt))
     && enabled.manifest === manifest && enabled.prepared?.generation === seed.pointer.generation
     && enabled.prepared.reportHash === seed.pointer.reportHash && enabled.prepared.manifestSha256 === seed.manifestSha256
-    && enabled.prepared.capacityBytes === capacity
-    && durable.MONGODB_URI === process.env.MONGODB_URI
-    && durable[gcKey] === process.env[gcKey]
-    && Object.entries(activeSettings).every(([key, value]) => key === gcKey || durable[key] === value && process.env[key] === value),
-  'The pinned audit seed, supervised worker or persisted runtime settings do not match.');
-  const identity = checkDriverAuditRetentionHead(await readActiveHead(), generations);
-  const { createSupabaseArchiveTransport } = await import('../vendor/driver-audits/integration/hosted/supabase-archive.mjs');
-  await readDriverAuditRetentionProof({
-    archive: createSupabaseArchiveTransport({ secret }),
-    expectedSha256: gcRestoreReceiptSha256,
-    seed,
-    implementationSha256: await driverAuditRetentionImplementation(),
-  });
-  if (process.env[gcKey] === '1' && prior.replicaGcEnabled === true && prior.gcRestoreReceiptSha256 === gcRestoreReceiptSha256) {
-    return { status: 'already-enabled', replicaGcEnabled: true };
-  }
-  requireValue(process.env[gcKey] === '0' && prior.replicaGcEnabled !== true && !prior.gcRestoreReceiptSha256,
-    'The running audit worker has different replica retention settings or evidence.');
-  await checkWorkerConfig(config, pmEnv);
-  checkDriverAuditRetentionHead(await readActiveHead(), generations, identity);
+    && enabled.prepared.capacityBytes === capacity, 'The pinned audit seed and supervised worker receipts do not match.');
 
+  const requestedAt = transition?.requestedAt ?? new Date().toISOString();
   let startedAt;
   const nextReceipt = JSON.stringify({
     ...prior, replicaGcEnabled: true, gcRestoreReceiptSha256,
-    retention: { commit, generations, requestedAt: new Date().toISOString() },
+    retention: { commit: transition?.commit ?? commit, generations, requestedAt },
   }) + '\n';
-  await restartDriverAuditRetention({
-    async checkHead() { checkDriverAuditRetentionHead(await readActiveHead(), generations, identity); },
+  const receiptState = async () => {
+    const current = await readFile(syncReceipt, { privateOnly: true });
+    requireValue(current === priorText || current === nextReceipt, 'The audit sync receipt changed during retention activation.');
+    return current;
+  };
+  const workerOperations = {
     async stop() {
       if (await checkedWorker() !== 'stopped') await pm2(['stop', syncName], pmEnv);
       requireValue(await checkedWorker() === 'stopped', 'The reviewed audit sync worker could not be stopped.');
@@ -451,13 +444,67 @@ async function enableRetention({ commit, manifest, capacity, secret, root, pmEnv
       requireValue(await checkedWorker() === 'online', 'The reviewed audit sync worker did not become online.');
     },
     async save() { await pm2(['save'], pmEnv); },
-    async writeSettings(on) { await writeDriverAuditEnvironment(serverRoot, { ...activeSettings, [gcKey]: on ? '1' : '0' }); },
+    async writeSettings(on) {
+      await checkedSettings();
+      await writeDriverAuditEnvironment(serverRoot, { ...activeSettings, [gcKey]: on ? '1' : '0' });
+    },
     async writeReceipt(on) {
       await atomicWrite(syncReceipt, on ? nextReceipt : priorText, async () => {
-        const current = await readFile(syncReceipt, { privateOnly: true });
-        requireValue(current === priorText || !on && current === nextReceipt, 'The audit sync receipt changed during retention activation.');
+        await receiptState();
       });
     },
+    async clearTransition() {
+      requireValue(await readFile(transitionFile, { privateOnly: true }) === transitionText, 'The audit retention transition changed.');
+      await fs.unlink(transitionFile);
+    },
+    async restore() {
+      const settingsChanged = await checkedSettings() !== '0';
+      const receiptChanged = await receiptState() !== priorText;
+      if (settingsChanged || receiptChanged || await checkedWorker() !== 'online') {
+        await workerOperations.stop();
+        if (settingsChanged) await workerOperations.writeSettings(false);
+        if (receiptChanged) await workerOperations.writeReceipt(false);
+        await workerOperations.restart();
+        await workerOperations.wait();
+      }
+      await workerOperations.save();
+    },
+  };
+
+  if (transition) {
+    requireValue(prior.replicaGcEnabled !== true && !prior.gcRestoreReceiptSha256,
+      'The interrupted retention operation has no verified GC-off settings to restore.');
+    await workerOperations.restore();
+    await workerOperations.clearTransition();
+    return { status: 'recovered', replicaGcEnabled: false };
+  }
+
+  const identity = checkDriverAuditRetentionHead(await readActiveHead(), generations);
+  const { createSupabaseArchiveTransport } = await import('../vendor/driver-audits/integration/hosted/supabase-archive.mjs');
+  await readDriverAuditRetentionProof({
+    archive: createSupabaseArchiveTransport({ secret }),
+    expectedSha256: gcRestoreReceiptSha256,
+    seed,
+    implementationSha256: await driverAuditRetentionImplementation(),
+  });
+  if (gcSetting === '1' && prior.replicaGcEnabled === true && prior.gcRestoreReceiptSha256 === gcRestoreReceiptSha256) {
+    requireValue(await checkedWorker() === 'online', 'The reviewed audit sync worker is not online.');
+    await workerOperations.save();
+    return { status: 'already-enabled', replicaGcEnabled: true };
+  }
+  requireValue(gcSetting === '0' && prior.replicaGcEnabled !== true && !prior.gcRestoreReceiptSha256,
+    'The running audit worker has different replica retention settings or evidence.');
+  await checkWorkerConfig(config, pmEnv);
+  checkDriverAuditRetentionHead(await readActiveHead(), generations, identity);
+  requireValue(await checkedSettings() === '0' && await receiptState() === priorText, 'The audit retention settings changed before activation.');
+  transitionText = JSON.stringify({
+    version: 1, commit, manifest, workerId: worker.pm_id, generations, requestedAt,
+    proofSha256: gcRestoreReceiptSha256, priorText,
+  }) + '\n';
+  await atomicWrite(transitionFile, transitionText, undefined, { createOnly: true });
+  await restartDriverAuditRetention({
+    ...workerOperations,
+    async checkHead() { checkDriverAuditRetentionHead(await readActiveHead(), generations, identity); },
   });
   return { status: 'enabled', replicaGcEnabled: true };
 }
@@ -466,8 +513,8 @@ async function release(operation, shell) {
   const commit = shell.DRIVER_AUDIT_DEPLOY_SHA;
   requireValue(/^[a-f0-9]{40}$/.test(commit ?? ''), 'An exact reviewed application commit is required.');
   const gcRestoreReceiptSha256 = shell.DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256 || null;
-  requireValue(!gcRestoreReceiptSha256 || ['audit-sync-start', retentionOperation].includes(operation) && sha256.test(gcRestoreReceiptSha256),
-    'Replica retention requires the reviewed restore receipt SHA-256 on audit-sync-start or audit-retention-enable.');
+  requireValue(!gcRestoreReceiptSha256 || operation === retentionOperation && sha256.test(gcRestoreReceiptSha256),
+    'Replica retention requires the reviewed restore receipt SHA-256 on audit-retention-enable.');
   requireValue(operation !== retentionOperation || gcRestoreReceiptSha256, 'The reviewed private restore and rollback proof SHA-256 is required.');
   const head = await run('git', ['rev-parse', 'HEAD'], shell, 'The deployed application commit could not be checked.');
   requireValue(head.trim() === commit, 'The deployed application commit differs from the reviewed commit.');
@@ -603,15 +650,14 @@ async function release(operation, shell) {
   await ensureRoom();
   const syncConfig = path.join(root, 'sync.json');
   const syncReceipt = path.join(root, 'deployment-sync.json');
-  const replicaGcEnabled = gcRestoreReceiptSha256 !== null;
-  const gcSetting = replicaGcEnabled ? '1' : '0';
+  const replicaGcEnabled = false;
   const previousWorker = await processEntry(syncName, pmEnv);
   if (previousWorker) {
     requireValue(matchingWorker(previousWorker, syncConfig) && previousWorker.pm2_env.status === 'online',
       'An existing audit sync process differs from the reviewed worker. Roll it back before starting another.');
     const previous = await jsonFile(syncReceipt);
-    requireValue((durable[gcKey] ?? '0') === gcSetting && (previous.replicaGcEnabled ?? false) === replicaGcEnabled
-      && (previous.gcRestoreReceiptSha256 ?? null) === gcRestoreReceiptSha256,
+    requireValue((durable[gcKey] ?? '0') === '0' && (previous.replicaGcEnabled ?? false) === false
+      && (previous.gcRestoreReceiptSha256 ?? null) === null,
     'The running audit worker has different retention settings or evidence. Roll it back before a reviewed restart.');
     return { status: 'already-supervised', generation, replicaGcEnabled };
   }
@@ -625,7 +671,7 @@ async function release(operation, shell) {
   await atomicWrite(syncReceipt, JSON.stringify(receipt) + '\n');
   let settingsWritten = false;
   try {
-    await writeDriverAuditEnvironment(serverRoot, { ...activeSettings, [gcKey]: gcSetting });
+    await writeDriverAuditEnvironment(serverRoot, activeSettings);
     settingsWritten = true;
     await checkWorkerConfig(syncConfig, pmEnv);
     const startedAt = Date.now();

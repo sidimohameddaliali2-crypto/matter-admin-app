@@ -107,8 +107,8 @@ jobs:
             echo "The workflow ref must match the exact reviewed commit."
             exit 1
           fi
-          if [ -n "$GC_RESTORE_RECEIPT" ] && { { [ "$OPERATION" != audit-sync-start ] && [ "$OPERATION" != audit-retention-enable ]; } || [[ ! "$GC_RESTORE_RECEIPT" =~ ^[a-f0-9]{64}$ ]]; }; then
-            echo "Replica retention requires the reviewed restore receipt SHA-256 on audit-sync-start or audit-retention-enable."
+          if [ -n "$GC_RESTORE_RECEIPT" ] && [ "$OPERATION" != audit-retention-enable ]; then
+            echo "Only audit-retention-enable can enable replica reclamation."
             exit 1
           fi
           if [ "$OPERATION" = audit-retention-enable ] && [[ ! "$GC_RESTORE_RECEIPT" =~ ^[a-f0-9]{64}$ || ! "$RETAINED_GENERATIONS" =~ ^[a-f0-9]{64}:[a-f0-9]{64}$ ]]; then

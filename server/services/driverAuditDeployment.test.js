@@ -74,6 +74,7 @@ test('an ordinary deployment leaves an unregistered audit worker inactive', asyn
   await fs.mkdir(scripts, { recursive: true });
   await fs.mkdir(bin);
   await fs.writeFile(path.join(server, 'package.json'), '{"type":"module"}');
+  await fs.writeFile(path.join(server, 'loadEnv.js'), 'export {};');
   const script = path.join(scripts, 'driverAuditDeploy.js');
   await fs.copyFile(fileURLToPath(new URL('../scripts/driverAuditDeploy.js', import.meta.url)), script);
   const commit = 'a'.repeat(40);
@@ -88,7 +89,10 @@ test('an ordinary deployment leaves an unregistered audit worker inactive', asyn
   }), /differs from the reviewed commit/);
   await assert.rejects(exec(process.execPath, [script, 'deploy-worker-pause'], {
     env: { ...env, DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256: 'c'.repeat(64) },
-  }), /requires the reviewed restore receipt SHA-256 on audit-sync-start/);
+  }), /requires the reviewed restore receipt SHA-256 on audit-retention-enable/);
+  await assert.rejects(exec(process.execPath, [script, 'audit-sync-start'], {
+    env: { ...env, DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256: 'c'.repeat(64) },
+  }), /requires the reviewed restore receipt SHA-256 on audit-retention-enable/);
 });
 
 const digest = value => value.repeat(64);
@@ -174,8 +178,10 @@ test('retention pins the current and previous identities and rejects changes dur
     async save() { calls.push('save'); },
     async writeSettings(enabled) { calls.push('settings:' + enabled); },
     async writeReceipt(enabled) { calls.push('receipt:' + enabled); },
+    async restore() { calls.push('restore'); },
+    async clearTransition() { calls.push('clear'); },
   }), /changed head/i);
-  assert.deepEqual(calls, ['stop','restart','wait','save']);
+  assert.deepEqual(calls, ['stop','restore','clear']);
 });
 
 test('retention restarts only the supervised worker and restores the exact prior settings and receipt on failure', async () => {
@@ -195,6 +201,8 @@ test('retention restarts only the supervised worker and restores the exact prior
       async save() { calls.push('save'); },
       async writeSettings(enabled) { calls.push('settings:' + enabled); gc = enabled; },
       async writeReceipt(enabled) { calls.push('receipt:' + enabled); },
+      async restore() { calls.push('restore'); gc = false; },
+      async clearTransition() { calls.push('clear'); },
     });
     if (failStartup) await assert.rejects(task, /startup failed/);
     else await task;
@@ -202,6 +210,15 @@ test('retention restarts only the supervised worker and restores the exact prior
     return calls;
   }
   const attempt = ['stop','head','receipt:true','settings:true','restart','wait'];
-  assert.deepEqual(await run({ failStartup: false }), [...attempt,'save']);
-  assert.deepEqual(await run({ failStartup: true }), [...attempt,'stop','settings:false','receipt:false','restart','wait','save']);
+  assert.deepEqual(await run({ failStartup: false }), [...attempt,'save','clear']);
+  assert.deepEqual(await run({ failStartup: true }), [...attempt,'restore','clear']);
+});
+
+test('failed recovery preserves the transition for an exact retry', async () => {
+  const { restartDriverAuditRetention } = await import('../scripts/driverAuditDeploy.js');
+  await assert.rejects(restartDriverAuditRetention({
+    async stop() { throw Error('stop failed'); },
+    async restore() { throw Error('worker unavailable'); },
+    async clearTransition() { assert.fail('An incomplete transition must stay available for recovery'); },
+  }), /restarting the prior GC-off worker could not be confirmed/);
 });
