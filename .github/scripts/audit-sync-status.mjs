@@ -15,6 +15,7 @@ const buildStates = ['building', 'validating', 'ready', 'unchanged', 'superseded
 const tracked = ['combined-reviews.private.json', 'verified-gps-windows.private.json', 'gps-refresh-receipt.private.json',
   'automatic-build.private.json', 'automatic-preservation.private.json', 'automatic-validation.private.json',
   'accepted.private.json', 'direct-seed.private.json'];
+const attemptDirectories = ['saved-current', 'server-data', 'audit-objects'];
 
 const missing = error => { if (error.code === 'ENOENT') return null; throw error; };
 const stat = file => fs.lstat(file).catch(missing);
@@ -46,7 +47,7 @@ async function json(file) {
 async function summarizeDirectory(directory) {
   if (!(await stat(directory))?.isDirectory()) return null;
   const limit = 8192;
-  let entries = 0, files = 0, bytes = 0, latest = 0;
+  let entries = 0, files = 0, bytes = 0, allocatedBytes = 0, latest = 0;
   for await (const entry of await fs.opendir(directory)) {
     if (entries === limit) break;
     entries++;
@@ -55,19 +56,69 @@ async function summarizeDirectory(directory) {
     if (!info?.isFile()) continue;
     files++;
     bytes += info.size;
+    allocatedBytes += info.blocks * 512;
     latest = Math.max(latest, info.mtimeMs);
   }
-  return { files, bytes, latestWriteAt: latest ? new Date(latest).toISOString() : null, bounded: entries === limit };
+  return { files, bytes, allocatedBytes, latestWriteAt: latest ? new Date(latest).toISOString() : null, bounded: entries === limit };
+}
+
+async function summarizeAttemptDirectories(directory) {
+  return Object.fromEntries(await Promise.all(attemptDirectories.map(async key => [key, await summarizeDirectory(path.join(directory, key))])));
+}
+
+async function summarizeAttempts(work, current, saved, progress) {
+  const root = path.join(work, 'attempts');
+  if (!(await stat(root))?.isDirectory() || await fs.realpath(root) !== root) return null;
+  const keep = new Set([current?.privateRoot, current?.previous?.privateRoot, current?.baselineRoot]
+    .filter(value => typeof value === 'string').map(value => path.dirname(value)));
+  const found = [];
+  let scanned = 0, scanBounded = false;
+  for await (const entry of await fs.opendir(root)) {
+    if (scanned === 4096) { scanBounded = true; break; }
+    scanned++;
+    if (!entry.isDirectory() || !attempt.test(entry.name)) continue;
+    const directory = path.join(root, entry.name), info = await stat(directory);
+    if (!info?.isDirectory()) continue;
+    const children = await fs.opendir(directory).catch(missing);
+    if (!children) continue;
+    let nonempty;
+    try { nonempty = !!await children.read(); }
+    finally { await children.close(); }
+    found.push({ id: entry.name, directory, nonempty, modified: info.mtimeMs });
+  }
+  const selected = found.sort((a, b) => Number(b.nonempty) - Number(a.nonempty) || b.modified - a.modified).slice(0, 64);
+  const summaries = [];
+  for (const { id, directory, nonempty, modified } of selected) {
+    const [accepted, seed, proof, legacy, direct, directories] = await Promise.all([
+      json(path.join(directory, 'accepted.private.json')),
+      json(path.join(directory, 'direct-seed.private.json')),
+      json(path.join(directory, 'retired-workspace.private.json')),
+      json(path.join(directory, 'compacted-files.private.json')),
+      summarizeDirectory(directory),
+      summarizeAttemptDirectories(directory),
+    ]);
+    const protectedByPointer = keep.has(directory);
+    const protectedByHeartbeat = manifest.test(saved?.activeGeneration) && seed?.pointer?.generation === saved.activeGeneration;
+    const inUse = ['building', 'validating'].includes(progress?.status) && progress.id === id;
+    summaries.push({ id, nonempty, modifiedAt: new Date(modified).toISOString(), accepted: !!accepted, seed: !!seed,
+      prepared: proof?.status === 'prepared', retired: proof?.status === 'retired', legacyCompacted: legacy?.complete === true,
+      protected: protectedByPointer || protectedByHeartbeat || inUse, protectedByPointer, protectedByHeartbeat, inUse,
+      collectorRevision: number(accepted?.collectorRevision ?? seed?.collectorRevision), direct, directories });
+  }
+  return { observed: found.length, nonempty: found.filter(item => item.nonempty).length, omitted: found.length - selected.length,
+    scanBounded, summaries };
 }
 
 async function summarizeLogs(pm2Home) {
-  const counts = { refreshPaused: 0, startupFailed: 0, memoryLimit: 0, other: 0 };
+  const counts = { refreshPaused: 0, startupFailed: 0, memoryLimit: 0, retirementDeferred: 0, lastRetirementDeferredAttempts: null, other: 0 };
   const file = path.join(pm2Home, 'logs', name + '-error.log');
   const log = await readTail(file, 32 * 1024).catch(() => null);
   for (const line of (log || '').split(/\r?\n/).filter(Boolean).slice(-40)) {
+    const deferred = /\{"event":"audit-workspace-retirement-deferred","attempts":([1-9]\d{0,4})\}$/.exec(line);
     if (line.includes('Driver audit sync paused this refresh.')) counts.refreshPaused++;
     else if (line.includes('Driver audit sync could not start.')) counts.startupFailed++;
     else if (/heap out of memory|Reached heap limit/.test(line)) counts.memoryLimit++;
+    else if (deferred) { counts.retirementDeferred++; counts.lastRetirementDeferredAttempts = Number(deferred[1]); }
     else counts.other++;
   }
   return counts;
@@ -109,8 +160,7 @@ export async function readAuditSyncStatus({ appRoot, pm2Home, entry }) {
       const info = await stat(path.join(directory, file));
       if (info?.isFile()) files[file] = { bytes: info.size, modifiedAt: info.mtime.toISOString() };
     }
-    const names = ['saved-current', 'server-data', 'audit-objects'];
-    directories = Object.fromEntries(await Promise.all(names.map(async key => [key, await summarizeDirectory(path.join(directory, key))])));
+    directories = await summarizeAttemptDirectories(directory);
   }
   const started = number(pm.pm_uptime);
   return {
@@ -123,7 +173,10 @@ export async function readAuditSyncStatus({ appRoot, pm2Home, entry }) {
       checkedAt: iso(saved.checkedAt), nextCheckAt: iso(saved.nextCheckAt), latestCaptureAt: iso(saved.latestCaptureAt), visibleCutoffAt: iso(saved.visibleCutoffAt) },
     build: { status: allowed(progress?.status, buildStates), startedAt: iso(progress?.startedAt ?? progress?.attempt?.startedAt),
       checkedAt: iso(progress?.checkedAt), candidateVerifiedAt: iso(current?.verifiedAt), files, directories },
+    attempts: await summarizeAttempts(work, current, saved, progress),
     archiveCache: await summarizeDirectory(path.join(work, 'archive-cache')),
+    metadataCache: await summarizeDirectory(path.join(work, 'metadata')),
+    stagedBaseline: await summarizeDirectory(path.join(root, 'baseline')),
     logs: await summarizeLogs(pm2Home),
   };
 }
