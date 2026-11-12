@@ -161,3 +161,101 @@ test('retirement persists directory deletions before marking the proof complete'
   }
   assert.deepEqual(events.slice(completed+1),[['sync',proof],['sync',old.directory]]);
 });
+
+async function abandonedFixture(t){
+  const f=await fixture(t),orphan=await f.add(1),previous=await f.add(2),current=await f.add(3);
+  await f.point();
+  for(const file of ['accepted.private.json','direct-seed.private.json'])await fs.unlink(path.join(orphan.directory,file));
+  const savedState=JSON.parse(await fs.readFile(path.join(orphan.saved,'collector-state.private.json')));
+  const manifest=await fs.readFile(path.join(orphan.privateRoot,'files.private.json'));
+  const reviews=await fs.readFile(path.join(orphan.saved,'current-reviews.private.json'));
+  await write(path.join(orphan.directory,'receipt.private.json'),json({version:1,root:orphan.privateRoot,manifestSha256:sha(manifest),
+    baseline:{path:previous.privateRoot,manifestSha256:previous.accepted.manifestSha256},
+    canonical:{reviewsPath:path.join(orphan.saved,'current-reviews.private.json'),reviewsSha256:sha(reviews),
+      browserSha256:sha(orphan.browser),head:JSON.parse(savedState.body).head}}));
+  await write(path.join(f.root,'status.private.json'),json({status:'ready',id:path.basename(current.directory)}));
+  return {f,orphan,previous,current};
+}
+
+test('abandoned workspace dry run and cleanup verify archived inputs and keep unknown or protected files',async t=>{
+  const {f,orphan,previous,current}=await abandonedFixture(t);
+  const cache=path.join(f.root,'archive-cache','a'.repeat(64)+'.gz');
+  await fs.mkdir(path.dirname(cache));await write(cache,'cached');
+  const options={abandoned:'plan',protectedManifests:[current.accepted.manifestSha256],maxCacheBytes:0};
+  const plan=await f.prune(options);
+  assert.equal(plan.abandoned.attempts,1);
+  assert.ok(plan.abandoned.bytes>0);
+  assert.deepEqual(await fs.readFile(path.join(orphan.privateRoot,'runtime.private.json')),orphan.browser);
+  assert.equal(await fs.readFile(cache,'utf8'),'cached');
+  const result=await f.prune({...options,abandoned:'apply'});
+  assert.equal(result.abandoned.attempts,plan.abandoned.attempts);
+  assert.equal(result.abandoned.bytes,plan.abandoned.bytes);
+  assert.deepEqual(await fs.readdir(orphan.saved),[]);
+  assert.deepEqual(await fs.readdir(orphan.privateRoot),['files.private.json','unknown.private.json']);
+  assert.deepEqual(await fs.readFile(path.join(previous.privateRoot,'runtime.private.json')),previous.browser);
+  assert.deepEqual(await fs.readFile(path.join(current.privateRoot,'runtime.private.json')),current.browser);
+  const proof=JSON.parse(await fs.readFile(path.join(orphan.directory,'abandoned-workspace.private.json')));
+  assert.equal(proof.source.revision,1);
+  assert.equal(proof.scope,'source-and-rebuild');
+  assert.equal(proof.baseline.manifestSha256,previous.accepted.manifestSha256);
+  assert.equal(proof.status,'retired');
+  assert.equal((await f.prune({...options,abandoned:'apply'})).abandoned.attempts,0);
+});
+
+test('abandoned workspace preserves live, staged and unverified candidates',async t=>{
+  const {f,orphan}=await abandonedFixture(t);
+  const source=path.join(orphan.saved,'current-browser.private.json');
+  assert.equal((await f.prune({abandoned:'apply',protectedManifests:[orphan.accepted.manifestSha256]})).abandoned.attempts,0);
+  await write(path.join(f.root,'status.private.json'),json({status:'building',id:path.basename(orphan.directory)}));
+  assert.equal((await f.prune({abandoned:'apply'})).abandoned.attempts,0);
+  await write(path.join(f.root,'status.private.json'),json({status:'ready',id:'ffffffff-0000-4000-8000-000000000000'}));
+  await write(source,Buffer.from('unverified'));
+  const result=await f.prune({abandoned:'apply'});
+  assert.equal(result.abandoned.attempts,0);
+  assert.equal(result.retirementDeferred,1);
+  assert.equal(await fs.readFile(source,'utf8'),'unverified');
+  assert.deepEqual(await fs.readFile(path.join(orphan.privateRoot,'runtime.private.json')),orphan.browser);
+  assert.ok((await fs.readdir(orphan.bundleRoot)).length);
+  await assert.rejects(fs.stat(path.join(orphan.directory,'abandoned-workspace.private.json')),{code:'ENOENT'});
+});
+
+test('malformed or unavailable abandoned proofs defer without blocking another build and can retry',async t=>{
+  const {f,orphan}=await abandonedFixture(t);
+  const file=path.join(orphan.privateRoot,'files.private.json'),manifest=await fs.readFile(file);
+  await write(file,'{"interrupted":');
+  assert.equal((await f.prune({abandoned:'apply'})).retirementDeferred,1);
+  await write(file,manifest);
+  const unavailable=await f.prune({abandoned:'apply',retirement:{...f.retirement,readSourceReceipt:async()=>{throw Error('Archive temporarily unavailable');}}});
+  assert.equal(unavailable.retirementDeferred,1);
+  assert.equal(unavailable.abandoned.attempts,0);
+  assert.ok((await fs.readdir(orphan.bundleRoot)).length);
+  assert.equal((await f.prune({abandoned:'apply'})).abandoned.attempts,1);
+});
+
+test('verified abandoned copies can be removed without deleting unique outputs of an unavailable baseline',async t=>{
+  const {f,orphan,previous}=await abandonedFixture(t);
+  const manifest=path.join(previous.privateRoot,'files.private.json');
+  await write(manifest,json({changed:true}));
+  const result=await f.prune({abandoned:'apply'});
+  assert.equal(result.abandoned.attempts,1);
+  assert.deepEqual(await fs.readdir(orphan.saved),[]);
+  assert.deepEqual(await fs.readFile(path.join(orphan.privateRoot,'runtime.private.json')),orphan.browser);
+  const proof=JSON.parse(await fs.readFile(path.join(orphan.directory,'abandoned-workspace.private.json')));
+  assert.equal(proof.scope,'copies-only');
+  assert.equal(proof.baseline,null);
+});
+
+test('abandoned workspace resumes a durable inventory after unlink interruption',async t=>{
+  const {f,orphan}=await abandonedFixture(t),unlink=fs.unlink;
+  const proof=path.join(orphan.directory,'abandoned-workspace.private.json');
+  let removes=0;
+  const mocked=t.mock.method(fs,'unlink',async file=>{
+    if(file.startsWith(orphan.directory)&&++removes===2)throw Error('Fixture interrupted orphan');
+    return unlink(file);
+  });
+  try{await assert.rejects(f.prune({abandoned:'apply'}),/Fixture interrupted orphan/);}finally{mocked.mock.restore();}
+  assert.equal(JSON.parse(await fs.readFile(proof)).status,'prepared');
+  await f.prune({abandoned:'apply',retirement:{...f.retirement,readSourceReceipt:async()=>assert.fail('Prepared inventory must resume locally')}});
+  assert.equal(JSON.parse(await fs.readFile(proof)).status,'retired');
+  assert.deepEqual(await fs.readdir(orphan.saved),[]);
+});

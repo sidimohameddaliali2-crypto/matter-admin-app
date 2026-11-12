@@ -5,7 +5,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {createGzip,createGunzip} from 'node:zlib';
 import {pipeline} from 'node:stream/promises';
 import {readDriverAuditSeedConfig} from './driverAuditDirectImport.js';
-import {retireDriverAuditAttempt} from './driverAuditWorkspaceRetirement.js';
+import {retireAbandonedDriverAuditAttempt,retireDriverAuditAttempt} from './driverAuditWorkspaceRetirement.js';
 import {privateAuditJson,privateAuditWrite} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
 
 const digest = /^[a-f0-9]{64}$/;
@@ -30,9 +30,9 @@ async function optionalJson(file) {
 
 // Called only by the single sync writer between builds. Original staging data,
 // the current/previous candidates and all MongoDB-protected generations stay.
-export async function pruneDriverAuditWorkspace({root, receiptRoot, retirement, protectedManifests = [], maxCacheBytes = 512 * 1024 * 1024}) {
+export async function pruneDriverAuditWorkspace({root, receiptRoot, retirement, protectedManifests = [], maxCacheBytes = 512 * 1024 * 1024, abandoned = 'off'}) {
   if (!path.isAbsolute(root) || !Array.isArray(protectedManifests) || protectedManifests.some(value => !digest.test(value))
-    || !Number.isSafeInteger(maxCacheBytes) || maxCacheBytes < 0) {
+    || !Number.isSafeInteger(maxCacheBytes) || maxCacheBytes < 0 || !['off','plan','apply'].includes(abandoned)) {
     throw Error('Invalid audit workspace retention bounds');
   }
   const pointer = await optionalJson(path.join(root, 'current.private.json'));
@@ -49,6 +49,15 @@ export async function pruneDriverAuditWorkspace({root, receiptRoot, retirement, 
   let attemptsCompacted = 0;
   let attemptsRetired = 0;
   let retirementDeferred = 0;
+  const orphaned={attempts:0,files:0,bytes:0,allocatedBytes:0,freeDiskDeltaBytes:0};
+  const statusPath=path.join(root,'status.private.json');
+  const buildStatus=abandoned==='off'?null:await optionalJson(statusPath).catch(()=>null);
+  const latestAttempt=buildStatus?.attempt?.id??buildStatus?.id;
+  const lastBuildAt=attemptName.test(latestAttempt)?(await fs.lstat(statusPath).catch(()=>null))?.mtimeMs:0;
+  const retainedRoots=[pointer,pointer?.previous,retirement?.retainedBaseline]
+    .filter(candidate=>digest.test(candidate?.manifestSha256)&&path.isAbsolute(candidate.privateRoot??candidate.root??''))
+    .map(candidate=>({root:candidate.privateRoot??candidate.root,manifestSha256:candidate.manifestSha256}));
+  const freeDisk=async()=>{const disk=await fs.statfs(root);return disk.bavail*disk.bsize;};
   for (const entry of await fs.readdir(attempts, {withFileTypes: true}).catch(error => {
     if (error.code === 'ENOENT') return [];
     throw error;
@@ -56,8 +65,25 @@ export async function pruneDriverAuditWorkspace({root, receiptRoot, retirement, 
     if (!entry.isDirectory() || !attemptName.test(entry.name)) continue;
     const directory = path.join(attempts, entry.name);
     if (keepRoots.has(directory)) continue;
-    const accepted = await optionalJson(path.join(directory, 'accepted.private.json'));
-    const seed = await readDriverAuditSeedConfig(path.join(directory, 'direct-seed.private.json')).catch(() => null);
+    const acceptedPath=path.join(directory,'accepted.private.json');
+    const accepted=await optionalJson(acceptedPath).catch(()=>null);
+    const seedPath=path.join(directory,'direct-seed.private.json');
+    if(!accepted&&abandoned!=='off'&&pointer&&lastBuildAt&&entry.name!==latestAttempt&&(await fs.lstat(directory)).birthtimeMs<=lastBuildAt){
+      // Existing seed metadata still protects an attempt when its config cannot be read.
+      const present=async file=>fs.lstat(file).then(()=>true,error=>error.code!=='ENOENT');
+      if(await present(acceptedPath)||await present(seedPath))continue;
+      const before=abandoned==='apply'?await freeDisk():0;
+      const result=await retireAbandonedDriverAuditAttempt({directory,protectedManifests:keepManifests,retainedRoots,receiptRoot,retirement,apply:abandoned==='apply'});
+      if(result==='proof-unavailable')retirementDeferred++;
+      else if(result){
+        orphaned.attempts++;
+        for(const field of ['files','bytes','allocatedBytes'])orphaned[field]+=result[field];
+        if(abandoned==='apply')orphaned.freeDiskDeltaBytes+=await freeDisk()-before;
+      }
+      continue;
+    }
+    if(abandoned==='plan')continue;
+    const seed = await readDriverAuditSeedConfig(seedPath).catch(() => null);
     if (!accepted || !seed || keepManifests.has(accepted.manifestSha256)) continue;
     if (accepted.privateRoot !== path.join(directory, 'server-data') || seed.manifestSha256 !== accepted.manifestSha256
       || accepted.sourceBasis !== seed.sourceBasis || accepted.collectorRevision !== seed.collectorRevision) continue;
@@ -80,6 +106,7 @@ export async function pruneDriverAuditWorkspace({root, receiptRoot, retirement, 
     await privateAuditWrite(journalPath,JSON.stringify({...journal,complete:true}));
     attemptsCompacted++;
   }
+  if(abandoned==='plan')return {abandoned:orphaned,retirementDeferred};
   const cache = path.join(root, 'archive-cache');
   const cached = [];
   for (const entry of await fs.readdir(cache, {withFileTypes: true}).catch(error => {
@@ -97,7 +124,7 @@ export async function pruneDriverAuditWorkspace({root, receiptRoot, retirement, 
     cachedBytes -= entry.bytes;
     cacheBytesRemoved += entry.bytes;
   }
-  return {attemptsCompacted, attemptsRetired, retirementDeferred, cacheBytesRemoved, cachedBytes};
+  return {attemptsCompacted, attemptsRetired, retirementDeferred, cacheBytesRemoved, cachedBytes, abandoned:orphaned};
 }
 
 async function hashFile(file, compressed = false) {

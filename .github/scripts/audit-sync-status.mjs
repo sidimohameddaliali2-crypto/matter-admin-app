@@ -89,10 +89,11 @@ async function summarizeAttempts(work, current, saved, progress) {
   const selected = found.sort((a, b) => Number(b.nonempty) - Number(a.nonempty) || b.modified - a.modified).slice(0, 64);
   const summaries = [];
   for (const { id, directory, nonempty, modified } of selected) {
-    const [accepted, seed, proof, legacy, direct, directories] = await Promise.all([
+    const [accepted, seed, proof, abandoned, legacy, direct, directories] = await Promise.all([
       json(path.join(directory, 'accepted.private.json')),
       json(path.join(directory, 'direct-seed.private.json')),
       json(path.join(directory, 'retired-workspace.private.json')),
+      json(path.join(directory, 'abandoned-workspace.private.json')),
       json(path.join(directory, 'compacted-files.private.json')),
       summarizeDirectory(directory),
       summarizeAttemptDirectories(directory),
@@ -102,6 +103,8 @@ async function summarizeAttempts(work, current, saved, progress) {
     const inUse = ['building', 'validating'].includes(progress?.status) && progress.id === id;
     summaries.push({ id, nonempty, modifiedAt: new Date(modified).toISOString(), accepted: !!accepted, seed: !!seed,
       prepared: proof?.status === 'prepared', retired: proof?.status === 'retired', legacyCompacted: legacy?.complete === true,
+      abandonedPrepared: abandoned?.status === 'prepared', abandonedRetired: abandoned?.status === 'retired',
+      abandonedScope: ['copies-only', 'source-and-rebuild'].includes(abandoned?.scope) ? abandoned.scope : null,
       protected: protectedByPointer || protectedByHeartbeat || inUse, protectedByPointer, protectedByHeartbeat, inUse,
       collectorRevision: number(accepted?.collectorRevision ?? seed?.collectorRevision), direct, directories });
   }
@@ -110,15 +113,20 @@ async function summarizeAttempts(work, current, saved, progress) {
 }
 
 async function summarizeLogs(pm2Home) {
-  const counts = { refreshPaused: 0, startupFailed: 0, memoryLimit: 0, retirementDeferred: 0, lastRetirementDeferredAttempts: null, other: 0 };
+  const counts = { refreshPaused: 0, startupFailed: 0, memoryLimit: 0, retirementDeferred: 0, lastRetirementDeferredAttempts: null, lastAbandonedRetirement: null, other: 0 };
   const file = path.join(pm2Home, 'logs', name + '-error.log');
   const log = await readTail(file, 32 * 1024).catch(() => null);
   for (const line of (log || '').split(/\r?\n/).filter(Boolean).slice(-40)) {
     const deferred = /\{"event":"audit-workspace-retirement-deferred","attempts":([1-9]\d{0,4})\}$/.exec(line);
+    const abandoned = /\{"event":"audit-workspace-abandoned-retired","attempts":([1-9]\d{0,4}),"files":([1-9]\d{0,8}),"bytes":(\d{1,15}),"allocatedBytes":(\d{1,15}),"freeDiskDeltaBytes":(-?\d{1,15})\}$/.exec(line);
     if (line.includes('Driver audit sync paused this refresh.')) counts.refreshPaused++;
     else if (line.includes('Driver audit sync could not start.')) counts.startupFailed++;
     else if (/heap out of memory|Reached heap limit/.test(line)) counts.memoryLimit++;
     else if (deferred) { counts.retirementDeferred++; counts.lastRetirementDeferredAttempts = Number(deferred[1]); }
+    else if (abandoned) {
+      const [attempts, files, bytes, allocatedBytes, freeDiskDeltaBytes] = abandoned.slice(1).map(Number);
+      counts.lastAbandonedRetirement = { attempts, files, bytes, allocatedBytes, freeDiskDeltaBytes };
+    }
     else counts.other++;
   }
   return counts;
