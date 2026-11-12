@@ -100,3 +100,14 @@ test('inbox has a skip target and descriptive heading/title without retaining it
   expect(container.querySelector('h1')).toBeNull();
   expect(mockDispatch).not.toHaveBeenCalled();
 });
+
+test('every customer service destination has its own heading, title and keyboard route focus', async () => {
+  await mountLayout();
+  for (const [page,label] of [['problems','Follow-ups'],['customers','Customers'],['reviews','Reviews'],['summary','Summary'],['reporting','Reporting']]) {
+    mockPathname = `/customer-service/${page}`;
+    await mountLayout();
+    expect(container.querySelector('h1').textContent).toBe(label);
+    expect(document.title).toBe(`Customer service ${label.toLowerCase()} · Matter`);
+    expect(document.activeElement).toBe(container.querySelector('main'));
+  }
+});

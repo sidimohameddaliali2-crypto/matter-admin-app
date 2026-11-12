@@ -11,7 +11,7 @@ import api from '../../utils/api';
 import Conversation from '../../components/customerService/Conversation';
 import CustomerContextDrawer from '../../components/customerService/CustomerContext';
 import ActionEditor from '../../components/customerService/ActionEditor';
-import {dubaiToday, categoryLabels, errorMessage, filterParams, formatDubai, idOf, prettyStatus, ResourceState, serviceFilterSearch, servicePath, unpack, useServiceResource} from '../../components/customerService/serviceUtils';
+import {dubaiToday, categoryLabels, errorMessage, filterParams, formatDubai, idOf, inboxStateFromSearch, prettyStatus, ResourceState, serviceFilterSearch, servicePath, unpack, updateServiceFilterSearch, useServiceResource} from '../../components/customerService/serviceUtils';
 
 // Polling merges by source message identity; opening another contact invalidates
 // every pending response. Older loaded pages keep their own pagination cursor.
@@ -64,9 +64,10 @@ function useInboxPages(path, params, field, epoch) {
   return {...(current?state:{rows:[],data:null,loading:!!path,error:'',hasMore:false}),loadMore:()=>more.current(),refresh:()=>reload.current()};
 }
 
-export default function CustomerChats({me,user,capabilities,categories,filters,epoch,onRefresh,onFiltersChange,navigation}) {
+export default function CustomerChats({me,user,capabilities,categories,filters,epoch,onRefresh,onFiltersChange}) {
   const location=useLocation(),navigate=useNavigate();
-  const [source,setSource]=useState('native');
+  const initialQuery=inboxStateFromSearch(location.search);
+  const [source,setSource]=useState(initialQuery.source);
   const [detailsOpen,setDetailsOpen]=useState(false),[panelOpen,setPanelOpen]=useState(()=>!!new URLSearchParams(location.search).get('request'));
   const health=useServiceResource('/capture-health',{},epoch);
   const prependAnchor=useRef(null);
@@ -78,14 +79,25 @@ export default function CustomerChats({me,user,capabilities,categories,filters,e
   const closeWork=useCallback(()=>setPanelOpen(false),[]);
   const overviewChanged=useCallback(next=>setIssueOverview(previous=>JSON.stringify(previous)===JSON.stringify(next)?previous:next),[]);
   const activeChanged=useCallback(next=>setActiveIssue(previous=>idOf(previous)===idOf(next)&&previous?.version===next?.version&&previous?.canWork===next?.canWork&&previous?.status===next?.status?previous:next),[]);
-  const [workQueue,setWorkQueue]=useState(false);
+  const [workQueue,setWorkQueue]=useState(initialQuery.workQueue);
   const [requestId,setRequestId]=useState(()=>new URLSearchParams(location.search).get('request')||'');
-  const initialQuery=new URLSearchParams(location.search);
-  const [status,setStatus]=useState(()=>['open','resolved','all','unknown'].includes(initialQuery.get('status'))?initialQuery.get('status'):'open');
-  const [assignment,setAssignment]=useState(()=>['mine','unassigned','assigned','all','unknown'].includes(initialQuery.get('assignment'))?initialQuery.get('assignment'):'all');
+  const [status,setStatus]=useState(initialQuery.status);
+  const [assignment,setAssignment]=useState(initialQuery.assignment);
+  function changeInbox(patch) {
+    const query=new URLSearchParams(location.search);
+    Object.entries(patch).forEach(([key,value])=>{if(value)query.set(key,value);else query.delete(key);});
+    navigate(`${location.pathname}?${query}`,{replace:true});
+  }
   function changeQueue(field,value){
     if(field==='status')setStatus(value);else setAssignment(value);
-    const query=new URLSearchParams(location.search);query.set(field,value);
+    changeInbox({[field]:value});
+  }
+  function changeView(next) { setWorkQueue(next); changeInbox({view:next?'work':''}); }
+  function browseHistory() {
+    const query=new URLSearchParams(updateServiceFilterSearch({...filters,from:'',to:''},location.search));
+    query.set('status','all');query.set('assignment','all');query.set('source','native');query.delete('view');
+    if(source!=='native'){query.delete('conversation');query.delete('request');}
+    setSource('native');setStatus('all');setAssignment('all');setWorkQueue(false);
     navigate(`${location.pathname}?${query}`,{replace:true});
   }
   const backlog=source==='native'&&(status==='open'||assignment==='unassigned');
@@ -93,7 +105,17 @@ export default function CustomerChats({me,user,capabilities,categories,filters,e
   const initials=name=>String(name||'?').split(/\s+/).map(x=>x[0]).slice(0,2).join('').toUpperCase();
   const shortTime=value=>{const d=new Date(value);return Number.isFinite(d.getTime())?new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Dubai',hour:'2-digit',minute:'2-digit'}).format(d):'';};
   if(backlog){delete dateParams.from;delete dateParams.to;}
-  const [selected,setSelected]=useState(()=>new URLSearchParams(location.search).get('conversation')||'');
+  const [selected,setSelected]=useState(initialQuery.conversation);
+  const appliedContext=useRef({conversation:initialQuery.conversation,request:new URLSearchParams(location.search).get('request')||''});
+  useEffect(()=>{
+    const next=inboxStateFromSearch(location.search);
+    const request=new URLSearchParams(location.search).get('request')||'';
+    if(appliedContext.current.conversation!==next.conversation||appliedContext.current.request!==request){
+      appliedContext.current={conversation:next.conversation,request};
+      setRequestId(request);setRequestMessage(null);setReopenTarget(null);setActionId('');setPanelOpen(!!request);
+    }
+    setSource(next.source);setStatus(next.status);setAssignment(next.assignment);setWorkQueue(next.workQueue);setSelected(next.conversation);
+  },[location.search]);
   const [context,setContext]=useState(false),[actionId,setActionId]=useState('');
   const transcript=useRef(null),atBottom=useRef(true),lastSeen=useRef({chat:'',message:''});
   const [newMessages,setNewMessages]=useState(false);
@@ -107,7 +129,8 @@ export default function CustomerChats({me,user,capabilities,categories,filters,e
   const issues=detail.data?.issues||[];
   const actions=detail.data?.actions||[];
   const chosen=actions.find(action=>idOf(action)===actionId);
-  function open(id){setRequestId('');setRequestMessage(null);setReopenTarget(null);setCreateSignal(0);setIssueOverview({requests:[]});setActiveIssue(null);setTargetMessageId('');setHighlightMessageId('');setEvidenceError('');atBottom.current=true;setNewMessages(false);setSelected(id);setActionId('');setContext(false);navigate(`${location.pathname}${serviceFilterSearch(filters)}&status=${status}&assignment=${assignment}&conversation=${encodeURIComponent(id)}`,{replace:true});}
+  function open(id,request=''){appliedContext.current={conversation:id,request};setRequestId(request);setRequestMessage(null);setReopenTarget(null);setCreateSignal(0);setIssueOverview({requests:[]});setActiveIssue(null);setTargetMessageId('');setHighlightMessageId('');setEvidenceError('');atBottom.current=true;setNewMessages(false);setSelected(id);setActionId('');setContext(false);changeInbox({status,assignment,source,conversation:id,request});}
+  function backToConversations(){setSelected('');setPanelOpen(false);changeInbox({conversation:'',request:''});}
   const saved=(request)=>{setActionId('');setReopenTarget(null);if(request?._id){setRequestMessage(null);setRequestId(request._id);}detail.refresh();onRefresh();};
   const viewMessage=id=>{lastEvidence.current=id;evidenceCursor.current=null;atBottom.current=false;setEvidenceError('');setTargetMessageId(id);setPanelOpen(false);};
   const reopenFromMessage=message=>{if(message.authorType!=='customer'||!activeIssue?.canWork||!['resolved','non_customer'].includes(activeIssue.status))return;setRequestMessage(null);setRequestId(activeIssue._id);setReopenTarget({requestId:activeIssue._id,message});setPanelOpen(true);};
@@ -133,14 +156,40 @@ export default function CustomerChats({me,user,capabilities,categories,filters,e
     {capabilities.sidebarSandbox&&<SidebarSandbox conversationId={selected} epoch={epoch} onRefresh={()=>{detail.refresh();onRefresh();}} onOpen={id=>{setPanelOpen(true);open(id);}}/>}
     <div className={`cs-inbox ${selected?'has-conversation':''} ${panelOpen?'work-panel-open':''}`}>
       <aside className="cs-card cs-inbox-list" aria-label="Conversations">
-<div className="cs-inbox-search"><input aria-label="Search customer service" placeholder="Search conversations" value={filters.search||''} onChange={e=>onFiltersChange?.({...filters,search:e.target.value})}/><details className="cs-secondary-menu"><summary aria-label="More staff tools">☰</summary>{navigation}{capabilities.supervise&&<button disabled={!selected} onClick={()=>setDetailsOpen(!detailsOpen)}>Source diagnostics</button>}<button onClick={()=>setWorkQueue(!workQueue)}>My work & follow-ups</button><button onClick={onRefresh}>Refresh saved data</button></details></div><nav className="cs-queue-tabs" aria-label="Conversation queues">{[['mine','Mine'],['unassigned','Unassigned'],['all','All open']].map(([value,label])=><button key={value} aria-pressed={status==='open'&&assignment===value} onClick={()=>{setSource('native');setWorkQueue(false);setStatus('open');setAssignment(value);const q=new URLSearchParams(location.search);q.set('status','open');q.set('assignment',value);navigate(location.pathname+'?'+q,{replace:true});}}>{label}</button>)}</nav><button className="cs-my-work" onClick={()=>setWorkQueue(!workQueue)}>{workQueue?"Back to chats":"My work & follow-ups"}</button><nav className="cs-inbox-mode" hidden aria-label="Inbox view"><button aria-pressed={!workQueue} onClick={()=>setWorkQueue(false)}>Conversations</button><button aria-pressed={workQueue} onClick={()=>setWorkQueue(true)}>Staff work</button></nav>
-{workQueue?<RequestQueues capabilities={capabilities} epoch={epoch} onOpen={r=>{setPanelOpen(true);open(idOf(r.conversationId));setRequestId(r._id||'');if(r.candidate)setRequestMessage({_id:r.originMessageId,text:r.excerpt});}}/>:<>
-    <details className="cs-queue-filters"><summary>Filters & history</summary><div className="cs-toolbar"><div><span className="cs-muted">Provider conversations · read only</span></div><label className="cs-inbox-source">Show<select aria-label="Conversation source" value={source} onChange={event=>{setSource(event.target.value);setSelected('');setActionId('');}}><option value="native">Native chats</option><option value="history">Workbook excerpts</option></select></label></div>
-    {<div className="cs-chip-row" role="group" aria-label="Conversation dates"><button type="button" aria-pressed={filters.from===dubaiToday()&&filters.to===dubaiToday()} onClick={()=>onFiltersChange?.({...filters,from:dubaiToday(),to:dubaiToday()})}>Today</button><button type="button" aria-pressed={!filters.from&&!filters.to} onClick={()=>onFiltersChange?.({...filters,from:'',to:''})}>All time</button></div>}<div className="cs-period"><label>From<input type="date" aria-label="From date in Dubai" value={filters.from||''} onChange={e=>onFiltersChange?.({...filters,from:e.target.value})}/></label><label>To<input type="date" aria-label="To date in Dubai" value={filters.to||''} onChange={e=>onFiltersChange?.({...filters,to:e.target.value})}/></label></div><label>Review category<select aria-label="Review category filter" value={filters.categoryId||''} onChange={e=>onFiltersChange?.({...filters,categoryId:e.target.value})}><option value="">All review categories</option>{categories.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}</select></label>
-    {source==='native'&&<div className="cs-toolbar" aria-label="Inbox filters"><label>Conversation status <select aria-label="Conversation status" value={status} onChange={e=>changeQueue('status',e.target.value)}><option value="open">Open</option><option value="resolved">Resolved</option><option value="all">All statuses</option><option value="unknown">Status unavailable</option></select></label><label>Assignment <select aria-label="Assignment" value={assignment} onChange={e=>changeQueue('assignment',e.target.value)}><option value="all">All assignments</option><option value="mine">Mine (verified identity)</option><option value="unassigned">Unassigned</option><option value="assigned">Assigned</option><option value="unknown">Assignment unavailable</option></select></label>{backlog&&<span className="cs-muted">Backlog · all dates</span>}</div>}
-</details><div className="cs-conversation-list-scroll"><ResourceState loading={list.loading} error={list.error}/>{list.data?.queueUnavailableReason&&<p role="status">{list.data.queueUnavailableReason}</p>}
+        <div className="cs-inbox-search">
+          <input aria-label="Search customer service" placeholder="Search conversations" value={filters.search||''} onChange={e=>onFiltersChange?.({...filters,search:e.target.value})}/>
+          <details className="cs-secondary-menu"><summary>Inbox tools</summary>
+            {capabilities.supervise&&<button disabled={!selected} onClick={()=>setDetailsOpen(!detailsOpen)}>Source diagnostics</button>}
+            <button onClick={onRefresh}>Refresh saved data</button>
+          </details>
+        </div>
+        <nav className="cs-inbox-mode" aria-label="Inbox view">
+          <button aria-pressed={!workQueue} onClick={()=>changeView(false)}>Conversations</button>
+          <button aria-pressed={workQueue} onClick={()=>changeView(true)}>My work</button>
+        </nav>
+        {workQueue?<RequestQueues capabilities={capabilities} epoch={epoch} onOpen={r=>{setPanelOpen(true);open(idOf(r.conversationId),r._id||'');if(r.candidate)setRequestMessage({_id:r.originMessageId,text:r.excerpt});}}/>:<>
+          <nav className="cs-queue-tabs" aria-label="Conversation queues">
+            {[['mine','Mine'],['unassigned','Unassigned'],['all','All open']].map(([value,label])=><button key={value} aria-pressed={source==='native'&&status==='open'&&assignment===value} onClick={()=>{setSource('native');setStatus('open');setAssignment(value);changeInbox({source:'native',status:'open',assignment:value});}}>{label}</button>)}
+          </nav>
+          <div className="cs-inbox-scope"><span>{source==='history'?'Workbook excerpts':backlog?'Backlog · all dates':status==='resolved'?'Resolved conversations':'Conversation history'}</span><button onClick={browseHistory}>Browse history</button></div>
+          <details className="cs-queue-filters"><summary>Filter conversations</summary>
+            <div className="cs-inbox-filter-fields">
+              <label>Conversation source<select aria-label="Conversation source" value={source} onChange={event=>{setSource(event.target.value);setSelected('');setActionId('');changeInbox({source:event.target.value,conversation:'',request:''});}}><option value="native">Native chats</option><option value="history">Workbook excerpts</option></select></label>
+              {source==='native'&&<div className="cs-inbox-filter-grid" aria-label="Inbox filters">
+                <label>Conversation status<select aria-label="Conversation status" value={status} onChange={e=>changeQueue('status',e.target.value)}><option value="open">Open</option><option value="resolved">Resolved</option><option value="all">All statuses</option><option value="unknown">Status unavailable</option></select></label>
+                <label>Assignment<select aria-label="Assignment" value={assignment} onChange={e=>changeQueue('assignment',e.target.value)}><option value="all">All assignments</option><option value="mine">Mine (verified identity)</option><option value="unassigned">Unassigned</option><option value="assigned">Assigned</option><option value="unknown">Assignment unavailable</option></select></label>
+              </div>}
+              {backlog&&<p className="cs-muted" id="cs-inbox-date-help">Open and unassigned queues include all dates. Choose All statuses and All assignments to filter by date.</p>}
+              <fieldset disabled={backlog} aria-describedby={backlog?'cs-inbox-date-help':undefined}>
+                <legend>Date range · Dubai</legend>
+                <div className="cs-chip-row" role="group" aria-label="Conversation dates"><button type="button" aria-pressed={!backlog&&filters.from===dubaiToday()&&filters.to===dubaiToday()} onClick={()=>onFiltersChange?.({...filters,from:dubaiToday(),to:dubaiToday()})}>Today</button><button type="button" aria-pressed={!backlog&&!filters.from&&!filters.to} onClick={()=>onFiltersChange?.({...filters,from:'',to:''})}>All time</button></div>
+                <div className="cs-period"><label>From<input type="date" aria-label="From date in Dubai" value={filters.from||''} max={filters.to||undefined} onChange={e=>onFiltersChange?.({...filters,from:e.target.value})}/></label><label>To<input type="date" aria-label="To date in Dubai" value={filters.to||''} min={filters.from||undefined} onChange={e=>onFiltersChange?.({...filters,to:e.target.value})}/></label></div>
+              </fieldset>
+              <label>Review category<select aria-label="Review category filter" value={filters.categoryId||''} onChange={e=>onFiltersChange?.({...filters,categoryId:e.target.value})}><option value="">All review categories</option>{categories.map(c=><option key={c.id} value={c.id}>{c.label}</option>)}</select></label>
+            </div>
+          </details><div className="cs-conversation-list-scroll"><ResourceState loading={list.loading} error={list.error}/>{list.data?.queueUnavailableReason&&<p role="status">{list.data.queueUnavailableReason}</p>}
         {list.rows.map(row=><button className={`cs-inbox-row ${(selected===idOf(row)||idOf(conversation?.historyAnchorId)===idOf(row))?'active':''}`} key={idOf(row)} aria-pressed={(selected===idOf(row)||idOf(conversation?.historyAnchorId)===idOf(row))} onClick={()=>open(idOf(row))}><span className="cs-list-avatar" aria-hidden="true">{initials(row.customerName)}</span><span className="cs-inbox-row-top"><strong>{row.customerName||'Unnamed contact'}</strong><time title={formatDubai(row.lastMessageAt)}>{shortTime(row.lastMessageAt)}</time></span><span className="cs-inbox-preview">{row.lastMessage?.text||(row.lastMessage?.authorType==='system'?'Conversation activity':row.lastMessage?.type==='other'?'Message':row.lastMessage?.type)||row.summary||'Open conversation'}</span><span className="cs-inbox-tags">{row.historical&&<span className="cs-badge amber">Workbook excerpt</span>}</span></button>)}
-        {!list.loading&&!list.rows.length&&<div className="cs-empty"><h2 className="cs-inbox-placeholder-heading">No conversations match</h2><p>{backlog?'Try another status or assignment.':'Choose All dates to browse older chats.'}</p></div>}
+        {!list.loading&&!list.rows.length&&<div className="cs-empty"><h2 className="cs-inbox-placeholder-heading">No conversations match</h2><p>{backlog?'Try another status or assignment.':'Change the filters or browse all conversation history.'}</p></div>}
         {list.hasMore&&<button className="cs-inbox-more" disabled={list.loadingMore} onClick={list.loadMore}>{list.loadingMore?'Loading…':'Load more conversations'}</button>}
         {list.error&&<button onClick={list.refresh}>Retry conversation list</button>}
       </div></>}
@@ -150,7 +199,7 @@ export default function CustomerChats({me,user,capabilities,categories,filters,e
           <ResourceState loading={detail.loading} error={detail.error}/>
           {detail.error&&<button onClick={detail.refresh}>Retry conversation</button>}
           {conversation&&<>
-            <div className="cs-toolbar cs-inbox-contact"><button className="cs-mobile-back" onClick={()=>setSelected('')}>‹ Chats</button><span className="cs-contact-avatar" aria-hidden="true">{initials(conversation.customerName)}</span><div className="cs-contact-name"><h2>{conversation.customerName||'Unnamed contact'}</h2><span className="cs-owner-line">{conversation.providerInbox?.status==='open'?'Open':conversation.providerInbox?.status==='resolved'?'Resolved':'Status unavailable'} · Chat assigned to {conversation.providerInbox?.assignment==='unassigned'?'Unassigned':conversation.providerInbox?.assigneeName||'Not recorded'}</span></div><div className="cs-form-actions"><button className="cs-work-toggle" aria-expanded={panelOpen} onClick={()=>setPanelOpen(!panelOpen)}>Work items</button></div></div>
+            <div className="cs-toolbar cs-inbox-contact"><button className="cs-mobile-back" aria-label="Back to conversations" onClick={backToConversations}>‹ Chats</button><span className="cs-contact-avatar" aria-hidden="true">{initials(conversation.customerName)}</span><div className="cs-contact-name"><h2>{conversation.customerName||'Unnamed contact'}</h2><span className="cs-owner-line">{conversation.providerInbox?.status==='open'?'Open':conversation.providerInbox?.status==='resolved'?'Resolved':'Status unavailable'} · Chat assigned to {conversation.providerInbox?.assignment==='unassigned'?'Unassigned':conversation.providerInbox?.assigneeName||'Not recorded'}</span></div><div className="cs-form-actions"><button className="cs-work-toggle" aria-expanded={panelOpen} onClick={()=>setPanelOpen(!panelOpen)}>Work items</button></div></div>
             <div className="cs-context-tools" aria-label="Source diagnostics" hidden={!detailsOpen}><h4>Source diagnostics</h4><p className="cs-muted">{conversation.threadCount||1} source threads · {conversation.coverageStatus==='partial'?'Partial capture':'Completeness unknown'} · {conversation.linkOverride?conversation.navigationCustomerId:conversation.customerId||'Unmatched contact'}</p><p className="cs-muted">{health.error?'Capture health unavailable':health.data?.control?.hasError?'Capture error — updates may be delayed':health.data?.control?.enabled===false?'Capture disabled':'Last successful capture: '+formatDubai(health.data?.control?.lastSuccessAt)}. No complete-provider coverage claim.</p>
             {capabilities.supervise&&conversation.source==='gallabox'&&<CustomerLinkReview key={selected} conversationId={selected} messages={detail.rows} onSaved={()=>{detail.refresh();onRefresh();}}/>}
             {conversation.historyRecovery&&<details className="cs-history-coverage"><summary>{conversation.historyRecovery.hasError?'History recovery needs retry':conversation.historyRecovery.pending?'Checking older source history':'Available source history checked'}</summary><p className="cs-muted">Last successful page: {formatDubai(conversation.historyRecovery.lastSuccessAt)} · Page {conversation.historyRecovery.page}. A completed scan means the provider returned no more pages; it does not prove deleted or expired messages are recoverable.</p></details>}

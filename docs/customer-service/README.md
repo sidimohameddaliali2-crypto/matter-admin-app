@@ -13,6 +13,14 @@ Customer Service is a new, separate page at `/customer-service/chats`. The exist
 
 The optional private investigation-reporting package from the local development preview is not copied into this public repository. This integration does not replace the existing delivery reports or publish private evidence archives.
 
+### Moving around the workspace
+
+The six Customer Service destinations share a visible page bar on desktop and narrow screens. Inbox tools contains only inbox utilities; page links are not hidden there. Each destination has its own heading, browser title and current-page indicator. The existing admin Customers and delivery Reports pages remain separate destinations with their original permissions.
+
+Inbox separates Conversations from My work. Browse history opens all captured conversation statuses and dates; Workbook excerpts remains a separate source choice under Filter conversations. Open/unassigned backlog queues span all dates, so their date controls are inactive with an explanation. Other pages use the collapsible Filter this page section, whose summary displays the current date scope.
+
+Conversation, request, queue, source and work-view context travels in the workspace URLs alongside shared filters. Moving between pages, refreshing, and returning to Inbox retain that context. Back to conversations removes the selected conversation/request from the URL so a refresh returns to the list. Unknown workspace destinations show an explicit recovery link rather than silently displaying Inbox. These controls change navigation and view state; they do not grant access or save workflow commands.
+
 ## Storage and permissions
 
 The server consumes the canonical Supabase archive and workflow in `gallabox_private`. IDs, source payloads, reviews and archived revisions stay there. No customer history is imported into a second application store, and this module starts no capture job, local publisher or provider-send service. Chat closure remains separate from issue resolution.

@@ -76,6 +76,18 @@ export function serviceFilterSearch(filters, now = new Date()) {
 // Preserve inbox navigation while changing only the shared search/date filters.
 export function updateServiceFilterSearch(filters,currentSearch='') {
  const query=new URLSearchParams(serviceFilterSearch(filters)),current=new URLSearchParams(currentSearch);
- for(const key of ['status','assignment','conversation','request'])if(current.has(key))query.set(key,current.get(key));
+ for(const key of ['status','assignment','conversation','request','source','view'])if(current.has(key))query.set(key,current.get(key));
  return '?'+query.toString();
+}
+
+export function inboxStateFromSearch(search = '') {
+ const query = new URLSearchParams(search);
+ const choice = (key, values, fallback) => values.includes(query.get(key)) ? query.get(key) : fallback;
+ return {
+  source: choice('source', ['native', 'history'], 'native'),
+  status: choice('status', ['open', 'resolved', 'all', 'unknown'], 'open'),
+  assignment: choice('assignment', ['mine', 'unassigned', 'assigned', 'all', 'unknown'], 'all'),
+  workQueue: query.get('view') === 'work',
+  conversation: query.get('conversation') || '',
+ };
 }
