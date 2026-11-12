@@ -6,6 +6,7 @@ import {runDriverAuditSyncTick} from '../services/driverAuditSync.js';
 import {runDriverAuditDirectImport} from '../services/driverAuditDirectImport.js';
 import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollection.js';
 import {withDriverAuditWriter} from '../services/driverAuditWriter.js';
+import {pruneDriverAuditWorkspace} from '../services/driverAuditWorkspace.js';
 import {pathToFileURL} from 'node:url';
 import {createBudgetedAuditArchive,createBudgetedAuditState} from '../vendor/driver-audits/integration/cloud/driver-audit-archive.mjs';
 import {prepareDirectAuditBundle,privateAuditDirectory,privateAuditJson,privateAuditWrite,verifyAuditBuilder} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
@@ -60,9 +61,9 @@ async function main(){
    if(receipt.replicaGcEnabled!==true||!/^[a-f0-9]{64}$/.test(receipt.gcRestoreReceiptSha256||''))throw Error('Reviewed audit archive restore required');
   }
   lock=await acquireWorkerLock(path.join(path.dirname(root),'sync-worker.lock'));
-  const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true});
+  const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true});
   const boundedState=responseLimit=>createBudgetedAuditState({state:createCloudState({rpc:createHostedRpc({secret,maxResponseBytes:responseLimit})}),
-   budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true});
+   budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true});
   const sourceState=boundedState(2*1024*1024),reviewState=boundedState(8*1024*1024);
   const work=path.join(root,'work');
   const loadSource=createAutomaticReleaseSource({secret,stateStore:sourceState,cacheRoot:path.join(work,'archive-cache'),localRoots:[baselineRoot],archiveTransport:{readObject:archive.readBounded}});
@@ -71,7 +72,7 @@ async function main(){
    root:work,baselineRoot,pinnedDirectSync:true,loadSource:async()=>pinned,
    async build(options){
     const disk=await fs.statfs(work);
-    if(disk.bavail*disk.bsize<1024*1024*1024)throw Object.assign(Error('Audit disk reserve unavailable'),{code:'AUDIT_CAPACITY'});
+    if(disk.bavail*disk.bsize<4*1024*1024*1024)throw Object.assign(Error('Audit disk reserve unavailable'),{code:'AUDIT_CAPACITY'});
     return buildAutomaticRelease({...options,rendererBuild,archiveBackedBaseline:true});
    },
    validate:candidate=>validateAutomaticCandidate(candidate,{journals}),
@@ -130,7 +131,13 @@ async function main(){
       pinned=await loadSource();
       return {revision:pinned.savedState.revision,basis:automaticReleaseBasis(pinned.publication),observedAt:nullableIso(pinned.publication.head.source?.observedAt)};
      },
-     readHead,getCandidate:current,build:async()=>builder.tick(),
+     readHead,getCandidate:current,build:async()=>{
+      const head=await readHead(),stage=await control.findOne({_id:'direct-stage'});
+      const protectedManifests=[head,head?.previous,stage?.pointer]
+       .map(pointer=>pointer?.directImport?.manifestSha256).filter(Boolean);
+      await pruneDriverAuditWorkspace({root:work,receiptRoot:path.join(root,'archive-receipts'),protectedManifests});
+      return builder.tick();
+     },
      async apply(candidate){
       const config=await prepareDirectAuditBundle({
        privateRoot:candidate.privateRoot,bundleRoot:path.join(path.dirname(candidate.privateRoot),'audit-objects'),

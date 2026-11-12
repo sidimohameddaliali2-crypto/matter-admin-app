@@ -9,15 +9,15 @@ import {createBudgetedArchiveReader} from './budgeted-archive-reader.mjs';
 
 // Combine concurrent immutable reads and possible missing-object uploads into
 // the same existing bounded storage and reader accounting used by publication.
-function fixedHostBudget(stateStore,approvedNovemberRelease,clock){
- const pool=createReaderBudgetPool({stateStore,approvedNovemberRelease,clock});
+function fixedHostBudget(stateStore,options){
+ const pool=createReaderBudgetPool({stateStore,...options});
  return {...pool,settle:(reservation,measurement)=>pool.settle(reservation,{
   ...measurement,accountingBasis:'remote-archive-transfer-v1',
  })};
 }
 
-export function createBudgetedAuditArchive({rpc,state,remote,receiptRoot,requestBytes=4096,approvedNovemberRelease=false,clock=Date.now}){
- const budget=fixedHostBudget(state,approvedNovemberRelease,clock);
+export function createBudgetedAuditArchive({rpc,state,remote,receiptRoot,requestBytes=4096,approvedNovemberRelease=false,approvedNovemberSync=false,clock=Date.now}){
+ const budget=fixedHostBudget(state,{approvedNovemberRelease,approvedNovemberSync,clock});
  const reader=createBudgetedArchiveReader({transport:remote,budget,requestBytes});
  const storage=createArchiveReservation({rpc,transport:remote,ensureCapacity:createArchiveCapacity({rpc})});
  const queued=[];
@@ -72,21 +72,27 @@ export function createBudgetedAuditArchive({rpc,state,remote,receiptRoot,request
  };
 }
 
-export function createBudgetedAuditState({state,budgetState,responseLimit,requestBytes=4096,approvedNovemberRelease=false,clock=Date.now}){
- const budget=fixedHostBudget(budgetState,approvedNovemberRelease,clock);
+export function createBudgetedAuditState({state,budgetState,responseLimit,requestBytes=4096,approvedNovemberRelease=false,approvedNovemberSync=false,clock=Date.now}){
+ const budget=fixedHostBudget(budgetState,{approvedNovemberRelease,approvedNovemberSync,clock});
+ const cached=new Map();
  return {async read(key){
   let transfer=0;
+  const previous=cached.get(key);
   const result=await runWithWorkerBudget({
    reserve:()=>budget.reserve({responseBytes:responseLimit}),
    settle:(reservation,measurement)=>budget.settle(reservation,{...measurement,extraMicros:transfer}),
   },async()=>{
-   const value=await state.read(key);
-   const responseBytes=Buffer.byteLength(JSON.stringify(value));
+   const received=previous&&typeof state.readIfChanged==='function'?await state.readIfChanged(key,previous.revision):await state.read(key);
+   const responseBytes=Buffer.byteLength(JSON.stringify(received));
    if(responseBytes>responseLimit)throw Error('Audit state exceeds its reader bound');
    transfer=readerTransferMicros({responseBytes,requestBytes});
+   if(received.unchanged&&(!previous||received.revision!==previous.revision||received.body!==null))throw Error('Audit source revision mismatch');
+   const value=received.unchanged?previous:{revision:received.revision,body:received.body};
    return {status:'read',value};
   });
   if(result.status!=='read'||result.budgetSettlement!=='settled')throw Object.assign(Error('Audit state allowance unavailable'),{code:'AUDIT_BUDGET'});
+  if(!cached.has(key)||cached.get(key).revision<=result.value.revision)cached.set(key,result.value);
+  if(cached.size>16)cached.delete(cached.keys().next().value);
   return result.value;
  }};
 }

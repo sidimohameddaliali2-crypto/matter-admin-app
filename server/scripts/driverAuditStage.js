@@ -13,7 +13,7 @@ async function main(){
  const secret=process.env.DRIVER_AUDIT_DEPLOY_SECRET||process.env.DRIVER_AUDIT_SUPABASE_SECRET;
  const rpc=createHostedRpc({secret}),state=createCloudState({rpc}),remote=createSupabaseArchiveTransport({secret});
  await remote.assertPrivate();
- const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true});
+ const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true});
  const result=await stageAuditHandoff({root,sha,withBaseline:baseline==='--with-baseline',archive:{readObject:archive.readBounded}});
  console.log(JSON.stringify(result));
 }

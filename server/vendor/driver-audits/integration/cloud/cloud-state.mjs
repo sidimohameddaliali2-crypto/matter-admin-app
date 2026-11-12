@@ -11,6 +11,16 @@ function checkedReceipt(r){if(!r||!Number.isSafeInteger(r.revision)||r.revision<
 export function createCloudState({rpc}){
  if(typeof rpc!=='function')throw Error('State RPC transport required');
  return {async read(key){if(!keyOk(key))throw Error('Invalid state key');const r=await rpc('matter_hosted_state_read',{p_key:key});if(!r||!Number.isSafeInteger(r.revision)||r.revision<0||r.body_text!==null&&typeof r.body_text!=='string')throw Error('Invalid state response');if(r.body_text!==null)jsonObject(r.body_text);return {revision:r.revision,body:r.body_text};},
+ async readIfChanged(key,revision){
+  if(!keyOk(key)||!Number.isSafeInteger(revision)||revision<0)throw Error('Invalid conditional state read');
+  const result=await rpc('matter_hosted_state_read_if_changed',{p_key:key,p_revision:revision});
+  if(!result||!Number.isSafeInteger(result.revision)||result.revision<revision||typeof result.unchanged!=='boolean'
+   ||result.body_text!==null&&typeof result.body_text!=='string'
+   ||result.unchanged&&(result.revision!==revision||result.body_text!==null)
+   ||!result.unchanged&&(result.revision===revision||result.body_text===null))throw Error('Invalid conditional state response');
+  if(result.body_text!==null)jsonObject(result.body_text);
+  return {revision:result.revision,body:result.body_text,unchanged:result.unchanged};
+ },
  async receipts(key,{after=0,limit=1}={}){if(!keyOk(key)||!Number.isSafeInteger(after)||after<0||limit!==1)throw Error('Invalid receipt request');const rows=await rpc('matter_hosted_state_receipts',{p_key:key,p_after:after,p_limit:limit});if(!Array.isArray(rows)||rows.length>limit)throw Error('Invalid receipt response');let revision=after;for(const row of rows){if(!Number.isSafeInteger(row.revision)||row.revision<=revision||!idOk(row.event_id)||!/^[a-f0-9]{64}$/.test(row.request_sha256||'')||!/^[a-f0-9]{64}$/.test(row.body_sha256||''))throw Error('Invalid receipt response');jsonObject(row.body_text);jsonObject(row.event_text);if(createHash('sha256').update(row.body_text).digest('hex')!==row.body_sha256)throw Error('Receipt integrity failure');revision=row.revision;}return rows;},
  async compareAndSwap({key,expectedRevision,eventId,body,event,request}){if(!keyOk(key)||!idOk(eventId)||!Number.isSafeInteger(expectedRevision)||expectedRevision<0)throw Error('Invalid state request');jsonObject(body);jsonObject(event);if(request===undefined)request=JSON.stringify({expectedRevision,event:JSON.parse(event)});jsonObject(request);let r;try{r=await rpc('matter_hosted_state_cas',{p_key:key,p_expected:expectedRevision,p_event_id:eventId,p_body_text:body,p_event_text:event,p_request_text:request});}catch(e){conflict(e);}return checkedReceipt(r);}};
 }
