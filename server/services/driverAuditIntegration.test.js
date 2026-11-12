@@ -6,6 +6,35 @@ import {gzipSync} from 'node:zlib';
 import {createDriverAuditIntegration} from './driverAuditIntegration.js';
 import {archiveBytes} from '../vendor/driver-audits/integration/cloud/repository.mjs';
 
+test('startup preloads the direct report once and still denies unsigned requests',async()=>{
+ const origin='https://app.example.invalid';
+ let active=null,polls=0,initializations=0;
+ const coordinator=async()=>assert.fail('Unsigned requests must never reach the report');
+ coordinator.status=()=>({active});
+ coordinator.poll=async()=>{polls++;active={generation:'a'.repeat(64)};};
+ const env={DRIVER_AUDIT_ENABLED:'0',DRIVER_AUDIT_IMPORT_ENABLED:'0',DRIVER_AUDIT_ORIGIN:origin};
+ const handler=createDriverAuditIntegration({env,dependencies:{
+  auth:{authenticate:async()=>{throw Object.assign(Error('Sign in'),{status:401});}},
+  state:{read:async()=>assert.fail('Startup must not start a source import')},
+  archive:{readObject:async()=>assert.fail('Unexpected archive read')},store:{},
+  createCoordinator:()=>{initializations++;return coordinator;},
+ }});
+ assert.equal(await handler.prewarm(),undefined);
+ env.DRIVER_AUDIT_ENABLED='1';env.DRIVER_AUDIT_IMPORT_ENABLED='1';
+ assert.equal(await handler.prewarm(),undefined);
+ assert.equal(initializations,0);
+ env.DRIVER_AUDIT_IMPORT_ENABLED='0';
+ assert.equal(await handler.prewarm(),true);
+ assert.equal(await handler.prewarm(),true);
+ assert.equal(initializations,1);
+ assert.equal(polls,1);
+ let status;
+ await handler({method:'GET',url:'/api/reporting/view',headers:{host:new URL(origin).host}},{
+  writeHead(value){status=value;},end(){},
+ },()=>assert.fail('Expected the audit handler'));
+ assert.equal(status,401);
+});
+
 test('the API document and exact evidence aliases reach the canonical audit handler after authorization',async()=>{
  const origin='https://app.example.invalid';
  const seen=[];
@@ -78,6 +107,41 @@ async function retainedPackage(){
  const pointer={generation,reportHash,directImport:{version:1},restore:{verified:true,archive:'matter-report-archive',descriptorSha256:descriptor.sha256,generation,reportHash}};
  return {objects,descriptor,pointer};
 }
+
+test('failed startup never reads the archive and authenticated access retries immediately',async()=>{
+ const fixture=await retainedPackage();
+ const origin='https://app.example.invalid';
+ let budgetReads=0,heads=0;
+ const handler=createDriverAuditIntegration({
+  env:{DRIVER_AUDIT_ENABLED:'1',DRIVER_AUDIT_IMPORT_ENABLED:'0',DRIVER_AUDIT_ORIGIN:origin},
+  dependencies:{
+   clock:()=>100000,
+   auth:{authenticate:async cookie=>{if(cookie!=='staff')throw Object.assign(Error('Sign in'),{status:401});}},
+   state:{},
+   store:{
+    head:async()=>{heads++;return {...fixture.pointer,version:1,descriptor:fixture.descriptor};},
+    readObject:async()=>{throw Object.assign(Error('Missing'),{code:'AUDIT_OBJECT_MISSING'});},
+   },
+   archive:{readObject:async key=>[fixture.objects.get(key)]},
+   budget:{reserve:async()=>{budgetReads++;return {allowed:true};},settle:async()=>({settled:true})},
+   createRuntime:()=>async(_req,res)=>res.end(),
+  },
+ });
+ const request=async cookie=>{
+  let status=200;
+  await handler({method:'GET',url:'/api/reporting/view',headers:{host:new URL(origin).host,cookie}},{
+   setHeader(){},writeHead(value){status=value;},end(){},
+  },()=>assert.fail('Expected the audit handler'));
+  return status;
+ };
+ assert.equal(await handler.prewarm(),false);
+ assert.equal(budgetReads,0);
+ assert.equal(await request(),401);
+ assert.equal(heads,1);
+ assert.equal(await request('staff'),200);
+ assert.equal(heads,3);
+ assert.ok(budgetReads>0);
+});
 
 async function integrationOptions({store,archive,budget,state={}}){
  let options;
