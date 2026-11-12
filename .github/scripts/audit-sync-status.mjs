@@ -113,12 +113,13 @@ async function summarizeAttempts(work, current, saved, progress) {
 }
 
 async function summarizeLogs(pm2Home) {
-  const counts = { refreshPaused: 0, startupFailed: 0, memoryLimit: 0, retirementDeferred: 0, lastRetirementDeferredAttempts: null, lastAbandonedRetirement: null, other: 0 };
+  const counts = { refreshPaused: 0, startupFailed: 0, memoryLimit: 0, retirementDeferred: 0, lastRetirementDeferredAttempts: null, lastAbandonedRetirement: null, lastArchiveCopyRetirement: null, other: 0 };
   const file = path.join(pm2Home, 'logs', name + '-error.log');
   const log = await readTail(file, 32 * 1024).catch(() => null);
   for (const line of (log || '').split(/\r?\n/).filter(Boolean).slice(-40)) {
     const deferred = /\{"event":"audit-workspace-retirement-deferred","attempts":([1-9]\d{0,4})\}$/.exec(line);
     const abandoned = /\{"event":"audit-workspace-abandoned-retired","attempts":([1-9]\d{0,4}),"files":([1-9]\d{0,8}),"bytes":(\d{1,15}),"allocatedBytes":(\d{1,15}),"freeDiskDeltaBytes":(-?\d{1,15})\}$/.exec(line);
+    const copies = /\{"event":"audit-workspace-archive-copies-retired","files":([1-9]\d{0,8}),"bytes":(\d{1,15}),"allocatedBytes":(\d{1,15}),"freeDiskDeltaBytes":(-?\d{1,15})\}$/.exec(line);
     if (line.includes('Driver audit sync paused this refresh.')) counts.refreshPaused++;
     else if (line.includes('Driver audit sync could not start.')) counts.startupFailed++;
     else if (/heap out of memory|Reached heap limit/.test(line)) counts.memoryLimit++;
@@ -126,6 +127,10 @@ async function summarizeLogs(pm2Home) {
     else if (abandoned) {
       const [attempts, files, bytes, allocatedBytes, freeDiskDeltaBytes] = abandoned.slice(1).map(Number);
       counts.lastAbandonedRetirement = { attempts, files, bytes, allocatedBytes, freeDiskDeltaBytes };
+    }
+    else if (copies) {
+      const [files, bytes, allocatedBytes, freeDiskDeltaBytes] = copies.slice(1).map(Number);
+      counts.lastArchiveCopyRetirement = { files, bytes, allocatedBytes, freeDiskDeltaBytes };
     }
     else counts.other++;
   }

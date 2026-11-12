@@ -6,6 +6,9 @@ import path from 'node:path';
 import test from 'node:test';
 import {gzipSync,gunzipSync} from 'node:zlib';
 import {pruneDriverAuditWorkspace} from './driverAuditWorkspace.js';
+import {prunePreviousDriverAuditCopies} from './driverAuditWorkspaceRetirement.js';
+import {driverAuditPackagePointer} from './driverAuditDirectImport.js';
+import {checkedAuditPointer} from '../vendor/driver-audits/integration/cloud/audit-replica.mjs';
 import {archiveBytes,archiveCatalog,readManifestBytes} from '../vendor/driver-audits/integration/cloud/repository.mjs';
 
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -24,7 +27,7 @@ async function fixture(t){
   };
   const recipe={builderSha256:sha('builder'),rendererSha256:sha('renderer'),journalsSha256:sha('journals'),baselineManifestSha256:sha('baseline')};
   const retirement={transport,sourceBasis:source=>source.basis,readSourceReceipt:async revision=>sources.get(revision),recipe};
-  async function add(revision){
+  async function add(revision,{archiveMirrors=false}={}){
     const directory=path.join(root,'attempts',String(revision).padStart(8,'0')+'-0000-4000-8000-000000000000');
     const privateRoot=path.join(directory,'server-data'),bundleRoot=path.join(directory,'audit-objects'),saved=path.join(directory,'saved-current');
     for(const subdir of [privateRoot,bundleRoot,saved])await fs.mkdir(subdir,{recursive:true,mode:0o700});
@@ -38,7 +41,22 @@ async function fixture(t){
     await write(path.join(saved,'collector-state.private.json'),json(state));
     await write(path.join(saved,'current-browser.private.json'),browser);
     await write(path.join(saved,'current-reviews.private.json'),reviews);
-    const manifest=json({'runtime.private.json':sha(browser),'generated.private.json':sha(reviews)}),manifestSha256=sha(manifest);
+    const localFiles={'runtime.private.json':sha(browser),'generated.private.json':sha(reviews)};
+    const mirrors=[];
+    if(archiveMirrors){
+      for(const [kind,verified]of [['archived',true],['unverified',false]]){
+        const payload=gzipSync(json({revision,kind})),hash=sha(payload),name='archive-'+hash+'.private.bin',key=hash+'.gz';
+        const file=path.join(privateRoot,name);
+        localFiles[name]=hash;
+        await write(file,payload);
+        if(verified){
+          archived.set(key,payload);
+          await write(path.join(receiptRoot,key+'.json'),json({target:'matter-report-archive',key,sha256:hash,bytes:payload.length,verified:true}));
+        }
+        mirrors.push({file,payload});
+      }
+    }
+    const manifest=json(localFiles),manifestSha256=sha(manifest);
     await write(path.join(privateRoot,'files.private.json'),manifest);
     await write(path.join(privateRoot,'runtime.private.json'),browser);
     await write(path.join(privateRoot,'generated.private.json'),reviews);
@@ -51,21 +69,94 @@ async function fixture(t){
       await write(path.join(bundleRoot,key),archived.get(key));
       await write(path.join(receiptRoot,key+'.json'),json({target:'matter-report-archive',key,sha256:chunk.sha256,bytes:chunk.size,verified:true}));
     }
-    const accepted={privateRoot,manifestSha256,sourceBasis,collectorRevision:revision};
+    const prior=attempts.at(-1)?.accepted;
+    const accepted={version:1,basis:sourceBasis,privateRoot,manifestSha256,sourceBasis,collectorRevision:revision,
+      baselineRoot:prior?.privateRoot??path.join(base,'baseline'),
+      previous:prior?{basis:prior.basis,privateRoot:prior.privateRoot,manifestSha256:prior.manifestSha256}:null};
     const binding={manifestSha256,generation,reportHash,descriptorSha256:descriptor.sha256};
     await write(path.join(directory,'accepted.private.json'),json(accepted));
-    await write(path.join(directory,'direct-seed.private.json'),json({version:1,mode:'sync',bundleRoot,collectorRevision:revision,sourceBasis,manifestSha256,
+    const seed={version:1,mode:'sync',bundleRoot,collectorRevision:revision,sourceBasis,manifestSha256,
       visibleCutoffAt:null,pointer:{version:1,generation,reportHash,descriptor},closureReceipt:{version:1,status:'verified',sourceBasis,...binding,
-        checkedAt:'2026-11-12T00:00:00.000Z',checks:{archive:true,photos:true,reviewHistory:true}},restore:{version:1,archive:'matter-report-archive',verified:true,...binding}}));
-    const item={directory,privateRoot,bundleRoot,saved,accepted,descriptor,ref,browser,reportHash};attempts.push(item);return item;
+        checkedAt:'2026-11-12T00:00:00.000Z',checks:{archive:true,photos:true,reviewHistory:true}},restore:{version:1,archive:'matter-report-archive',verified:true,...binding}};
+    await write(path.join(directory,'direct-seed.private.json'),json(seed));
+    const head=checkedAuditPointer(driverAuditPackagePointer(seed));
+    const item={directory,privateRoot,bundleRoot,saved,accepted,head,descriptor,ref,browser,reportHash,mirrors};attempts.push(item);return item;
   }
   const prune=options=>pruneDriverAuditWorkspace({root,receiptRoot,retirement,...options});
   async function point(){
-    const current=attempts.at(-1),previous=attempts.at(-2);
-    await write(path.join(root,'current.private.json'),json({...current.accepted,previous:previous?.accepted,baselineRoot:previous?.privateRoot}));
+    await write(path.join(root,'current.private.json'),json(attempts.at(-1).accepted));
   }
   return {root,receiptRoot,retirement,transport,add,prune,point};
 }
+
+test('only the previous accepted archive copies are reclaimable under disk pressure',async t=>{
+  const f=await fixture(t),previous=await f.add(1,{archiveMirrors:true}),current=await f.add(2);
+  await f.point();
+  const key=previous.ref.chunks[0].sha256+'.gz';
+  const file=path.join(previous.bundleRoot,key);
+  const currentFile=path.join(current.bundleRoot,current.ref.chunks[0].sha256+'.gz');
+  const head={...current.head,importedAt:'2026-11-12T00:00:00.000Z',transferBytes:16384,objects:2,previous:previous.head};
+  const options={root:f.root,receiptRoot:f.receiptRoot,head,stage:null,retentionStatus:'qualified'};
+  const reclaim=overrides=>prunePreviousDriverAuditCopies({...options,...overrides});
+  for(const override of [
+    {retentionStatus:'proof-stale'},
+    {stage:{pointer:previous.head}},
+    {head:{...options.head,sourceRevision:999}},
+    {head:{...options.head,sourceBodySha256:sha('changed')}},
+    {head:{...options.head,previous:{...previous.head,reportHash:sha('changed')}}},
+  ])assert.equal(await reclaim(override),null);
+  const archived=await fs.readFile(file);
+  const archiveReceipt=path.join(f.receiptRoot,key+'.json'),savedReceipt=await fs.readFile(archiveReceipt);
+  await fs.unlink(archiveReceipt);
+  assert.equal(await reclaim(),'proof-unavailable');
+  assert.deepEqual(await fs.readFile(file),archived);
+  await write(archiveReceipt,savedReceipt);
+  const extra=path.join(previous.bundleRoot,sha('unlisted')+'.gz');
+  await write(extra,'unlisted');
+  const result=await reclaim();
+  const [mirror,unverified]=previous.mirrors;
+  assert.equal(result.files,2);
+  assert.equal(result.bytes,archived.length+mirror.payload.length);
+  await assert.rejects(fs.stat(file),{code:'ENOENT'});
+  await assert.rejects(fs.stat(mirror.file),{code:'ENOENT'});
+  assert.deepEqual(await fs.readFile(unverified.file),unverified.payload);
+  assert.equal(await fs.readFile(extra,'utf8'),'unlisted');
+  assert.deepEqual(await fs.readFile(path.join(previous.privateRoot,'runtime.private.json')),previous.browser);
+  assert.deepEqual(await fs.readFile(path.join(previous.saved,'current-browser.private.json')),previous.browser);
+  assert.ok(await fs.stat(path.join(previous.bundleRoot,previous.descriptor.chunks[0].sha256+'.gz')));
+  assert.ok(await fs.stat(currentFile));
+  assert.equal(await reclaim(),null);
+  const descriptor=JSON.parse(await readManifestBytes(f.transport,previous.descriptor,{maxBytes:16_384}));
+  assert.deepEqual(await readManifestBytes(f.transport,descriptor.files['runtime.private.json'],{maxBytes:16_384}),previous.browser);
+  await f.add(3);await f.point();
+  assert.equal((await f.prune()).attemptsRetired,1);
+});
+
+test('a prepared archive copy inventory resumes only against the same verified pair and receipts',async t=>{
+  const f=await fixture(t),previous=await f.add(1,{archiveMirrors:true}),current=await f.add(2);
+  await f.point();
+  const options={root:f.root,receiptRoot:f.receiptRoot,head:{...current.head,previous:previous.head},stage:null,retentionStatus:'qualified'};
+  const proof=path.join(previous.directory,'retired-archive-copies.private.json');
+  const file=previous.mirrors[0].file,unlink=fs.unlink;
+  const interruption=t.mock.method(fs,'unlink',async target=>{
+    if(target===file)throw Error('Fixture interruption');
+    return unlink(target);
+  });
+  try{await assert.rejects(prunePreviousDriverAuditCopies(options),/Fixture interruption/);}
+  finally{interruption.mock.restore();}
+  assert.equal(JSON.parse(await fs.readFile(proof)).status,'prepared');
+  await assert.rejects(fs.stat(path.join(previous.bundleRoot,previous.ref.chunks[0].sha256+'.gz')),{code:'ENOENT'});
+  assert.equal(await prunePreviousDriverAuditCopies({...options,stage:{pointer:current.head}}),null);
+  const key=sha(previous.mirrors[0].payload)+'.gz',receipt=path.join(f.receiptRoot,key+'.json');
+  const original=await fs.readFile(receipt);
+  await fs.unlink(receipt);
+  await assert.rejects(prunePreviousDriverAuditCopies(options),/restore receipt changed/);
+  assert.ok(await fs.stat(file));
+  await write(receipt,original);
+  assert.equal((await prunePreviousDriverAuditCopies(options)).files,2);
+  assert.equal(JSON.parse(await fs.readFile(proof)).status,'retired');
+  await assert.rejects(fs.stat(file),{code:'ENOENT'});
+});
 
 test('repeated cycles retire known generated data while restoring the archived package and keeping protected candidates',async t=>{
   const f=await fixture(t),retired=[];

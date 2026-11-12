@@ -7,7 +7,8 @@ import {runDriverAuditDirectImport} from '../services/driverAuditDirectImport.js
 import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollection.js';
 import {driverAuditReplicaRetentionStatus,driverAuditRetentionImplementation} from '../services/driverAuditRetention.js';
 import {withDriverAuditWriter} from '../services/driverAuditWriter.js';
-import {pruneDriverAuditWorkspace,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
+import {hasDriverAuditBuildSpace,pruneDriverAuditWorkspace,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
+import {prunePreviousDriverAuditCopies} from '../services/driverAuditWorkspaceRetirement.js';
 import {pathToFileURL} from 'node:url';
 import {createBudgetedAuditArchive,createBudgetedAuditState} from '../vendor/driver-audits/integration/cloud/driver-audit-archive.mjs';
 import {prepareDirectAuditBundle,privateAuditDirectory,privateAuditJson,privateAuditWrite,verifyAuditBuilder} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
@@ -65,9 +66,9 @@ async function main(){
    return;
   }
   lock=await acquireWorkerLock(path.join(path.dirname(root),'sync-worker.lock'));
-  const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true});
+  const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true});
   const boundedState=(responseLimit,select=cloud=>cloud)=>createBudgetedAuditState({state:select(createCloudState({rpc:createHostedRpc({secret,maxResponseBytes:responseLimit})})),
-   budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true});
+   budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true});
   const sourceState=boundedState(2*1024*1024),reviewState=boundedState(8*1024*1024);
   const sourceReceipts=boundedState(2*1024*1024,cloud=>({async read(revision){
    const [receipt]=await cloud.receipts('collector-state',{after:revision-1});
@@ -76,13 +77,17 @@ async function main(){
   }}));
   const bootstrap=await privateAuditJson(path.join(root,'seed.json')).catch(()=>null);
   const work=path.join(root,'work');
+  const receiptRoot=path.join(root,'archive-receipts');
+  const freeBuildBytes=async(directory=work)=>{
+   const disk=await fs.statfs(directory);
+   return disk.bavail*disk.bsize;
+  };
   const loadSource=createAutomaticReleaseSource({secret,stateStore:sourceState,cacheRoot:path.join(work,'archive-cache'),localRoots:[baselineRoot],archiveTransport:{readObject:archive.readBounded}});
   let pinned;
   const builder=createAutomaticRelease({
    root:work,baselineRoot,pinnedDirectSync:true,loadSource:async()=>pinned,
    async build(options){
-    const disk=await fs.statfs(work);
-    requireDriverAuditBuildSpace(disk.bavail*disk.bsize);
+    requireDriverAuditBuildSpace(await freeBuildBytes());
     return buildAutomaticRelease({...options,rendererBuild,archiveBackedBaseline:true});
    },
    validate:candidate=>validateAutomaticCandidate(candidate,{journals}),
@@ -151,9 +156,21 @@ async function main(){
         return {revision:receipt.revision,body:JSON.parse(receipt.body).body_text};
        },recipe:{builderSha256,rendererSha256:rendererBuild.sha256,journalsSha256:journals.sha256,baselineManifestSha256:bootstrap?.manifestSha256},
        retainedBaseline:{root:baselineRoot,manifestSha256:bootstrap?.manifestSha256}};
-      const workspace=await pruneDriverAuditWorkspace({root:work,receiptRoot:path.join(root,'archive-receipts'),protectedManifests,retirement,abandoned:'apply'});
+      const workspace=await pruneDriverAuditWorkspace({root:work,receiptRoot,protectedManifests,retirement,abandoned:'apply'});
       if(workspace.retirementDeferred)console.warn(JSON.stringify({event:'audit-workspace-retirement-deferred',attempts:workspace.retirementDeferred}));
       if(workspace.abandoned.attempts)console.warn(JSON.stringify({event:'audit-workspace-abandoned-retired',...workspace.abandoned}));
+      const before=await freeBuildBytes().catch(error=>{
+       if(error.code==='ENOENT')return freeBuildBytes(root);
+       throw error;
+      });
+      if(collectReplicas&&!hasDriverAuditBuildSpace(before)){
+       const copies=await withDriverAuditWriter(db,async()=>prunePreviousDriverAuditCopies({
+        root:work,receiptRoot,head:await readHead(),stage:await control.findOne({_id:'direct-stage'}),retentionStatus:replicaGcStatus,
+       }));
+       if(copies==='proof-unavailable')console.warn(JSON.stringify({event:'audit-workspace-retirement-deferred',attempts:1}));
+       else if(copies)console.warn(JSON.stringify({event:'audit-workspace-archive-copies-retired',...copies,
+        freeDiskDeltaBytes:await freeBuildBytes()-before}));
+      }
       return builder.tick();
      },
      async apply(candidate){

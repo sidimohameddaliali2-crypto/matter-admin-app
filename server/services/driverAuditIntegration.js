@@ -35,7 +35,7 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
   const rawArchive=dependencies.archive||createSupabaseArchiveTransport({secret:env.DRIVER_AUDIT_SUPABASE_SECRET});
   const store=dependencies.store||createDriverAuditReplica(db(),{capacityBytes:Number(env.DRIVER_AUDIT_CAPACITY_BYTES)});
   let budget=dependencies.budget;
-  const getBudget=()=>budget??=createReaderBudgetPool({stateStore:state,approvedNovemberRelease:true,approvedNovemberSync:true});
+  const getBudget=()=>budget??=createReaderBudgetPool({stateStore:state,approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true});
   const archive=createBudgetedArchiveReader({transport:rawArchive,maxConcurrent:4,requestBytes:2048+2*Buffer.byteLength(env.DRIVER_AUDIT_SUPABASE_SECRET||''),budget:{
    reserve:options=>getBudget().reserve(options),
    settle:(reservation,measurement)=>getBudget().settle(reservation,measurement),
@@ -63,7 +63,7 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
     try{return await store.readObject(key,options);}
     catch(error){if(!recoverable||error.code!=='AUDIT_OBJECT_MISSING')throw error;return archive.readObject(key,options);}
    }};
-   return {...await loadRemotePreviewPackage({descriptor,transport}),directSnapshot};
+   return {...await loadRemotePreviewPackage({descriptor,transport,parallelCoreReads:directSnapshot}),directSnapshot};
   },createRuntime:({packageOverride,automaticFeed})=>createRuntime({origin,publicPathPrefix:reportApi,packageOverride,automaticFeed,
    auditImportStatus:health,auditSyncStatus:packageOverride.directSnapshot?()=>readDriverAuditSyncStatus(db(),packageOverride.generation,clock):undefined,
    authOverride:requestAuth,staffReportFrame:true,stateOverride:state,transportOverride:archive,remoteReadsBudgeted:true,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
