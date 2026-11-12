@@ -60,9 +60,9 @@ async function main(){
    if(receipt.replicaGcEnabled!==true||!/^[a-f0-9]{64}$/.test(receipt.gcRestoreReceiptSha256||''))throw Error('Reviewed audit archive restore required');
   }
   lock=await acquireWorkerLock(path.join(path.dirname(root),'sync-worker.lock'));
-  const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts')});
+  const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true});
   const boundedState=responseLimit=>createBudgetedAuditState({state:createCloudState({rpc:createHostedRpc({secret,maxResponseBytes:responseLimit})}),
-   budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret)});
+   budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true});
   const sourceState=boundedState(2*1024*1024),reviewState=boundedState(8*1024*1024);
   const work=path.join(root,'work');
   const loadSource=createAutomaticReleaseSource({secret,stateStore:sourceState,cacheRoot:path.join(work,'archive-cache'),localRoots:[baselineRoot],archiveTransport:{readObject:archive.readBounded}});
