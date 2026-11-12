@@ -32,7 +32,7 @@
     "integration/cloud/hosted-auth.mjs": "f0b82031a5bf6829507f4508187b32430d36a75f0ed7e5ed690fcb475c5294cc",
     "integration/cloud/hosted-reviews.mjs": "ed2665d1e2b70e998c7850f1c094a917d8cc36220f5bce298c3f44bbc8beb429",
     "integration/cloud/report-service.mjs": "db351b3de6db610fdfd872e687c14ec0fe91a3f3ab456fc8790fe88a4a570c7f",
-    "integration/cloud/cloud-http.mjs": "e7e047110a481d3ce072e7f2f1dabd15199046ab569ca75abbe62ebdc9a4831e",
+    "integration/cloud/cloud-http.mjs": "ca55e57e59de7eab2ebb35b44e1772833fdc95c3913627c04a9c29bf707c8236",
     "integration/cloud/password-login.mjs": "f487f3499fbf4959400abd04cb61ad9998e3a80c404568499ff762a5e476226d",
     "integration/cloud/preview-gps.mjs": "969c0bb314d4a3e8d67625a6e2eaae2de03c2cfb32d501a9d6c9fc878f47ff23",
     "integration/cloud/preview-map-access.mjs": "b35ca049abfdf5f9645e7d354b8e9db72ad17f143d0bd86cbb1cb3ba3c4ab5ac",
