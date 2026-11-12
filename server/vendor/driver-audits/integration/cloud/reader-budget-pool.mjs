@@ -7,12 +7,16 @@ export const READER_RESERVE_BUDGET_POLICY=Object.freeze({...READER_BUDGET_POLICY
 // Explicitly approved 6 November 2026; separate history, preview opt-in only.
 export const READER_APPROVED_ADDITION_POLICY=Object.freeze({...READER_BUDGET_POLICY,monthlyMicros:5_000_000});
 export const EXPANDED_HOSTING_BUDGET_MICROS=30_000_000;
+// One-time release allowance approved for November 2026 only.
+export const READER_NOVEMBER_RELEASE_POLICY=Object.freeze({...READER_BUDGET_POLICY,monthlyMicros:1_000_000});
 const SMALL_RESPONSE_BYTES=2*1024*1024;
 const capacities=new Map([[40_000,SMALL_RESPONSE_BYTES],[45_000,8*1024*1024],[47_000,9*1024*1024],[55_000,16*1024*1024],[150_000,MAX_READER_BODY_BYTES]]);
 
-export function createReaderBudgetPool({stateStore,clock=Date.now,requestId,maxRetries,approvedAdditionalBrowsing=false}={}){
+export function createReaderBudgetPool({stateStore,clock=Date.now,requestId,maxRetries,approvedAdditionalBrowsing=false,approvedNovemberRelease=false}={}){
  if(WORKER_BUDGET_DEFAULTS.monthlyMicros+READER_BUDGET_POLICY.monthlyMicros+READER_RESERVE_BUDGET_POLICY.monthlyMicros>APPROVED_HOSTING_BUDGET_MICROS)throw Error('Reader pool exceeds approved hosting budget');
  if(typeof approvedAdditionalBrowsing!=='boolean')throw Error('Explicit browsing approval required');
+ if(typeof approvedNovemberRelease!=='boolean')throw Error('Explicit November release approval required');
+ if(approvedAdditionalBrowsing&&approvedNovemberRelease)throw Error('November release cannot combine browsing supplements');
  if(APPROVED_HOSTING_BUDGET_MICROS+READER_APPROVED_ADDITION_POLICY.monthlyMicros>EXPANDED_HOSTING_BUDGET_MICROS)throw Error('Expanded reader pool exceeds approved hosting budget');
  const options={stateStore,clock,requestId,maxRetries};
  const budgets={
@@ -20,6 +24,7 @@ export function createReaderBudgetPool({stateStore,clock=Date.now,requestId,maxR
   reserve:createWorkerBudget({...options,key:'reader-budget-reserve',policy:READER_RESERVE_BUDGET_POLICY})
  };
  if(approvedAdditionalBrowsing)budgets.approved20261106=createWorkerBudget({...options,key:'reader-budget-approved-20261106',policy:READER_APPROVED_ADDITION_POLICY});
+ if(approvedNovemberRelease)budgets.novemberRelease=createWorkerBudget({...options,key:'reader-budget-release-20261112',policy:READER_NOVEMBER_RELEASE_POLICY});
  const check=reservation=>{
   if(!reservation?.allowed||!Object.hasOwn(budgets,reservation.readerPool))throw Error('Invalid reader budget pool reservation');
   if(!capacities.has(reservation.reservationMicros)||reservation.maxResponseBytes!==capacities.get(reservation.reservationMicros))throw Error('Invalid reader response capacity');
@@ -30,7 +35,9 @@ export function createReaderBudgetPool({stateStore,clock=Date.now,requestId,maxR
    const [initialMicros,initialBytes]=[...capacities].find(([,max])=>responseBytes<=max);
    const began=clock();
    let result;
-   for(const readerPool of approvedAdditionalBrowsing?['approved20261106','primary','reserve']:['primary','reserve']){
+   const pools=approvedAdditionalBrowsing?['approved20261106','primary','reserve']:['primary','reserve'];
+   if(approvedNovemberRelease&&new Date(began).toISOString().slice(0,7)==='2026-11')pools.unshift('novemberRelease');
+   for(const readerPool of pools){
     // Accounting failures propagate; only confirmed exhaustion permits fallback.
     const reservation=await budgets[readerPool].reserve({reservationMicros:initialMicros});
     result={...reservation,readerPool,readerPoolDelayMs:reservation.allowed?reservation.startedAtMs-began:0,maxResponseBytes:initialBytes};
