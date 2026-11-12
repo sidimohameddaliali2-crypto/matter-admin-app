@@ -167,3 +167,40 @@ test('restore does not expose fetched bytes when allowance settlement is uncerta
  assert.equal(reads,2,'unsettled data must not enter the shared cache');
  assert.equal(settlements,2);
 });
+
+test('audit authentication is reused only for the same verified request', async () => {
+ const origin='https://app.example.invalid';
+ let runtime, checks=0;
+ const auth={
+  async authenticate(cookie){
+   checks++;
+   if(cookie!=='staff')throw Object.assign(new Error('Sign in'),{status:401});
+   return {actor:{id:'staff'},csrf:'fixture'};
+  },
+ };
+ const coordinator=async(req,res)=>{
+  const first=await runtime.authOverride.authenticate(req.headers.cookie,req);
+  const second=await runtime.authOverride.authenticate(req.headers.cookie,req);
+  assert.equal(first,second);
+  await assert.rejects(runtime.authOverride.authenticate('other',req),{status:401});
+  res.end();
+ };
+ coordinator.status=()=>({status:'ready',active:{generation:'a'.repeat(64)}});
+ coordinator.poll=async()=>{};
+ const handler=createDriverAuditIntegration({
+  env:{DRIVER_AUDIT_ENABLED:'1',DRIVER_AUDIT_ORIGIN:origin},
+  dependencies:{
+   auth,state:{},archive:{readObject:async()=>assert.fail('No archive reads expected')},store:{},createRuntime:options=>options,
+   createCoordinator:options=>{runtime=options.createRuntime({packageOverride:{}});return coordinator;},
+  },
+ });
+ const request={method:'GET',url:'/api/reporting/view',headers:{host:'app.example.invalid',cookie:'staff'}};
+ await handler(request,{setHeader(){},end(){},writeHead(){assert.fail('Unexpected rejection');}},()=>assert.fail('Expected audit route'));
+ assert.equal(checks,2,'one verified check and one deliberate different-cookie check');
+ await runtime.authOverride.authenticate('staff',request);
+ assert.equal(checks,3,'verification is removed after dispatch');
+ await handler({...request,url:'/api/reporting/view',headers:{host:'app.example.invalid'}},{
+  writeHead(status){assert.equal(status,401);},end(){},
+ },()=>assert.fail('Expected audit route'));
+ assert.equal(checks,4,'signed-out request is checked separately');
+});

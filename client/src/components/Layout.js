@@ -43,6 +43,7 @@ const NAV_ITEMS = [
   { name: 'Delivery Changes', href: '/delivery-changes', icon: ReplaceAll, permission: 'delivery_changes', group: 'Operations' },
   { name: 'Bag Operations', href: '/bags', icon: ShoppingBag, permission: 'bags', group: 'Operations' },
   { name: 'Report', href: '/reports', icon: BarChart3, permission: 'reports', group: 'Operations' },
+  { name: 'Driver Reports', href: '/driver-reports', icon: FileText, permission: 'reports', group: 'Operations' },
   { name: 'Events', href: '/events', icon: Calendar, permission: 'events', group: 'Operations' },
   { name: 'Complaints', href: '/complaints', icon: AlertTriangle, permission: 'complaints', group: 'Operations' },
 
@@ -170,6 +171,7 @@ const Layout = ({ children }) => {
                     <Link
                       key={item.name}
                       to={item.href}
+                      aria-current={isActive ? 'page' : undefined}
                       className={`flex items-center pl-6 pr-3 py-2 text-sm font-medium rounded-full transition-colors ${
                         isActive
                           ? 'bg-[#bdf477] text-[#0b1630] font-semibold'

@@ -17,7 +17,7 @@ import DeliveryDetail from './pages/DeliveryDetail';
 import AddDelivery from './pages/AddDelivery';
 import BagTracking from './pages/BagOperations';
 import Reports from './pages/Reports';
-import DriverAudits from './pages/DriverAudits';
+import DriverReports from './pages/DriverReports';
 import CreateDriver from './pages/CreateDriver';
 import DriverMobile from './pages/DriverMobile';
 import Users from './pages/Users'
@@ -501,10 +501,11 @@ function App() {
                 </PermissionBasedRoute>
               </ProtectedRoute>
             } />
-            <Route path="/driver-audits" element={
+            <Route path="/driver-audits" element={<Navigate to="/driver-reports" replace />} />
+            <Route path="/driver-reports" element={
               <ProtectedRoute>
                 <PermissionBasedRoute permission="reports">
-                  <Layout><DriverAudits /></Layout>
+                  <Layout><DriverReports /></Layout>
                 </PermissionBasedRoute>
               </ProtectedRoute>
             } />
