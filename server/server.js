@@ -92,7 +92,8 @@ app.set('io', io);
 
 // Middleware
 // This handler owns its raw JSON body and existing reporting security headers.
-app.use(createDriverAuditIntegration({db:()=>mongoose.connection.db,authenticateStaffToken}));
+const driverAuditIntegration = createDriverAuditIntegration({db:()=>mongoose.connection.db,authenticateStaffToken});
+app.use(driverAuditIntegration);
 app.use(cors(corsOptions));
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
@@ -128,6 +129,10 @@ const connectDB = async () => {
       tlsAllowInvalidHostnames: true,
     });
     console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
+    void driverAuditIntegration.prewarm().then(ready => {
+      if (ready) console.log('Driver Reports ready after database startup');
+      if (ready === false) console.warn('Driver Reports startup load will retry on request');
+    }).catch(() => console.warn('Driver Reports startup load will retry on request'));
     return conn;
   } catch (error) {
     console.error('❌ MongoDB connection error:', error.message);

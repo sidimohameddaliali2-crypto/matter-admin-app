@@ -54,27 +54,54 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
   };
   const createCoordinator=dependencies.createCoordinator||createAutomaticHostedPreview;
   const createRuntime=dependencies.createRuntime||createImportedAuditRuntime;
+  let preload,preloadFailed=false;
   const coordinator=createCoordinator({clock,refreshOnRequest:false,restorePrevious:true,loadPointer:async()=>await store.head(),async loadPackage({descriptor,pointer}){
    const directSnapshot=pointer?.directImport?.version===1;
+   let localOnly=Boolean(preload);
+   if(localOnly&&!directSnapshot)throw Error('Startup requires a direct Mongo audit');
    const restore=pointer?.restore;
    const recoverable=directSnapshot&&restore?.verified===true&&restore.archive==='matter-report-archive'&&
     restore.descriptorSha256===descriptor.sha256&&restore.generation===pointer.generation&&restore.reportHash===pointer.reportHash;
    const transport={async readObject(key,options){
     try{return await store.readObject(key,options);}
-    catch(error){if(!recoverable||error.code!=='AUDIT_OBJECT_MISSING')throw error;return archive.readObject(key,options);}
+    catch(error){if(localOnly||!recoverable||error.code!=='AUDIT_OBJECT_MISSING')throw error;return archive.readObject(key,options);}
    }};
-   return {...await loadRemotePreviewPackage({descriptor,transport,parallelCoreReads:directSnapshot}),directSnapshot};
+   const loaded=await loadRemotePreviewPackage({descriptor,transport,parallelCoreReads:directSnapshot});
+   localOnly=false; // Lazy evidence reads on the published handler retain the normal fallback.
+   return {...loaded,directSnapshot};
   },createRuntime:({packageOverride,automaticFeed})=>createRuntime({origin,publicPathPrefix:reportApi,packageOverride,automaticFeed,
    auditImportStatus:health,auditSyncStatus:packageOverride.directSnapshot?()=>readDriverAuditSyncStatus(db(),packageOverride.generation,clock):undefined,
    authOverride:requestAuth,staffReportFrame:true,stateOverride:state,transportOverride:archive,remoteReadsBudgeted:true,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
   function health(){const runtime=coordinator.status();return {status:runtime.status==='stale'?'failed':runtime.status==='refreshing'?'checking':env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'?'disabled':importStatus,checkedAt:attempt===null?null:new Date(attempt).toISOString(),servingGeneration:runtime.active?.generation||null};}
-  return {origin,auth,verifiedRequests,coordinator,refresh,getImportStatus:()=>health().status};
+  function prewarm(){
+   if(preload)return preload;
+   const current=coordinator.status();
+   if(current.active||current.lastAttemptAt)return Boolean(current.active);
+   preload=coordinator.poll().then(()=>{
+    preloadFailed=!coordinator.status().active;
+    return !preloadFailed;
+   }).catch(()=>{preloadFailed=true;return false;}).finally(()=>{preload=null;});
+   return preload;
+  }
+  async function pollForStaff(){
+   if(preload)await preload;
+   if(preloadFailed){
+    preloadFailed=false;
+    return coordinator.refresh();
+   }
+   return coordinator.poll();
+  }
+  return {origin,auth,verifiedRequests,coordinator,refresh,prewarm,pollForStaff,getImportStatus:()=>health().status};
  }
- return async(req,res,next)=>{
+ function getContext(){
+  if(!pending)pending=initialize().catch(error=>{pending=null;throw error;});
+  return pending;
+ }
+ const middleware=async(req,res,next)=>{
   const url=new URL(req.url,'http://audit.invalid'),path=url.pathname;if(!auditRoute(path))return next();
   if(env.DRIVER_AUDIT_ENABLED!=='1'){res.writeHead(503,{'Cache-Control':'no-store'});res.end('Driver audits are not enabled.');return;}
   try{
-   if(!pending)pending=initialize().catch(e=>{pending=null;throw e;});const context=await pending;
+   const context=await getContext();
    if(req.headers.host!==new URL(context.origin).host||req.headers.origin&&req.headers.origin!==context.origin)throw Object.assign(Error('Invalid origin'),{status:403});
    if(path==='/api/driver-audits/session'){
     if(req.method==='DELETE'&&req.headers.origin===context.origin){req.resume();res.writeHead(204,{'Cache-Control':'no-store','Set-Cookie':context.auth.clearCookie});res.end();return;}
@@ -83,7 +110,7 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
      req.resume();res.writeHead(428,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Reload the app to open driver audits.');return;
     }
     const session=await context.auth.issue(req.headers.authorization);
-    if(env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'&&!context.coordinator.status().active)void context.coordinator.poll().catch(()=>{});
+    if(env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'&&!context.coordinator.status().active)void context.pollForStaff().catch(()=>{});
     req.resume();res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store','Set-Cookie':session.cookie});res.end(JSON.stringify({url:auditView+'?screen=reports&view=1&tab=mirror'}));return;
    }
    const cookie=req.headers.cookie;
@@ -99,7 +126,7 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
     res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(req.method==='HEAD'?undefined:'{"connected":true}');return;
    }
    const isDocument=path===auditView||path==='/driver-audit-view';
-   const update=async()=>{await context.refresh();await context.coordinator.poll();};
+   const update=async()=>{await context.refresh();await context.pollForStaff();};
    if(!context.coordinator.status().active)await update();
    else if(req.method==='GET'&&(isDocument||path==='/api/reporting/status'))void update().catch(()=>{});
    // Existing generations stay available while imports are in flight. In
@@ -111,4 +138,9 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    try{return await context.coordinator(req,res);}finally{context.verifiedRequests.delete(req);}
   }catch(error){if(res.headersSent){res.destroy();return;}const code=[401,403,409].includes(error.status)?error.status:503;res.writeHead(code,{'Content-Type':'text/plain','Cache-Control':'no-store'});res.end(code===401?'Sign in to the delivery app again.':'Driver audits are temporarily unavailable. Existing reports and saved findings are retained.');}
  };
+ middleware.prewarm=async()=>{
+  if(env.DRIVER_AUDIT_ENABLED!=='1'||env.DRIVER_AUDIT_IMPORT_ENABLED!=='0')return;
+  return (await getContext()).prewarm();
+ };
+ return middleware;
 }
