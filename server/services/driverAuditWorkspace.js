@@ -12,11 +12,15 @@ const digest = /^[a-f0-9]{64}$/;
 const attemptName = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 
 // The saved-data replay used 1.32 GB of working space. Retain additional room
-// for a larger capture while allowing the active and previous builds to coexist.
+// for a larger capture.
 const minimumBuildBytes = 2560 * 1024 * 1024;
 
+export function hasDriverAuditBuildSpace(availableBytes) {
+  return Number.isSafeInteger(availableBytes) && availableBytes >= minimumBuildBytes;
+}
+
 export function requireDriverAuditBuildSpace(availableBytes) {
-  if (!Number.isSafeInteger(availableBytes) || availableBytes < minimumBuildBytes) {
+  if (!hasDriverAuditBuildSpace(availableBytes)) {
     throw Object.assign(Error('Audit disk reserve unavailable'), {code:'AUDIT_CAPACITY'});
   }
 }

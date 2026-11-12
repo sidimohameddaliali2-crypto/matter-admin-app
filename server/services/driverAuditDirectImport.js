@@ -131,7 +131,7 @@ async function localPackage(config){
   return {sourceTransport,chunks};
 }
 
-function packagePointer(config){
+export function driverAuditPackagePointer(config){
   const {collectorRevision,sourceBasis,manifestSha256,visibleCutoffAt,pointer,restore}=config;
   const {version,domain,path,kind,size,sha256,chunks}=pointer.descriptor;
   return {
@@ -230,7 +230,7 @@ export async function runDriverAuditDirectImport({config,db,capacityBytes,apply=
   }
   if(cloudImportEnabled)throw new DriverAuditDirectImportError('Disable automatic imports before using direct audit import.');
   if(apply&&!db)throw new DriverAuditDirectImportError('The existing app database is required to apply an audit import.');
-  const pointer=packagePointer(config),incoming=checkedAuditPointer(pointer);
+  const pointer=driverAuditPackagePointer(config),incoming=checkedAuditPointer(pointer);
   const packageData=await localPackage(config);
   const run=token=>importIntoTarget({config,db,capacityBytes,apply,token,pointer,incoming,...packageData});
   return apply?withDriverAuditWriter(db,run):run(null);

@@ -40,7 +40,7 @@ test('status reports bounded build progress and omits private values and paths',
   assert.equal(status.heartbeat.replicaGcStatus, 'proof-stale');
   assert.equal(status.build.status, 'building');
   assert.equal(status.build.files['combined-reviews.private.json'].bytes, 13);
-  assert.deepEqual(status.logs, { refreshPaused: 1, startupFailed: 0, memoryLimit: 0, retirementDeferred: 0, lastRetirementDeferredAttempts: null, lastAbandonedRetirement: null, other: 1 });
+  assert.deepEqual(status.logs, { refreshPaused: 1, startupFailed: 0, memoryLimit: 0, retirementDeferred: 0, lastRetirementDeferredAttempts: null, lastAbandonedRetirement: null, lastArchiveCopyRetirement: null, other: 1 });
   const output = JSON.stringify(status);
   assert.ok(!output.includes('private-value') && !output.includes(appRoot));
 });
@@ -68,7 +68,8 @@ test('inventory identifies populated, protected, prepared and retired attempts w
   await fs.writeFile(path.join(f.attempt, 'interrupted.private.json'), 'private-value');
   await fs.writeFile(path.join(prepared, 'server-data', 'private-filename.json'), 'private-value');
   await fs.writeFile(path.join(f.pm2Home, 'logs/matter-driver-audit-sync-error.log'), '{"event":"audit-workspace-retirement-deferred","attempts":2}\n'
-    +'{"event":"audit-workspace-abandoned-retired","attempts":1,"files":100,"bytes":123,"allocatedBytes":456,"freeDiskDeltaBytes":400}\n');
+    +'{"event":"audit-workspace-abandoned-retired","attempts":1,"files":100,"bytes":123,"allocatedBytes":456,"freeDiskDeltaBytes":400}\n'
+    +'{"event":"audit-workspace-archive-copies-retired","files":90,"bytes":120,"allocatedBytes":450,"freeDiskDeltaBytes":390}\n');
   const status = await readAuditSyncStatus(f);
   const attempts = new Map(status.attempts.summaries.map(item => [item.id, item]));
   assert.equal(status.attempts.observed, 4);
@@ -84,6 +85,7 @@ test('inventory identifies populated, protected, prepared and retired attempts w
   assert.equal(status.logs.retirementDeferred, 1);
   assert.equal(status.logs.lastRetirementDeferredAttempts, 2);
   assert.deepEqual(status.logs.lastAbandonedRetirement, { attempts: 1, files: 100, bytes: 123, allocatedBytes: 456, freeDiskDeltaBytes: 400 });
+  assert.deepEqual(status.logs.lastArchiveCopyRetirement, { files: 90, bytes: 120, allocatedBytes: 450, freeDiskDeltaBytes: 390 });
   assert.ok(!JSON.stringify(status).includes('private-filename') && !JSON.stringify(status).includes('private-value'));
 });
 

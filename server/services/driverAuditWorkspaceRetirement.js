@@ -3,7 +3,10 @@ import {constants} from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {Readable} from 'node:stream';
+import {isDeepStrictEqual} from 'node:util';
 import {createGunzip,gzipSync,gunzipSync} from 'node:zlib';
+import {driverAuditPackagePointer,readDriverAuditSeedConfig} from './driverAuditDirectImport.js';
+import {checkedAuditPointer} from '../vendor/driver-audits/integration/cloud/audit-replica.mjs';
 import {privateAuditJson,privateAuditWrite} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
 import {createCloudRepository,readManifestBytes} from '../vendor/driver-audits/integration/cloud/repository.mjs';
 
@@ -15,6 +18,8 @@ const receiptName='retired-workspace.private.json';
 const inventoryName='retired-workspace-inventory.private.json.gz';
 const abandonedReceipt='abandoned-workspace.private.json';
 const abandonedInventory='abandoned-workspace-inventory.private.json.gz';
+const copiesReceipt='retired-archive-copies.private.json';
+const copiesInventory='retired-archive-copies-inventory.private.json.gz';
 const buildFiles=new Set(['automatic-build.private.json','automatic-validation.private.json','combined-reviews.private.json',
   'gps-refresh-receipt.private.json','history-query.private.gz','receipt.private.json','verified-gps-windows.private.json']);
 const savedFiles=['collector-state.private.json','current-browser.private.json','current-reviews.private.json'];
@@ -271,6 +276,91 @@ async function exactArchiveReceipt(receiptRoot,key,actual){
 
 const archiveKey=relative=>relative.match(/^(?:server-data\/archive-([a-f0-9]{64})\.private\.bin|audit-objects\/([a-f0-9]{64})\.gz)$/)?.slice(1).find(Boolean);
 const proofForRecipe=recipe=>['builderSha256','rendererSha256','journalsSha256','baselineManifestSha256'].every(key=>digest.test(recipe?.[key]));
+
+async function acceptedWorkspace(root,candidate,head){
+  if(!candidate||head?.version!==1||!digest.test(candidate.basis)
+    ||typeof candidate.privateRoot!=='string')return null;
+  const directory=path.dirname(candidate.privateRoot);
+  if(path.dirname(directory)!==path.join(root,'attempts')
+    ||!(/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/).test(path.basename(directory))
+    ||candidate.privateRoot!==path.join(directory,'server-data')||!await safeDirectory(directory))return null;
+  const accepted=await privateAuditJson(path.join(directory,'accepted.private.json'));
+  const seed=await readDriverAuditSeedConfig(path.join(directory,'direct-seed.private.json'));
+  const replica={...head};
+  delete replica.previous;
+  if(accepted?.version!==1||accepted.privateRoot!==candidate.privateRoot||accepted.basis!==candidate.basis
+    ||accepted.manifestSha256!==candidate.manifestSha256||accepted.manifestSha256!==seed.manifestSha256
+    ||accepted.sourceBasis!==seed.sourceBasis||accepted.collectorRevision!==seed.collectorRevision
+    ||seed.mode!=='sync'||seed.bundleRoot!==path.join(directory,'audit-objects')
+    ||!isDeepStrictEqual(replica,checkedAuditPointer(driverAuditPackagePointer(seed))))return null;
+  const manifest=await readLocalManifest(accepted.privateRoot);
+  if(manifest?.sha256!==seed.manifestSha256)return null;
+  return {directory,accepted,seed,manifest};
+}
+
+// The sync writer holds both the local worker and MongoDB direct-writer locks.
+// The previous local package can shed verified archive copies. Its source,
+// derived reports, manifest and lineage remain available for later retirement.
+export async function prunePreviousDriverAuditCopies({root,receiptRoot,head,stage,retentionStatus}){
+  if(retentionStatus!=='qualified'||stage!==null||!path.isAbsolute(root??'')||!path.isAbsolute(receiptRoot??'')
+    ||!await safeDirectory(root)||!await safeDirectory(receiptRoot))return null;
+  let plan;
+  try{
+    const pointer=await privateAuditJson(path.join(root,'current.private.json')).catch(missing);
+    if(pointer?.version!==1||!pointer.previous||pointer.privateRoot===pointer.previous.privateRoot
+      ||pointer.manifestSha256===pointer.previous.manifestSha256||pointer.baselineRoot!==pointer.previous.privateRoot)return null;
+    const active=await acceptedWorkspace(root,pointer,head);
+    const previous=await acceptedWorkspace(root,pointer.previous,head?.previous);
+    if(!active||!previous||!isDeepStrictEqual(pointer,active.accepted)
+      ||active.seed.collectorRevision<=previous.seed.collectorRevision)return null;
+    const {directory,seed,manifest}=previous;
+    const receipt=path.join(directory,copiesReceipt);
+    let proof=await privateAuditJson(receipt).catch(missing);
+    if(proof?.status==='retired')return null;
+    const binding={kind:'accepted-archive-copies',version:1,manifestSha256:manifest.sha256,
+      activeSourceBodySha256:head.sourceBodySha256,sourceBodySha256:head.previous.sourceBodySha256};
+    assert(!proof||Object.entries(binding).every(([key,value])=>proof[key]===value),'Audit archive copy retirement binding changed');
+    const objects=await archivedPackage({directory,seed,receiptRoot,transport:{readObject(){
+      throw Error('Missing local audit archive descriptor');
+    }}});
+    // Keep descriptor chunks so regular retirement can read the package
+    // inventory locally after these copies have been removed.
+    for(const chunk of seed.pointer.descriptor.chunks)objects.delete(chunk.sha256+'.gz');
+    const isBound=(relative,hash)=>relative.startsWith('server-data/')
+      ?manifest.files[path.basename(relative)]===hash
+      :objects.has(hash+'.gz');
+    let files;
+    if(proof){
+      files=await readInventory(directory,proof,copiesInventory);
+    }else{
+      files=[];
+      const names=[...Array.from(objects.keys(),key=>'audit-objects/'+key),
+        ...Object.keys(manifest.files).filter(name=>archiveKey('server-data/'+name)).map(name=>'server-data/'+name)];
+      for(const relative of names){
+        const hash=archiveKey(relative),file=path.join(directory,relative);
+        if(!hash||!isBound(relative,hash))continue;
+        const stat=await fs.lstat(file).catch(missing);
+        if(!stat?.isFile()||!stat.blocks||stat.nlink!==1
+          ||!await exactArchiveReceipt(receiptRoot,hash+'.gz',{sha256:hash,bytes:stat.size}))continue;
+        const actual=await localFingerprint(file);
+        if(actual?.sha256!==hash||actual.bytes!==stat.size)continue;
+        files.push({path:relative,...actual,allocatedBytes:stat.blocks*512});
+        if(files.length===10_000)break;
+      }
+      if(!files.length)return null;
+    }
+    plan={directory,receipt,proof,binding,files,isBound};
+  }catch{return 'proof-unavailable';}
+  const {directory,receipt,binding,files,isBound}=plan;
+  const proof=plan.proof??await saveInventory(directory,receipt,copiesInventory,{...binding,status:'prepared'},files);
+  await finishInventory(directory,receipt,proof,files,async item=>{
+    const hash=archiveKey(item.path);
+    assert(hash===item.sha256&&isBound(item.path,hash)
+      &&await exactArchiveReceipt(receiptRoot,hash+'.gz',item),'Audit archive copy restore receipt changed');
+  });
+  return {files:files.length,bytes:files.reduce((sum,item)=>sum+item.bytes,0),
+    allocatedBytes:files.reduce((sum,item)=>sum+item.allocatedBytes,0)};
+}
 
 async function abandonedSource(directory,retirement){
   const {transport,readSourceReceipt,sourceBasis,recipe}=retirement??{};
