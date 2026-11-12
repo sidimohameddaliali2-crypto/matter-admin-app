@@ -127,3 +127,37 @@ test('retirement records proof before unlinking and resumes an interrupted delet
   assert.equal(JSON.parse(await fs.readFile(receipt)).status,'retired');
   assert.deepEqual(await fs.readdir(old.saved),[]);
 });
+
+test('retirement persists directory deletions before marking the proof complete',async t=>{
+  const f=await fixture(t),old=await f.add(1);
+  await f.add(2);await f.add(3);await f.point();
+  const proof=path.join(old.directory,'retired-workspace.private.json');
+  const events=[];
+  const open=fs.open,rename=fs.rename,unlink=fs.unlink;
+  t.mock.method(fs,'open',async(file,...options)=>{
+    const handle=await open(file,...options);
+    if(file===old.directory||file.startsWith(old.directory+path.sep)){
+      const sync=handle.sync.bind(handle);
+      handle.sync=async()=>{await sync();events.push(['sync',file]);};
+    }
+    return handle;
+  });
+  t.mock.method(fs,'rename',async(from,to)=>{
+    if(to===proof)events.push(['publish',JSON.parse(await fs.readFile(from)).status]);
+    return rename(from,to);
+  });
+  t.mock.method(fs,'unlink',async file=>{
+    await unlink(file);
+    if(file.startsWith(old.directory+path.sep))events.push(['unlink',path.dirname(file)]);
+  });
+
+  await f.prune();
+  const completed=events.findIndex(([event,status])=>event==='publish'&&status==='retired');
+  assert.ok(completed>=0);
+  for(const directory of [old.directory,old.privateRoot,old.bundleRoot,old.saved]){
+    const removed=events.findLastIndex(([event,target])=>event==='unlink'&&target===directory);
+    const persisted=events.slice(0,completed).findLastIndex(([event,target])=>event==='sync'&&target===directory);
+    assert.ok(removed>=0&&persisted>removed,'The directory change must reach disk before retirement is marked complete');
+  }
+  assert.deepEqual(events.slice(completed+1),[['sync',proof],['sync',old.directory]]);
+});

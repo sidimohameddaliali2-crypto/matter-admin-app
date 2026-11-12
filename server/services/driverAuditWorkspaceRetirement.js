@@ -215,17 +215,23 @@ export async function retireDriverAuditAttempt({directory,seed,accepted,receiptR
   const decoded=gunzipSync(inventory,{maxOutputLength:16*1024*1024}),files=JSON.parse(decoded);
   assert(Array.isArray(files)&&files.length<=10_000&&sha(decoded)===proof.inventorySha256,
     'Invalid audit workspace retirement inventory');
+  const affected=new Set();
   for(const item of files){
     assert(typeof item.path==='string'&&eligible(item.path)&&digest.test(item.sha256)&&Number.isSafeInteger(item.bytes)&&item.bytes>=0,
       'Invalid audit workspace retirement item');
     const target=path.join(directory,item.path);
-    assert(await safeDirectory(path.dirname(target)),'Audit workspace directory changed during retirement');
+    const parent=path.dirname(target);
+    assert(await safeDirectory(parent),'Audit workspace directory changed during retirement');
+    affected.add(parent);
     const actual=await localFingerprint(target);
     if(!actual)continue;
     assert(actual.sha256===item.sha256&&actual.bytes===item.bytes,'Audit workspace file changed during retirement');
     await fs.unlink(target);
   }
+  for(const parent of affected)await syncPath(parent);
   await privateAuditWrite(file,JSON.stringify({...proof,status:'retired',retiredAt:new Date().toISOString(),
     removedFiles:files.length,removedBytes:files.reduce((total,item)=>total+item.bytes,0)}));
+  await syncPath(file);
+  await syncPath(directory);
   return 'retired';
 }
