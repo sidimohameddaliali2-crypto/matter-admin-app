@@ -5,6 +5,7 @@ import {createHash,randomUUID} from 'node:crypto';
 import {createGzip,createGunzip} from 'node:zlib';
 import {pipeline} from 'node:stream/promises';
 import {readDriverAuditSeedConfig} from './driverAuditDirectImport.js';
+import {retireDriverAuditAttempt} from './driverAuditWorkspaceRetirement.js';
 import {privateAuditJson,privateAuditWrite} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
 
 const digest = /^[a-f0-9]{64}$/;
@@ -29,7 +30,7 @@ async function optionalJson(file) {
 
 // Called only by the single sync writer between builds. Original staging data,
 // the current/previous candidates and all MongoDB-protected generations stay.
-export async function pruneDriverAuditWorkspace({root, receiptRoot, protectedManifests = [], maxCacheBytes = 512 * 1024 * 1024}) {
+export async function pruneDriverAuditWorkspace({root, receiptRoot, retirement, protectedManifests = [], maxCacheBytes = 512 * 1024 * 1024}) {
   if (!path.isAbsolute(root) || !Array.isArray(protectedManifests) || protectedManifests.some(value => !digest.test(value))
     || !Number.isSafeInteger(maxCacheBytes) || maxCacheBytes < 0) {
     throw Error('Invalid audit workspace retention bounds');
@@ -46,6 +47,8 @@ export async function pruneDriverAuditWorkspace({root, receiptRoot, protectedMan
     if (stat && !stat.isDirectory()) throw Error('Audit workspace directory must be a real directory');
   }
   let attemptsCompacted = 0;
+  let attemptsRetired = 0;
+  let retirementDeferred = 0;
   for (const entry of await fs.readdir(attempts, {withFileTypes: true}).catch(error => {
     if (error.code === 'ENOENT') return [];
     throw error;
@@ -58,6 +61,11 @@ export async function pruneDriverAuditWorkspace({root, receiptRoot, protectedMan
     if (!accepted || !seed || keepManifests.has(accepted.manifestSha256)) continue;
     if (accepted.privateRoot !== path.join(directory, 'server-data') || seed.manifestSha256 !== accepted.manifestSha256
       || accepted.sourceBasis !== seed.sourceBasis || accepted.collectorRevision !== seed.collectorRevision) continue;
+    if(Number.isSafeInteger(pointer?.collectorRevision)&&accepted.collectorRevision<pointer.collectorRevision){
+      const retired=await retireDriverAuditAttempt({directory,seed,accepted,receiptRoot,retirement});
+      if(retired==='proof-unavailable')retirementDeferred++;
+      else if(retired){if(retired==='retired')attemptsRetired++;continue;}
+    }
     const journalPath=path.join(directory,'compacted-files.private.json');
     const journal=await optionalJson(journalPath) || {version:1,complete:false,files:[]};
     if(journal.version!==1 || !Array.isArray(journal.files)) throw Error('Invalid audit compaction journal');
@@ -89,7 +97,7 @@ export async function pruneDriverAuditWorkspace({root, receiptRoot, protectedMan
     cachedBytes -= entry.bytes;
     cacheBytesRemoved += entry.bytes;
   }
-  return {attemptsCompacted, cacheBytesRemoved, cachedBytes};
+  return {attemptsCompacted, attemptsRetired, retirementDeferred, cacheBytesRemoved, cachedBytes};
 }
 
 async function hashFile(file, compressed = false) {
