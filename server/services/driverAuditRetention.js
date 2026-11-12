@@ -13,6 +13,7 @@ const implementationFiles = [
   'services/driverAuditRetention.js',
   'services/driverAuditWriter.js',
   'services/driverAuditWorkspace.js',
+  'services/driverAuditWorkspaceRetirement.js',
   'scripts/driverAuditSync.js',
   'vendor/driver-audits/integration/cloud/audit-replica.mjs',
   'vendor/driver-audits/integration/cloud/automatic-hosted-preview.mjs',
