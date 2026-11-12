@@ -65,7 +65,8 @@ export function createBudgetedArchiveReader({ transport, budget, requestBytes = 
         extraMicros: readerTransferMicros({ responseBytes: size, requestBytes }),
         accountingBasis: 'remote-archive-transfer-v1',
       });
-    } catch {
+    } catch (error) {
+      if (error?.status === 503 && error.diagnosticCategory === 'state-contention') throw error;
       throw allowanceUnavailable();
     }
     if (settlement?.settled !== true) throw allowanceUnavailable();

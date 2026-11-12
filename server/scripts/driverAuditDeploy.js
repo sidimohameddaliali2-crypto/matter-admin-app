@@ -1,10 +1,13 @@
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { driverAuditReplicaRetentionStatus, driverAuditRetentionImplementation } from '../services/driverAuditRetention.js';
+
+export { driverAuditRetentionImplementation };
 
 const exec = promisify(execFile);
 const serverRoot = path.resolve(fileURLToPath(new URL('../', import.meta.url)));
@@ -25,6 +28,9 @@ const gcKey = 'DRIVER_AUDIT_REPLICA_GC_ENABLED';
 const disabled = { [enabledKey]: '0', [importKey]: '0', [gcKey]: '0' };
 const activeKeys = [enabledKey, importKey, originKey, capacityKey, secretKey, gcKey];
 const sha256 = /^[a-f0-9]{64}$/;
+const retentionOperation = 'audit-retention-enable';
+const retainedGenerations = /^[a-f0-9]{64}:[a-f0-9]{64}$/;
+const digest = value => createHash('sha256').update(value).digest('hex');
 
 class DeploymentError extends Error {}
 function requireValue(condition, message) {
@@ -61,12 +67,13 @@ async function readFile(file, { optional = false, privateOnly = false } = {}) {
   }
 }
 
-async function atomicWrite(file, text, beforeRename = async () => {}) {
+async function atomicWrite(file, text, beforeRename = async () => {}, { createOnly = false } = {}) {
   const temporary = file + '.' + randomUUID();
   try {
     await fs.writeFile(temporary, text, { mode: 0o600, flag: 'wx' });
     await beforeRename();
-    await fs.rename(temporary, file);
+    if (createOnly) await fs.link(temporary, file);
+    else await fs.rename(temporary, file);
   } finally {
     await fs.rm(temporary, { force: true });
   }
@@ -119,6 +126,14 @@ async function jsonFile(file) {
   return JSON.parse(await readFile(file, { privateOnly: true }));
 }
 
+async function readDurableSettings() {
+  const { default: dotenv } = await import('dotenv');
+  return {
+    ...dotenv.parse(await readFile(path.join(serverRoot, '.env'), { optional: true }) ?? ''),
+    ...dotenv.parse(await readFile(path.join(serverRoot, '.env.local'), { privateOnly: true })),
+  };
+}
+
 async function run(command, args, env, message) {
   try {
     return (await exec(command, args, { cwd: appRoot, env, timeout: 15 * 60_000, maxBuffer: 8 * 1024 * 1024 })).stdout;
@@ -168,12 +183,13 @@ async function checkWorkerConfig(config, shell) {
   await runScript('driverAuditSync.js', ['--config', config, '--check'], shell, 'The staged audit sync worker did not pass its configuration checks.');
 }
 
-async function waitForWorker(config, pmEnv, startedAt) {
+async function waitForWorker(config, pmEnv, startedAt, requiresQualifiedRetention = false) {
   const heartbeat = path.join(path.dirname(config), 'sync-status.private.json');
   for (let attempt = 0; attempt < 20; attempt++) {
     const text = await readFile(heartbeat, { optional: true, privateOnly: true });
     const status = text ? JSON.parse(text) : null;
-    if (status?.version === 1 && Date.parse(status.checkedAt) >= startedAt && !status.errorCode) {
+    if (status?.version === 1 && Date.parse(status.checkedAt) >= startedAt && !status.errorCode
+      && (!requiresQualifiedRetention || status.replicaGcStatus === 'qualified')) {
       const worker = await processEntry(syncName, pmEnv);
       if (matchingWorker(worker, config) && worker.pm2_env.status === 'online') return;
     }
@@ -255,12 +271,244 @@ async function readActiveHead() {
   }
 }
 
+const positiveInteger = value => Number.isSafeInteger(value) && value > 0;
+const verifiedFiles = value => positiveInteger(value?.files) && sha256.test(value.manifestSha256);
+const verifiedJourney = value => ['servedSnapshot', 'verifiedPhoto', 'verifiedGps', 'reviewHistoryMatches', 'signedOutDenied', 'logout']
+  .every(key => value?.[key] === true);
+
+export async function readDriverAuditRetentionProof({ archive, expectedSha256, seed, implementationSha256 }) {
+  const message = 'The private audit restore and rollback proof did not match the qualified implementation and approved seed.';
+  const maxBytes = 16 * 1024;
+  let proof;
+  try {
+    requireValue(sha256.test(expectedSha256 ?? ''), message);
+    await archive.assertPrivate();
+    const body = await archive.readObject(expectedSha256 + '.json', { maxBytes });
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of body) {
+      size += chunk.length;
+      requireValue(size <= maxBytes, message);
+      chunks.push(Buffer.from(chunk));
+    }
+    const raw = Buffer.concat(chunks, size);
+    requireValue(digest(raw) === expectedSha256, message);
+    proof = JSON.parse(raw);
+  } catch {
+    throw new DeploymentError(message);
+  }
+  const { previous, oldest, collection, reviews, checks, traffic, archiveEvidence } = proof ?? {};
+  requireValue(proof?.version === 1 && proof.scope === 'isolated-loopback-Mongo-only'
+    && /^[a-f0-9]{40}$/.test(proof.appCommit) && proof.implementationSha256 === implementationSha256
+    && sha256.test(proof.appRuntimeManifestSha256)
+    && positiveInteger(archiveEvidence?.seedVerifiedCacheCopies) && sha256.test(archiveEvidence.seedVerifiedObjectIndexSha256)
+    && previous && seed?.pointer?.descriptor && previous.generation === seed.pointer.generation && previous.reportHash === seed.pointer.reportHash
+    && previous.descriptorSha256 === seed.pointer.descriptor.sha256 && previous.manifestSha256 === seed.manifestSha256
+    && previous.sourceRevision === seed.collectorRevision && verifiedFiles(previous.archiveRestore)
+    && verifiedFiles(oldest?.postCollectionArchiveRead) && positiveInteger(collection?.objectsRemoved)
+    && positiveInteger(collection.bytesReclaimed) && positiveInteger(collection.usedBefore) && positiveInteger(collection.usedAfter)
+    && collection.usedBefore - collection.usedAfter === collection.bytesReclaimed
+    && positiveInteger(collection.activeKeys) && positiveInteger(collection.previousKeys) && positiveInteger(collection.stagedKeys)
+    && collection.orphanProtected === true && reviews?.copied === true && reviews.unchanged === true
+    && positiveInteger(reviews.count) && sha256.test(reviews.sha256) && reviews.journalWrites === 0
+    && verifiedJourney(checks?.baseline) && verifiedJourney(checks.rollback) && verifiedJourney(checks.archiveFallback)
+    && checks.currentPointerUnchanged === true && checks.completeEmptyReplicaRestore === true
+    && traffic?.productionRequests === 0 && traffic.productionWrites === 0, message);
+}
+
+export function checkDriverAuditRetentionHead(head, generations, expected) {
+  const [active, previous] = retainedGenerations.test(generations ?? '') ? generations.split(':') : [];
+  const verified = (pointer, generation) => {
+    const { directImport, restore } = pointer ?? {};
+    return Boolean(generation) && pointer?.version === 1 && pointer.generation === generation
+      && sha256.test(pointer.reportHash) && sha256.test(pointer.descriptor?.sha256)
+      && positiveInteger(pointer.sourceRevision) && sha256.test(pointer.sourceBodySha256)
+      && directImport?.version === 1 && directImport.collectorRevision === pointer.sourceRevision
+      && sha256.test(directImport.manifestSha256) && sha256.test(directImport.sourceBasis)
+      && restore?.version === 1 && restore.verified === true && restore.archive === 'matter-report-archive'
+      && restore.generation === generation && restore.reportHash === pointer.reportHash
+      && restore.descriptorSha256 === pointer.descriptor.sha256 && restore.manifestSha256 === directImport.manifestSha256;
+  };
+  requireValue(verified(head, active) && verified(head.previous, previous) && head.sourceRevision > head.previous.sourceRevision,
+    'The active or previous MongoDB audit differs from the reviewed restorable releases.');
+  const identity = digest(JSON.stringify([head, head.previous]));
+  requireValue(!expected || identity === expected, 'The active or previous audit changed while stopping the sync worker.');
+  return identity;
+}
+
+export async function restartDriverAuditRetention({
+  checkHead, stop, restart, wait, save, writeSettings, writeReceipt, restore, clearTransition,
+}) {
+  try {
+    await stop();
+    await checkHead();
+    await writeReceipt(true);
+    await writeSettings(true);
+    await restart();
+    await wait(true);
+    await save();
+  } catch (error) {
+    try {
+      await restore();
+      await clearTransition();
+    } catch {
+      throw new DeploymentError('Audit retention activation failed and restoring the prior audit worker could not be confirmed. Retry the same operation to recover it.');
+    }
+    throw error;
+  }
+  await clearTransition();
+}
+
+async function enableRetention({ commit, manifest, capacity, secret, root, pmEnv, activeSettings, gcRestoreReceiptSha256, generations }) {
+  requireValue(retainedGenerations.test(generations ?? ''), 'Exact current and previous audit generations are required.');
+  const config = path.join(root, 'sync.json');
+  const syncReceipt = path.join(root, 'deployment-sync.json');
+  const transitionFile = path.join(root, 'deployment-retention-transition.json');
+  let transitionText = await readFile(transitionFile, { optional: true, privateOnly: true });
+  const transition = transitionText === null ? null : JSON.parse(transitionText);
+  const worker = await processEntry(syncName, pmEnv);
+  requireValue(Number.isInteger(worker?.pm_id) && registeredWorkerConfig(worker) === config
+    && (transition || worker.pm2_env.status === 'online'), 'The reviewed audit sync worker does not match its pinned configuration.');
+  if (transitionText !== null) {
+    requireValue(transition?.version === 2 && transition.workerId === worker.pm_id
+      && transition.manifest === manifest && transition.generations === generations
+      && transition.proofSha256 === gcRestoreReceiptSha256 && /^[a-f0-9]{40}$/.test(transition.commit)
+      && sha256.test(transition.implementationSha256) && ['0', '1'].includes(transition.priorGcSetting)
+      && typeof transition.priorText === 'string' && Number.isFinite(Date.parse(transition.requestedAt)),
+    'Retry the interrupted audit retention operation with the same reviewed inputs and registered worker.');
+  }
+  const checkedWorker = async () => {
+    const current = await processEntry(syncName, pmEnv);
+    requireValue(current?.pm_id === worker.pm_id && registeredWorkerConfig(current) === config,
+      'The registered audit sync worker changed during retention activation.');
+    return current.pm2_env.status;
+  };
+
+  const currentText = await readFile(syncReceipt, { privateOnly: true });
+  const priorText = transition?.priorText ?? currentText;
+  const prior = JSON.parse(priorText);
+  const enabled = await jsonFile(path.join(root, 'deployment-enabled.json'));
+  const seed = await jsonFile(path.join(root, 'seed.json'));
+  const checkedSettings = async () => {
+    const durable = await readDurableSettings();
+    requireValue(durable.MONGODB_URI === process.env.MONGODB_URI && ['0', '1'].includes(durable[gcKey])
+      && Object.entries(activeSettings).every(([key, value]) => key === gcKey || durable[key] === value && process.env[key] === value),
+    'The persisted audit worker settings changed.');
+    return durable[gcKey];
+  };
+  const gcSetting = await checkedSettings();
+  const priorGcSetting = transition?.priorGcSetting ?? gcSetting;
+  requireValue(prior.manifest === manifest && prior.generation === seed?.pointer?.generation
+    && sha256.test(prior.staffVerificationSha256) && Number.isFinite(Date.parse(prior.supervisedAt))
+    && enabled.manifest === manifest && enabled.prepared?.generation === seed.pointer.generation
+    && enabled.prepared.reportHash === seed.pointer.reportHash && enabled.prepared.manifestSha256 === seed.manifestSha256
+    && enabled.prepared.capacityBytes === capacity, 'The pinned audit seed and supervised worker receipts do not match.');
+
+  const requestedAt = transition?.requestedAt ?? new Date().toISOString();
+  const implementationSha256 = transition?.implementationSha256 ?? await driverAuditRetentionImplementation();
+  let startedAt;
+  const nextReceipt = JSON.stringify({
+    ...prior, replicaGcEnabled: true, gcRestoreReceiptSha256, gcImplementationSha256: implementationSha256,
+    retention: { commit: transition?.commit ?? commit, generations, requestedAt },
+  }) + '\n';
+  const receiptState = async () => {
+    const current = await readFile(syncReceipt, { privateOnly: true });
+    requireValue(current === priorText || current === nextReceipt, 'The audit sync receipt changed during retention activation.');
+    return current;
+  };
+  const workerOperations = {
+    async stop() {
+      if (await checkedWorker() !== 'stopped') await pm2(['stop', syncName], pmEnv);
+      requireValue(await checkedWorker() === 'stopped', 'The reviewed audit sync worker could not be stopped.');
+    },
+    async restart() {
+      const status = await checkedWorker();
+      requireValue(status === 'online' || status === 'stopped', 'The reviewed audit sync worker could not be restarted.');
+      startedAt = Date.now();
+      await pm2(['restart', syncName], pmEnv);
+    },
+    async wait(requiresQualifiedRetention) {
+      await waitForWorker(config, pmEnv, startedAt, requiresQualifiedRetention);
+      requireValue(await checkedWorker() === 'online', 'The reviewed audit sync worker did not become online.');
+    },
+    async save() { await pm2(['save'], pmEnv); },
+    async writeSettings(on) {
+      await checkedSettings();
+      await writeDriverAuditEnvironment(serverRoot, { ...activeSettings, [gcKey]: on ? '1' : '0' });
+    },
+    async writeReceipt(on) {
+      await atomicWrite(syncReceipt, on ? nextReceipt : priorText, async () => {
+        await receiptState();
+      });
+    },
+    async clearTransition() {
+      requireValue(await readFile(transitionFile, { privateOnly: true }) === transitionText, 'The audit retention transition changed.');
+      await fs.unlink(transitionFile);
+    },
+    async restore() {
+      const currentGcSetting = await checkedSettings();
+      requireValue(currentGcSetting === priorGcSetting || currentGcSetting === '1', 'The audit retention setting changed outside this operation.');
+      const settingsChanged = currentGcSetting !== priorGcSetting;
+      const receiptChanged = await receiptState() !== priorText;
+      if (settingsChanged || receiptChanged || await checkedWorker() !== 'online') {
+        await workerOperations.stop();
+        if (settingsChanged) await workerOperations.writeSettings(priorGcSetting === '1');
+        if (receiptChanged) await workerOperations.writeReceipt(false);
+        await workerOperations.restart();
+        await workerOperations.wait();
+      }
+      await workerOperations.save();
+    },
+  };
+
+  if (transition) {
+    await workerOperations.restore();
+    await workerOperations.clearTransition();
+    const fingerprint = priorGcSetting === '1' ? await driverAuditRetentionImplementation().catch(() => null) : null;
+    const replicaGcStatus = driverAuditReplicaRetentionStatus(priorGcSetting === '1', prior, fingerprint);
+    return { status: 'recovered', replicaGcEnabled: replicaGcStatus === 'qualified', replicaGcStatus };
+  }
+
+  const identity = checkDriverAuditRetentionHead(await readActiveHead(), generations);
+  const { createSupabaseArchiveTransport } = await import('../vendor/driver-audits/integration/hosted/supabase-archive.mjs');
+  await readDriverAuditRetentionProof({
+    archive: createSupabaseArchiveTransport({ secret }),
+    expectedSha256: gcRestoreReceiptSha256,
+    seed,
+    implementationSha256,
+  });
+  const priorStatus = driverAuditReplicaRetentionStatus(gcSetting === '1', prior, implementationSha256);
+  const sameProof = prior.gcRestoreReceiptSha256 === gcRestoreReceiptSha256;
+  const heartbeat = await jsonFile(path.join(root, 'sync-status.private.json')).catch(() => null);
+  if (priorStatus === 'qualified' && sameProof && heartbeat?.version === 1 && heartbeat.replicaGcStatus === 'qualified'
+    && Date.parse(heartbeat.checkedAt) >= worker.pm2_env.pm_uptime) {
+    requireValue(await checkedWorker() === 'online', 'The reviewed audit sync worker is not online.');
+    await workerOperations.save();
+    return { status: 'already-enabled', replicaGcEnabled: true };
+  }
+  requireValue(priorStatus !== 'qualified' || sameProof, 'The running audit worker already has a different current retention proof.');
+  await checkWorkerConfig(config, pmEnv);
+  checkDriverAuditRetentionHead(await readActiveHead(), generations, identity);
+  requireValue(await checkedSettings() === priorGcSetting && await receiptState() === priorText, 'The audit retention settings changed before activation.');
+  transitionText = JSON.stringify({
+    version: 2, commit, manifest, workerId: worker.pm_id, generations, requestedAt,
+    proofSha256: gcRestoreReceiptSha256, implementationSha256, priorGcSetting, priorText,
+  }) + '\n';
+  await atomicWrite(transitionFile, transitionText, undefined, { createOnly: true });
+  await restartDriverAuditRetention({
+    ...workerOperations,
+    async checkHead() { checkDriverAuditRetentionHead(await readActiveHead(), generations, identity); },
+  });
+  return { status: 'enabled', replicaGcEnabled: true };
+}
+
 async function release(operation, shell) {
   const commit = shell.DRIVER_AUDIT_DEPLOY_SHA;
   requireValue(/^[a-f0-9]{40}$/.test(commit ?? ''), 'An exact reviewed application commit is required.');
   const gcRestoreReceiptSha256 = shell.DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256 || null;
-  requireValue(!gcRestoreReceiptSha256 || operation === 'audit-sync-start' && sha256.test(gcRestoreReceiptSha256),
-    'Replica retention requires the reviewed restore receipt SHA-256 on audit-sync-start.');
+  requireValue(!gcRestoreReceiptSha256 || operation === retentionOperation && sha256.test(gcRestoreReceiptSha256),
+    'Replica retention requires the reviewed restore receipt SHA-256 on audit-retention-enable.');
+  requireValue(operation !== retentionOperation || gcRestoreReceiptSha256, 'The reviewed private restore and rollback proof SHA-256 is required.');
   const head = await run('git', ['rev-parse', 'HEAD'], shell, 'The deployed application commit could not be checked.');
   requireValue(head.trim() === commit, 'The deployed application commit differs from the reviewed commit.');
   const pmEnv = pm2Environment(shell);
@@ -315,6 +563,10 @@ async function release(operation, shell) {
   requireValue(process.env.MONGODB_URI && process.env.JWT_SECRET, 'Existing application database and staff authentication settings are required.');
   requireValue(process.env[importKey] !== '1', 'Disable the previous publication importer before the direct MongoDB release.');
   const root = await privateReleaseRoot(manifest);
+  if (operation === retentionOperation) {
+    return enableRetention({ commit, manifest, capacity, secret, root, pmEnv, activeSettings, gcRestoreReceiptSha256,
+      generations: shell.DRIVER_AUDIT_RETAINED_GENERATIONS });
+  }
   const preflightFile = path.join(root, 'deployment-preflight.json');
   const enabledFile = path.join(root, 'deployment-enabled.json');
   const stageArgs = ['--root', root, '--sha256', manifest];
@@ -373,9 +625,7 @@ async function release(operation, shell) {
     && enabled.prepared.generation === generation && process.env[enabledKey] === '1' && process.env[importKey] === '0'
     && process.env[originKey] === origin && process.env[capacityKey] === String(capacity) && process.env[secretKey] === secret,
   'Staff verification must match the enabled audit release and its persisted runtime settings.');
-  const { default: dotenv } = await import('dotenv');
-  const durable = { ...dotenv.parse(await readFile(path.join(serverRoot, '.env'), { optional: true }) ?? ''),
-    ...dotenv.parse(await readFile(path.join(serverRoot, '.env.local'), { privateOnly: true })) };
+  const durable = await readDurableSettings();
   requireValue(durable.MONGODB_URI === process.env.MONGODB_URI && durable[secretKey] === secret,
     'The worker must be able to load existing private database settings from the app environment.');
   await run(process.execPath, ['--input-type=module', '-e', 'import { DatabaseSync } from "node:sqlite";'], shell,
@@ -393,15 +643,14 @@ async function release(operation, shell) {
   await ensureRoom();
   const syncConfig = path.join(root, 'sync.json');
   const syncReceipt = path.join(root, 'deployment-sync.json');
-  const replicaGcEnabled = gcRestoreReceiptSha256 !== null;
-  const gcSetting = replicaGcEnabled ? '1' : '0';
+  const replicaGcEnabled = false;
   const previousWorker = await processEntry(syncName, pmEnv);
   if (previousWorker) {
     requireValue(matchingWorker(previousWorker, syncConfig) && previousWorker.pm2_env.status === 'online',
       'An existing audit sync process differs from the reviewed worker. Roll it back before starting another.');
     const previous = await jsonFile(syncReceipt);
-    requireValue((durable[gcKey] ?? '0') === gcSetting && (previous.replicaGcEnabled ?? false) === replicaGcEnabled
-      && (previous.gcRestoreReceiptSha256 ?? null) === gcRestoreReceiptSha256,
+    requireValue((durable[gcKey] ?? '0') === '0' && (previous.replicaGcEnabled ?? false) === false
+      && (previous.gcRestoreReceiptSha256 ?? null) === null,
     'The running audit worker has different retention settings or evidence. Roll it back before a reviewed restart.');
     return { status: 'already-supervised', generation, replicaGcEnabled };
   }
@@ -415,7 +664,7 @@ async function release(operation, shell) {
   await atomicWrite(syncReceipt, JSON.stringify(receipt) + '\n');
   let settingsWritten = false;
   try {
-    await writeDriverAuditEnvironment(serverRoot, { ...activeSettings, [gcKey]: gcSetting });
+    await writeDriverAuditEnvironment(serverRoot, activeSettings);
     settingsWritten = true;
     await checkWorkerConfig(syncConfig, pmEnv);
     const startedAt = Date.now();
@@ -448,7 +697,7 @@ if (process.argv[1] && await fs.realpath(process.argv[1]).catch(() => null) === 
   const shell = { ...process.env };
   try {
     const deploymentMaintenance = ['deploy-worker-pause', 'deploy-worker-resume'].includes(operation);
-    requireValue(process.argv.length === 3 && (deploymentMaintenance || ['audit-preflight', 'audit-seed-enable', 'audit-sync-start', 'audit-rollback'].includes(operation)),
+    requireValue(process.argv.length === 3 && (deploymentMaintenance || ['audit-preflight', 'audit-seed-enable', 'audit-sync-start', 'audit-rollback', retentionOperation].includes(operation)),
       'Choose an explicit driver audit deployment operation.');
     if (!deploymentMaintenance) await import('../loadEnv.js');
     const result = await release(operation, shell);

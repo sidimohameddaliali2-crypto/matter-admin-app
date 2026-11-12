@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 import {runDriverAuditSyncTick} from '../services/driverAuditSync.js';
 import {runDriverAuditDirectImport} from '../services/driverAuditDirectImport.js';
 import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollection.js';
+import {driverAuditReplicaRetentionStatus,driverAuditRetentionImplementation} from '../services/driverAuditRetention.js';
 import {withDriverAuditWriter} from '../services/driverAuditWriter.js';
 import {pruneDriverAuditWorkspace,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
 import {pathToFileURL} from 'node:url';
@@ -51,20 +52,29 @@ async function main(){
   if(seed?.directImport?.version!==1)throw Error('Verified direct audit seed required');
   const rpc=createHostedRpc({secret}),state=createCloudState({rpc}),remote=createSupabaseArchiveTransport({secret});
   await remote.assertPrivate();
+  const retentionRequested=process.env.DRIVER_AUDIT_REPLICA_GC_ENABLED==='1';
+  const [retentionReceipt,implementationSha256]=retentionRequested?await Promise.all([
+   privateAuditJson(path.join(root,'deployment-sync.json')).catch(()=>null),
+   driverAuditRetentionImplementation().catch(()=>null),
+  ]):[null,null];
+  const replicaGcStatus=driverAuditReplicaRetentionStatus(retentionRequested,retentionReceipt,implementationSha256);
+  const collectReplicas=replicaGcStatus==='qualified';
+  if(retentionRequested&&!collectReplicas)console.warn('Driver audit replica retention withheld: '+replicaGcStatus+'. Audit sync remains enabled.');
   if(mode==='--check'){
-   console.log(JSON.stringify({status:'checked',activeGeneration:seed.generation}));
+   console.log(JSON.stringify({status:'checked',activeGeneration:seed.generation,replicaGcStatus}));
    return;
-  }
-  const collectReplicas=process.env.DRIVER_AUDIT_REPLICA_GC_ENABLED==='1';
-  if(collectReplicas){
-   const receipt=await privateAuditJson(path.join(root,'deployment-sync.json'));
-   if(receipt.replicaGcEnabled!==true||!/^[a-f0-9]{64}$/.test(receipt.gcRestoreReceiptSha256||''))throw Error('Reviewed audit archive restore required');
   }
   lock=await acquireWorkerLock(path.join(path.dirname(root),'sync-worker.lock'));
   const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true});
-  const boundedState=responseLimit=>createBudgetedAuditState({state:createCloudState({rpc:createHostedRpc({secret,maxResponseBytes:responseLimit})}),
+  const boundedState=(responseLimit,select=cloud=>cloud)=>createBudgetedAuditState({state:select(createCloudState({rpc:createHostedRpc({secret,maxResponseBytes:responseLimit})})),
    budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true});
   const sourceState=boundedState(2*1024*1024),reviewState=boundedState(8*1024*1024);
+  const sourceReceipts=boundedState(2*1024*1024,cloud=>({async read(revision){
+   const [receipt]=await cloud.receipts('collector-state',{after:revision-1});
+   if(receipt?.revision!==revision)throw Error('The pinned collector receipt is unavailable');
+   return {revision,body:JSON.stringify(receipt)};
+  }}));
+  const bootstrap=await privateAuditJson(path.join(root,'seed.json')).catch(()=>null);
   const work=path.join(root,'work');
   const loadSource=createAutomaticReleaseSource({secret,stateStore:sourceState,cacheRoot:path.join(work,'archive-cache'),localRoots:[baselineRoot],archiveTransport:{readObject:archive.readBounded}});
   let pinned;
@@ -112,7 +122,7 @@ async function main(){
   process.once('SIGINT',stop);
   async function status(value){
    const active=await readHead();
-   const report={version:1,...value,activeGeneration:active?.generation??null,checkedAt:new Date().toISOString(),nextCheckAt:new Date(next).toISOString()};
+   const report={version:1,...value,replicaGcStatus,activeGeneration:active?.generation??null,checkedAt:new Date().toISOString(),nextCheckAt:new Date(next).toISOString()};
    await control.updateOne({_id:'sync-status'},{$set:report},{upsert:true});
    await privateAuditWrite(heartbeat,JSON.stringify(report));
   }
@@ -135,7 +145,13 @@ async function main(){
       const head=await readHead(),stage=await control.findOne({_id:'direct-stage'});
       const protectedManifests=[head,head?.previous,stage?.pointer]
        .map(pointer=>pointer?.directImport?.manifestSha256).filter(Boolean);
-      await pruneDriverAuditWorkspace({root:work,receiptRoot:path.join(root,'archive-receipts'),protectedManifests});
+      const retirement={transport:pinned.transport,sourceBasis:automaticReleaseBasis,
+       async readSourceReceipt(revision){
+        const receipt=await sourceReceipts.read(revision);
+        return {revision:receipt.revision,body:JSON.parse(receipt.body).body_text};
+       },recipe:{builderSha256,rendererSha256:rendererBuild.sha256,journalsSha256:journals.sha256,baselineManifestSha256:bootstrap?.manifestSha256}};
+      const workspace=await pruneDriverAuditWorkspace({root:work,receiptRoot:path.join(root,'archive-receipts'),protectedManifests,retirement});
+      if(workspace.retirementDeferred)console.warn(JSON.stringify({event:'audit-workspace-retirement-deferred',attempts:workspace.retirementDeferred}));
       return builder.tick();
      },
      async apply(candidate){

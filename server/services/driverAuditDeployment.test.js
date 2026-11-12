@@ -73,9 +73,12 @@ test('an ordinary deployment leaves an unregistered audit worker inactive', asyn
   const bin = path.join(root, 'bin');
   await fs.mkdir(scripts, { recursive: true });
   await fs.mkdir(bin);
+  await fs.mkdir(path.join(server, 'services'));
   await fs.writeFile(path.join(server, 'package.json'), '{"type":"module"}');
+  await fs.writeFile(path.join(server, 'loadEnv.js'), 'export {};');
   const script = path.join(scripts, 'driverAuditDeploy.js');
   await fs.copyFile(fileURLToPath(new URL('../scripts/driverAuditDeploy.js', import.meta.url)), script);
+  await fs.copyFile(fileURLToPath(new URL('./driverAuditRetention.js', import.meta.url)), path.join(server, 'services/driverAuditRetention.js'));
   const commit = 'a'.repeat(40);
   await fs.writeFile(path.join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' '${commit}'\n`, { mode: 0o700 });
   await fs.writeFile(path.join(bin, 'pm2'), '#!/bin/sh\n[ "$1" = jlist ] || exit 1\nprintf "[]\\n"\n', { mode: 0o700 });
@@ -88,5 +91,147 @@ test('an ordinary deployment leaves an unregistered audit worker inactive', asyn
   }), /differs from the reviewed commit/);
   await assert.rejects(exec(process.execPath, [script, 'deploy-worker-pause'], {
     env: { ...env, DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256: 'c'.repeat(64) },
-  }), /requires the reviewed restore receipt SHA-256 on audit-sync-start/);
+  }), /requires the reviewed restore receipt SHA-256 on audit-retention-enable/);
+  await assert.rejects(exec(process.execPath, [script, 'audit-sync-start'], {
+    env: { ...env, DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256: 'c'.repeat(64) },
+  }), /requires the reviewed restore receipt SHA-256 on audit-retention-enable/);
+});
+
+const digest = value => value.repeat(64);
+const proofIdentity = {
+  generation: digest('1'), reportHash: digest('2'), descriptorSha256: digest('3'),
+  manifestSha256: digest('4'), sourceRevision: 2118,
+};
+const seed = {
+  pointer: { generation: proofIdentity.generation, reportHash: proofIdentity.reportHash, descriptor: { sha256: proofIdentity.descriptorSha256 } },
+  manifestSha256: proofIdentity.manifestSha256, collectorRevision: proofIdentity.sourceRevision,
+};
+const journey = { servedSnapshot: true, verifiedPhoto: true, verifiedGps: true, reviewHistoryMatches: true, signedOutDenied: true, logout: true };
+
+test('sync only permits reclamation while its current implementation matches the saved private qualification', async () => {
+  const { driverAuditReplicaRetentionStatus } = await import('./driverAuditRetention.js');
+  const receipt = { replicaGcEnabled: true, gcRestoreReceiptSha256: digest('5'), gcImplementationSha256: digest('6') };
+  assert.equal(driverAuditReplicaRetentionStatus(false, receipt, digest('6')), 'off');
+  assert.equal(driverAuditReplicaRetentionStatus(true, receipt, digest('6')), 'qualified');
+  assert.equal(driverAuditReplicaRetentionStatus(true, receipt, digest('7')), 'proof-stale');
+  assert.equal(driverAuditReplicaRetentionStatus(true, receipt, null), 'proof-stale');
+  assert.equal(driverAuditReplicaRetentionStatus(true, { ...receipt, gcImplementationSha256: undefined }, digest('6')), 'proof-required');
+  assert.equal(driverAuditReplicaRetentionStatus(true, null, digest('6')), 'proof-required');
+});
+
+function proofFixture() {
+  return {
+    version: 1, scope: 'isolated-loopback-Mongo-only', implementationSha256: digest('5'),
+    appCommit: 'a'.repeat(40), appRuntimeManifestSha256: digest('6'),
+    archiveEvidence: { seedVerifiedCacheCopies: 238, seedVerifiedObjectIndexSha256: digest('7') },
+    previous: { ...proofIdentity, archiveRestore: { files: 232, manifestSha256: digest('8') } },
+    oldest: { postCollectionArchiveRead: { files: 232, manifestSha256: digest('9') } },
+    collection: { objectsRemoved: 8, bytesReclaimed: 20, usedBefore: 100, usedAfter: 80, activeKeys: 238,
+      previousKeys: 238, stagedKeys: 2, orphanProtected: true },
+    reviews: { copied: true, unchanged: true, count: 14, sha256: digest('a'), journalWrites: 0 },
+    checks: { baseline: journey, rollback: journey, archiveFallback: journey, currentPointerUnchanged: true, completeEmptyReplicaRestore: true },
+    traffic: { productionRequests: 0, productionWrites: 0 },
+  };
+}
+
+test('retention proof must be privately archived, exact and bound to the qualified implementation and approved seed', async () => {
+  const { createHash } = await import('node:crypto');
+  const { readDriverAuditRetentionProof } = await import('../scripts/driverAuditDeploy.js');
+  const proof = proofFixture();
+  async function load(value, overrides = {}) {
+    const body = Buffer.from(JSON.stringify(value));
+    const expectedSha256 = createHash('sha256').update(body).digest('hex');
+    let privateChecked = false;
+    const archive = {
+      async assertPrivate() { privateChecked = true; },
+      async readObject(key, { maxBytes }) {
+        assert.ok(privateChecked);
+        assert.equal(key, (overrides.expectedSha256 || expectedSha256) + '.json');
+        assert.ok(maxBytes <= 16 * 1024);
+        return [body];
+      },
+    };
+    return readDriverAuditRetentionProof({ archive, expectedSha256, seed, implementationSha256: digest('5'), ...overrides });
+  }
+  await load(proof);
+  await assert.rejects(load(proof, { expectedSha256: digest('f') }), /restore and rollback proof/i);
+  await assert.rejects(load(proof, { implementationSha256: digest('f') }), /restore and rollback proof/i);
+  await assert.rejects(load(proof, { seed: { ...seed, collectorRevision: 2119 } }), /restore and rollback proof/i);
+  await assert.rejects(load({ ...proof, reviews: { ...proof.reviews, journalWrites: 1 } }), /restore and rollback proof/i);
+  await assert.rejects(load({ ...proof, checks: { ...proof.checks, archiveFallback: { ...journey, verifiedPhoto: false } } }), /restore and rollback proof/i);
+});
+
+function livePointer(identity, sourceBodySha256) {
+  const { generation, reportHash, descriptorSha256, manifestSha256, sourceRevision } = identity;
+  return {
+    version: 1, generation, reportHash, descriptor: { sha256: descriptorSha256 }, sourceRevision, sourceBodySha256,
+    directImport: { version: 1, collectorRevision: sourceRevision, manifestSha256, sourceBasis: digest('9') },
+    restore: { version: 1, archive: 'matter-report-archive', verified: true, generation, reportHash, descriptorSha256, manifestSha256 },
+  };
+}
+
+test('retention pins the current and previous identities and rejects changes during the stop', async () => {
+  const { checkDriverAuditRetentionHead, restartDriverAuditRetention } = await import('../scripts/driverAuditDeploy.js');
+  const previous = livePointer(proofIdentity, digest('e'));
+  const active = livePointer({ ...proofIdentity, generation: digest('b'), sourceRevision: 2124 }, digest('d'));
+  const head = { ...active, previous };
+  const generations = active.generation + ':' + previous.generation;
+  const identity = checkDriverAuditRetentionHead(head, generations);
+  assert.throws(() => checkDriverAuditRetentionHead({ ...head, previous: { ...previous, restore: undefined } }, generations), /active or previous/i);
+  assert.throws(() => checkDriverAuditRetentionHead(head, previous.generation + ':' + active.generation), /active or previous/i);
+  const calls = [];
+  await assert.rejects(restartDriverAuditRetention({
+    async checkHead() {
+      const changed = checkDriverAuditRetentionHead({ ...head, sourceBodySha256: digest('c') }, generations);
+      assert.deepEqual(changed, identity, 'changed head');
+    },
+    async stop() { calls.push('stop'); },
+    async restart() { calls.push('restart'); },
+    async wait() { calls.push('wait'); },
+    async save() { calls.push('save'); },
+    async writeSettings(enabled) { calls.push('settings:' + enabled); },
+    async writeReceipt(enabled) { calls.push('receipt:' + enabled); },
+    async restore() { calls.push('restore'); },
+    async clearTransition() { calls.push('clear'); },
+  }), /changed head/i);
+  assert.deepEqual(calls, ['stop','restore','clear']);
+});
+
+test('retention restarts only the supervised worker and restores the exact prior settings and receipt on failure', async () => {
+  const { restartDriverAuditRetention } = await import('../scripts/driverAuditDeploy.js');
+  async function run({ failStartup }) {
+    const calls = [];
+    let gc = false;
+    let waits = 0;
+    const task = restartDriverAuditRetention({
+      async checkHead() { calls.push('head'); },
+      async stop() { calls.push('stop'); },
+      async restart() { calls.push('restart'); },
+      async wait() {
+        calls.push('wait');
+        if (failStartup && waits++ === 0) throw Error('startup failed');
+      },
+      async save() { calls.push('save'); },
+      async writeSettings(enabled) { calls.push('settings:' + enabled); gc = enabled; },
+      async writeReceipt(enabled) { calls.push('receipt:' + enabled); },
+      async restore() { calls.push('restore'); gc = false; },
+      async clearTransition() { calls.push('clear'); },
+    });
+    if (failStartup) await assert.rejects(task, /startup failed/);
+    else await task;
+    assert.equal(gc,!failStartup);
+    return calls;
+  }
+  const attempt = ['stop','head','receipt:true','settings:true','restart','wait'];
+  assert.deepEqual(await run({ failStartup: false }), [...attempt,'save','clear']);
+  assert.deepEqual(await run({ failStartup: true }), [...attempt,'restore','clear']);
+});
+
+test('failed recovery preserves the transition for an exact retry', async () => {
+  const { restartDriverAuditRetention } = await import('../scripts/driverAuditDeploy.js');
+  await assert.rejects(restartDriverAuditRetention({
+    async stop() { throw Error('stop failed'); },
+    async restore() { throw Error('worker unavailable'); },
+    async clearTransition() { assert.fail('An incomplete transition must stay available for recovery'); },
+  }), /restoring the prior audit worker could not be confirmed/);
 });

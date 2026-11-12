@@ -26,7 +26,7 @@ async function fixture(t) {
 test('status reports bounded build progress and omits private values and paths', async t => {
   const { appRoot, root, attemptId, attempt, pm2Home, entry } = await fixture(t);
   const write = (file, value) => fs.writeFile(file, JSON.stringify(value), { mode: 0o600 });
-  await write(path.join(root, 'sync-status.private.json'), { status: 'checking', checkedAt: '2026-11-12T14:53:31Z', private: 'private-value' });
+  await write(path.join(root, 'sync-status.private.json'), { status: 'checking', replicaGcStatus: 'proof-stale', checkedAt: '2026-11-12T14:53:31Z', private: 'private-value' });
   await write(path.join(root, 'work/status.private.json'), { status: 'building', id: attemptId, startedAt: '2026-11-12T14:53:31Z' });
   await fs.writeFile(path.join(attempt, 'combined-reviews.private.json'), 'private-value');
   await fs.writeFile(path.join(pm2Home, 'logs/matter-driver-audit-sync-error.log'), 'private-value\nDriver audit sync paused this refresh. See private sync status.\n');
@@ -34,6 +34,7 @@ test('status reports bounded build progress and omits private values and paths',
   assert.equal(status.worker.status, 'online');
   assert.equal(status.worker.restarts, 2);
   assert.equal(status.heartbeat.status, 'checking');
+  assert.equal(status.heartbeat.replicaGcStatus, 'proof-stale');
   assert.equal(status.build.status, 'building');
   assert.equal(status.build.files['combined-reviews.private.json'].bytes, 13);
   assert.deepEqual(status.logs, { refreshPaused: 1, startupFailed: 0, memoryLimit: 0, other: 1 });
