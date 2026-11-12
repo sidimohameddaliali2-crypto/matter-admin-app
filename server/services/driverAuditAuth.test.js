@@ -5,11 +5,11 @@ import {createServer} from 'node:http';
 test('audit staff sessions recheck permission, roles, revocation and CSRF',async()=>{
  let user={_id:'staff-1',email:'staff@example.invalid',isActive:true,role:'manager',permissions:{reports:true}},calls=0;
  const auth=createDriverAuditAuth({origin:'https://app.example.invalid',secret:'a'.repeat(32),authenticateStaffToken:async token=>{calls++;assert.equal(token,'valid.staff.token');return user;}});
- const issued=await auth.issue('Bearer valid.staff.token');assert.match(issued.cookie,/HttpOnly; SameSite=Strict/);assert.match(issued.cookie,/Secure/);
+ const issued=await auth.issue('Bearer valid.staff.token');assert.match(issued.cookie,/^matter_driver_audit_v2=/);assert.match(issued.cookie,/HttpOnly; SameSite=Strict/);assert.match(issued.cookie,/Secure/);
  const session=await auth.authenticate(issued.cookie);assert.equal(session.actor.role,'reviewer');assert.equal(session.actor.id,'matter:staff-1');assert.ok(auth.csrfMatches(session.csrf,session.csrf));assert.ok(!auth.csrfMatches(session.csrf,'x'.repeat(64)));
  user.role='viewer';assert.equal((await auth.authenticate(issued.cookie)).actor.role,'viewer');
  user.permissions.reports=false;await assert.rejects(auth.authenticate(issued.cookie),{status:403});user.permissions.reports=true;user.isActive=false;await assert.rejects(auth.authenticate(issued.cookie),{status:403});
- await assert.rejects(auth.authenticate(''),{status:401});await assert.rejects(auth.authenticate('matter_driver_audit=x; matter_driver_audit=y'),{status:401});assert.ok(calls>=5);assert.match(auth.clearCookie,/Max-Age=0/);
+ await assert.rejects(auth.authenticate(''),{status:401});await assert.rejects(auth.authenticate('matter_driver_audit=valid.staff.token'),{status:401});await assert.rejects(auth.authenticate('matter_driver_audit_v2=x; matter_driver_audit_v2=y'),{status:401});assert.ok(calls>=5);assert.match(auth.clearCookie,/^matter_driver_audit_v2=.*Max-Age=0/);
 });
 test('disabled audit integration does not contact a database or alter operations routes',async()=>{
  const middleware=createDriverAuditIntegration({env:{},db:()=>{throw Error('must not run');}});let next=0,status;
@@ -25,7 +25,11 @@ test('staff-only session handshake, refresh and logout work without a report imp
  let admissions=0;const handler=createDriverAuditIntegration({env,authenticateStaffToken,dependencies:{budget:{reserve:async()=>{admissions++;return {allowed:false};},settle:async()=>{throw Error('No denied settlement');}},state:{read:async()=>{throw Error('No cloud reads during session handshake');}},archive:{readObject:async()=>{throw Error('No archive read');}},store:{head:async()=>null}}});
  const server=createServer((req,res)=>handler(req,res,()=>{res.writeHead(404);res.end();}));await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));env.DRIVER_AUDIT_ORIGIN='http://127.0.0.1:'+server.address().port;const origin=env.DRIVER_AUDIT_ORIGIN;
  const call=(path,method='GET',headers={})=>fetch(origin+path,{method,headers});
- const issued=await call('/api/driver-audits/session','POST',{origin,'content-type':'application/json',authorization:'Bearer valid.jwt.token'});assert.equal(issued.status,200);const cookie=issued.headers.get('set-cookie');
+ const sessionHeaders={origin,'content-type':'application/json',authorization:'Bearer valid.jwt.token'};
+ const staleClient=await call('/api/driver-audits/session','POST',sessionHeaders);
+ assert.equal(staleClient.status,428);assert.equal(staleClient.headers.get('set-cookie'),null);
+ const issued=await call('/api/driver-audits/session','POST',{...sessionHeaders,'x-driver-audit-client':'reporting-v1'});assert.equal(issued.status,200);const cookie=issued.headers.get('set-cookie');
+ assert.deepEqual(await issued.json(),{url:'/api/reporting/view?screen=reports&view=1&tab=mirror'});
  assert.equal((await call('/api/session','GET',{cookie})).status,200);
  assert.equal((await call('/api/session/refresh','POST',{cookie,origin,'content-type':'application/json'})).status,200);
  assert.equal((await call('/api/session','POST',{cookie,origin,'content-type':'application/json'})).status,403);

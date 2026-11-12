@@ -5,7 +5,7 @@ export function browserReadCache(){
  const deliver=(entry,signal)=>{aborted(signal);return new Response(entry.bytes.slice(0),{status:200,headers:entry.headers});};
  const wait=(promise,signal)=>{if(!signal)return promise;aborted(signal);return new Promise((resolve,reject)=>{const cancel=()=>reject(signal.reason||new DOMException('Aborted','AbortError'));signal.addEventListener('abort',cancel,{once:true});promise.then(v=>{signal.removeEventListener('abort',cancel);if(!signal.aborted)resolve(v);},e=>{signal.removeEventListener('abort',cancel);reject(e);});});};
  window.fetch=async(input,init)=>{
-  const request=new Request(input,init),url=new URL(request.url),match=/^\/report-data\/(detail|history|query)-([a-f0-9]{64})\.json$/.exec(url.pathname);
+  const request=new Request(input,init),url=new URL(request.url),dataPath=window.__matterReportDataPath?.(url.pathname)??url.pathname,match=/^\/report-data\/(detail|history|query)-([a-f0-9]{64})\.json$/.exec(dataPath);
   const photo=url.pathname==='/api/reporting/photo/image'&&url.searchParams.getAll('record').length===1&&url.searchParams.getAll('snapshot').length===1&&/^[a-f0-9]{64}$/.test(url.searchParams.get('snapshot')||'')&&[...url.searchParams.keys()].every(k=>['record','snapshot'].includes(k));
   if(request.method!=='GET'||url.origin!==location.origin||!match&&!photo)return original(request);
   aborted(request.signal);const key=String(window.__matterReportingGeneration||'')+'|'+url.href;

@@ -2,6 +2,7 @@
 // consumed or cancelled. No caching or changes to report request contents.
 export function browserRequestQueue(){
  const original=window.fetch.bind(window),queue=[];let active=0,activeCases=0,activePrefetchCases=0,urgentRun=0;
+ const dataPath=pathname=>window.__matterReportDataPath?.(pathname)??pathname;
  const aborted=signal=>signal.reason||new DOMException('Request aborted','AbortError');
  function finish(task){
   if(task.finished)return;task.finished=true;task.request.signal.removeEventListener('abort',task.abort);
@@ -22,7 +23,7 @@ export function browserRequestQueue(){
  // Promote only its exact queued resource in the same page generation.
  window.__matterPromoteReportRead=(url,generation)=>{
   const task=queue.find(task=>task.priority===2&&task.request.url===url&&task.generation===generation);
-  if(task){task.priority=0;task.caseRead=/^\/report-data\/(detail|history)-[a-f0-9]{64}\.json$/.test(new URL(task.request.url).pathname)||new URL(task.request.url).pathname==='/api/reporting/photo/image';drain();}
+  if(task){const pathname=new URL(task.request.url).pathname;task.priority=0;task.caseRead=/^\/report-data\/(detail|history)-[a-f0-9]{64}\.json$/.test(dataPath(pathname))||pathname==='/api/reporting/photo/image';drain();}
  };
  async function run(task){
   try{
@@ -62,7 +63,7 @@ export function browserRequestQueue(){
     return original(new Request(url,{body,method:request.method,headers:request.headers,credentials:request.credentials,signal:request.signal,mode:request.mode,cache:request.cache,redirect:request.redirect,referrer:request.referrer,referrerPolicy:request.referrerPolicy,integrity:request.integrity,keepalive:request.keepalive}));
    }
   }
-  const resource=/^\/report-data\/(detail|history|query|archive|snapshot)-[a-f0-9]{64}\.json$/.exec(url.pathname);
+  const resource=/^\/report-data\/(detail|history|query|archive|snapshot)-[a-f0-9]{64}\.json$/.exec(dataPath(url.pathname));
   if(request.method!=='GET'||url.origin!==location.origin||!resource&&(!url.pathname.startsWith('/api/reporting/')||url.pathname==='/api/reporting/status'))return original(request);
   if(request.signal.aborted)throw aborted(request.signal);
   const prefetch=request.headers.get('X-Report-Prefetch')==='1';request.headers.delete('X-Report-Prefetch');
