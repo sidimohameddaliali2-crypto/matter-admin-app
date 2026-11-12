@@ -1,10 +1,31 @@
 import {validateReaderUsage} from './reader-usage.mjs';
 import {readerComputeMicros} from './reader-compute-cost.mjs';
 // Project-local worker admission ledger. It estimates bounded compute, not the provider invoice.
-import {randomUUID} from 'node:crypto';
+import {randomInt,randomUUID} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 const MONTH=/^\d{4}-(?:0[1-9]|1[0-2])$/,ID=/^[a-f0-9-]{36}$/i;
 export const WORKER_BUDGET_DEFAULTS=Object.freeze({monthlyMicros:12_000_000,reservationMicros:40_000,maxRunMs:300_000,overheadMs:10_000,rateMicrosPerHour:428_800});
 const fail=message=>{throw Error(message)};
+const pendingLedgers=new WeakMap();
+
+function queueLedgerMutation(stateStore,key,operation){
+ let ledgers=pendingLedgers.get(stateStore);
+ if(!ledgers){
+  ledgers=new Map();
+  pendingLedgers.set(stateStore,ledgers);
+ }
+ const result=(ledgers.get(key)??Promise.resolve()).then(operation);
+ const tail=result.then(()=>{},()=>{});
+ ledgers.set(key,tail);
+ void tail.then(()=>{if(ledgers.get(key)===tail)ledgers.delete(key);});
+ return result;
+}
+
+function revisionConflict(error){
+ // The CAS RPC rejects PT409 before writing. Identity conflicts and ambiguous
+ // transport errors may refer to an existing commit, so they cannot be retried.
+ return error?.status===409&&(error.code??error.cause?.code)==='PT409';
+}
 function validatePolicy(p){if(!p||!Number.isSafeInteger(p.monthlyMicros)||p.monthlyMicros<1||p.monthlyMicros>25_000_000||!Number.isSafeInteger(p.reservationMicros)||p.reservationMicros<40_000||p.reservationMicros>p.monthlyMicros||p.maxRunMs!==300_000||p.overheadMs!==10_000||p.rateMicrosPerHour!==428_800)fail('Invalid worker budget policy');return p;}
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 const validReservationMicros=(value,policy)=>Number.isSafeInteger(value)&&value>=40_000&&value<=policy.reservationMicros;
@@ -28,7 +49,31 @@ function currentMonth(now){if(!Number.isSafeInteger(now)||now<0)fail('Invalid wo
 function settledMicros(policy,elapsedMs,extraMicros){if(!Number.isSafeInteger(elapsedMs)||elapsedMs<0||elapsedMs>policy.maxRunMs)fail('Uncertain worker duration');if(!Number.isSafeInteger(extraMicros)||extraMicros<0||extraMicros>policy.reservationMicros)fail('Uncertain additional cost');const cost=Math.max(100,Math.ceil((elapsedMs+policy.overheadMs)*policy.rateMicrosPerHour/3_600_000/100)*100)+extraMicros;if(!Number.isSafeInteger(cost)||cost>policy.reservationMicros)fail('Uncertain total cost');return cost;}
 export function createWorkerBudget({stateStore,clock=Date.now,policy=WORKER_BUDGET_DEFAULTS,key='worker-budget',requestId=randomUUID,maxRetries=8}={}){
  if(!stateStore?.read||!stateStore?.compareAndSwap||typeof clock!=='function'||typeof requestId!=='function'||!Number.isInteger(maxRetries)||maxRetries<1||maxRetries>20||!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,159}$/.test(key))fail('Invalid worker budget dependencies');policy={...validatePolicy(policy)};
- async function mutate(kind,id,change){for(let attempt=0;attempt<maxRetries;attempt++){const current=await stateStore.read(key);if(!Number.isSafeInteger(current?.revision)||current.revision<0)fail('Invalid worker budget revision');const doc=readDocument(current.body,policy),output=change(doc);if(!output.commit)return output.result;const body=JSON.stringify(doc),event=JSON.stringify({kind:'worker-budget-'+kind,...output.event}),request=JSON.stringify({eventId:id,kind,expectedRevision:current.revision,body});try{const saved=await stateStore.compareAndSwap({key,expectedRevision:current.revision,eventId:'budget-'+kind+'-'+id,body,event,request});if(saved.body_text!==body||saved.event_text!==event)fail('Worker budget receipt mismatch');return output.result;}catch(e){if(e?.status===409&&attempt+1<maxRetries)continue;throw e;}}fail('Worker budget contention');}
+ function mutate(kind,id,change){
+  return queueLedgerMutation(stateStore,key,async()=>{
+   for(let attempt=0;attempt<maxRetries;attempt++){
+    const current=await stateStore.read(key);
+    if(!Number.isSafeInteger(current?.revision)||current.revision<0)fail('Invalid worker budget revision');
+    const doc=readDocument(current.body,policy),output=change(doc);
+    if(!output.commit)return output.result;
+    const body=JSON.stringify(doc);
+    const event=JSON.stringify({kind:'worker-budget-'+kind,...output.event});
+    const request=JSON.stringify({eventId:id,kind,expectedRevision:current.revision,body});
+    try{
+     const saved=await stateStore.compareAndSwap({key,expectedRevision:current.revision,eventId:'budget-'+kind+'-'+id,body,event,request});
+     if(saved.body_text!==body||saved.event_text!==event)fail('Worker budget receipt mismatch');
+     return output.result;
+    }catch(error){
+     if(!revisionConflict(error))throw error;
+     if(attempt+1===maxRetries)throw Object.assign(Error('Worker budget state remained busy',{cause:error}),{
+      status:503,diagnosticCategory:'state-contention',
+     });
+     const maximumDelay=Math.min(200,10*2**attempt);
+     await delay(randomInt(Math.ceil(maximumDelay/2),maximumDelay+1));
+    }
+   }
+  });
+ }
  return {
   async reserve({reservationMicros=policy.reservationMicros}={}){
    if(!validReservationMicros(reservationMicros,policy))fail('Invalid worker budget reservation amount');

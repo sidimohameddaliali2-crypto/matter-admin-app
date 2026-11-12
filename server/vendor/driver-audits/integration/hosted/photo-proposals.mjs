@@ -22,7 +22,13 @@ export function createPhotoProposalService({root,objectsRoot,snapshotFor,invento
  }
  return async params=>{
   const hashes=params.getAll('snapshot'),keys=params.getAll('record');if([...params.keys()].some(k=>!['snapshot','record'].includes(k))||hashes.length!==1||!hex(hashes[0])||keys.length<1||keys.length>25||new Set(keys).size!==keys.length||keys.some(k=>!k||k.length>300))throw fail('Invalid proposal request',400);
-  let snapshot;try{snapshot=await snapshotFor(hashes[0]);}catch{throw fail('Unknown report',409);}if(!Array.isArray(snapshot?.rows))throw fail('Unknown report',409);const rows=new Map(snapshot.rows.map(r=>[r.key,r]));if(keys.some(k=>!rows.has(k)))throw fail('Unknown record',409);
+  let snapshot;
+  try{snapshot=await snapshotFor(hashes[0]);}
+  catch(error){
+   if(error?.code==='ENOENT'||error?.status===404)throw fail('Unknown report',409);
+   throw error;
+  }
+  if(!Array.isArray(snapshot?.rows))throw fail('Unknown report',409);const rows=new Map(snapshot.rows.map(r=>[r.key,r]));if(keys.some(k=>!rows.has(k)))throw fail('Unknown record',409);
   const pinned=inventoryFor?await inventoryFor(hashes[0]):null;
   const evidence=async(kind,id)=>{if(!pinned)return json(path.join(root,kind,id+'.json'));if(!pinned[kind]?.[id])throw Object.assign(Error('Missing pinned receipt'),{code:'ENOENT'});return pinned[kind][id];};
   const q=await queue(pinned),progress=pinned?{total:q.total,proposed:Object.keys(pinned.proposals).filter(id=>q.ids.has(id)&&!pinned.flags[id]).length,needsReview:Object.keys(pinned.flags).filter(id=>q.ids.has(id)).length,unavailable:Object.keys(pinned.unavailable).filter(id=>q.ids.has(id)).length,pending:q.total-[...q.ids].filter(id=>pinned.proposals[id]||pinned.flags[id]||pinned.unavailable[id]).length,activeWorkers:0}:await counts(q);
