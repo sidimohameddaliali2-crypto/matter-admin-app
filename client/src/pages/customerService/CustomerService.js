@@ -11,8 +11,7 @@ import CustomerChats from './CustomerChats';
 import CustomerReviews from './CustomerReviews';
 import { updateServiceFilterSearch, dubaiToday, serviceFiltersFromSearch, serviceFilterSearch, displayName, errorMessage, idOf, servicePath, unpack, useServiceResource } from '../../components/customerService/serviceUtils';
 import './customerService.css';
-
-const tabs = [['chats', 'Inbox'], ['problems', 'Follow-ups'], ['customers', 'Customers'], ['reviews', 'Reviews'], ['summary', 'Summary'], ['reporting', 'Reporting']];
+import { servicePages, servicePageForPath } from '../../components/customerService/serviceNavigation';
 
 function SupervisorSetup({ onConfigured }) {
   const team = useServiceResource('/team');
@@ -47,8 +46,10 @@ export default function CustomerService() {
 function CustomerServiceWorkspace({ user }) {
   const location = useLocation();
   const navigate = useNavigate();
-  const selectedTab = location.pathname.split('/')[2] || 'chats';
-  const activeTab = tabs.some(([key]) => key === selectedTab) ? selectedTab : 'chats';
+  const activeTab = servicePageForPath(location.pathname)?.[0];
+  const inboxSearch = useRef('');
+  const query = new URLSearchParams(location.search);
+  if (activeTab === 'chats' || ['status','assignment','source','view','conversation','request'].some(key=>query.has(key))) inboxSearch.current = location.search;
   const [me, setMe] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -75,18 +76,25 @@ function CustomerServiceWorkspace({ user }) {
   const changeFilters = next => { setFilters(next); navigate(`${location.pathname}${updateServiceFilterSearch(next,location.search)}`, {replace:true}); };
   const updateFilter = (key, value) => changeFilters({ ...filters, [key]: value });
   const today = dubaiToday();
-  const props = { me, user, capabilities, categories, filters, epoch, onRefresh: refresh, onFiltersChange: changeFilters };
-  return <div className={`matter-cs ${activeTab==='chats'?'cs-compact-inbox':''} ${user.localPreview?'cs-local-read-preview':''}`}>
+  const periodLabel = filters.from === today && filters.to === today ? 'Today' : !filters.from && !filters.to ? 'All time' : `${filters.from || 'Any date'} – ${filters.to || 'Any date'}`;
+  const inboxHref = `${servicePath}/chats${updateServiceFilterSearch(filters, inboxSearch.current)}`;
+  const props = { me, user, capabilities, categories, filters, epoch, onRefresh: refresh, onFiltersChange: changeFilters, inboxHref };
+  return <div className={`matter-cs cs-workspace ${activeTab==='chats'?'cs-compact-inbox':''} ${user.localPreview?'cs-local-read-preview':''}`}>
     {user.localPreview&&<p className="cs-local-preview-note" role="status">Local preview · live records · view only</p>}
-    {activeTab!=='chats'&&<header className={`cs-header ${activeTab==='chats'?'cs-compact-header':''}`}>
-      <div className="cs-heading-row"><div className="cs-brand">Matter<span />Customer service</div><nav aria-label="Customer service pages">{tabs.map(([key, label]) => <Link key={key} to={`${servicePath}/${key}${serviceFilterSearch(filters)}`} className={key === activeTab ? 'active' : ''} aria-current={key === activeTab ? 'page' : undefined}>{label}</Link>)}</nav></div>
+    <nav className="cs-workspace-navigation" aria-label="Customer service pages">
+      {servicePages.map(([key, label]) => <Link key={key} to={key === 'chats' ? inboxHref : `${servicePath}/${key}${updateServiceFilterSearch(filters, inboxSearch.current)}`} aria-current={key === activeTab ? 'page' : undefined}>{label}</Link>)}
+    </nav>
+    <div className="cs-workspace-content">
+    {activeTab!=='chats'&&<details className="cs-header cs-page-filters">
+      <summary>Filter this page <span className="cs-page-filter-scope">· {periodLabel}{filters.search?' · Search active':''}{filters.categoryId?' · Category selected':''}</span></summary>
       <div className="cs-filter-row"><div className="cs-chip-row cs-date-shortcuts" role="group" aria-label="Date range"><button aria-pressed={filters.from === today && filters.to === today} onClick={() => changeFilters({...filters,from:today,to:today})}>Today</button><button aria-pressed={!filters.from && !filters.to} onClick={() => changeFilters({...filters,from:'',to:''})}>All time</button></div><div className="cs-period"><label>From<input type="date" aria-label="From date in Dubai" value={filters.from} max={filters.to || undefined} onChange={event => updateFilter('from', event.target.value)} /></label><label>To<input type="date" aria-label="To date in Dubai" value={filters.to} min={filters.from || undefined} onChange={event => updateFilter('to', event.target.value)} /></label></div><label className="cs-search"><Search size={17} aria-hidden="true"/><input aria-label="Search customer service" placeholder="Search customers or issues" value={filters.search} onChange={event => updateFilter('search', event.target.value)} /></label><select aria-label="Review category filter" value={filters.categoryId} onChange={event => updateFilter('categoryId', event.target.value)}><option value="">All review categories</option>{categories.map(category => <option key={category.id} value={category.id}>{category.label}</option>)}</select><div className="cs-person"><strong>{me?.profile?.displayName || displayName(user)}</strong><span>{capabilities.supervise ? 'Supervisor' : capabilities.review ? 'Reviewer' : capabilities.setup ? 'Setup administrator' : 'Staff'} · Dubai time</span></div><button className="cs-icon-button" aria-label="Refresh customer service" title="Refresh saved information" onClick={() => { if (!me) loadMe(); else refresh(); }}><RefreshCw size={18}/></button></div>
-    </header>}
+    </details>}
     {loading && <section className="cs-card"><p role="status">Checking customer service access…</p></section>}
     {error && <section className="cs-card"><div className="cs-alert" role="alert">{error}</div><button onClick={loadMe}>Try again</button></section>}
     {!loading && !error && !allowed && !capabilities.setup && <section className="cs-card cs-empty"><h2>Customer service access is not configured</h2><p>Ask your supervisor for access.</p></section>}
     {!loading && !error && !allowed && capabilities.setup && <SupervisorSetup onConfigured={loadMe} />}
-    {!loading && !error && allowed && <>{dictionary.error && <div className="cs-alert" role="alert">Category definitions unavailable: {dictionary.error}</div>}{activeTab === 'reporting' && <Reporting {...props} />}{activeTab === 'summary' && <Summary {...props} />}{activeTab === 'problems' && <Problems {...props} />}{activeTab === 'customers' && <Customers {...props} />}{activeTab === 'chats' && <CustomerChats {...props} navigation={<nav aria-label="Customer service pages">{tabs.map(([key,label])=><Link key={key} to={servicePath+'/'+key+serviceFilterSearch(filters)}>{label}</Link>)}</nav>} />}{activeTab === 'reviews' && <CustomerReviews {...props} />}</>}
+    {!loading && !error && allowed && <>{dictionary.error && <div className="cs-alert" role="alert">Category definitions unavailable: {dictionary.error}</div>}{!activeTab && <section className="cs-card cs-empty"><h2>Customer service page not found</h2><p>Choose a page above or return to the inbox.</p><Link to={`${servicePath}/chats${serviceFilterSearch(filters)}`}>Open inbox</Link></section>}{activeTab === 'reporting' && <Reporting {...props} />}{activeTab === 'summary' && <Summary {...props} />}{activeTab === 'problems' && <Problems {...props} />}{activeTab === 'customers' && <Customers {...props} />}{activeTab === 'chats' && <CustomerChats {...props} />}{activeTab === 'reviews' && <CustomerReviews {...props} />}</>}
     {activeTab!=='chats'&&<footer className="cs-page-footer">Dubai time · Staff inbox</footer>}
+    </div>
   </div>;
 }

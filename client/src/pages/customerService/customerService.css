@@ -201,3 +201,56 @@
 
 .cs-compact-inbox h2.cs-inbox-placeholder-heading{font-size:17px;font-weight:700;letter-spacing:normal;line-height:1.35;}
 .cs-compact-inbox .cs-inbox-contact h2{font-weight:700;letter-spacing:normal;line-height:1.35;}
+
+/* One visible page map throughout the customer-service workspace. */
+.cs-workspace{display:flex;flex-direction:column;min-height:100%;}
+.cs-workspace-navigation{display:flex;flex-wrap:wrap;gap:4px;flex:none;position:sticky;top:0;z-index:20;padding:10px 12px;background:var(--ivory);border-bottom:1px solid var(--line);}
+main[aria-labelledby="customer-service-page-heading"]{scroll-padding-block-start:76px;}
+.cs-workspace-navigation a{display:flex;align-items:center;justify-content:center;min-height:40px;padding:8px 14px;border:1px solid transparent;border-radius:8px;color:var(--ink);font-size:.875rem;font-weight:600;text-decoration:none;}
+.cs-workspace-navigation a[aria-current=page]{background:#dff49c;border-color:#dff49c;text-decoration:underline;text-underline-offset:4px;}
+.cs-workspace-navigation a:focus-visible{outline:2px solid #345c98;outline-offset:2px;}
+.cs-workspace-content{min-width:0;}
+.cs-workspace.cs-compact-inbox>.cs-workspace-content{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;}
+.cs-workspace.cs-compact-inbox>.cs-workspace-content>.cs-chat-shell{flex:1;height:auto;min-height:0;}
+.cs-workspace:not(.cs-compact-inbox)>.cs-workspace-navigation{margin-bottom:16px;}
+.cs-workspace .cs-header .cs-filter-row{margin-top:0;padding-top:0;border-top:0;}
+.cs-workspace .cs-page-filters>summary{font-size:.875rem;line-height:1.5;min-height:24px;}
+.cs-page-filter-scope{color:var(--muted);font-size:.8125rem;font-weight:400;}
+.cs-workspace .cs-page-filters[open] .cs-filter-row{margin-top:16px;}
+.cs-compact-inbox .cs-secondary-menu>summary{font-size:.75rem;white-space:nowrap;padding:8px 4px;min-height:40px;display:flex;align-items:center;}
+.cs-compact-inbox .cs-secondary-menu>summary::after{content:'⌄';margin-inline-start:6px;}
+.cs-compact-inbox .cs-secondary-menu[open]{inset-inline-end:12px;top:12px;width:min(260px,calc(100% - 24px));}
+.cs-compact-inbox .cs-inbox-mode{display:flex;flex:none;gap:4px;margin-bottom:12px;}
+.cs-compact-inbox .cs-inbox-mode button{min-height:40px;}
+.cs-inbox-scope{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:.75rem;margin-bottom:8px;}
+.cs-inbox-scope button{padding:6px 8px;min-height:32px;font-size:.75rem;}
+.cs-compact-inbox .cs-queue-filters{max-height:52%;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;}
+.cs-queue-filters>summary{padding:8px 0;font-size:.875rem;}
+.cs-inbox-filter-fields{display:grid;gap:14px;padding:6px 2px 14px;}
+.cs-inbox-filter-fields label{min-width:0;}
+.cs-inbox-filter-fields select,.cs-inbox-filter-fields input{width:100%;min-width:0;max-width:100%;}
+.cs-inbox-filter-grid{display:grid;gap:12px;}
+.cs-inbox-filter-fields fieldset{min-width:0;border:0;padding:0;margin:0;}
+.cs-inbox-filter-fields legend{font-size:.75rem;font-weight:600;margin-bottom:8px;}
+.cs-inbox-filter-fields fieldset:disabled{opacity:.65;}
+.cs-inbox-filter-fields .cs-period{display:grid;grid-template-columns:minmax(0,1fr);gap:10px;width:100%;margin-top:10px;}
+.cs-inbox-filter-fields .cs-period input{box-sizing:border-box;}
+.cs-compact-inbox .cs-request-queues{min-height:0;overflow-y:auto;overscroll-behavior:contain;}
+.cs-compact-inbox .cs-request-queues nav{flex-wrap:wrap;}
+.cs-compact-inbox .cs-request-queues nav button{white-space:normal;min-height:40px;}
+.cs-compact-inbox .cs-request-strip{display:flex;flex-direction:column;overflow:visible;max-height:none;}
+.cs-compact-inbox .cs-request-strip button{min-width:0;max-width:100%;width:100%;}
+@media(max-width:650px){
+ main[aria-labelledby="customer-service-page-heading"]{scroll-padding-block-start:108px;}
+ .cs-workspace-navigation{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:6px 8px;}
+ .cs-workspace-navigation a{min-width:0;padding:8px 4px;font-size:.8125rem;}
+ .cs-workspace input,.cs-workspace select{font-size:1rem;}
+ .cs-inbox-filter-fields .cs-period{grid-template-columns:repeat(2,minmax(0,1fr));}
+ .cs-workspace .cs-filter-row .cs-period{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;min-width:0;}
+ .cs-workspace .cs-period label,.cs-workspace .cs-period input{min-width:0;max-width:100%;width:100%;box-sizing:border-box;}
+}
+@media(max-width:360px){
+ .cs-shell-header .cs-shell-brand img{max-width:72px;}
+ .cs-shell-header .cs-shell-brand .cs-inbox-heading{font-size:14px;}
+ .cs-inbox-filter-fields .cs-period{grid-template-columns:minmax(0,1fr);}
+}

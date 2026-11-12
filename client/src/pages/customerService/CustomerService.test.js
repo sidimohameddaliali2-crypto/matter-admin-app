@@ -8,10 +8,14 @@ import api from '../../utils/api';
 jest.mock('../../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn(), put: jest.fn(), patch: jest.fn() } }));
 let mockPathname = '/customer-service/chats';
 let mockSearch = '';
+const mockLocationListeners = new Set();
 const mockNavigate = jest.fn();
 jest.mock('react-router-dom', () => {
   const React = require('react');
-  return { Link: ({ to, children, ...props }) => <a href={to} {...props}>{children}</a>, useLocation: () => ({ pathname: mockPathname, search: mockSearch }), useNavigate: () => mockNavigate };
+  return { Link: ({ to, children, ...props }) => <a href={to} {...props}>{children}</a>, useLocation: () => {
+    React.useSyncExternalStore(listener => {mockLocationListeners.add(listener);return()=>mockLocationListeners.delete(listener);},()=>mockPathname+mockSearch);
+    return { pathname: mockPathname, search: mockSearch };
+  }, useNavigate: () => mockNavigate };
 }, { virtual: true });
 global.IS_REACT_ACT_ENVIRONMENT = true;
 let root, container;
@@ -22,7 +26,7 @@ async function render(user = { _id: 'reviewer', role: 'admin' }, route = '/custo
   await act(async () => root.render(<Provider store={store}><CustomerService /></Provider>));
 }
 beforeEach(() => {
-  jest.clearAllMocks(); mockSearch = ''; mockNavigate.mockImplementation(url => { mockSearch = url.includes('?') ? url.slice(url.indexOf('?')) : ''; });
+  jest.clearAllMocks(); mockSearch = ''; mockLocationListeners.clear(); mockNavigate.mockImplementation(url => { mockPathname=url.split('?')[0];mockSearch = url.includes('?') ? url.slice(url.indexOf('?')) : '';mockLocationListeners.forEach(listener=>listener()); });
   container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
   api.get.mockImplementation(async url => ({ data: { success: true, data: url.endsWith('/me') ? { capabilities: { review: true, workActions: true }, profile: { displayName: 'Reviewer', userId: 'reviewer' } } : url.endsWith('/categories') ? [] : url.endsWith('/reviews') ? { reviews: [] } : url.endsWith('/team') ? { members: [], candidates: [{ _id: 'candidate', displayName: 'Existing staff' }] } : { issues: [], actions: [] } } }));
 });
@@ -30,6 +34,8 @@ afterEach(async () => { await act(async () => root.unmount()); container.remove(
 test('inbox is primary and reviews remain a separate deliberate workflow', async () => {
   await render();
   expect([...container.querySelectorAll('nav[aria-label="Customer service pages"] a')].map(a => a.textContent)).toEqual(['Inbox', 'Follow-ups', 'Customers', 'Reviews', 'Summary', 'Reporting']);
+  expect(container.querySelector('nav[aria-label="Customer service pages"]').closest('details')).toBeNull();
+  expect(container.querySelector('nav[aria-label="Customer service pages"] [aria-current=page]').textContent).toBe('Inbox');
   expect(container.textContent).toContain('Select a conversation');
   expect(api.post).not.toHaveBeenCalled();
   expect(button('Start next review')).toBeUndefined();
@@ -69,8 +75,8 @@ test('Today is the Dubai default on all pages and date choices survive navigatio
   expect(container.querySelector('[aria-label="From date in Dubai"]').value).toBe(today);
   expect(container.querySelector('[aria-label="To date in Dubai"]').value).toBe(today);
   expect(api.get).toHaveBeenCalledWith('/customer-service/conversations',expect.objectContaining({params:expect.objectContaining({status:'open',assignment:'all'})}));
-  await act(async()=>button('All time').click());
-  expect(mockNavigate).toHaveBeenLastCalledWith('/customer-service/chats?period=all',{replace:true});
+  await act(async()=>button('Browse history').click());
+  expect(mockNavigate).toHaveBeenLastCalledWith('/customer-service/chats?period=all&status=all&assignment=all&source=native',{replace:true});
   expect(container.querySelector('nav a[href*="customers"]').getAttribute('href')).toContain('period=all');
   await render(undefined,'/customer-service/customers');expect(container.querySelector('[aria-label="From date in Dubai"]').value).toBe('');
   expect(api.get).toHaveBeenCalledWith('/customer-service/customers',expect.objectContaining({params:expect.not.objectContaining({from:today})}));
@@ -78,6 +84,30 @@ test('Today is the Dubai default on all pages and date choices survive navigatio
   mockSearch='?from=2026-10-01&to=2026-10-03';await render(undefined,'/customer-service/problems');expect(container.querySelector('[aria-label="From date in Dubai"]').value).toBe('2026-10-01');expect(container.querySelector('nav a[href*="summary"]').getAttribute('href')).toContain('from=2026-10-01');
   await act(async()=>button('Today').click());expect(container.querySelector('[aria-label="From date in Dubai"]').value).toBe(today);
   expect(mockNavigate).toHaveBeenLastCalledWith('/customer-service/problems?period=today',{replace:true});
+});
+
+test('the visible page map retains the inbox conversation, source and queue when returning from another page',async()=>{
+ mockSearch='?period=all&status=resolved&assignment=mine&conversation=chat-one&request=work-one&source=history&view=work';
+ await render();
+ mockSearch='?period=all';await render(undefined,'/customer-service/reviews');
+ const nav=container.querySelector('nav[aria-label="Customer service pages"]');
+ expect(nav.closest('details')).toBeNull();
+ expect(nav.querySelector('[aria-current=page]').textContent).toBe('Reviews');
+ const inbox=new URL(nav.querySelector('a').href);
+ expect(Object.fromEntries(inbox.searchParams)).toMatchObject({period:'all',status:'resolved',assignment:'mine',conversation:'chat-one',request:'work-one',source:'history',view:'work'});
+ const reporting=nav.querySelector('a[href*="reporting"]').getAttribute('href');
+ await act(async()=>root.unmount());root=createRoot(container);mockSearch=reporting.slice(reporting.indexOf('?'));await render(undefined,'/customer-service/reporting');
+ expect(container.querySelector('nav[aria-label="Customer service pages"] a').getAttribute('href')).toContain('conversation=chat-one');
+ expect(container.querySelector('nav[aria-label="Customer service pages"] a').getAttribute('href')).toContain('view=work');
+ expect(api.post).not.toHaveBeenCalled();
+});
+
+test('an unknown customer service page provides an explicit route back instead of displaying the inbox at a misleading URL',async()=>{
+ await render(undefined,'/customer-service/missing');
+ expect(container.textContent).toContain('Customer service page not found');
+ expect(container.querySelector('nav[aria-label="Customer service pages"] [aria-current]')).toBeNull();
+ expect(container.textContent).not.toContain('Select a conversation');
+ expect(api.get.mock.calls.some(([url])=>url.endsWith('/conversations'))).toBe(false);
 });
 test('a fresh opening resets to Today and source settings stay collapsed',async()=>{
  await render(undefined,'/customer-service/summary');expect(container.querySelector('[aria-label="From date in Dubai"]').value).toBe(new Date(Date.now()+14400000).toISOString().slice(0,10));
@@ -108,7 +138,7 @@ test('a custom range can be entered for resolved chats from All time one date at
  await setDate('To date in Dubai','2026-08-31');
  expect(container.querySelector('[aria-label="From date in Dubai"]').value).toBe('2026-08-08');
  expect(container.querySelector('[aria-label="To date in Dubai"]').value).toBe('2026-08-31');
- expect(mockSearch).toBe('?from=2026-08-08&to=2026-08-31');
+ expect(Object.fromEntries(new URLSearchParams(mockSearch))).toMatchObject({from:'2026-08-08',to:'2026-08-31',status:'resolved'});
  expect(api.get).toHaveBeenCalledWith('/customer-service/conversations',expect.objectContaining({params:expect.objectContaining({from:'2026-08-08',to:'2026-08-31'})}));
 });
 

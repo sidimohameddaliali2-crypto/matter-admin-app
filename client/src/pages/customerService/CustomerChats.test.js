@@ -3,7 +3,9 @@ import {createRoot} from 'react-dom/client';
 import CustomerChats from './CustomerChats';
 import api from '../../utils/api';
 jest.mock('../../utils/api',()=>({__esModule:true,default:{get:jest.fn(),post:jest.fn(),patch:jest.fn()}}));
-jest.mock('react-router-dom',()=>({useLocation:()=>({pathname:'/customer-service/chats',search:''}),useNavigate:()=>jest.fn()}),{virtual:true});
+let mockSearch='';
+const mockNavigate=jest.fn();
+jest.mock('react-router-dom',()=>({useLocation:()=>({pathname:'/customer-service/chats',search:mockSearch}),useNavigate:()=>mockNavigate}),{virtual:true});
 let mockWorkProps;
 jest.mock('../../components/customerService/RequestWork',()=>({__esModule:true,default:props=>{mockWorkProps=props;return null;},RequestQueues:()=>null}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
@@ -13,8 +15,45 @@ const response=data=>({data:{data}});
 const row=(id,name)=>({_id:id,customerName:name,lastMessageAt:'2026-11-06T10:00:00Z',lastMessage:{text:`Preview ${name}`}});
 const message=(id,text,time)=>({_id:id,text,authorType:'customer',sentAt:`2026-11-06T${time}:00Z`});
 const click=async text=>{const button=[...el.querySelectorAll('button')].find(b=>b.textContent.includes(text));expect(button).toBeTruthy();await act(async()=>button.click());};
-beforeEach(()=>{jest.useFakeTimers();jest.clearAllMocks();el=document.createElement('div');document.body.appendChild(el);root=createRoot(el);});
+beforeEach(()=>{jest.useFakeTimers();jest.clearAllMocks();mockSearch='';mockNavigate.mockImplementation(url=>{mockSearch=url.includes('?')?url.slice(url.indexOf('?')):'';});el=document.createElement('div');document.body.appendChild(el);root=createRoot(el);});
 afterEach(async()=>{await act(async()=>root.unmount());el.remove();jest.useRealTimers();});
+
+test('history and work navigation have distinct visible controls and survive a URL restore',async()=>{
+ api.get.mockResolvedValue(response({conversations:[],hasMore:false}));
+ mockSearch='?period=all&source=history&status=resolved&assignment=mine';
+ await act(async()=>root.render(<CustomerChats {...props}/>));
+ expect(el.querySelector('[aria-label="Conversation source"]').value).toBe('history');
+ expect(el.querySelector('nav[aria-label="Inbox view"]').hasAttribute('hidden')).toBe(false);
+ await click('My work');
+ expect(new URLSearchParams(mockSearch).get('view')).toBe('work');
+ await act(async()=>root.unmount());root=createRoot(el);
+ await act(async()=>root.render(<CustomerChats {...props}/>));
+ expect(el.querySelector('nav[aria-label="Inbox view"] button[aria-pressed=true]').textContent).toBe('My work');
+ await click('Conversations');await click('Browse history');
+ expect(Object.fromEntries(new URLSearchParams(mockSearch))).toMatchObject({period:'all',status:'all',assignment:'all'});
+ expect(api.post).not.toHaveBeenCalled();
+});
+
+test('returning to the conversation list clears the selected conversation from the reload URL',async()=>{
+ api.get.mockImplementation(async url=>response(url.endsWith('/conversations')?{conversations:[row('a','Selected contact')]}:{conversation:row('a','Selected contact'),messages:[],issues:[],actions:[]}));
+ mockSearch='?period=all&status=resolved&assignment=mine&conversation=a&request=work-a';
+ await act(async()=>root.render(<CustomerChats {...props}/>));
+ await act(async()=>el.querySelector('[aria-label="Back to conversations"]').click());
+ const query=new URLSearchParams(mockSearch);
+ expect(query.has('conversation')).toBe(false);expect(query.has('request')).toBe(false);
+ expect(query.get('status')).toBe('resolved');expect(query.get('assignment')).toBe('mine');
+ await act(async()=>root.unmount());root=createRoot(el);await act(async()=>root.render(<CustomerChats {...props}/>));
+ expect(el.textContent).toContain('Select a conversation');
+});
+
+test('backlog dates explain why the range is inactive and become usable in a historical queue',async()=>{
+ api.get.mockResolvedValue(response({conversations:[],hasMore:false}));
+ await act(async()=>root.render(<CustomerChats {...props}/>));
+ expect(el.querySelector('.cs-inbox-filter-fields fieldset').disabled).toBe(true);
+ expect(el.textContent).toContain('Open and unassigned queues include all dates');
+ await act(async()=>{const input=el.querySelector('[aria-label="Conversation status"]');input.value='all';input.dispatchEvent(new Event('change',{bubbles:true}));});
+ expect(el.querySelector('.cs-inbox-filter-fields fieldset').disabled).toBe(false);
+});
 test('staff can browse unmapped native chats and paginate without claiming a review',async()=>{
  api.get.mockImplementation(async(url,{params}={})=>response(url.endsWith('/conversations')?{conversations:params.cursor?[row('b','Second contact')]:[row('a','Unmapped contact')],nextCursor:params.cursor?null:'page2',hasMore:!params.cursor}:{conversation:row('a','Unmapped contact'),messages:[message('m','Customer question','10:00')],issues:[],actions:[]}));
  await act(async()=>root.render(<CustomerChats {...props}/>));

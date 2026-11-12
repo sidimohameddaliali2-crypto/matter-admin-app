@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
+import { servicePageForPath } from './customerService/serviceNavigation';
 import {
   LayoutDashboard,
   Users,
@@ -77,6 +78,9 @@ const Layout = ({ children }) => {
   const navigate = useNavigate();
   const location = useLocation();
   const compactInbox = /^\/customer-service(?:\/chats)?\/?$/.test(location.pathname);
+  const servicePage = servicePageForPath(location.pathname);
+  const serviceTitle = servicePage?.[1];
+  const previousPath = useRef(location.pathname);
   const { user } = useSelector(state => state.auth);
 
   useEffect(() => {
@@ -98,12 +102,20 @@ const Layout = ({ children }) => {
   useEffect(() => { setSidebarOpen(false); }, [location.pathname]);
 
   useEffect(() => {
-    if (!compactInbox) return undefined;
+    if (!serviceTitle) return undefined;
     const previousTitle = document.title;
-    const inboxTitle = 'Customer service inbox · Matter';
-    document.title = inboxTitle;
-    return () => { if (document.title === inboxTitle) document.title = previousTitle; };
-  }, [compactInbox]);
+    const pageTitle = serviceTitle === 'Customer service' ? 'Customer service · Matter' : `Customer service ${serviceTitle.toLowerCase()} · Matter`;
+    document.title = pageTitle;
+    return () => { if (document.title === pageTitle) document.title = previousTitle; };
+  }, [serviceTitle]);
+
+  useEffect(() => {
+    if (serviceTitle && previousPath.current !== location.pathname) {
+      const main = document.getElementById('main-content');
+      if (main) { main.scrollTop = 0; main.focus({ preventScroll: true }); }
+    }
+    previousPath.current = location.pathname;
+  }, [location.pathname, serviceTitle]);
 
   // Check if a nav item should be visible for the current user.
   // Permission wins: a page keyed with `permission` shows iff that permission is
@@ -246,7 +258,7 @@ const Layout = ({ children }) => {
       {/* Main content */}
       <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
         {/* Header */}
-        <header style={compactInbox?{height:60,paddingTop:8,paddingBottom:8}:undefined} className={`${compactInbox?'cs-shell-header ':''}mo-chrome-font mo-app-header relative z-40 flex items-center justify-between flex-wrap gap-x-4 flex-shrink-0 px-6 py-4 bg-[#0b1630] border-b border-white/10 text-white`}>
+        <header style={serviceTitle?{minHeight:60,paddingTop:8,paddingBottom:8}:undefined} className={`${serviceTitle?'cs-shell-header ':''}mo-chrome-font mo-app-header relative z-40 flex items-center justify-between flex-wrap gap-x-4 flex-shrink-0 px-6 py-4 bg-[#0b1630] border-b border-white/10 text-white`}>
           <div className="flex items-center">
             <button
               onClick={() => setSidebarOpen(true)}
@@ -270,7 +282,7 @@ const Layout = ({ children }) => {
                 <Menu className="w-6 h-6" />
               </button>
             )}
-            {compactInbox ? <div className="cs-shell-brand" style={{display:'flex',alignItems:'center',gap:22,marginLeft:12}}><img src="/images/matter-logo24-white.png" alt="MATTER" style={{height:28,width:'auto',objectFit:'contain'}}/><h1 id="customer-service-inbox-heading" className="cs-inbox-heading">Inbox</h1></div> : headerLabel && (
+            {serviceTitle ? <div className="cs-shell-brand" style={{display:'flex',alignItems:'center',gap:22,marginLeft:12}}><img src="/images/matter-logo24-white.png" alt="MATTER" style={{height:28,width:'auto',objectFit:'contain'}}/><h1 id="customer-service-page-heading" className="cs-inbox-heading">{serviceTitle}</h1></div> : headerLabel && (
               <span className="ml-3 pl-3 border-l border-white/20 text-[11px] tracking-[0.18em] uppercase text-white/80">
                 {headerLabel}
               </span>
@@ -312,7 +324,7 @@ const Layout = ({ children }) => {
         </header>
 
         {/* Page content */}
-        <main id="main-content" tabIndex={-1} aria-labelledby={compactInbox ? 'customer-service-inbox-heading' : undefined} className="flex-1 overflow-y-auto overflow-x-hidden bg-gray-50">
+        <main id="main-content" tabIndex={-1} aria-labelledby={serviceTitle ? 'customer-service-page-heading' : undefined} className="flex-1 overflow-y-auto overflow-x-hidden bg-gray-50">
           <div className="h-full">
             {children}
           </div>
