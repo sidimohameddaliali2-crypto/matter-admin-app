@@ -65,9 +65,9 @@ async function main(){
    return;
   }
   lock=await acquireWorkerLock(path.join(path.dirname(root),'sync-worker.lock'));
-  const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true});
+  const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true});
   const boundedState=(responseLimit,select=cloud=>cloud)=>createBudgetedAuditState({state:select(createCloudState({rpc:createHostedRpc({secret,maxResponseBytes:responseLimit})})),
-   budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true});
+   budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true});
   const sourceState=boundedState(2*1024*1024),reviewState=boundedState(8*1024*1024);
   const sourceReceipts=boundedState(2*1024*1024,cloud=>({async read(revision){
    const [receipt]=await cloud.receipts('collector-state',{after:revision-1});

@@ -1,4 +1,4 @@
-import {createWorkerBudget,WORKER_BUDGET_DEFAULTS} from './worker-budget.mjs';
+import {createWorkerBudget,WORKER_BUDGET_DEFAULTS,NOVEMBER_RECOVERY_READER_BUDGET_KEY} from './worker-budget.mjs';
 import {READER_BUDGET_POLICY,MAX_READER_BODY_BYTES} from './reader-budget.mjs';
 
 // Preserve the original ledgers and use only the remaining approved hosting dollar.
@@ -10,15 +10,18 @@ export const EXPANDED_HOSTING_BUDGET_MICROS=30_000_000;
 // One-time release allowance approved for November 2026 only.
 export const READER_NOVEMBER_RELEASE_POLICY=Object.freeze({...READER_BUDGET_POLICY,monthlyMicros:1_000_000});
 export const READER_NOVEMBER_SYNC_POLICY=Object.freeze({...READER_BUDGET_POLICY,monthlyMicros:5_000_000});
+// An explicit November recovery opt-in uses a fresh ledger and leaves existing holds intact.
+export const READER_NOVEMBER_RECOVERY_POLICY=Object.freeze({...READER_BUDGET_POLICY,monthlyMicros:3_000_000});
 const SMALL_RESPONSE_BYTES=2*1024*1024;
 const capacities=new Map([[40_000,SMALL_RESPONSE_BYTES],[45_000,8*1024*1024],[47_000,9*1024*1024],[55_000,16*1024*1024],[150_000,MAX_READER_BODY_BYTES]]);
 
-export function createReaderBudgetPool({stateStore,clock=Date.now,requestId,maxRetries,approvedAdditionalBrowsing=false,approvedNovemberRelease=false,approvedNovemberSync=false}={}){
+export function createReaderBudgetPool({stateStore,clock=Date.now,requestId,maxRetries,approvedAdditionalBrowsing=false,approvedNovemberRelease=false,approvedNovemberSync=false,approvedNovemberRecovery=false}={}){
  if(WORKER_BUDGET_DEFAULTS.monthlyMicros+READER_BUDGET_POLICY.monthlyMicros+READER_RESERVE_BUDGET_POLICY.monthlyMicros>APPROVED_HOSTING_BUDGET_MICROS)throw Error('Reader pool exceeds approved hosting budget');
  if(typeof approvedAdditionalBrowsing!=='boolean')throw Error('Explicit browsing approval required');
  if(typeof approvedNovemberRelease!=='boolean')throw Error('Explicit November release approval required');
  if(typeof approvedNovemberSync!=='boolean')throw Error('Explicit November sync approval required');
- if(approvedAdditionalBrowsing&&(approvedNovemberRelease||approvedNovemberSync))throw Error('November release cannot combine browsing supplements');
+ if(typeof approvedNovemberRecovery!=='boolean')throw Error('Explicit November recovery approval required');
+ if(approvedAdditionalBrowsing&&(approvedNovemberRelease||approvedNovemberSync||approvedNovemberRecovery))throw Error('November release cannot combine browsing supplements');
  if(APPROVED_HOSTING_BUDGET_MICROS+READER_APPROVED_ADDITION_POLICY.monthlyMicros>EXPANDED_HOSTING_BUDGET_MICROS)throw Error('Expanded reader pool exceeds approved hosting budget');
  const options={stateStore,clock,requestId,maxRetries};
  const budgets={
@@ -28,6 +31,7 @@ export function createReaderBudgetPool({stateStore,clock=Date.now,requestId,maxR
  if(approvedAdditionalBrowsing)budgets.approved20261106=createWorkerBudget({...options,key:'reader-budget-approved-20261106',policy:READER_APPROVED_ADDITION_POLICY});
  if(approvedNovemberRelease)budgets.novemberRelease=createWorkerBudget({...options,key:'reader-budget-release-20261112',policy:READER_NOVEMBER_RELEASE_POLICY});
  if(approvedNovemberSync)budgets.novemberSync=createWorkerBudget({...options,key:'reader-budget-sync-20261112',policy:READER_NOVEMBER_SYNC_POLICY});
+ if(approvedNovemberRecovery)budgets.novemberRecovery=createWorkerBudget({...options,key:NOVEMBER_RECOVERY_READER_BUDGET_KEY,policy:READER_NOVEMBER_RECOVERY_POLICY});
  const check=reservation=>{
   if(!reservation?.allowed||!Object.hasOwn(budgets,reservation.readerPool))throw Error('Invalid reader budget pool reservation');
   if(!capacities.has(reservation.reservationMicros)||reservation.maxResponseBytes!==capacities.get(reservation.reservationMicros))throw Error('Invalid reader response capacity');
@@ -42,6 +46,7 @@ export function createReaderBudgetPool({stateStore,clock=Date.now,requestId,maxR
    if(new Date(began).toISOString().slice(0,7)==='2026-11'){
     if(approvedNovemberSync)pools.unshift('novemberSync');
     if(approvedNovemberRelease)pools.unshift('novemberRelease');
+    if(approvedNovemberRecovery)pools.unshift('novemberRecovery');
    }
    for(const readerPool of pools){
     // Accounting failures propagate; only confirmed exhaustion permits fallback.
