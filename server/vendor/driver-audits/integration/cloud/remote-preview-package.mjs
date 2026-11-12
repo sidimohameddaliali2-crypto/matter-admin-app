@@ -89,7 +89,8 @@ function scanBuffer(bytes){const chunks=[];for(let offset=0;offset<bytes.length;
 
 // Load a single immutable preview generation. Only runtime-core files are kept synchronously;
 // deferred queries and GPS streams are fetched on demand through readAsync.
-export async function loadRemotePreviewPackage({descriptor,transport}={}){
+export async function loadRemotePreviewPackage({descriptor,transport,parallelCoreReads=false}={}){
+ if(typeof parallelCoreReads!=='boolean')fail('Invalid preview core read configuration');
  if(!validRef(descriptor)||typeof transport?.readObject!=='function'||descriptor.domain!=='previewPackage'||descriptor.path!=='descriptor.json'||descriptor.size>MAX_DESCRIPTOR)fail('Invalid remote preview descriptor reference');
  const body=await readManifestBytes(transport,descriptor,{maxBytes:MAX_DESCRIPTOR});if(sha(body)!==descriptor.sha256)fail('Remote preview descriptor hash mismatch');
  const value=json(body,'remote preview descriptor');if(value.version!==1||!hex(value.sourceManifestSha256)||!hex(value.reportHash)||!hex(value.generation)||!value.files||typeof value.files!=='object'||Array.isArray(value.files))fail('Invalid remote preview descriptor');
@@ -100,10 +101,11 @@ export async function loadRemotePreviewPackage({descriptor,transport}={}){
  const coreNames=[...CORE,...OPTIONAL.filter(name=>refs.has(name))];
  let coreBytes=0;
  for(const name of coreNames){const size=refs.get(name).size;if(size>MAX_CORE_FILE||(coreBytes+=size)>MAX_CORE_BYTES)fail('Remote preview runtime core exceeds preload limit');}
- // These files are independent. Keep in-flight reads bounded and validate the
- // generation only after every core file has passed its original hash checks.
- for(let offset=0;offset<coreNames.length;offset+=4){
-  const batch=coreNames.slice(offset,offset+4);
+ // Only the read-only staff coordinator opts in. Import transports account
+ // for staged bytes in sequence and must keep that request order.
+ const width=parallelCoreReads?4:1;
+ for(let offset=0;offset<coreNames.length;offset+=width){
+  const batch=coreNames.slice(offset,offset+width);
   const bodies=await Promise.all(batch.map(readVerified));
   for(const [index,name]of batch.entries())cache.set(name,bodies[index]);
  }

@@ -97,13 +97,19 @@ async function integrationOptions({store,archive,budget,state={}}){
 
 test('loading the Mongo audit package never admits or reads external storage',async()=>{
  const fixture=await retainedPackage();
+ let reads=0,peak=0;
  const options=await integrationOptions({
-  store:{readObject:async key=>[fixture.objects.get(key)]},
+  store:{async readObject(key){
+   reads++;peak=Math.max(peak,reads);
+   try{await new Promise(resolve=>setImmediate(resolve));return [fixture.objects.get(key)];}
+   finally{reads--;}
+  }},
   archive:{readObject:async()=>assert.fail('Mongo package must stay local')},
   state:{read:async()=>assert.fail('Local reads must not create a budget reservation')},
  });
  const loaded=await options.loadPackage(fixture);
  assert.equal(loaded.generation,fixture.pointer.generation);
+ assert.equal(peak,4);
  const runtime=options.createRuntime({packageOverride:loaded,automaticFeed:false});
  assert.equal(runtime.remoteReadsBudgeted,true);
 });
