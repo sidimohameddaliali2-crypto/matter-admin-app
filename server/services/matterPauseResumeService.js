@@ -120,7 +120,7 @@ export function validateRequiredResumeDates({ skippedDateKeys, decisions, alread
  * Read-only orchestration for the pre-submit preview the customer sees in the
  * pause-confirmation calendar. Never calls createSubscriptionPause.
  */
-export async function previewSkipPauses({ email, matterSubscriptionId, matterCustomerId, skippedDateKeys }) {
+export async function previewSkipPauses({ email, matterSubscriptionId, matterCustomerId, skippedDateKeys, restoredSkipDates = [] }) {
   const ctx = await resolveSubscriptionContext({ email, matterSubscriptionId, matterCustomerId });
   if (ctx.error) {
     return {
@@ -129,7 +129,9 @@ export async function previewSkipPauses({ email, matterSubscriptionId, matterCus
       pauses: (skippedDateKeys || []).map((date) => ({ date: toDayKey(date), alreadyPaused: false, resumeDate: null, error: ctx.error }))
     };
   }
-  skippedDateKeys = expandSaturdaySkips(skippedDateKeys, new Set([...ctx.activeDeliveryDates, ...ctx.existingPaused]));
+  const explicitDates = new Set(skippedDateKeys);
+  skippedDateKeys = expandSaturdaySkips(skippedDateKeys, new Set([...ctx.activeDeliveryDates, ...ctx.existingPaused]))
+    .filter((date) => explicitDates.has(date) || !restoredSkipDates.includes(date));
   return {
     subscriptionId: ctx.subscriptionId,
     weekendEnabled: ctx.weekendEnabled,

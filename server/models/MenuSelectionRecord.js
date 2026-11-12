@@ -147,7 +147,7 @@ const menuSelectionRecordSchema = new mongoose.Schema({
   // Days the customer chose to skip in the menu-selection link. Each entry
   // tracks the outcome of the automatic Matter subscription pause created for
   // that day (paused day + the customer's chosen resume day). Surfaced
-  // in the admin selections view only — never sent to the customer.
+  // in the admin view and restored as locked skips in the customer's menu.
   skippedDays: [{
     resumedAt: Date,
     date: { type: String },              // "YYYY-MM-DD"
@@ -166,6 +166,15 @@ const menuSelectionRecordSchema = new mongoose.Schema({
   }],
 
   kitchenAudit: [{ date: String, action: String, at: Date, subscriptionId: String, reason: String }],
+  // Historical menu-link pauses explicitly restored to active delivery by Matter.
+  // Kept separately so they no longer block selection or kitchen assignment.
+  unpausedDays: [{
+    date: String,
+    resumeDate: String,
+    subscriptionId: String,
+    unpausedAt: Date
+  }],
+
   submittedAt: {
     type: Date,
     default: Date.now
