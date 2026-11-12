@@ -1,18 +1,31 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useSelector } from 'react-redux';
 import api from '../utils/api';
 import { canOpenDriverAudits, DRIVER_AUDIT_CLIENT } from '../utils/driverAuditWorker.mjs';
 
 const OPEN_TIMEOUT_MS = 25000;
+const REPORT_PATH = '/api/reporting/view';
+const viewParameters = new Set(['reportFrom', 'reportTo', 'reportDates', 'reportDrill', 'photoReview']);
 const reloadMessage = 'Reload Matter to open Driver Reports.';
 const failureMessage = 'Driver Reports could not load. Try again.';
 
-function reportFrameUrl(value) {
-  if (typeof value !== 'string' || !value.startsWith('/api/reporting/view?')) {
+function reportFrameUrl(value, viewKey) {
+  if (typeof value !== 'string' || !value.startsWith(REPORT_PATH + '?')) {
     throw new Error('Invalid report entry');
   }
   const url = new URL(value, window.location.origin);
-  if (url.origin !== window.location.origin || url.pathname !== '/api/reporting/view') {
+  if (url.origin !== window.location.origin || url.pathname !== REPORT_PATH) {
     throw new Error('Invalid report entry');
+  }
+  if (viewKey) {
+    try {
+      const saved = sessionStorage.getItem(viewKey);
+      for (const [name, value] of new URLSearchParams(saved)) {
+        if (viewParameters.has(name) || name.startsWith('report_')) url.searchParams.set(name, value);
+      }
+    } catch {
+      // The report can open with default filters if browser storage is unavailable.
+    }
   }
   url.searchParams.set('staffFrame', '1');
   return url.pathname + url.search;
@@ -20,6 +33,8 @@ function reportFrameUrl(value) {
 
 export default function DriverReports() {
   const frame = useRef(null);
+  const userId = useSelector(state => state.auth.user?._id);
+  const viewKey = userId ? 'matter:driver-reports:view:' + userId : null;
   const [attempt, setAttempt] = useState({ number: 0, reconnect: false });
   const [url, setUrl] = useState('');
   const [error, setError] = useState('');
@@ -52,10 +67,14 @@ export default function DriverReports() {
         if (controller.signal.aborted) return;
         if (attempt.reconnect) {
           // Renew the cookie without reloading the review and its draft.
-          frame.current?.contentWindow?.dispatchEvent(new Event('focus'));
+          const child = frame.current?.contentWindow;
+          if (child && frame.current.contentDocument) {
+            child.dispatchEvent(new child.Event('focus'));
+            child.document.dispatchEvent(new child.Event('visibilitychange'));
+          }
           setExpired(false);
         } else {
-          setUrl(reportFrameUrl(data?.url));
+          setUrl(reportFrameUrl(data?.url, viewKey));
         }
       } catch (requestError) {
         if (!controller.signal.aborted) {
@@ -67,7 +86,7 @@ export default function DriverReports() {
     }
     void connect();
     return () => controller.abort();
-  }, [attempt]);
+  }, [attempt, viewKey]);
 
   useEffect(() => {
     function onMessage(event) {
@@ -77,9 +96,38 @@ export default function DriverReports() {
         setExpired(true);
       }
     }
+    function onLogout(event) {
+      const child = frame.current?.contentWindow;
+      if (!child || !frame.current.contentDocument) return;
+      const beforeUnload = new child.Event('beforeunload', { cancelable: true });
+      if (!child.dispatchEvent(beforeUnload) && !window.confirm('Leave Driver Reports and discard your unsaved finding?')) {
+        event.preventDefault();
+      }
+    }
     window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
+    window.addEventListener('matter-before-logout', onLogout);
+    return () => {
+      window.removeEventListener('message', onMessage);
+      window.removeEventListener('matter-before-logout', onLogout);
+    };
   }, []);
+
+  useEffect(() => {
+    if (!viewKey) return undefined;
+    function saveView() {
+      try {
+        const location = frame.current?.contentWindow?.location;
+        if (location?.origin === window.location.origin && location.pathname === REPORT_PATH &&
+            location.search.length <= 4096) {
+          sessionStorage.setItem(viewKey, location.search);
+        }
+      } catch {
+        // A failed or no-longer same-origin frame has no report filters to retain.
+      }
+    }
+    window.addEventListener('pagehide', saveView);
+    return () => window.removeEventListener('pagehide', saveView);
+  }, [viewKey]);
 
   useEffect(() => {
     if (!url || frameState !== 'loading') return undefined;

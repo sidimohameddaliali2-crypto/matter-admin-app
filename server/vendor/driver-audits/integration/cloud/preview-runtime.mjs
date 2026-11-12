@@ -82,6 +82,8 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
  const frameHead=`<meta name="matter-driver-reports" content="1"><style>
  [data-data-app-chrome="topbar"], .mm-workspace-shell > .mm-app-header,
  .mm-workspace-shell > .mm-drawer-layer, #hosted-session-expired { display: none !important; }
+ .dashboard-root { --dashboard-topbar-base-height: 0px !important; }
+
  .mm-workspace-shell > .mm-content, .mm-workspace-shell > .mm-snapshot-foot { margin-left: 0 !important; }
  </style><script>window.addEventListener('matter-session-expired',()=>parent.postMessage('matter-audit-session-expired',location.origin));</script>`;
  return createCloudHttp({auth,service:report,origin,login,loginPage:passwordLoginHtml,compressPreviewReads:true,localFontAssets:staffIntegration,staffReportFrame,afterResponse,onAuthenticatedRequest,mapsEnabled:maps.enabled===true,readerBudget:local||remoteReadsBudgeted?undefined:createReaderBudgetPool({stateStore:rawState}),renderer:async(_actor,_service,url,framed)=>{

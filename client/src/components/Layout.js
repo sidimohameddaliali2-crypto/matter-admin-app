@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useMatch, useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
 import {
   LayoutDashboard,
@@ -77,6 +77,7 @@ const Layout = ({ children }) => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const location = useLocation();
+  const driverReports = Boolean(useMatch('/driver-reports'));
   const compactInbox = /^\/customer-service(?:\/chats)?\/?$/.test(location.pathname);
   const { user } = useSelector(state => state.auth);
 
@@ -132,11 +133,12 @@ const Layout = ({ children }) => {
   };
 
   const handleLogout = () => {
+    if (driverReports && !window.dispatchEvent(new Event('matter-before-logout', { cancelable: true }))) return;
     dispatch(logout());
     navigate('/login');
   };
 
-  const isNavItemActive = (item) => item.href === location.pathname || (
+  const isNavItemActive = (item) => item.href === '/driver-reports' ? driverReports : item.href === location.pathname || (
     item.group === 'Menu Creation' && location.pathname.startsWith(`${item.href}/`)
   );
   const currentPageName = navigationGroups
@@ -167,10 +169,13 @@ const Layout = ({ children }) => {
                 {group.items.map((item) => {
                   const Icon = item.icon;
                   const isActive = isNavItemActive(item);
+                  // A document boundary lets the review frame protect drafts on exit and Back.
+                  const reloadDocument = driverReports || item.href === '/driver-reports';
                   return (
                     <Link
                       key={item.name}
                       to={item.href}
+                      reloadDocument={reloadDocument}
                       aria-current={isActive ? 'page' : undefined}
                       className={`flex items-center pl-6 pr-3 py-2 text-sm font-medium rounded-full transition-colors ${
                         isActive
