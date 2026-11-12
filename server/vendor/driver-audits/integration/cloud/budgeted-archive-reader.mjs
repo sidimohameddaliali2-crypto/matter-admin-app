@@ -3,6 +3,7 @@ import { createImmutableEvidenceCache } from './immutable-evidence-cache.mjs';
 import { MAX_READER_REQUEST_BYTES, readerTransferMicros } from './reader-budget.mjs';
 
 const maximumObjectBytes = 16 * 1024 * 1024;
+const reservationDenied = Symbol('archive reservation denied');
 
 function allowanceUnavailable() {
   return Object.assign(Error('Audit archive reader allowance unavailable'), {
@@ -14,23 +15,34 @@ function allowanceUnavailable() {
 
 // One shared reader accounts only for actual remote reads. Local package reads
 // never enter this queue, and verified immutable bytes can be reused in memory.
-export function createBudgetedArchiveReader({ transport, budget, requestBytes = 2048 }) {
+export function createBudgetedArchiveReader({ transport, budget, requestBytes = 2048, maxConcurrent = 1 }) {
   if (typeof transport?.readObject !== 'function'
     || typeof budget?.reserve !== 'function'
     || typeof budget?.settle !== 'function'
     || !Number.isSafeInteger(requestBytes)
     || requestBytes < 0
-    || requestBytes > MAX_READER_REQUEST_BYTES) {
+    || requestBytes > MAX_READER_REQUEST_BYTES
+    || !Number.isSafeInteger(maxConcurrent)
+    || maxConcurrent < 1
+    || maxConcurrent > 4) {
     throw Error('Budgeted archive reader dependencies required');
   }
   const cache = createImmutableEvidenceCache({ maxBytes: maximumObjectBytes, maxEntries: 64 });
-  let tail = Promise.resolve();
+  const queued = [];
+  let concurrency = maxConcurrent;
+  let active = 0;
+  let nextOrder = 0;
+  let started = 0;
 
   async function readRemote(key, maxBytes, signal) {
     signal?.throwIfAborted();
     const began = performance.now();
     const reservation = await budget.reserve({ responseBytes: maxBytes });
-    if (!reservation?.allowed) throw allowanceUnavailable();
+    if (!reservation?.allowed) {
+      const error = allowanceUnavailable();
+      if (reservation?.allowed === false) error[reservationDenied] = true;
+      throw error;
+    }
 
     const parts = [];
     const hash = createHash('sha256');
@@ -60,10 +72,40 @@ export function createBudgetedArchiveReader({ transport, budget, requestBytes = 
     return { value: Buffer.concat(parts, size), bytes: size };
   }
 
+  function startQueuedReads() {
+    while (active < concurrency && queued.length > 0) {
+      active++;
+      void completeRead(queued.shift());
+    }
+  }
+
+  async function completeRead(job) {
+    const { key, maxBytes, signal, resolve, reject } = job;
+    const overlappedAtStart = active > 1;
+    const sequence = ++started;
+    try {
+      resolve(await readRemote(key, maxBytes, signal));
+    } catch (error) {
+      if (error?.[reservationDenied] && (overlappedAtStart || started !== sequence)) {
+        // Temporary holds can deny an admission that fits after settlement.
+        // Drain the active reads before a single serial retry in queue order.
+        concurrency = 1;
+        const later = queued.findIndex(entry => entry.order > job.order);
+        queued.splice(later < 0 ? queued.length : later, 0, job);
+      } else {
+        reject(error);
+      }
+    } finally {
+      active--;
+      startQueuedReads();
+    }
+  }
+
   function queueRead(key, maxBytes, signal) {
-    const pending = tail.then(() => readRemote(key, maxBytes, signal));
-    tail = pending.catch(() => {});
-    return pending;
+    return new Promise((resolve, reject) => {
+      queued.push({ key, maxBytes, signal, resolve, reject, order: nextOrder++ });
+      startQueuedReads();
+    });
   }
 
   function waitForRead(pending, signal) {
