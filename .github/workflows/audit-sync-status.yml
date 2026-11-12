@@ -1,0 +1,56 @@
+name: Audit sync status
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_deployed_sha:
+        description: Exact currently deployed application commit
+        type: string
+        required: true
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  status:
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the reviewed diagnostics
+        uses: actions/checkout@v4
+
+      - name: Validate the deployed commit and prepare diagnostics
+        id: prepare
+        shell: bash
+        env:
+          EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$EXPECTED_DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "Use the exact currently deployed application commit."
+            exit 1
+          fi
+          printf 'code=%s\n' "$(base64 -w0 .github/scripts/audit-sync-status.mjs)" >> "$GITHUB_OUTPUT"
+
+      - name: Read production audit sync status
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
+          EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
+          AUDIT_STATUS_CODE: ${{ steps.prepare.outputs.code }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          command_timeout: 2m
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE
+          script: |
+            set -e
+            cd -- "$DO_APP_PATH"
+            printf '%s' "$AUDIT_STATUS_CODE" | base64 -d | node --input-type=module - --print

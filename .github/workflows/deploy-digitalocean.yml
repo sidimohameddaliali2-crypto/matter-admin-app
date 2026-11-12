@@ -40,6 +40,12 @@ on:
   push:
     branches:
       - main
+    # A diagnostics-only release must not restart the worker it is inspecting.
+    paths-ignore:
+      - '.github/workflows/deploy-digitalocean.yml'
+      - '.github/workflows/audit-sync-status.yml'
+      - '.github/scripts/audit-sync-status.mjs'
+      - '.github/scripts/audit-sync-status.test.mjs'
 
 concurrency:
   group: production-deploy
