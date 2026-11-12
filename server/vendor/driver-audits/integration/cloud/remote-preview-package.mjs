@@ -97,8 +97,16 @@ export async function loadRemotePreviewPackage({descriptor,transport}={}){
  for(const name of CORE)if(!refs.has(name))fail('Remote preview core file missing');
  const cache=new Map();let used=0;
  async function readVerified(name){const ref=refs.get(name);if(!ref)fail('Remote preview file unavailable');const bytes=await readManifestBytes(transport,ref,{maxBytes:MAX_FILE});if(sha(bytes)!==ref.sha256)fail('Remote preview file hash mismatch');return bytes;}
- let coreBytes=0;for(const name of CORE) {const bytes=await readVerified(name);if(bytes.length>MAX_CORE_FILE||(coreBytes+=bytes.length)>MAX_CORE_BYTES)fail('Remote preview runtime core exceeds preload limit');cache.set(name,bytes);}
- for(const name of OPTIONAL)if(refs.has(name)){const bytes=await readVerified(name);if(bytes.length>MAX_CORE_FILE||(coreBytes+=bytes.length)>MAX_CORE_BYTES)fail('Remote preview runtime core exceeds preload limit');cache.set(name,bytes);}
+ const coreNames=[...CORE,...OPTIONAL.filter(name=>refs.has(name))];
+ let coreBytes=0;
+ for(const name of coreNames){const size=refs.get(name).size;if(size>MAX_CORE_FILE||(coreBytes+=size)>MAX_CORE_BYTES)fail('Remote preview runtime core exceeds preload limit');}
+ // These files are independent. Keep in-flight reads bounded and validate the
+ // generation only after every core file has passed its original hash checks.
+ for(let offset=0;offset<coreNames.length;offset+=4){
+  const batch=coreNames.slice(offset,offset+4);
+  const bodies=await Promise.all(batch.map(readVerified));
+  for(const [index,name]of batch.entries())cache.set(name,bodies[index]);
+ }
  const wanted=verifyGeneration(cache,refs,value.reportHash,value.generation);for(const name of wanted)if(!refs.has(name))fail('Remote preview deferred file missing');
  const asyncCache=new Map();
  return {descriptor:value,generation:value.generation,reportHash:value.reportHash,coreBytes,manifest:Object.fromEntries([...refs].map(([name,ref])=>[name,ref.sha256])),has:name=>refs.has(name),read(name){if(!cache.has(name))fail('Preview file is not in synchronous runtime core');return Buffer.from(cache.get(name));},async readAsync(name){if(!refs.has(name))fail('Remote preview file unavailable');if(cache.has(name))return Buffer.from(cache.get(name));let entry=asyncCache.get(name);if(entry){const bytes=await entry.promise;if(entry.bytes){asyncCache.delete(name);asyncCache.set(name,entry);}return Buffer.from(bytes);}entry={bytes:0,promise:null};entry.promise=readVerified(name).then(bytes=>{if(bytes.length<=CACHE_BYTES){entry.bytes=bytes.length;while(used+bytes.length>CACHE_BYTES){const first=[...asyncCache].find(([key,item])=>key!==name&&item.bytes>0);if(!first)break;asyncCache.delete(first[0]);used-=first[1].bytes;}if(used+bytes.length<=CACHE_BYTES)used+=bytes.length;else entry.bytes=0;}if(!entry.bytes)asyncCache.delete(name);return bytes;}).catch(e=>{asyncCache.delete(name);throw e;});asyncCache.set(name,entry);return Buffer.from(await entry.promise);}};
