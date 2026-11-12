@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useSelector } from 'react-redux';
-import api from '../utils/api';
 import { canOpenDriverAudits, DRIVER_AUDIT_CLIENT } from '../utils/driverAuditWorker.mjs';
 
 const OPEN_TIMEOUT_MS = 25000;
@@ -8,6 +7,7 @@ const REPORT_PATH = '/api/reporting/view';
 const viewParameters = new Set(['reportFrom', 'reportTo', 'reportDates', 'reportDrill', 'photoReview']);
 const reloadMessage = 'Reload Matter to open Driver Reports.';
 const failureMessage = 'Driver Reports could not load. Try again.';
+const changedAccountMessage = 'Your Matter sign-in changed. Reload Matter to open Driver Reports.';
 
 function reportFrameUrl(value, viewKey) {
   if (typeof value !== 'string' || !value.startsWith(REPORT_PATH + '?')) {
@@ -33,6 +33,7 @@ function reportFrameUrl(value, viewKey) {
 
 export default function DriverReports() {
   const frame = useRef(null);
+  const openingToken = useRef(null);
   const userId = useSelector(state => state.auth.user?._id);
   const viewKey = userId ? 'matter:driver-reports:view:' + userId : null;
   const [attempt, setAttempt] = useState({ number: 0, reconnect: false });
@@ -41,9 +42,13 @@ export default function DriverReports() {
   const [connecting, setConnecting] = useState(true);
   const [frameState, setFrameState] = useState('loading');
   const [expired, setExpired] = useState(false);
+  const [accountChanged, setAccountChanged] = useState(false);
 
   useEffect(() => {
+    if (accountChanged) return undefined;
     const controller = new AbortController();
+    let active = true;
+    const timer = window.setTimeout(() => controller.abort(), OPEN_TIMEOUT_MS);
     async function connect() {
       setError('');
       setConnecting(true);
@@ -53,18 +58,42 @@ export default function DriverReports() {
       }
       try {
         const workerReady = await canOpenDriverAudits(navigator.serviceWorker).catch(() => false);
-        if (controller.signal.aborted) return;
+        if (!active) return;
+        if (controller.signal.aborted) throw controller.signal.reason;
         if (!workerReady) {
           setError(reloadMessage);
           return;
         }
 
-        const { data } = await api.post('/driver-audits/session', {}, {
-          headers: { 'X-Driver-Audit-Client': DRIVER_AUDIT_CLIENT },
-          timeout: OPEN_TIMEOUT_MS,
+        const token = localStorage.getItem('token');
+        if (!token || (openingToken.current && openingToken.current !== token)) {
+          setAccountChanged(true);
+          return;
+        }
+        openingToken.current = token;
+        const response = await fetch('/api/driver-audits/session', {
+          method: 'POST',
+          credentials: 'same-origin',
+          cache: 'no-store',
+          headers: {
+            Authorization: 'Bearer ' + token,
+            'Content-Type': 'application/json',
+            'X-Driver-Audit-Client': DRIVER_AUDIT_CLIENT,
+          },
+          body: '{}',
           signal: controller.signal,
         });
-        if (controller.signal.aborted) return;
+        if (!active) return;
+        if (localStorage.getItem('token') !== token) {
+          setAccountChanged(true);
+          return;
+        }
+        if (!response.ok) {
+          setError(response.status === 428 ? reloadMessage : failureMessage);
+          return;
+        }
+        const data = await response.json();
+        if (!active) return;
         if (attempt.reconnect) {
           // Renew the cookie without reloading the review and its draft.
           const child = frame.current?.contentWindow;
@@ -76,17 +105,20 @@ export default function DriverReports() {
         } else {
           setUrl(reportFrameUrl(data?.url, viewKey));
         }
-      } catch (requestError) {
-        if (!controller.signal.aborted) {
-          setError(requestError.response?.status === 428 ? reloadMessage : failureMessage);
-        }
+      } catch {
+        if (active) setError(failureMessage);
       } finally {
-        if (!controller.signal.aborted) setConnecting(false);
+        window.clearTimeout(timer);
+        if (active) setConnecting(false);
       }
     }
     void connect();
-    return () => controller.abort();
-  }, [attempt, viewKey]);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [accountChanged, attempt, viewKey]);
 
   useEffect(() => {
     function onMessage(event) {
@@ -104,9 +136,17 @@ export default function DriverReports() {
         event.preventDefault();
       }
     }
+    function onStorage(event) {
+      if ((event.key === 'token' || event.key === null) && openingToken.current &&
+          localStorage.getItem('token') !== openingToken.current) {
+        setAccountChanged(true);
+      }
+    }
+    window.addEventListener('storage', onStorage);
     window.addEventListener('message', onMessage);
     window.addEventListener('matter-before-logout', onLogout);
     return () => {
+      window.removeEventListener('storage', onStorage);
       window.removeEventListener('message', onMessage);
       window.removeEventListener('matter-before-logout', onLogout);
     };
@@ -141,11 +181,11 @@ export default function DriverReports() {
   }
 
   const hasFrameError = frameState === 'failed' || frameState === 'slow';
-  const needsReload = error === reloadMessage;
+  const needsReload = accountChanged || error === reloadMessage;
   const reconnect = expired && !hasFrameError;
-  const showAction = !connecting && (error || hasFrameError || expired);
-  const loading = connecting || (url && frameState === 'loading');
-  const message = error || (frameState === 'failed' ? failureMessage :
+  const showAction = accountChanged || (!connecting && (error || hasFrameError || expired));
+  const loading = !accountChanged && (connecting || (url && frameState === 'loading'));
+  const message = accountChanged ? changedAccountMessage : error || (frameState === 'failed' ? failureMessage :
     frameState === 'slow' ? 'Driver Reports is taking longer than expected.' :
     expired ? 'Your report session expired. Reconnect to keep reviewing.' : '');
 
@@ -171,7 +211,7 @@ export default function DriverReports() {
           )}
         </div>
       )}
-      {url && (
+      {url && !accountChanged && (
         <iframe
           ref={frame}
           title="Driver Reports"
