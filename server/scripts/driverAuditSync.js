@@ -72,7 +72,7 @@ async function main(){
    root:work,baselineRoot,pinnedDirectSync:true,loadSource:async()=>pinned,
    async build(options){
     const disk=await fs.statfs(work);
-    if(disk.bavail*disk.bsize<1024*1024*1024)throw Object.assign(Error('Audit disk reserve unavailable'),{code:'AUDIT_CAPACITY'});
+    if(disk.bavail*disk.bsize<4*1024*1024*1024)throw Object.assign(Error('Audit disk reserve unavailable'),{code:'AUDIT_CAPACITY'});
     return buildAutomaticRelease({...options,rendererBuild,archiveBackedBaseline:true});
    },
    validate:candidate=>validateAutomaticCandidate(candidate,{journals}),
