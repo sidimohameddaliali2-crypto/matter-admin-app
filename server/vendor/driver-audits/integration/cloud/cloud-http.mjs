@@ -13,10 +13,11 @@ const safeInput=value=>{const {actor,authorName,...input}=value;return input;};
 const fontRoute=/^\/report-assets\/font-[a-f0-9]{64}\.(woff2?|ttf|otf)$/;
 const diagnosticCategory=error=>{const allowed=new Set(['state-timeout','state-transport','state-rate-limit','state-server-error','state-contention','state-rejected','state-invalid-response','identity-timeout','identity-transport','identity-rate-limit','identity-server-error','identity-rejected','identity-invalid-response']);for(let e=error,n=0;e&&n<5;e=e.cause,n++)if(allowed.has(e.diagnosticCategory))return e.diagnosticCategory;if(error?.status===409||error?.cause?.status===409)return 'state-contention';const code=error?.code||error?.cause?.code;if(code==='ENOENT')return 'missing-file';if(code==='storage_timeout')return 'archive-timeout';if(code==='storage_unavailable')return 'archive-unavailable';if(code==='storage_rate_limit')return 'archive-rate-limit';if(code==='storage_rejected')return 'archive-rejected';if(code==='ERR_STREAM_PREMATURE_CLOSE'||code==='ECONNRESET'||code==='EPIPE')return 'client-disconnect';const msg=typeof error?.message==='string'?error.message.slice(0,256):'';if(/integrity|digest|hash|mismatch/i.test(msg))return 'integrity';if(/exceed|too large|size limit/i.test(msg))return 'size-limit';if(/budget/i.test(msg))return 'budget';if(/timed? ?out|timeout/i.test(msg))return 'timeout';if(error instanceof SyntaxError||/invalid.*json|unexpected token/i.test(msg))return 'invalid-data';return 'unclassified';};
 const defaultDiagnostic=entry=>console.error(JSON.stringify(entry));
-export function createCloudHttp({auth,service,origin,renderer,login,requestCode,loginPage,readerBudget,readerMaxBodyBytes=MAX_READER_BODY_BYTES,diagnostic=defaultDiagnostic,mapsEnabled=false,compressPreviewReads=false,localFontAssets=false,afterResponse,onAuthenticatedRequest}){
+export function createCloudHttp({auth,service,origin,renderer,login,requestCode,loginPage,readerBudget,readerMaxBodyBytes=MAX_READER_BODY_BYTES,diagnostic=defaultDiagnostic,mapsEnabled=false,compressPreviewReads=false,localFontAssets=false,afterResponse,onAuthenticatedRequest,staffReportFrame=false}){
  const site=new URL(origin);if(!(site.protocol==='https:'||site.protocol==='http:'&&site.hostname==='127.0.0.1')||site.origin!==origin||site.username||site.password||typeof renderer!=='function'||!auth||!service)throw Error('Invalid hosted report configuration');
  if(typeof diagnostic!=='function'||readerBudget&&(!readerBudget.reserve||!readerBudget.settle)||!Number.isSafeInteger(readerMaxBodyBytes)||readerMaxBodyBytes<1||readerMaxBodyBytes>MAX_READER_BODY_BYTES)throw Error('Invalid reader budget');
  // Only trusted staff hosts opt in for hash-checked fonts from their local package.
+ if(typeof staffReportFrame!=='boolean'||staffReportFrame&&!localFontAssets)throw Error('Trusted staff frame configuration required');
  if(typeof localFontAssets!=='boolean')throw Error('Invalid local font configuration');
  const compress=createPreviewResponseCompression({maxBytes:96*1024*1024,maxEntries:4});
  return async(req,res)=>{
@@ -47,7 +48,7 @@ export function createCloudHttp({auth,service,origin,renderer,login,requestCode,
    if(method==='POST'&&url.pathname==='/api/session/refresh'){await readJson(req);const session=await auth.refresh(req.headers.cookie);return await send(200,{connected:true},'application/json',{'Set-Cookie':session.cookie});}
    if(!['GET','HEAD','POST'].includes(method))throw httpError(405);
    const localFontRead=localFontAssets&&(method==='GET'||method==='HEAD')&&fontRoute.test(url.pathname);
-   phase='authentication';const session=await auth.authenticate(req.headers.cookie),actor=session.actor;if(session.cookie)headers['Set-Cookie']=session.cookie;if(!posted&&url.pathname==='/api/session')return await send(200,{connected:true});if(posted&&!auth.csrfMatches(session.csrf,req.headers['x-reporting-token']))throw httpError(403);if(typeof onAuthenticatedRequest==='function')await onAuthenticatedRequest({req,actor,session});
+   phase='authentication';const session=await auth.authenticate(req.headers.cookie,req),actor=session.actor;if(session.cookie)headers['Set-Cookie']=session.cookie;if(!posted&&url.pathname==='/api/session')return await send(200,{connected:true});if(posted&&!auth.csrfMatches(session.csrf,req.headers['x-reporting-token']))throw httpError(403);if(typeof onAuthenticatedRequest==='function')await onAuthenticatedRequest({req,actor,session});
    const requestHeaderBytes=Buffer.byteLength(req.url||'')+(req.rawHeaders||[]).reduce((n,x)=>n+Buffer.byteLength(x),0);const lengthHeader=Number(req.headers['content-length']||0);if(requestHeaderBytes>MAX_READER_HEADER_BYTES||!Number.isSafeInteger(lengthHeader)||lengthHeader<0||posted&&lengthHeader>MAX_READER_REQUEST_BYTES||!posted&&(req.headers['transfer-encoding']||lengthHeader!==0))throw httpError(413);
    if(readerBudget&&!localFontRead&&url.pathname!=='/api/reporting/status'&&url.pathname!=='/api/reporting/reviews'){requestBytes=posted?MAX_READER_REQUEST_BYTES:0;preReservationMs=Math.ceil(performance.now()-began);phase='reader-admission';let admission;try{admission=await readerBudget.reserve(compressPreviewReads&&url.pathname==='/api/reporting/evidence-overlay'?{responseBytes:8*1024*1024}:undefined);}catch(error){throw Object.assign(Error('Reader budget unavailable'),{cause:error});}if(!admission.allowed)return await send(429,{error:'Report reading is temporarily unavailable; existing drafts can still be saved.'});reservation=admission;}phase='service-initialization';const requestService=typeof service==='function'?await service(actor):service;
    if(posted){const input=await readJson(req);
@@ -59,7 +60,16 @@ export function createCloudHttp({auth,service,origin,renderer,login,requestCode,
     if(['/api/reporting/fresh-run','/api/reporting/api-refresh'].includes(url.pathname)&&typeof requestService.refresh==='function')return await send(202,await requestService.refresh(safeInput(input),actor,url.pathname.endsWith('fresh-run')));
     throw httpError(405);
    }
-   if(['/','/app'].includes(url.pathname)){phase='renderer';return await send(200,await renderer(actor,requestService,url),'text/html; charset=utf-8');}
+   if(['/','/app'].includes(url.pathname)){
+    phase='renderer';
+    const framed=staffReportFrame&&url.pathname==='/'&&url.searchParams.get('staffFrame')==='1';
+    const html=await renderer(actor,requestService,url,framed);
+    const frameHeaders=framed?{
+     'Content-Security-Policy':headers['Content-Security-Policy'].replace("frame-ancestors 'none'","frame-ancestors 'self'"),
+     'X-Frame-Options':'SAMEORIGIN',
+    }:{};
+    return await send(200,html,'text/html; charset=utf-8',frameHeaders);
+   }
    if(/^\/report-data\/(detail|history|query|archive|snapshot)-[a-f0-9]{64}\.json$/.test(url.pathname)){phase='resource';const entries=[...url.searchParams.entries()];if(entries.length>1||entries.some(([key,value])=>key!=='generation'||!/^[a-f0-9]{64}$/.test(value)))throw httpError(400);const value=await requestService.resource(url.pathname.slice(1),{...(entries.length?{generation:entries[0][1]}:{}),acceptEncoding:req.headers['accept-encoding']||''},actor);return await send(200,value.body??value,'application/json',{...(value.encoding==='br'?{'Content-Encoding':'br',Vary:'Accept-Encoding'}:value.gzip?{'Content-Encoding':'gzip'}:{}),...(Number.isSafeInteger(value.decodedBytes)&&value.decodedBytes>=0?{'X-Report-Bytes':String(value.decodedBytes)}:{})},value.encodedBytes);}
    if(fontRoute.test(url.pathname)&&typeof requestService.fontAsset==='function'){phase='font';const value=requestService.fontAsset(url.pathname);return await send(200,value.bytes,value.mime);}
    if(url.pathname==='/api/reporting/status'){phase='status';const status=await requestService.status(actor);return await send(200,{...status,token:session.csrf});}

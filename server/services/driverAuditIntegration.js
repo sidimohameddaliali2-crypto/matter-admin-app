@@ -26,6 +26,11 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
  async function initialize(){
   const origin=env.DRIVER_AUDIT_ORIGIN,url=new URL(origin);if(url.origin!==origin||!(url.protocol==='https:'||url.protocol==='http:'&&url.hostname==='127.0.0.1'))throw Error('Explicit audit origin required');
   const auth=dependencies.auth||createDriverAuditAuth({authenticateStaffToken,secret:env.JWT_SECRET,origin});
+  const verifiedRequests=new WeakMap();
+  const requestAuth={...auth,authenticate(cookie,req){
+   const verified=req&&verifiedRequests.get(req);
+   return verified&&verified.cookie===cookie?verified.session:auth.authenticate(cookie);
+  }};
   const state=dependencies.state||createCloudState({rpc:createHostedRpc({secret:env.DRIVER_AUDIT_SUPABASE_SECRET})});
   const rawArchive=dependencies.archive||createSupabaseArchiveTransport({secret:env.DRIVER_AUDIT_SUPABASE_SECRET});
   const store=dependencies.store||createDriverAuditReplica(db(),{capacityBytes:Number(env.DRIVER_AUDIT_CAPACITY_BYTES)});
@@ -61,9 +66,9 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    return {...await loadRemotePreviewPackage({descriptor,transport}),directSnapshot};
   },createRuntime:({packageOverride,automaticFeed})=>createRuntime({origin,publicPathPrefix:reportApi,packageOverride,automaticFeed,
    auditImportStatus:health,auditSyncStatus:packageOverride.directSnapshot?()=>readDriverAuditSyncStatus(db(),packageOverride.generation,clock):undefined,
-   authOverride:auth,stateOverride:state,transportOverride:archive,remoteReadsBudgeted:true,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
+   authOverride:requestAuth,staffReportFrame:true,stateOverride:state,transportOverride:archive,remoteReadsBudgeted:true,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
   function health(){const runtime=coordinator.status();return {status:runtime.status==='stale'?'failed':runtime.status==='refreshing'?'checking':env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'?'disabled':importStatus,checkedAt:attempt===null?null:new Date(attempt).toISOString(),servingGeneration:runtime.active?.generation||null};}
-  return {origin,auth,coordinator,refresh,getImportStatus:()=>health().status};
+  return {origin,auth,verifiedRequests,coordinator,refresh,getImportStatus:()=>health().status};
  }
  return async(req,res,next)=>{
   const url=new URL(req.url,'http://audit.invalid'),path=url.pathname;if(!auditRoute(path))return next();
@@ -77,9 +82,12 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
     if(req.headers['x-driver-audit-client']!=='reporting-v1'){
      req.resume();res.writeHead(428,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Reload the app to open driver audits.');return;
     }
-    const session=await context.auth.issue(req.headers.authorization);req.resume();res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store','Set-Cookie':session.cookie});res.end(JSON.stringify({url:auditView+'?screen=reports&view=1&tab=mirror'}));return;
+    const session=await context.auth.issue(req.headers.authorization);
+    if(env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'&&!context.coordinator.status().active)void context.coordinator.poll().catch(()=>{});
+    req.resume();res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store','Set-Cookie':session.cookie});res.end(JSON.stringify({url:auditView+'?screen=reports&view=1&tab=mirror'}));return;
    }
-   await context.auth.authenticate(req.headers.cookie);
+   const cookie=req.headers.cookie;
+   const session=await context.auth.authenticate(cookie);
    // The existing audit client probes its session before enabling review/maps.
    // Staff identity stays with this app; never invoke the Supabase login flow.
    if(path==='/api/session/refresh'){
@@ -99,7 +107,8 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    res.setHeader('X-Audit-Import-Status',context.getImportStatus());
    const canonicalPath=isDocument?'/':evidenceAlias.exec(path)?.[1];
    if(canonicalPath)req.url=canonicalPath+url.search;
-   return await context.coordinator(req,res);
+   context.verifiedRequests.set(req,{cookie,session});
+   try{return await context.coordinator(req,res);}finally{context.verifiedRequests.delete(req);}
   }catch(error){if(res.headersSent){res.destroy();return;}const code=[401,403,409].includes(error.status)?error.status:503;res.writeHead(code,{'Content-Type':'text/plain','Cache-Control':'no-store'});res.end(code===401?'Sign in to the delivery app again.':'Driver audits are temporarily unavailable. Existing reports and saved findings are retained.');}
  };
 }
