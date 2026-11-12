@@ -3,7 +3,14 @@ import test from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import {pruneDriverAuditWorkspace} from './driverAuditWorkspace.js';
+import {pruneDriverAuditWorkspace,requireDriverAuditBuildSpace} from './driverAuditWorkspace.js';
+
+test('measured working-space reserve allows retained builds and still blocks an undersized disk', () => {
+  assert.doesNotThrow(() => requireDriverAuditBuildSpace(3646214144));
+  assert.doesNotThrow(() => requireDriverAuditBuildSpace(2560 * 1024 * 1024));
+  assert.throws(() => requireDriverAuditBuildSpace(2560 * 1024 * 1024 - 1), {code:'AUDIT_CAPACITY'});
+  assert.throws(() => requireDriverAuditBuildSpace(NaN), {code:'AUDIT_CAPACITY'});
+});
 
 test('workspace retention protects current, previous, staged and unverified data', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'audit-retention-'));

@@ -10,6 +10,16 @@ import {privateAuditJson,privateAuditWrite} from '../vendor/driver-audits/integr
 const digest = /^[a-f0-9]{64}$/;
 const attemptName = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 
+// The saved-data replay used 1.32 GB of working space. Retain additional room
+// for a larger capture while allowing the active and previous builds to coexist.
+const minimumBuildBytes = 2560 * 1024 * 1024;
+
+export function requireDriverAuditBuildSpace(availableBytes) {
+  if (!Number.isSafeInteger(availableBytes) || availableBytes < minimumBuildBytes) {
+    throw Object.assign(Error('Audit disk reserve unavailable'), {code:'AUDIT_CAPACITY'});
+  }
+}
+
 async function optionalJson(file) {
   return privateAuditJson(file).catch(error => {
     if (error.code === 'ENOENT') return null;

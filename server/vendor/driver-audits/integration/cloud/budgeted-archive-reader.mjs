@@ -14,17 +14,21 @@ function allowanceUnavailable() {
 
 // One shared reader accounts only for actual remote reads. Local package reads
 // never enter this queue, and verified immutable bytes can be reused in memory.
-export function createBudgetedArchiveReader({ transport, budget, requestBytes = 2048 }) {
+export function createBudgetedArchiveReader({ transport, budget, requestBytes = 2048, maxConcurrent = 1 }) {
   if (typeof transport?.readObject !== 'function'
     || typeof budget?.reserve !== 'function'
     || typeof budget?.settle !== 'function'
     || !Number.isSafeInteger(requestBytes)
     || requestBytes < 0
-    || requestBytes > MAX_READER_REQUEST_BYTES) {
+    || requestBytes > MAX_READER_REQUEST_BYTES
+    || !Number.isSafeInteger(maxConcurrent)
+    || maxConcurrent < 1
+    || maxConcurrent > 4) {
     throw Error('Budgeted archive reader dependencies required');
   }
   const cache = createImmutableEvidenceCache({ maxBytes: maximumObjectBytes, maxEntries: 64 });
-  let tail = Promise.resolve();
+  const queued = [];
+  let active = 0;
 
   async function readRemote(key, maxBytes, signal) {
     signal?.throwIfAborted();
@@ -60,10 +64,29 @@ export function createBudgetedArchiveReader({ transport, budget, requestBytes = 
     return { value: Buffer.concat(parts, size), bytes: size };
   }
 
+  function startQueuedReads() {
+    while (active < maxConcurrent && queued.length > 0) {
+      active++;
+      void completeRead(queued.shift());
+    }
+  }
+
+  async function completeRead({ key, maxBytes, signal, resolve, reject }) {
+    try {
+      resolve(await readRemote(key, maxBytes, signal));
+    } catch (error) {
+      reject(error);
+    } finally {
+      active--;
+      startQueuedReads();
+    }
+  }
+
   function queueRead(key, maxBytes, signal) {
-    const pending = tail.then(() => readRemote(key, maxBytes, signal));
-    tail = pending.catch(() => {});
-    return pending;
+    return new Promise((resolve, reject) => {
+      queued.push({ key, maxBytes, signal, resolve, reject });
+      startQueuedReads();
+    });
   }
 
   function waitForRead(pending, signal) {

@@ -6,7 +6,7 @@ import {runDriverAuditSyncTick} from '../services/driverAuditSync.js';
 import {runDriverAuditDirectImport} from '../services/driverAuditDirectImport.js';
 import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollection.js';
 import {withDriverAuditWriter} from '../services/driverAuditWriter.js';
-import {pruneDriverAuditWorkspace} from '../services/driverAuditWorkspace.js';
+import {pruneDriverAuditWorkspace,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
 import {pathToFileURL} from 'node:url';
 import {createBudgetedAuditArchive,createBudgetedAuditState} from '../vendor/driver-audits/integration/cloud/driver-audit-archive.mjs';
 import {prepareDirectAuditBundle,privateAuditDirectory,privateAuditJson,privateAuditWrite,verifyAuditBuilder} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
@@ -72,7 +72,7 @@ async function main(){
    root:work,baselineRoot,pinnedDirectSync:true,loadSource:async()=>pinned,
    async build(options){
     const disk=await fs.statfs(work);
-    if(disk.bavail*disk.bsize<4*1024*1024*1024)throw Object.assign(Error('Audit disk reserve unavailable'),{code:'AUDIT_CAPACITY'});
+    requireDriverAuditBuildSpace(disk.bavail*disk.bsize);
     return buildAutomaticRelease({...options,rendererBuild,archiveBackedBaseline:true});
    },
    validate:candidate=>validateAutomaticCandidate(candidate,{journals}),
