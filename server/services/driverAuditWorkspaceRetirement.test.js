@@ -95,7 +95,8 @@ test('only the previous accepted archive copies are reclaimable under disk press
   const key=previous.ref.chunks[0].sha256+'.gz';
   const file=path.join(previous.bundleRoot,key);
   const currentFile=path.join(current.bundleRoot,current.ref.chunks[0].sha256+'.gz');
-  const options={root:f.root,receiptRoot:f.receiptRoot,head:{...current.head,previous:previous.head},stage:null,retentionStatus:'qualified'};
+  const head={...current.head,importedAt:'2026-11-12T00:00:00.000Z',transferBytes:16384,objects:2,previous:previous.head};
+  const options={root:f.root,receiptRoot:f.receiptRoot,head,stage:null,retentionStatus:'qualified'};
   const reclaim=overrides=>prunePreviousDriverAuditCopies({...options,...overrides});
   for(const override of [
     {retentionStatus:'proof-stale'},

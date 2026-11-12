@@ -185,7 +185,7 @@ function plannedCapacity(chunks,ledger,capacityBytes){
   return {transferBytes,additionalChargeBytes};
 }
 
-function previousHead(prior){
+export function driverAuditSourceHead(prior){
   if(!prior)return null;
   const {version,generation,reportHash,descriptor,sourceRevision,sourceBodySha256,directImport,visibleCutoffAt,restore}=prior;
   return {version,generation,reportHash,descriptor,sourceRevision,sourceBodySha256,directImport,visibleCutoffAt,restore};
@@ -217,7 +217,7 @@ function pinnedReplica(replica,prior,{startStage,checkWriter}){
     readObject:(key,options)=>replica.readObject(key,options),
     async activate({expected,head}){
       await checkWriter();
-      await replica.activate({expected,head:{...head,previous:previousHead(expected)}});
+      await replica.activate({expected,head:{...head,previous:driverAuditSourceHead(expected)}});
       activated=true;
     },
   };

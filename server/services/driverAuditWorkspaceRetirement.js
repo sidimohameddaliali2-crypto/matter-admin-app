@@ -5,7 +5,7 @@ import path from 'node:path';
 import {Readable} from 'node:stream';
 import {isDeepStrictEqual} from 'node:util';
 import {createGunzip,gzipSync,gunzipSync} from 'node:zlib';
-import {driverAuditPackagePointer,readDriverAuditSeedConfig} from './driverAuditDirectImport.js';
+import {driverAuditPackagePointer,driverAuditSourceHead,readDriverAuditSeedConfig} from './driverAuditDirectImport.js';
 import {checkedAuditPointer} from '../vendor/driver-audits/integration/cloud/audit-replica.mjs';
 import {privateAuditJson,privateAuditWrite} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
 import {createCloudRepository,readManifestBytes} from '../vendor/driver-audits/integration/cloud/repository.mjs';
@@ -286,13 +286,11 @@ async function acceptedWorkspace(root,candidate,head){
     ||candidate.privateRoot!==path.join(directory,'server-data')||!await safeDirectory(directory))return null;
   const accepted=await privateAuditJson(path.join(directory,'accepted.private.json'));
   const seed=await readDriverAuditSeedConfig(path.join(directory,'direct-seed.private.json'));
-  const replica={...head};
-  delete replica.previous;
   if(accepted?.version!==1||accepted.privateRoot!==candidate.privateRoot||accepted.basis!==candidate.basis
     ||accepted.manifestSha256!==candidate.manifestSha256||accepted.manifestSha256!==seed.manifestSha256
     ||accepted.sourceBasis!==seed.sourceBasis||accepted.collectorRevision!==seed.collectorRevision
     ||seed.mode!=='sync'||seed.bundleRoot!==path.join(directory,'audit-objects')
-    ||!isDeepStrictEqual(replica,checkedAuditPointer(driverAuditPackagePointer(seed))))return null;
+    ||!isDeepStrictEqual(driverAuditSourceHead(head),checkedAuditPointer(driverAuditPackagePointer(seed))))return null;
   const manifest=await readLocalManifest(accepted.privateRoot);
   if(manifest?.sha256!==seed.manifestSha256)return null;
   return {directory,accepted,seed,manifest};
