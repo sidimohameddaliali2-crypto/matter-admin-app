@@ -13,8 +13,12 @@ const source = {
 const savedRecord = () => ({ _id: 'record', weeklyMenuId: 'menu', matterSubscriptionId: 'current', selectedMeals: [],
   skippedDays: [{ date: '2026-11-16', pauseStatus: 'success', subscriptionId: 'current', resumeDate: '2026-12-11' }],
 });
+const confirmActive = (t) => t.mock.method(matter, 'getSubscription', async () => ({ data: {
+  subscription_id: 'current', delivery_schedule: [{ date: '2026-11-16', status: 'active' }],
+} }));
 
 test('reopening a confirmed skip after a Matter admin unpause returns an unlocked delivery day', async (t) => {
+  confirmActive(t);
   const record = savedRecord();
   t.mock.method(matter, 'getKitchenNutrition', async () => source);
   t.mock.method(Customer, 'find', () => ({ select: () => ({ lean: async () => [] }) }));
@@ -30,7 +34,36 @@ test('reopening a confirmed skip after a Matter admin unpause returns an unlocke
   assert.deepEqual(body.data.restoredSkipDates, ['2026-11-16']);
 });
 
+test('sign-in retains a pause confirmed between the initial calendar fetch and saved-record read', async (t) => {
+  const order = [];
+  const record = savedRecord();
+  record.skippedDays[0].processedAt = new Date('2026-11-12T09:00:01Z');
+  t.mock.method(matter, 'getKitchenNutrition', async () => {
+    order.push('initial-calendar');
+    return { ...source, source_fetched_at: '2026-11-12T09:00:00Z' };
+  });
+  t.mock.method(Customer, 'find', () => ({ select: () => ({ lean: async () => [] }) }));
+  t.mock.method(MenuSelectionRecord, 'findOne', () => ({ lean: async () => {
+    order.push('newly-confirmed-pause');
+    return record;
+  } }));
+  t.mock.method(matter, 'getSubscription', async () => {
+    order.push('confirm-calendar');
+    return { data: { subscription_id: 'current', delivery_schedule: [{ date: '2026-11-16', status: 'paused' }] } };
+  });
+  t.mock.method(MenuSelectionRecord, 'updateOne', () => assert.fail('The newly confirmed pause must not be removed'));
+  const handler = router.stack.find(layer => layer.route?.path === '/customers/:email/subscription-profile').route.stack[0].handle;
+  const res = { json(body) { this.body = body; }, status() { return this; } };
+  await handler({ params: { email: source.customer_email }, query: { menuId: 'menu' } }, res);
+  assert.deepEqual(order, ['initial-calendar', 'newly-confirmed-pause', 'confirm-calendar']);
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.data.skippedDays[0].pauseStatus, 'success');
+  assert.deepEqual(res.body.data.deliveryDates, []);
+  assert.deepEqual(res.body.data.restoredSkipDates, []);
+});
+
 test('an old tab cannot silently resubmit a confirmed skip after an admin unpause', async (t) => {
+  confirmActive(t);
   const record = savedRecord();
   t.mock.method(matter, 'getKitchenNutrition', async () => source);
   t.mock.method(MenuSelectionRecord, 'findOne', () => ({ select: () => ({ lean: async () => record }) }));
@@ -47,6 +80,7 @@ test('an old tab cannot silently resubmit a confirmed skip after an admin unpaus
 });
 
 test('meals on an admin-unpaused date are saved instead of being discarded as a prior skip', async (t) => {
+  confirmActive(t);
   const record = savedRecord();
   t.mock.method(matter, 'getKitchenNutrition', async () => source);
   t.mock.method(MenuSelectionRecord, 'findOne', () => ({ select: () => ({ lean: async () => record }) }));

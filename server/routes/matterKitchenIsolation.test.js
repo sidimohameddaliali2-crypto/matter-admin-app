@@ -41,6 +41,9 @@ test('kitchen preparation releases a confirmed skip when Matter restores the act
   t.mock.method(Lease, 'findOneAndUpdate', async () => ({}));
   t.mock.method(Lease, 'deleteOne', async () => ({}));
   const date = '2026-10-22';
+  t.mock.method(matter, 'getSubscription', async () => ({ data: {
+    subscription_id: source.subscription_id, delivery_schedule: [{ date, status: 'active' }],
+  } }));
   const nutrition = { ...source, active_delivery_dates: [date] };
   const record = { _id: 'record', weeklyMenuId: 'menu', matterCustomerId: '42', matterSubscriptionId: 'renewal',
     email: source.customer_email, matterEmail: source.customer_email,
