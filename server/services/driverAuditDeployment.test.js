@@ -73,10 +73,12 @@ test('an ordinary deployment leaves an unregistered audit worker inactive', asyn
   const bin = path.join(root, 'bin');
   await fs.mkdir(scripts, { recursive: true });
   await fs.mkdir(bin);
+  await fs.mkdir(path.join(server, 'services'));
   await fs.writeFile(path.join(server, 'package.json'), '{"type":"module"}');
   await fs.writeFile(path.join(server, 'loadEnv.js'), 'export {};');
   const script = path.join(scripts, 'driverAuditDeploy.js');
   await fs.copyFile(fileURLToPath(new URL('../scripts/driverAuditDeploy.js', import.meta.url)), script);
+  await fs.copyFile(fileURLToPath(new URL('./driverAuditRetention.js', import.meta.url)), path.join(server, 'services/driverAuditRetention.js'));
   const commit = 'a'.repeat(40);
   await fs.writeFile(path.join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' '${commit}'\n`, { mode: 0o700 });
   await fs.writeFile(path.join(bin, 'pm2'), '#!/bin/sh\n[ "$1" = jlist ] || exit 1\nprintf "[]\\n"\n', { mode: 0o700 });
@@ -105,6 +107,17 @@ const seed = {
   manifestSha256: proofIdentity.manifestSha256, collectorRevision: proofIdentity.sourceRevision,
 };
 const journey = { servedSnapshot: true, verifiedPhoto: true, verifiedGps: true, reviewHistoryMatches: true, signedOutDenied: true, logout: true };
+
+test('sync only permits reclamation while its current implementation matches the saved private qualification', async () => {
+  const { driverAuditReplicaRetentionStatus } = await import('./driverAuditRetention.js');
+  const receipt = { replicaGcEnabled: true, gcRestoreReceiptSha256: digest('5'), gcImplementationSha256: digest('6') };
+  assert.equal(driverAuditReplicaRetentionStatus(false, receipt, digest('6')), 'off');
+  assert.equal(driverAuditReplicaRetentionStatus(true, receipt, digest('6')), 'qualified');
+  assert.equal(driverAuditReplicaRetentionStatus(true, receipt, digest('7')), 'proof-stale');
+  assert.equal(driverAuditReplicaRetentionStatus(true, receipt, null), 'proof-stale');
+  assert.equal(driverAuditReplicaRetentionStatus(true, { ...receipt, gcImplementationSha256: undefined }, digest('6')), 'proof-required');
+  assert.equal(driverAuditReplicaRetentionStatus(true, null, digest('6')), 'proof-required');
+});
 
 function proofFixture() {
   return {
@@ -220,5 +233,5 @@ test('failed recovery preserves the transition for an exact retry', async () => 
     async stop() { throw Error('stop failed'); },
     async restore() { throw Error('worker unavailable'); },
     async clearTransition() { assert.fail('An incomplete transition must stay available for recovery'); },
-  }), /restarting the prior GC-off worker could not be confirmed/);
+  }), /restoring the prior audit worker could not be confirmed/);
 });
