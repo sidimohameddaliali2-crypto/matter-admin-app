@@ -12,6 +12,7 @@ on:
           - audit-preflight
           - audit-seed-enable
           - audit-sync-start
+          - audit-retention-enable
           - audit-rollback
       expected_sha:
         description: Exact reviewed application commit for audit operations
@@ -29,7 +30,10 @@ on:
         description: SHA-256 of the reviewed staff acceptance receipt
         type: string
       audit_gc_restore_receipt_sha256:
-        description: Optional SHA-256 of reviewed private restore and rollback evidence for audit replica retention
+        description: SHA-256 of the reviewed private restore and rollback receipt for replica retention
+        type: string
+      audit_retained_generations:
+        description: Current and previous live audit generation SHA-256 values joined by a colon
         type: string
       sync_min_free_memory_bytes:
         description: Minimum free memory from the reviewed isolated sync replay
@@ -93,6 +97,7 @@ jobs:
           STAFF_GENERATION: ${{ inputs.staff_verified_generation }}
           STAFF_VERIFICATION: ${{ inputs.staff_verification_reference }}
           GC_RESTORE_RECEIPT: ${{ inputs.audit_gc_restore_receipt_sha256 }}
+          RETAINED_GENERATIONS: ${{ inputs.audit_retained_generations }}
           SYNC_MEMORY: ${{ inputs.sync_min_free_memory_bytes }}
           SYNC_DISK: ${{ inputs.sync_min_free_disk_bytes }}
           REPORTING_SECRET: ${{ inputs.operation != 'audit-rollback' && secrets.DRIVER_AUDIT_SUPABASE_SECRET || '' }}
@@ -102,13 +107,17 @@ jobs:
             echo "The workflow ref must match the exact reviewed commit."
             exit 1
           fi
-          if [ -n "$GC_RESTORE_RECEIPT" ] && { [ "$OPERATION" != audit-sync-start ] || [[ ! "$GC_RESTORE_RECEIPT" =~ ^[a-f0-9]{64}$ ]]; }; then
-            echo "Replica retention requires the reviewed restore receipt SHA-256 on audit-sync-start."
+          if [ -n "$GC_RESTORE_RECEIPT" ] && { { [ "$OPERATION" != audit-sync-start ] && [ "$OPERATION" != audit-retention-enable ]; } || [[ ! "$GC_RESTORE_RECEIPT" =~ ^[a-f0-9]{64}$ ]]; }; then
+            echo "Replica retention requires the reviewed restore receipt SHA-256 on audit-sync-start or audit-retention-enable."
+            exit 1
+          fi
+          if [ "$OPERATION" = audit-retention-enable ] && [[ ! "$GC_RESTORE_RECEIPT" =~ ^[a-f0-9]{64}$ || ! "$RETAINED_GENERATIONS" =~ ^[a-f0-9]{64}:[a-f0-9]{64}$ ]]; then
+            echo "Reviewed private restore proof and the exact current and previous audit generations are required."
             exit 1
           fi
           case "$OPERATION" in
             audit-rollback) exit 0 ;;
-            audit-preflight|audit-seed-enable|audit-sync-start) ;;
+            audit-preflight|audit-seed-enable|audit-sync-start|audit-retention-enable) ;;
             *) echo "Invalid audit operation."; exit 1 ;;
           esac
           if [[ ! "$AUDIT_MANIFEST" =~ ^[a-f0-9]{64}$ || ! "$AUDIT_CAPACITY" =~ ^[1-9][0-9]*$ || -z "$REPORTING_SECRET" ]]; then
@@ -205,6 +214,7 @@ jobs:
           DRIVER_AUDIT_STAFF_GENERATION: ${{ inputs.staff_verified_generation }}
           DRIVER_AUDIT_STAFF_VERIFICATION: ${{ inputs.staff_verification_reference }}
           DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256: ${{ inputs.audit_gc_restore_receipt_sha256 }}
+          DRIVER_AUDIT_RETAINED_GENERATIONS: ${{ inputs.audit_retained_generations }}
           DRIVER_AUDIT_SYNC_MIN_MEMORY: ${{ inputs.sync_min_free_memory_bytes }}
           DRIVER_AUDIT_SYNC_MIN_DISK: ${{ inputs.sync_min_free_disk_bytes }}
         with:
@@ -213,7 +223,7 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 20m
-          envs: DO_APP_PATH,AUDIT_OPERATION,DRIVER_AUDIT_DEPLOY_SHA,DRIVER_AUDIT_DEPLOY_MANIFEST,DRIVER_AUDIT_DEPLOY_CAPACITY_BYTES,DRIVER_AUDIT_DEPLOY_SECRET,DRIVER_AUDIT_STAFF_GENERATION,DRIVER_AUDIT_STAFF_VERIFICATION,DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256,DRIVER_AUDIT_SYNC_MIN_MEMORY,DRIVER_AUDIT_SYNC_MIN_DISK
+          envs: DO_APP_PATH,AUDIT_OPERATION,DRIVER_AUDIT_DEPLOY_SHA,DRIVER_AUDIT_DEPLOY_MANIFEST,DRIVER_AUDIT_DEPLOY_CAPACITY_BYTES,DRIVER_AUDIT_DEPLOY_SECRET,DRIVER_AUDIT_STAFF_GENERATION,DRIVER_AUDIT_STAFF_VERIFICATION,DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256,DRIVER_AUDIT_RETAINED_GENERATIONS,DRIVER_AUDIT_SYNC_MIN_MEMORY,DRIVER_AUDIT_SYNC_MIN_DISK
           script: |
             set -e
             cd -- "$DO_APP_PATH"

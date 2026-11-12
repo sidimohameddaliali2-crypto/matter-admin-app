@@ -90,3 +90,118 @@ test('an ordinary deployment leaves an unregistered audit worker inactive', asyn
     env: { ...env, DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256: 'c'.repeat(64) },
   }), /requires the reviewed restore receipt SHA-256 on audit-sync-start/);
 });
+
+const digest = value => value.repeat(64);
+const proofIdentity = {
+  generation: digest('1'), reportHash: digest('2'), descriptorSha256: digest('3'),
+  manifestSha256: digest('4'), sourceRevision: 2118,
+};
+const seed = {
+  pointer: { generation: proofIdentity.generation, reportHash: proofIdentity.reportHash, descriptor: { sha256: proofIdentity.descriptorSha256 } },
+  manifestSha256: proofIdentity.manifestSha256, collectorRevision: proofIdentity.sourceRevision,
+};
+const journey = { servedSnapshot: true, verifiedPhoto: true, verifiedGps: true, reviewHistoryMatches: true, signedOutDenied: true, logout: true };
+
+function proofFixture() {
+  return {
+    version: 1, scope: 'isolated-loopback-Mongo-only', implementationSha256: digest('5'),
+    appCommit: 'a'.repeat(40), appRuntimeManifestSha256: digest('6'),
+    archiveEvidence: { seedVerifiedCacheCopies: 238, seedVerifiedObjectIndexSha256: digest('7') },
+    previous: { ...proofIdentity, archiveRestore: { files: 232, manifestSha256: digest('8') } },
+    oldest: { postCollectionArchiveRead: { files: 232, manifestSha256: digest('9') } },
+    collection: { objectsRemoved: 8, bytesReclaimed: 20, usedBefore: 100, usedAfter: 80, activeKeys: 238,
+      previousKeys: 238, stagedKeys: 2, orphanProtected: true },
+    reviews: { copied: true, unchanged: true, count: 14, sha256: digest('a'), journalWrites: 0 },
+    checks: { baseline: journey, rollback: journey, archiveFallback: journey, currentPointerUnchanged: true, completeEmptyReplicaRestore: true },
+    traffic: { productionRequests: 0, productionWrites: 0 },
+  };
+}
+
+test('retention proof must be privately archived, exact and bound to the qualified implementation and approved seed', async () => {
+  const { createHash } = await import('node:crypto');
+  const { readDriverAuditRetentionProof } = await import('../scripts/driverAuditDeploy.js');
+  const proof = proofFixture();
+  async function load(value, overrides = {}) {
+    const body = Buffer.from(JSON.stringify(value));
+    const expectedSha256 = createHash('sha256').update(body).digest('hex');
+    let privateChecked = false;
+    const archive = {
+      async assertPrivate() { privateChecked = true; },
+      async readObject(key, { maxBytes }) {
+        assert.ok(privateChecked);
+        assert.equal(key, (overrides.expectedSha256 || expectedSha256) + '.json');
+        assert.ok(maxBytes <= 16 * 1024);
+        return [body];
+      },
+    };
+    return readDriverAuditRetentionProof({ archive, expectedSha256, seed, implementationSha256: digest('5'), ...overrides });
+  }
+  await load(proof);
+  await assert.rejects(load(proof, { expectedSha256: digest('f') }), /restore and rollback proof/i);
+  await assert.rejects(load(proof, { implementationSha256: digest('f') }), /restore and rollback proof/i);
+  await assert.rejects(load(proof, { seed: { ...seed, collectorRevision: 2119 } }), /restore and rollback proof/i);
+  await assert.rejects(load({ ...proof, reviews: { ...proof.reviews, journalWrites: 1 } }), /restore and rollback proof/i);
+  await assert.rejects(load({ ...proof, checks: { ...proof.checks, archiveFallback: { ...journey, verifiedPhoto: false } } }), /restore and rollback proof/i);
+});
+
+function livePointer(identity, sourceBodySha256) {
+  const { generation, reportHash, descriptorSha256, manifestSha256, sourceRevision } = identity;
+  return {
+    version: 1, generation, reportHash, descriptor: { sha256: descriptorSha256 }, sourceRevision, sourceBodySha256,
+    directImport: { version: 1, collectorRevision: sourceRevision, manifestSha256, sourceBasis: digest('9') },
+    restore: { version: 1, archive: 'matter-report-archive', verified: true, generation, reportHash, descriptorSha256, manifestSha256 },
+  };
+}
+
+test('retention pins the current and previous identities and rejects changes during the stop', async () => {
+  const { checkDriverAuditRetentionHead, restartDriverAuditRetention } = await import('../scripts/driverAuditDeploy.js');
+  const previous = livePointer(proofIdentity, digest('e'));
+  const active = livePointer({ ...proofIdentity, generation: digest('b'), sourceRevision: 2124 }, digest('d'));
+  const head = { ...active, previous };
+  const generations = active.generation + ':' + previous.generation;
+  const identity = checkDriverAuditRetentionHead(head, generations);
+  assert.throws(() => checkDriverAuditRetentionHead({ ...head, previous: { ...previous, restore: undefined } }, generations), /active or previous/i);
+  assert.throws(() => checkDriverAuditRetentionHead(head, previous.generation + ':' + active.generation), /active or previous/i);
+  const calls = [];
+  await assert.rejects(restartDriverAuditRetention({
+    async checkHead() {
+      const changed = checkDriverAuditRetentionHead({ ...head, sourceBodySha256: digest('c') }, generations);
+      assert.deepEqual(changed, identity, 'changed head');
+    },
+    async stop() { calls.push('stop'); },
+    async restart() { calls.push('restart'); },
+    async wait() { calls.push('wait'); },
+    async save() { calls.push('save'); },
+    async writeSettings(enabled) { calls.push('settings:' + enabled); },
+    async writeReceipt(enabled) { calls.push('receipt:' + enabled); },
+  }), /changed head/i);
+  assert.deepEqual(calls, ['stop','restart','wait','save']);
+});
+
+test('retention restarts only the supervised worker and restores the exact prior settings and receipt on failure', async () => {
+  const { restartDriverAuditRetention } = await import('../scripts/driverAuditDeploy.js');
+  async function run({ failStartup }) {
+    const calls = [];
+    let gc = false;
+    let waits = 0;
+    const task = restartDriverAuditRetention({
+      async checkHead() { calls.push('head'); },
+      async stop() { calls.push('stop'); },
+      async restart() { calls.push('restart'); },
+      async wait() {
+        calls.push('wait');
+        if (failStartup && waits++ === 0) throw Error('startup failed');
+      },
+      async save() { calls.push('save'); },
+      async writeSettings(enabled) { calls.push('settings:' + enabled); gc = enabled; },
+      async writeReceipt(enabled) { calls.push('receipt:' + enabled); },
+    });
+    if (failStartup) await assert.rejects(task, /startup failed/);
+    else await task;
+    assert.equal(gc,!failStartup);
+    return calls;
+  }
+  const attempt = ['stop','head','receipt:true','settings:true','restart','wait'];
+  assert.deepEqual(await run({ failStartup: false }), [...attempt,'save']);
+  assert.deepEqual(await run({ failStartup: true }), [...attempt,'stop','settings:false','receipt:false','restart','wait','save']);
+});
