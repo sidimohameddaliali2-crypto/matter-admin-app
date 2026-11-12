@@ -13,6 +13,8 @@ const objectName=/^[a-f0-9]{64}\.gz$/;
 const maxFile=128*1024*1024;
 const receiptName='retired-workspace.private.json';
 const inventoryName='retired-workspace-inventory.private.json.gz';
+const abandonedReceipt='abandoned-workspace.private.json';
+const abandonedInventory='abandoned-workspace-inventory.private.json.gz';
 const buildFiles=new Set(['automatic-build.private.json','automatic-validation.private.json','combined-reviews.private.json',
   'gps-refresh-receipt.private.json','history-query.private.gz','receipt.private.json','verified-gps-windows.private.json']);
 const savedFiles=['collector-state.private.json','current-browser.private.json','current-reviews.private.json'];
@@ -66,6 +68,51 @@ function eligible(relative){
 async function safeDirectory(directory){
   const stat=await fs.lstat(directory).catch(missing);
   return stat?.isDirectory()&&stat.uid===process.getuid()&&await fs.realpath(directory)===directory;
+}
+
+async function saveInventory(directory,receipt,inventoryName,summary,files){
+  const encoded=Buffer.from(JSON.stringify(files));
+  assert(files.length<=10_000&&encoded.length<=16*1024*1024,'Audit workspace retirement inventory exceeds its bound');
+  const inventory=gzipSync(encoded),inventoryFile=path.join(directory,inventoryName);
+  await privateAuditWrite(inventoryFile,inventory);
+  await syncPath(inventoryFile);
+  const proof={...summary,inventoryFile:inventoryName,inventorySha256:sha(encoded),inventoryCompressedSha256:sha(inventory)};
+  await privateAuditWrite(receipt,JSON.stringify(proof));
+  await syncPath(receipt);
+  await syncPath(directory);
+  return proof;
+}
+
+async function readInventory(directory,proof,inventoryName){
+  assert(proof.status==='prepared'&&proof.inventoryFile===inventoryName,'Invalid audit workspace retirement receipt');
+  const inventory=await bytes(path.join(directory,inventoryName),16*1024*1024);
+  assert(inventory&&sha(inventory)===proof.inventoryCompressedSha256,'Invalid compressed audit workspace inventory');
+  const decoded=gunzipSync(inventory,{maxOutputLength:16*1024*1024}),files=JSON.parse(decoded);
+  assert(Array.isArray(files)&&files.length<=10_000&&sha(decoded)===proof.inventorySha256,
+    'Invalid audit workspace retirement inventory');
+  return files;
+}
+
+async function finishInventory(directory,receipt,proof,files,revalidate){
+  const affected=new Set();
+  for(const item of files){
+    assert(typeof item.path==='string'&&eligible(item.path)&&digest.test(item.sha256)&&Number.isSafeInteger(item.bytes)&&item.bytes>=0,
+      'Invalid audit workspace retirement item');
+    const target=path.join(directory,item.path);
+    const parent=path.dirname(target);
+    assert(await safeDirectory(parent),'Audit workspace directory changed during retirement');
+    affected.add(parent);
+    const actual=await localFingerprint(target);
+    if(!actual)continue;
+    assert(actual.sha256===item.sha256&&actual.bytes===item.bytes,'Audit workspace file changed during retirement');
+    await revalidate?.(item);
+    await fs.unlink(target);
+  }
+  for(const parent of affected)await syncPath(parent);
+  await privateAuditWrite(receipt,JSON.stringify({...proof,status:'retired',retiredAt:new Date().toISOString(),
+    removedFiles:files.length,removedBytes:files.reduce((total,item)=>total+item.bytes,0)}));
+  await syncPath(receipt);
+  await syncPath(directory);
 }
 
 async function archivedPackage({directory,seed,receiptRoot,transport}){
@@ -197,41 +244,148 @@ export async function retireDriverAuditAttempt({directory,seed,accepted,receiptR
     try{prepared=await prepare({directory,seed,accepted,receiptRoot,retirement});}
     catch{return 'proof-unavailable';}
     const {files,...summary}=prepared;
-    const inventory=gzipSync(Buffer.from(JSON.stringify(files)));
-    const inventoryFile=path.join(directory,inventoryName);
-    await privateAuditWrite(inventoryFile,inventory);
-    await syncPath(inventoryFile);
-    proof={...summary,inventoryFile:inventoryName,inventoryCompressedSha256:sha(inventory)};
-    await privateAuditWrite(file,JSON.stringify(proof));
-    await syncPath(file);
-    await syncPath(directory);
+    proof=await saveInventory(directory,file,inventoryName,summary,files);
   }
   assert(proof.version===1&&proof.manifestSha256===seed.manifestSha256&&proof.sourceBasis===seed.sourceBasis,
     'Audit workspace retirement proof changed');
   if(proof.status==='retired')return 'already-retired';
-  assert(proof.status==='prepared'&&proof.inventoryFile===inventoryName,'Invalid audit workspace retirement receipt');
-  const inventory=await bytes(path.join(directory,inventoryName),16*1024*1024);
-  assert(inventory&&sha(inventory)===proof.inventoryCompressedSha256,'Invalid compressed audit workspace inventory');
-  const decoded=gunzipSync(inventory,{maxOutputLength:16*1024*1024}),files=JSON.parse(decoded);
-  assert(Array.isArray(files)&&files.length<=10_000&&sha(decoded)===proof.inventorySha256,
-    'Invalid audit workspace retirement inventory');
-  const affected=new Set();
-  for(const item of files){
-    assert(typeof item.path==='string'&&eligible(item.path)&&digest.test(item.sha256)&&Number.isSafeInteger(item.bytes)&&item.bytes>=0,
-      'Invalid audit workspace retirement item');
-    const target=path.join(directory,item.path);
-    const parent=path.dirname(target);
-    assert(await safeDirectory(parent),'Audit workspace directory changed during retirement');
-    affected.add(parent);
-    const actual=await localFingerprint(target);
-    if(!actual)continue;
-    assert(actual.sha256===item.sha256&&actual.bytes===item.bytes,'Audit workspace file changed during retirement');
-    await fs.unlink(target);
-  }
-  for(const parent of affected)await syncPath(parent);
-  await privateAuditWrite(file,JSON.stringify({...proof,status:'retired',retiredAt:new Date().toISOString(),
-    removedFiles:files.length,removedBytes:files.reduce((total,item)=>total+item.bytes,0)}));
-  await syncPath(file);
-  await syncPath(directory);
+  await finishInventory(directory,file,proof,await readInventory(directory,proof,inventoryName));
   return 'retired';
+}
+
+async function readLocalManifest(root){
+  if(!await safeDirectory(root))return null;
+  const manifest=await bytes(path.join(root,'files.private.json'),16*1024*1024);
+  if(!manifest)return null;
+  const files=JSON.parse(manifest);
+  assert(files&&typeof files==='object'&&!Array.isArray(files),'Invalid audit workspace manifest');
+  return {root,sha256:sha(manifest),files};
+}
+
+async function exactArchiveReceipt(receiptRoot,key,actual){
+  if(!receiptRoot||!await safeDirectory(receiptRoot)||key!==actual.sha256+'.gz')return false;
+  const receipt=await privateAuditJson(path.join(receiptRoot,key+'.json')).catch(missing);
+  return receipt?.target==='matter-report-archive'&&receipt.key===key&&receipt.verified===true
+    &&receipt.sha256===actual.sha256&&receipt.bytes===actual.bytes;
+}
+
+const archiveKey=relative=>relative.match(/^(?:server-data\/archive-([a-f0-9]{64})\.private\.bin|audit-objects\/([a-f0-9]{64})\.gz)$/)?.slice(1).find(Boolean);
+const proofForRecipe=recipe=>['builderSha256','rendererSha256','journalsSha256','baselineManifestSha256'].every(key=>digest.test(recipe?.[key]));
+
+async function abandonedSource(directory,retirement){
+  const {transport,readSourceReceipt,sourceBasis,recipe}=retirement??{};
+  if(!transport||!readSourceReceipt||!sourceBasis||!proofForRecipe(recipe)||!await safeDirectory(path.join(directory,'saved-current')))return null;
+  const state=await bytes(path.join(directory,'saved-current/collector-state.private.json'),2*1024*1024);
+  if(!state)return null;
+  const local=JSON.parse(state);
+  if(!Number.isSafeInteger(local.revision)||local.revision<1||typeof local.body!=='string')return null;
+  const pinned=JSON.parse(local.body),seed={collectorRevision:local.revision,sourceBasis:sourceBasis(pinned)};
+  const copies=new Map();
+  const source=await savedSource({directory,seed,transport,readSourceReceipt,sourceBasis,async original(relative){
+    const actual=await localFingerprint(path.join(directory,relative));
+    if(actual)copies.set(relative,actual);
+    return actual;
+  }});
+  return {source,sourceBasis:seed.sourceBasis,head:pinned.head,copies,recipe};
+}
+
+async function planAbandoned({directory,manifest,retained,receiptRoot,retirement}){
+  const entries=await fs.readdir(directory,{withFileTypes:true});
+  const names=new Set(entries.filter(entry=>entry.isFile()&&buildFiles.has(entry.name)&&entry.name!=='receipt.private.json').map(entry=>entry.name));
+  for(const kind of ['server-data','audit-objects']){
+    const subdir=path.join(directory,kind);
+    if(!await safeDirectory(subdir))continue;
+    for(const entry of await fs.readdir(subdir,{withFileTypes:true})){
+      if(entry.isFile()&&filename.test(entry.name)&&entry.name!=='files.private.json')names.add(kind+'/'+entry.name);
+    }
+  }
+  assert(names.size<=10_000,'Abandoned audit workspace exceeds its inventory bound');
+  // Archive receipts establish exact original inputs even if the interrupted build never wrote a manifest.
+  const source=await abandonedSource(directory,retirement);
+  if(!source)return null;
+  const originalReceipt=await bytes(path.join(directory,'receipt.private.json'),2*1024*1024);
+  const saved=originalReceipt?JSON.parse(originalReceipt):null;
+  const baseline=saved&&retained.find(item=>item.root===saved.baseline?.path&&item.sha256===saved.baseline.manifestSha256);
+  const derived=baseline&&manifest&&saved.version===1&&saved.root===manifest.root&&saved.manifestSha256===manifest.sha256
+    &&saved.canonical?.reviewsPath===path.join(directory,'saved-current/current-reviews.private.json')
+    &&saved.canonical.reviewsSha256===source.source.reviewsSha256&&saved.canonical.browserSha256===source.source.browserSha256
+    &&JSON.stringify(saved.canonical.head)===JSON.stringify(source.head);
+  const files=[];
+  async function plan(relative,actual,provenance){
+    const stat=await fs.lstat(path.join(directory,relative));
+    assert(stat.isFile()&&stat.size===actual.bytes,'Abandoned audit workspace file changed');
+    files.push({path:relative,...actual,allocatedBytes:stat.nlink===1?stat.blocks*512:0,provenance});
+  }
+  for(const [relative,actual]of source.copies)await plan(relative,actual,{kind:'archived-source'});
+  for(const relative of names){
+    if(!eligible(relative))continue;
+    const [kind,name]=relative.split('/'),key=archiveKey(relative);
+    const references=kind==='server-data'?retained.filter(item=>digest.test(item.files[name])):[];
+    const expected=kind==='server-data'?manifest?.files[name]:null;
+    if(!key&&!references.length&&!(derived&&(digest.test(expected)||buildFiles.has(relative))))continue;
+    const actual=await localFingerprint(path.join(directory,relative));
+    if(!actual)continue;
+    if(key&&await exactArchiveReceipt(receiptRoot,key+'.gz',actual)){
+      await plan(relative,actual,{kind:'archive',key:key+'.gz'});
+      continue;
+    }
+    let matched=false;
+    for(const ref of references){
+      if(ref.files[name]!==actual.sha256)continue;
+      const duplicate=await localFingerprint(path.join(ref.root,name));
+      if(duplicate?.sha256!==actual.sha256||duplicate.bytes!==actual.bytes)continue;
+      await plan(relative,actual,{kind:'retained',root:ref.root,manifestSha256:ref.sha256});
+      matched=true;break;
+    }
+    if(!matched&&derived&&(expected===actual.sha256||buildFiles.has(relative)))await plan(relative,actual,{kind:'derived'});
+  }
+  return {files,version:1,status:'prepared',kind:'abandoned',scope:derived?'source-and-rebuild':'copies-only',manifestSha256:manifest?.sha256??null,
+    source:source.source,sourceBasis:source.sourceBasis,recipe:source.recipe,
+    baseline:derived?{root:baseline.root,manifestSha256:baseline.sha256,receiptSha256:sha(originalReceipt)}:null,
+    verifiedAt:new Date().toISOString()};
+}
+
+export async function retireAbandonedDriverAuditAttempt({directory,protectedManifests,retainedRoots,receiptRoot,retirement,apply}){
+  if(!await safeDirectory(directory))return null;
+  let manifest;
+  try{manifest=await readLocalManifest(path.join(directory,'server-data'));}
+  catch{return 'proof-unavailable';}
+  if(manifest&&protectedManifests.has(manifest.sha256)||!manifest&&protectedManifests.size>0&&await fs.lstat(path.join(directory,'server-data/files.private.json')).catch(missing))return null;
+  const receipt=path.join(directory,abandonedReceipt);
+  let proof=await privateAuditJson(receipt).catch(missing),files;
+  if(proof?.status==='retired')return null;
+  if(!proof&&!manifest&&!await safeDirectory(path.join(directory,'saved-current')))return null;
+  const retained=[];
+  for(const candidate of retainedRoots){
+    const copy=await readLocalManifest(candidate.root).catch(()=>null);
+    if(copy?.sha256===candidate.manifestSha256)retained.push(copy);
+  }
+  if(proof){
+    assert(proof.version===1&&proof.kind==='abandoned'&&proof.manifestSha256===(manifest?.sha256??null),'Abandoned audit workspace changed');
+    files=await readInventory(directory,proof,abandonedInventory);
+  }else{
+    let prepared;
+    try{prepared=await planAbandoned({directory,manifest,retained,receiptRoot,retirement});}
+    catch{return 'proof-unavailable';}
+    if(!prepared)return 'proof-unavailable';
+    const {files:inventory,...summary}=prepared;
+    if(!inventory.length)return null;
+    files=inventory;
+    if(apply)proof=await saveInventory(directory,receipt,abandonedInventory,summary,files);
+  }
+  if(apply)await finishInventory(directory,receipt,proof,files,async item=>{
+    const witness=item.provenance;
+    if(witness?.kind==='archive')assert(await exactArchiveReceipt(receiptRoot,witness.key,item),'Abandoned audit archive receipt changed');
+    else if(witness?.kind==='retained'){
+      const name=item.path.split('/')[1];
+      const copy=retained.find(ref=>ref.root===witness.root&&ref.sha256===witness.manifestSha256&&ref.files[name]===item.sha256);
+      const actual=copy&&await localFingerprint(path.join(copy.root,name));
+      assert(actual?.sha256===item.sha256&&actual.bytes===item.bytes,'Abandoned audit retained copy changed');
+    }else if(witness?.kind==='archived-source')assert(proof.source&&item.path.startsWith('saved-current/'),'Abandoned audit source proof changed');
+    else if(witness?.kind==='derived'){
+      const base=retained.find(ref=>ref.root===proof.baseline?.root&&ref.sha256===proof.baseline.manifestSha256);
+      assert(proof.source&&base,'Abandoned audit rebuild proof changed');
+    }else throw Error('Unknown abandoned audit restore provenance');
+  });
+  return {files:files.length,bytes:files.reduce((total,item)=>total+item.bytes,0),allocatedBytes:files.reduce((total,item)=>total+item.allocatedBytes,0)};
 }

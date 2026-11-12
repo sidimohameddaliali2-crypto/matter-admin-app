@@ -149,9 +149,11 @@ async function main(){
        async readSourceReceipt(revision){
         const receipt=await sourceReceipts.read(revision);
         return {revision:receipt.revision,body:JSON.parse(receipt.body).body_text};
-       },recipe:{builderSha256,rendererSha256:rendererBuild.sha256,journalsSha256:journals.sha256,baselineManifestSha256:bootstrap?.manifestSha256}};
-      const workspace=await pruneDriverAuditWorkspace({root:work,receiptRoot:path.join(root,'archive-receipts'),protectedManifests,retirement});
+       },recipe:{builderSha256,rendererSha256:rendererBuild.sha256,journalsSha256:journals.sha256,baselineManifestSha256:bootstrap?.manifestSha256},
+       retainedBaseline:{root:baselineRoot,manifestSha256:bootstrap?.manifestSha256}};
+      const workspace=await pruneDriverAuditWorkspace({root:work,receiptRoot:path.join(root,'archive-receipts'),protectedManifests,retirement,abandoned:'apply'});
       if(workspace.retirementDeferred)console.warn(JSON.stringify({event:'audit-workspace-retirement-deferred',attempts:workspace.retirementDeferred}));
+      if(workspace.abandoned.attempts)console.warn(JSON.stringify({event:'audit-workspace-abandoned-retired',...workspace.abandoned}));
       return builder.tick();
      },
      async apply(candidate){
