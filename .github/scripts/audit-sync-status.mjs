@@ -147,6 +147,8 @@ export async function readAuditSyncStatus({ appRoot, pm2Home, entry }) {
   const root = syncRoot(appRoot, entry);
   if (await fs.realpath(root) !== root || !(await stat(root))?.isDirectory()) throw Error('The audit workspace is unavailable');
   const pm = entry.pm2_env, work = path.join(root, 'work');
+  const workDisk = await fs.statfs(work).catch(missing);
+  host.workFreeDiskBytes = workDisk ? workDisk.bavail * workDisk.bsize : null;
   const current = await json(path.join(work, 'current.private.json'));
   const progress = await json(path.join(work, 'status.private.json'));
   const saved = await json(path.join(root, 'sync-status.private.json'));

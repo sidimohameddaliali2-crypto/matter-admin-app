@@ -30,7 +30,10 @@ test('status reports bounded build progress and omits private values and paths',
   await write(path.join(root, 'work/status.private.json'), { status: 'building', id: attemptId, startedAt: '2026-11-12T14:53:31Z' });
   await fs.writeFile(path.join(attempt, 'combined-reviews.private.json'), 'private-value');
   await fs.writeFile(path.join(pm2Home, 'logs/matter-driver-audit-sync-error.log'), 'private-value\nDriver audit sync paused this refresh. See private sync status.\n');
+  t.mock.method(fs, 'statfs', async directory => ({ bsize: 4096, bavail: directory === path.join(root, 'work') ? 123 : 456 }));
   const status = await readAuditSyncStatus({ appRoot, pm2Home, entry });
+  assert.equal(status.host.workFreeDiskBytes, 123 * 4096);
+  assert.equal(status.host.freeDiskBytes, 456 * 4096);
   assert.equal(status.worker.status, 'online');
   assert.equal(status.worker.restarts, 2);
   assert.equal(status.heartbeat.status, 'checking');
