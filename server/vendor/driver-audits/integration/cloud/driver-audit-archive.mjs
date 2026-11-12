@@ -4,12 +4,21 @@ import {createReaderBudgetPool} from './reader-budget-pool.mjs';
 import {readerTransferMicros} from './reader-budget.mjs';
 import {runWithWorkerBudget} from './worker-budget.mjs';
 import {runAutomaticPublicationBatch,MAX_PUBLICATION_BATCH_BYTES} from './automatic-publication-budget.mjs';
-import {createVerifiedAuditArchive,sha256} from './driver-audit-handoff.mjs';
+import {createVerifiedAuditArchive} from './driver-audit-handoff.mjs';
+import {createBudgetedArchiveReader} from './budgeted-archive-reader.mjs';
 
 // Combine concurrent immutable reads and possible missing-object uploads into
 // the same existing bounded storage and reader accounting used by publication.
-export function createBudgetedAuditArchive({rpc,state,remote,receiptRoot}){
- const budget=createReaderBudgetPool({stateStore:state});
+function fixedHostBudget(stateStore,approvedNovemberRelease,clock){
+ const pool=createReaderBudgetPool({stateStore,approvedNovemberRelease,clock});
+ return {...pool,settle:(reservation,measurement)=>pool.settle(reservation,{
+  ...measurement,accountingBasis:'remote-archive-transfer-v1',
+ })};
+}
+
+export function createBudgetedAuditArchive({rpc,state,remote,receiptRoot,requestBytes=4096,approvedNovemberRelease=false,clock=Date.now}){
+ const budget=fixedHostBudget(state,approvedNovemberRelease,clock);
+ const reader=createBudgetedArchiveReader({transport:remote,budget,requestBytes});
  const storage=createArchiveReservation({rpc,transport:remote,ensureCapacity:createArchiveCapacity({rpc})});
  const queued=[];
  let running=false;
@@ -59,25 +68,12 @@ export function createBudgetedAuditArchive({rpc,state,remote,receiptRoot}){
  const verified=createVerifiedAuditArchive({remote,receiptRoot,runObject});
  return {
   ...verified,
-  async readBounded(key,{maxBytes}){
-   return runObject(maxBytes,false,async()=>{
-    const chunks=[];
-    let size=0;
-    for await(const chunk of await remote.readObject(key,{maxBytes})){
-     size+=chunk.length;
-     if(size>maxBytes)throw Error('Audit archive response exceeds bound');
-     chunks.push(Buffer.from(chunk));
-    }
-    const body=Buffer.concat(chunks,size);
-    if(sha256(body)+'.gz'!==key)throw Error('Audit archive read hash mismatch');
-    return [body];
-   });
-  }
+  readBounded:reader.readObject,
  };
 }
 
-export function createBudgetedAuditState({state,budgetState,responseLimit,requestBytes=4096}){
- const budget=createReaderBudgetPool({stateStore:budgetState});
+export function createBudgetedAuditState({state,budgetState,responseLimit,requestBytes=4096,approvedNovemberRelease=false,clock=Date.now}){
+ const budget=fixedHostBudget(budgetState,approvedNovemberRelease,clock);
  return {async read(key){
   let transfer=0;
   const result=await runWithWorkerBudget({

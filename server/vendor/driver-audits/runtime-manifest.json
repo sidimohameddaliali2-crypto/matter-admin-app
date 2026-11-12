@@ -5,7 +5,7 @@
     "integration/cloud/audit-replica.mjs": "ae7db2f5948958b8d6763bc1f69b5db797354ef82851d4a2b71fe723a182b559",
     "integration/cloud/automatic-hosted-preview.mjs": "5d2f6b9c73bee499fe15afdd7a0754773566c51b31e3ac88038a6a4836c6a18f",
     "integration/cloud/automatic-preview-publication.mjs": "e3e14f618b792eb74da2b46e0d8d98e532834183a5a1940b4360718aa5121866",
-    "integration/cloud/driver-audit-archive.mjs": "6b39a9bd9db62db03010526b2f4be1654d610e5c084267da809f012c7042f23a",
+    "integration/cloud/driver-audit-archive.mjs": "2a8939e4abae744420590790a0632df54f20187d30c1434e240240fc8d084941",
     "integration/cloud/budgeted-archive-reader.mjs": "3993e952760499300e0c394e1f45faf15a83051cd342e7f276dbcb7aaafbd6cb",
     "integration/hosted/worker-lock.mjs": "17b5755cce6dabbe3d08ef7550167a7d2bc965994912c2e58fc511a2dfc07d7e",
     "integration/cloud/candidate-map-access.mjs": "cfde8e9721b3c67864eb0423119e75a4ffd8c4439da2ac336213e214a308a734",
