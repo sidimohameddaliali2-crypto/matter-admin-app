@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
+    "start:staging-delivery": "node stagingDeliveryServer.js",
     "dev": "nodemon server.js",
     "server": "node server.js",
     "create-admin": "node createAdmin.js",
