@@ -513,10 +513,10 @@ async function archiveOlderAuditBuild(appRoot, entry, expected) {
       for await (const entry of await fs.opendir(folder)) {
         const file = path.join(folder, entry.name);
         const info = await fs.lstat(file);
-        if (info.uid !== process.getuid() || (info.mode & 0o022) !== 0) throw Error('Unexpected workspace ownership');
+        if (info.uid !== process.getuid()) throw Object.assign(Error('Unexpected workspace ownership'), { code: 'ENTRY_OWNER' });
         if (info.isDirectory()) total += await exclusiveBytes(file);
         else if (info.isFile() && info.nlink === 1) total += info.blocks * 512;
-        else if (!info.isFile()) throw Error('Unexpected workspace file type');
+        else if (!info.isFile() && !info.isSymbolicLink()) throw Object.assign(Error('Unexpected workspace file type'), { code: 'ENTRY_TYPE' });
       }
       return total;
     };
