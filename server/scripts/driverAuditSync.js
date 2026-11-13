@@ -7,7 +7,7 @@ import {runDriverAuditDirectImport} from '../services/driverAuditDirectImport.js
 import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollection.js';
 import {driverAuditReplicaRetentionStatus,driverAuditRetentionImplementation} from '../services/driverAuditRetention.js';
 import {withDriverAuditWriter} from '../services/driverAuditWriter.js';
-import {hasDriverAuditBuildSpace,pruneDriverAuditWorkspace,reclaimDriverAuditBuildCache,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
+import {compactPreviousDriverAuditInputs,compactRetiredDriverAuditInputs,hasDriverAuditBuildSpace,pruneDriverAuditWorkspace,reclaimDriverAuditBuildCache,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
 import {acceptedWorkspace,prunePreviousDriverAuditCopies} from '../services/driverAuditWorkspaceRetirement.js';
 import {pathToFileURL} from 'node:url';
 import {createBudgetedAuditArchive,createBudgetedAuditState} from '../vendor/driver-audits/integration/cloud/driver-audit-archive.mjs';
@@ -161,10 +161,11 @@ async function main(){
       const workspace=await pruneDriverAuditWorkspace({root:work,receiptRoot,protectedManifests,retirement,abandoned:'apply'});
       if(workspace.retirementDeferred)console.warn(JSON.stringify({event:'audit-workspace-retirement-deferred',attempts:workspace.retirementDeferred}));
       if(workspace.abandoned.attempts)console.warn(JSON.stringify({event:'audit-workspace-abandoned-retired',...workspace.abandoned}));
-      const before=await freeBuildBytes().catch(error=>{
+      const availableOnHost=()=>freeBuildBytes().catch(error=>{
        if(error.code==='ENOENT')return freeBuildBytes(root);
        throw error;
       });
+      const before=await availableOnHost();
       let available=before;
       if(collectReplicas&&!hasDriverAuditBuildSpace(available)){
        const copies=await withDriverAuditWriter(db,async()=>prunePreviousDriverAuditCopies({
@@ -179,8 +180,22 @@ async function main(){
       }
       if(!hasDriverAuditBuildSpace(available)){
        const reclaimed=await reclaimDriverAuditBuildCache(work,available);
-       if(reclaimed.cacheBytesRemoved)console.warn(JSON.stringify({event:'audit-workspace-cache-reclaimed',...reclaimed,
-        freeDiskDeltaBytes:await freeBuildBytes()-available}));
+       if(reclaimed.cacheBytesRemoved){
+        const after=await availableOnHost();
+        console.warn(JSON.stringify({event:'audit-workspace-cache-reclaimed',...reclaimed,freeDiskDeltaBytes:after-available}));
+        available=after;
+       }
+      }
+      if(collectReplicas&&!hasDriverAuditBuildSpace(available)){
+       const compacted=await withDriverAuditWriter(db,async()=>{
+        const currentHead=await readHead(),stage=await control.findOne({_id:'direct-stage'});
+        const options={root:work,head:currentHead,stage,retentionStatus:replicaGcStatus,
+         protectedManifests:[currentHead,currentHead?.previous,stage?.pointer].map(pointer=>pointer?.directImport?.manifestSha256).filter(Boolean)};
+        const previous=await compactPreviousDriverAuditInputs(options);
+        const retired=!hasDriverAuditBuildSpace(await availableOnHost())&&await compactRetiredDriverAuditInputs(options);
+        return previous||retired;
+       });
+       if(compacted)console.info(JSON.stringify({event:'audit-workspace-retained-inputs-compacted',freeDiskDeltaBytes:await availableOnHost()-available}));
       }
       const accepted=await current().then(candidate=>acceptedWorkspace(work,candidate,head)).catch(()=>null);
       // The pinned source checks every local object's content hash and size.
