@@ -357,6 +357,29 @@ async function main() {
     if (entries.length > 1) throw Error('Multiple audit workers registered');
     [entry] = entries;
   }
+  if (process.env.AUDIT_BUILD_DISK_INVENTORY === 'true') {
+    const root = syncRoot(appRoot, entry);
+    const npm = await exec('npm', ['config', 'get', 'cache'], { timeout: 5000 });
+    const npmCache = npm.stdout.trim();
+    const paths = {
+      npmCache: npmCache === path.join(os.homedir(), '.npm') ? path.join(npmCache, '_cacache') : null,
+      clientBuildCache: path.join(appRoot, 'client/node_modules/.cache'),
+      aptPackages: '/var/cache/apt/archives',
+      journals: '/var/log/journal',
+      pm2Logs: path.join(pm2Home, 'logs'),
+      auditWorkspace: path.join(root, 'work'),
+      abandoned: path.join(root, 'work/attempts/c0f5df67-e44b-4e0a-9d91-5d3b4d0dd560'),
+    };
+    const values = {};
+    for (const [key, directory] of Object.entries(paths)) {
+      if (!directory || !(await stat(directory))?.isDirectory() || await fs.realpath(directory) !== directory) continue;
+      const measured = await exec('du', ['-skx', '--', directory], { timeout: 15000, maxBuffer: 4096 }).catch(() => null);
+      if (measured) values[key] = Number(measured.stdout.split(/\s+/)[0]) * 1024;
+    }
+    const usage = await fs.statfs(root);
+    console.log(JSON.stringify({ diskInventory: values, freeBytes: usage.bavail * usage.bsize }));
+    return;
+  }
   if (process.env.QUALIFY_BUILDER === 'true') {
     console.log(JSON.stringify(await qualifyBuilder(appRoot, entry, pm2Home, encoded)));
   } else {
