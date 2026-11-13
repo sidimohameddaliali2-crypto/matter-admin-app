@@ -49,9 +49,10 @@ function currentMonth(now){if(!Number.isSafeInteger(now)||now<0)fail('Invalid wo
 function settledMicros(policy,elapsedMs,extraMicros){if(!Number.isSafeInteger(elapsedMs)||elapsedMs<0||elapsedMs>policy.maxRunMs)fail('Uncertain worker duration');if(!Number.isSafeInteger(extraMicros)||extraMicros<0||extraMicros>policy.reservationMicros)fail('Uncertain additional cost');const cost=Math.max(100,Math.ceil((elapsedMs+policy.overheadMs)*policy.rateMicrosPerHour/3_600_000/100)*100)+extraMicros;if(!Number.isSafeInteger(cost)||cost>policy.reservationMicros)fail('Uncertain total cost');return cost;}
 export const NOVEMBER_RECOVERY_READER_BUDGET_KEY='reader-budget-recovery-20261112';
 export const NOVEMBER_OVERNIGHT_READER_BUDGET_KEY='reader-budget-overnight-20261113';
+export const NOVEMBER_SYNC_RESTORE_READER_BUDGET_KEY='reader-budget-sync-restore-20261113';
 export const NOVEMBER_OVERNIGHT_COLLECTION_BUDGET_KEY='worker-budget-overnight-20261113';
 const NOVEMBER_OVERNIGHT_COLLECTION_POLICY=Object.freeze({...WORKER_BUDGET_DEFAULTS,monthlyMicros:5_000_000});
-const novemberReaderBudgetKeys=new Set(['reader-budget-release-20261112','reader-budget-sync-20261112',NOVEMBER_RECOVERY_READER_BUDGET_KEY,NOVEMBER_OVERNIGHT_READER_BUDGET_KEY]);
+const novemberReaderBudgetKeys=new Set(['reader-budget-release-20261112','reader-budget-sync-20261112',NOVEMBER_RECOVERY_READER_BUDGET_KEY,NOVEMBER_OVERNIGHT_READER_BUDGET_KEY,NOVEMBER_SYNC_RESTORE_READER_BUDGET_KEY]);
 const readerBudgetKeys=new Set(['reader-budget','reader-budget-reserve','reader-budget-approved-20261106',...novemberReaderBudgetKeys]);
 
 export function createWorkerBudget({stateStore,clock=Date.now,policy=WORKER_BUDGET_DEFAULTS,key='worker-budget',requestId=randomUUID,maxRetries=8}={}){
