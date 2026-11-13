@@ -211,9 +211,9 @@ export async function readAuditSyncStatus({ appRoot, pm2Home, entry }) {
 }
 
 // This payload is limited to the exact reviewed code-only export.
-const candidateBuilder = '13cfd8e5b543714ce6fa93d6aece9e229d4ff0e558768807622d595e29a200b7';
-const previousBuilder = '1df5fdc8ec706a7ab1b69c544a2c641b4951aa453859a5f48cf38818da09b6ee';
-const bundleHash = '769b2a83dc0b20715a434a5d2c27dc63a7b6370ae49f57780098063179e9d2ad';
+const candidateBuilder = '5ee269b38fa25a6ccb2f418822155a1255b2237a80bb0156ddb24100b47c6729';
+const previousBuilder = '13cfd8e5b543714ce6fa93d6aece9e229d4ff0e558768807622d595e29a200b7';
+const bundleHash = '7cd0c2e4c4f8364359e5b8566e6e5aac51c53e7d240473f4cd5b15d4b5fb021c';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const codePath = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*[A-Za-z0-9][A-Za-z0-9._-]*\.(?:mjs|js)$/;
 const smokeSource = String.raw`
@@ -239,6 +239,8 @@ for(const [file,names] of Object.entries(exportsByFile)){
   const loaded=await import(pathToFileURL(path.join(builder,file)).href);
   for(const name of names)assert.equal(typeof loaded[name],'function');
 }
+const {compactDirectBuildVersion}=await import(pathToFileURL(path.join(builder,'integration/cloud/automatic-release-build.mjs')).href);
+assert.equal(compactDirectBuildVersion,1);
 
 const scratch=await fs.mkdtemp(path.join(await fs.realpath(volume),'audit-builder-smoke-'));
 try{
@@ -331,7 +333,17 @@ async function qualifyBuilder(appRoot, entry, pm2Home, encoded) {
         (await json(path.join(root, 'sync.json')))?.builderSha256 !== previousBuilder) {
       throw Error('Managed worker changed during qualification');
     }
-    return { ...receipt, workerUnchanged: true, previousBuilderSha256: previousBuilder, files };
+    const staged = path.join(root, 'builder-staged-' + candidateBuilder);
+    if (await stat(staged)) await verifyAuditBuilder(staged, candidateBuilder);
+    else await fs.rename(code, staged);
+    await verifyAuditBuilder(staged, candidateBuilder);
+    const rootHandle = await fs.open(root, 'r');
+    try { await rootHandle.sync(); } finally { await rootHandle.close(); }
+    const disk = await fs.statfs(work);
+    const memory = await fs.readFile('/proc/meminfo', 'utf8');
+    const available = /^MemAvailable:\s+(\d+) kB$/m.exec(memory);
+    return { ...receipt, workerUnchanged: true, previousBuilderSha256: previousBuilder, files, staged: true,
+      freeDiskBytes: disk.bavail * disk.bsize, freeMemoryBytes: available ? Number(available[1]) * 1024 : null };
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
