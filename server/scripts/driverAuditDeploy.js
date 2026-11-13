@@ -259,12 +259,16 @@ async function verifyDisabledAudit() {
   requireValue(response.status === 503 && body.trim() === 'Driver audits are not enabled.', 'Driver audit disablement was not confirmed.');
 }
 
-async function readActiveHead() {
+async function readActiveHead({rejectStage=false}={}) {
   const { default: mongoose } = await import('mongoose');
   try {
     await mongoose.connect(process.env.MONGODB_URI, { autoIndex: false, autoCreate: false, serverSelectionTimeoutMS: 10_000 });
-    return (await mongoose.connection.db.collection('driverAuditControl').findOne({ _id: 'head' }))?.head;
-  } catch {
+    const control=mongoose.connection.db.collection('driverAuditControl');
+    if(rejectStage&&await control.findOne({_id:'direct-stage'}))
+      throw new DeploymentError('Recover the pending direct import before changing the builder.');
+    return (await control.findOne({_id:'head'}))?.head;
+  } catch (error) {
+    if(error instanceof DeploymentError)throw error;
     throw new DeploymentError('The active driver audit could not be read from the app database.');
   } finally {
     await mongoose.disconnect();
@@ -502,6 +506,82 @@ async function enableRetention({ commit, manifest, capacity, secret, root, pmEnv
   return { status: 'enabled', replicaGcEnabled: true };
 }
 
+async function changeAuditBuilder({operation,shell,pmEnv}){
+  const [{transitionDriverAuditBuilder},{acquireWorkerLock}]=await Promise.all([
+    import('../services/driverAuditBuilderTransition.js'),
+    import('../vendor/driver-audits/integration/hosted/worker-lock.mjs'),
+  ]);
+  const from=shell.DRIVER_AUDIT_BUILDER_FROM,to=shell.DRIVER_AUDIT_BUILDER_TO;
+  const rollback=operation==='audit-builder-rollback';
+  requireValue([from,to].every(hash=>sha256.test(hash??''))&&from!==to,
+    'Provide two distinct reviewed builder hashes.');
+  const worker=await processEntry(syncName,pmEnv);
+  requireValue(worker&&['online','stopped'].includes(worker.pm2_env?.status),'The managed audit worker must exist.');
+  const config=registeredWorkerConfig(worker);
+  const root=path.dirname(config);
+  const receipt=path.join(root,'builder-transition-'+from+'-'+to+'.private.json');
+  const interrupted=await readFile(receipt,{privateOnly:true,optional:true})!==null;
+  requireValue(!rollback||interrupted,'A builder rollback requires the original transition receipt.');
+
+  const retained=await jsonFile(path.join(root,'deployment-sync.json'));
+  const retentionStatus=driverAuditReplicaRetentionStatus(process.env[gcKey]==='1',retained,await driverAuditRetentionImplementation());
+  requireValue(retentionStatus==='off'||retentionStatus==='qualified','Qualify current replica retention before changing the builder.');
+  const qualified=retentionStatus==='qualified';
+  if(worker.pm2_env.status==='online'){
+    requireValue(process.platform==='linux'&&Number.isInteger(worker.pid)&&worker.pid>0&&
+      await fs.realpath('/proc/'+worker.pid+'/exe')===await fs.realpath(process.execPath),
+    'Run with the registered worker Linux Node executable.');
+    const existing=await jsonFile(config);
+    requireValue([from,to].includes(existing.builderSha256),'The active builder does not match either reviewed hash.');
+    const candidate=existing.builderSha256===to?existing.codeRoot:path.join(root,'builder-staged-'+to);
+    if(!rollback)await runScript('checkDriverAuditBuilder.js',[candidate,to,root],pmEnv,'The reviewed builder did not pass its host smoke check.');
+    await readActiveHead({rejectStage:true});
+    await pm2(['stop',syncName],pmEnv);
+  }else{
+    if(!interrupted){
+      requireValue(process.platform==='linux'&&(await jsonFile(config)).builderSha256===from,
+        'The stopped worker does not match the reviewed source builder.');
+      await runScript('checkDriverAuditBuilder.js',[path.join(root,'builder-staged-'+to),to,root],pmEnv,
+        'The reviewed builder did not pass its host smoke check.');
+    }
+  }
+
+  const resume=async()=>{
+    await checkWorkerConfig(config,shell);
+    const startedAt=Date.now();
+    await pm2(['restart',syncName],pmEnv);
+    await waitForWorker(config,pmEnv,startedAt,qualified);
+    requireValue((await processEntry(syncName,pmEnv))?.pm_id===worker.pm_id,'The audit worker registration changed.');
+    await pm2(['save'],pmEnv);
+  };
+  let switched=false;
+  try{
+    const stopped=await processEntry(syncName,pmEnv);
+    requireValue(stopped?.pm_id===worker.pm_id&&registeredWorkerConfig(stopped)===config&&stopped.pm2_env.status==='stopped',
+      'The original audit worker did not stop.');
+    const lock=await acquireWorkerLock(path.join(path.dirname(root),'sync-worker.lock'));
+    try{
+      await readActiveHead({rejectStage:true});
+      switched=true;
+      await transitionDriverAuditBuilder({root,from,to,rollback});
+    }finally{await lock.release();}
+    await resume();
+  }catch(error){
+    if(rollback)throw error;
+    await pm2(['stop',syncName],pmEnv);
+    const lock=await acquireWorkerLock(path.join(path.dirname(root),'sync-worker.lock'));
+    try{
+      if(switched&&await readFile(receipt,{privateOnly:true,optional:true})!==null){
+        await readActiveHead({rejectStage:true});
+        await transitionDriverAuditBuilder({root,from,to,rollback:true});
+      }
+    }finally{await lock.release();}
+    await resume();
+    throw error;
+  }
+  return {status:rollback?'builder-rolled-back':'builder-started',builderSha256:rollback?from:to,productionAcceptancePending:true};
+}
+
 async function release(operation, shell) {
   const commit = shell.DRIVER_AUDIT_DEPLOY_SHA;
   requireValue(/^[a-f0-9]{40}$/.test(commit ?? ''), 'An exact reviewed application commit is required.');
@@ -512,6 +592,7 @@ async function release(operation, shell) {
   const head = await run('git', ['rev-parse', 'HEAD'], shell, 'The deployed application commit could not be checked.');
   requireValue(head.trim() === commit, 'The deployed application commit differs from the reviewed commit.');
   const pmEnv = pm2Environment(shell);
+  if(['audit-builder-upgrade','audit-builder-rollback'].includes(operation))return changeAuditBuilder({operation,shell,pmEnv});
   if (operation === 'deploy-worker-pause' || operation === 'deploy-worker-resume') {
     const worker = await processEntry(syncName, pmEnv);
     if (operation === 'deploy-worker-pause') {
@@ -697,7 +778,7 @@ if (process.argv[1] && await fs.realpath(process.argv[1]).catch(() => null) === 
   const shell = { ...process.env };
   try {
     const deploymentMaintenance = ['deploy-worker-pause', 'deploy-worker-resume'].includes(operation);
-    requireValue(process.argv.length === 3 && (deploymentMaintenance || ['audit-preflight', 'audit-seed-enable', 'audit-sync-start', 'audit-rollback', retentionOperation].includes(operation)),
+    requireValue(process.argv.length === 3 && (deploymentMaintenance || ['audit-preflight', 'audit-seed-enable', 'audit-sync-start', 'audit-rollback', 'audit-builder-upgrade', 'audit-builder-rollback', retentionOperation].includes(operation)),
       'Choose an explicit driver audit deployment operation.');
     if (!deploymentMaintenance) await import('../loadEnv.js');
     const result = await release(operation, shell);

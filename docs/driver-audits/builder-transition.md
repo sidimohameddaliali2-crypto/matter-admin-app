@@ -1,0 +1,15 @@
+# Driver Reports builder replacement
+
+Use the reviewed DigitalOcean deployment workflow. It serializes the builder operations with application deployments. Coordinate a single production operator, record the reviewed app commit and previous and replacement manifest hashes, and capture the active and previous report fingerprints, worker registration, retention qualification and pending-stage state. Finish any pending direct import first. Record free memory, build-volume free space, replica usage, the review-journal fingerprint and source/report cutoffs in the private release receipt.
+
+The workflow expects the replacement code-only export at `<sync-root>/builder-staged-<replacement SHA-256>`, owned by the managed service account and staged on the same volume. Copy through the approved private host access path. The manifest and each declared file must match exact hashes and owner-only permissions. The active workflow checks the actual running worker Node executable and runs a credential-free smoke on that volume. The production workspace gate remains 2.5 GiB.
+
+Run `audit-builder-upgrade` with `expected_sha`, `audit_builder_from` and `audit_builder_to`. The operation stops the managed sync process, takes its SQLite-backed worker lock, checks for a pending stage again, persists the original configuration and swaps the two verified directories. It restarts the same PM2 registration and checks the heartbeat and retention status. Staff reads continue on the active report. Repeating the exact operation recovers an interrupted directory or configuration update. Keep the original directory and transition receipt.
+
+The replacement config holds retirement of unrecorded attempts unless the legacy recipe was independently established and already configured. Each new attempt records the builder, renderer, validation journals and original baseline fingerprints before writing build data. A failed or corrupt receipt prevents deriving a new retirement proof for that attempt.
+
+Startup confirmation leaves live acceptance pending. Verify a real sync result, the archive closure, the active and previous restore markers, and an authenticated read that opens an original photo, dated address, GPS and saved review history. Compare source capture, build start, publication and staff read times. Record measured peak RSS, allocated workspace, archive bytes and replica size. Verify a new saved photo, GPS point and grade when the next source capture is available.
+
+If the builder fails acceptance, run `audit-builder-rollback` with the same two hashes and deployed commit. Drain any staged import first. The rollback restores the original builder and exact configuration bytes. Check the same registration, active and previous report identities, pending stage and review history. Rollback keeps any newer verified report. A full audit rollback disables access and is a separate operation.
+
+Changes to the worker or retirement implementation require a fresh exact restore and rollback qualification receipt through the established retention workflow before builder replacement. The prior incident approval is scoped to its exact app release and receipt.

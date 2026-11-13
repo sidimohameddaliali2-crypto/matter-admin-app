@@ -13,11 +13,6 @@ on:
         type: boolean
         default: false
 
-      stage_driver_reports_release:
-        description: Stage the approved private Driver Reports release
-        type: boolean
-        default: false
-
 concurrency:
   group: production-deploy
   cancel-in-progress: false
@@ -55,15 +50,13 @@ jobs:
           QUALIFY_BUILDER: ${{ inputs.qualify_builder }}
           BUILDER_QUALIFICATION_BUNDLE: ${{ inputs.qualify_builder && secrets.DRIVER_AUDIT_ONE_OFF_BUILDER_BUNDLE || '' }}
           AUDIT_STATUS_CODE: ${{ steps.prepare.outputs.code }}
-          STAGE_DRIVER_REPORTS_RELEASE: ${{ inputs.stage_driver_reports_release }}
-          DRIVER_REPORTS_RELEASE_LOCATOR: ${{ inputs.stage_driver_reports_release && secrets.DRIVER_REPORTS_RELEASE_LOCATOR || '' }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 2m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,BUILDER_QUALIFICATION_BUNDLE,STAGE_DRIVER_REPORTS_RELEASE,DRIVER_REPORTS_RELEASE_LOCATOR
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,BUILDER_QUALIFICATION_BUNDLE
           script: |
             set -e
             cd -- "$DO_APP_PATH"
