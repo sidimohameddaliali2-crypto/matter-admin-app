@@ -16,6 +16,9 @@ const filename=/^[A-Za-z0-9][A-Za-z0-9._-]{0,239}$/;
 const objectName=/^[a-f0-9]{64}\.gz$/;
 const temporaryGzip=/^(.+\.retained\.gz)\.[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const maxFile=128*1024*1024;
+// Report workspaces contain the immutable archive chunks as well as generated files.
+const maxInventoryEntries=32_768;
+const maxInventoryBytes=16*1024*1024;
 const receiptName='retired-workspace.private.json';
 const inventoryName='retired-workspace-inventory.private.json.gz';
 const abandonedReceipt='abandoned-workspace.private.json';
@@ -87,7 +90,7 @@ async function safeDirectory(directory){
 
 async function saveInventory(directory,receipt,inventoryName,summary,files){
   const encoded=Buffer.from(JSON.stringify(files));
-  assert(files.length<=10_000&&encoded.length<=16*1024*1024,'Audit workspace retirement inventory exceeds its bound');
+  assert(files.length<=maxInventoryEntries&&encoded.length<=maxInventoryBytes,'Audit workspace retirement inventory exceeds its bound');
   const inventory=gzipSync(encoded),inventoryFile=path.join(directory,inventoryName);
   await privateAuditWrite(inventoryFile,inventory);
   await syncPath(inventoryFile);
@@ -100,10 +103,10 @@ async function saveInventory(directory,receipt,inventoryName,summary,files){
 
 async function readInventory(directory,proof,inventoryName){
   assert(proof.status==='prepared'&&proof.inventoryFile===inventoryName,'Invalid audit workspace retirement receipt');
-  const inventory=await bytes(path.join(directory,inventoryName),16*1024*1024);
+  const inventory=await bytes(path.join(directory,inventoryName),maxInventoryBytes);
   assert(inventory&&sha(inventory)===proof.inventoryCompressedSha256,'Invalid compressed audit workspace inventory');
-  const decoded=gunzipSync(inventory,{maxOutputLength:16*1024*1024}),files=JSON.parse(decoded);
-  assert(Array.isArray(files)&&files.length<=10_000&&sha(decoded)===proof.inventorySha256,
+  const decoded=gunzipSync(inventory,{maxOutputLength:maxInventoryBytes}),files=JSON.parse(decoded);
+  assert(Array.isArray(files)&&files.length<=maxInventoryEntries&&sha(decoded)===proof.inventorySha256,
     'Invalid audit workspace retirement inventory');
   return files;
 }
@@ -263,7 +266,7 @@ async function prepare({directory,seed,accepted,receiptRoot,retirement}){
     for(const key of objects.keys())await plan('audit-objects/'+key,key.slice(0,-3));
   }
   for(const name of buildFiles)await plan(name);
-  assert(files.length<=10_000,'Audit workspace retirement inventory exceeds its bound');
+  assert(files.length<=maxInventoryEntries,'Audit workspace retirement inventory exceeds its bound');
   return {version:1,status:'prepared',manifestSha256:seed.manifestSha256,sourceBasis:seed.sourceBasis,source,recipe,
     lineage:{baselineRoot:accepted.baselineRoot??null,previousManifestSha256:accepted.previous?.manifestSha256??null},
     archive:{descriptorSha256:seed.pointer.descriptor.sha256,objects:objects.size,inventorySha256:sha(JSON.stringify([...objects]))},
@@ -433,7 +436,7 @@ async function planAbandoned({directory,manifest,retained,receiptRoot,retirement
       if(entry.isFile()&&filename.test(entry.name)&&entry.name!=='files.private.json')names.add(kind+'/'+entry.name);
     }
   }
-  assert(names.size<=10_000,'Abandoned audit workspace exceeds its inventory bound');
+  assert(names.size<=maxInventoryEntries,'Abandoned audit workspace exceeds its inventory bound');
   // Archive receipts establish exact original inputs even if the interrupted build never wrote a manifest.
   const source=await abandonedSource(directory,retirement);
   if(!source)return null;
