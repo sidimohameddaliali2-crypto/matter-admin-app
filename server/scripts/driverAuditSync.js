@@ -7,7 +7,7 @@ import {runDriverAuditDirectImport} from '../services/driverAuditDirectImport.js
 import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollection.js';
 import {driverAuditReplicaRetentionStatus,driverAuditRetentionImplementation} from '../services/driverAuditRetention.js';
 import {withDriverAuditWriter} from '../services/driverAuditWriter.js';
-import {compactPreviousDriverAuditInputs,compactRetiredDriverAuditInputs,hasDriverAuditBuildSpace,pruneDriverAuditWorkspace,reclaimDriverAuditBuildCache,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
+import {compactActiveDriverAuditBuildFiles,compactPreviousDriverAuditInputs,compactRetiredDriverAuditInputs,hasDriverAuditBuildSpace,pruneDriverAuditWorkspace,reclaimDriverAuditBuildCache,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
 import {acceptedWorkspace,prunePreviousDriverAuditCopies} from '../services/driverAuditWorkspaceRetirement.js';
 import {pathToFileURL} from 'node:url';
 import {createBudgetedAuditArchive,createBudgetedAuditState} from '../vendor/driver-audits/integration/cloud/driver-audit-archive.mjs';
@@ -191,9 +191,10 @@ async function main(){
         const currentHead=await readHead(),stage=await control.findOne({_id:'direct-stage'});
         const options={root:work,head:currentHead,stage,retentionStatus:replicaGcStatus,
          protectedManifests:[currentHead,currentHead?.previous,stage?.pointer].map(pointer=>pointer?.directImport?.manifestSha256).filter(Boolean)};
-        const previous=await compactPreviousDriverAuditInputs(options);
+        const active=await compactActiveDriverAuditBuildFiles(options);
+        const previous=!hasDriverAuditBuildSpace(await availableOnHost())&&await compactPreviousDriverAuditInputs(options);
         const retired=!hasDriverAuditBuildSpace(await availableOnHost())&&await compactRetiredDriverAuditInputs(options);
-        return previous||retired;
+        return active||previous||retired;
        });
        if(compacted)console.info(JSON.stringify({event:'audit-workspace-retained-inputs-compacted',freeDiskDeltaBytes:await availableOnHost()-available}));
       }

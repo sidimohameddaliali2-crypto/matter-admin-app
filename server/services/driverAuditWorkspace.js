@@ -149,6 +149,16 @@ export async function compactPreviousDriverAuditInputs({root,head,stage,retentio
   return compactRetainedInputs(directory,{includeSources:true});
 }
 
+// The next refresh uses the published server-data as its baseline. Its build
+// scratch is only needed for offline inspection and can be stored losslessly.
+export async function compactActiveDriverAuditBuildFiles({root,head,stage,retentionStatus}) {
+  if(retentionStatus!=='qualified'||stage!==null)return false;
+  const pointer=await optionalJson(path.join(root,'current.private.json'));
+  const active=await acceptedWorkspace(root,pointer,head).catch(()=>null);
+  if(!active||!isDeepStrictEqual(pointer,active.accepted))return false;
+  return compactRetainedInputs(active.directory,{includeSources:false});
+}
+
 // The abandoned retirement inventory is terminal. Preserve the remaining
 // inputs byte for byte, even when their provenance was insufficient for removal.
 export async function compactRetiredDriverAuditInputs({root,protectedManifests,stage,retentionStatus}) {
