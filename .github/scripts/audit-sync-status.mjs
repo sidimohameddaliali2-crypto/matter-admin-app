@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { createRequire } from 'node:module';
 import { gunzipSync } from 'node:zlib';
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
@@ -338,124 +337,11 @@ async function qualifyBuilder(appRoot, entry, pm2Home, encoded) {
   }
 }
 
-const releaseTransferSha = '3e42f7a5ef3ce6f192597b3b7dc6a1e879be5685203a12dcc8e286ed79d67ede';
-const rendererSha = '214102591e7ef0568fc85e8f433b52bf8ec478c92304714f2b0d4eb6c9956a7f';
-const rendererManifestSha = '00c0c7dcea8a1c6cff3696c8ca4333134aa1809c7da7600dd73aa7b12077438a';
-const releaseBytes = 6884998;
-
-export function parseReleaseTransfer(bytes) {
-  if (bytes.length !== releaseBytes || digest(bytes) !== releaseTransferSha) throw Error('Unexpected private release payload');
-  const data = JSON.parse(gunzipSync(bytes, { maxOutputLength: 12 * 1024 * 1024 }));
-  const html = Buffer.from(data.renderer, 'base64');
-  const manifestBytes = Buffer.from(data.manifest, 'base64');
-  const builderDelta = Buffer.from(data.builderDelta, 'base64').toString('utf8');
-  if (digest(html) !== rendererSha || digest(manifestBytes) !== rendererManifestSha ||
-      digest(builderDelta) !== bundleHash) throw Error('Unexpected release component hash');
-  return { html, manifestBytes, builderDelta };
-}
-
-async function stageRelease(appRoot, entry, locator) {
-  if (process.platform !== 'linux' || entry?.pm2_env?.status !== 'online') throw Error('Online Linux worker required');
-  const root = syncRoot(appRoot, entry);
-  const info = await stat(root);
-  const config = await json(path.join(root, 'sync.json'));
-  const source = path.join(root, 'builder');
-  if (!info?.isDirectory() || info.uid !== process.getuid() || info.mode & 0o077 ||
-      await fs.realpath(root) !== root || config?.root !== root || config.codeRoot !== source ||
-      config.builderSha256 !== previousBuilder) throw Error('Unexpected live builder configuration');
-  const url = new URL(locator);
-  if (url.protocol !== 'https:' || url.hostname !== 'release-assets.githubusercontent.com' ||
-      url.port || url.username || url.password) throw Error('Unexpected release asset locator');
-  const response = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(30000) });
-  if (!response.ok || Number(response.headers.get('content-length')) !== releaseBytes) {
-    await response.body?.cancel();
-    throw Error('Private release transfer unavailable');
-  }
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of response.body) {
-    size += chunk.length;
-    if (size > releaseBytes) throw Error('Private release transfer exceeds its bound');
-    chunks.push(chunk);
-  }
-  const { html, manifestBytes, builderDelta } = parseReleaseTransfer(Buffer.concat(chunks, size));
-  const verifier = path.join(appRoot, 'server/vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs');
-  const { verifyAuditBuilder } = await import(pathToFileURL(verifier).href);
-  await verifyAuditBuilder(source, previousBuilder);
-  await import(pathToFileURL(path.join(appRoot, 'server/loadEnv.js')).href);
-  const require = createRequire(path.join(appRoot, 'server/package.json'));
-  const mongoose = require('mongoose');
-  const connection = mongoose.createConnection(process.env.MONGODB_URI, {
-    autoCreate: false, autoIndex: false, maxPoolSize: 1, serverSelectionTimeoutMS: 5000,
-  });
-  let generations;
-  try {
-    await connection.asPromise();
-    const control = connection.db.collection('driverAuditControl');
-    const [stage, pointer] = await Promise.all([
-      control.findOne({ _id: 'direct-stage' }, { projection: { _id: 1 } }),
-      control.findOne({ _id: 'head' }, { projection: { 'head.generation': 1, 'head.previous.generation': 1 } }),
-    ]);
-    generations = [pointer?.head?.generation, pointer?.head?.previous?.generation];
-    if (stage || !generations.every(value => typeof value === 'string' && manifest.test(value))) {
-      throw Error('Recover the staged audit import before release');
-    }
-  } finally {
-    await connection.close();
-  }
-  const staged = path.join(root, 'builder-staged-' + candidateBuilder);
-  const renderer = path.join(root, 'staff-renderer-' + rendererSha);
-  const temporary = await fs.mkdtemp(path.join(root, 'audit-release-staging-'));
-  try {
-    const builderTmp = path.join(temporary, 'builder');
-    const rendererTmp = path.join(temporary, 'renderer');
-    await stageQualificationBuilder({ source, target: builderTmp, encoded: builderDelta,
-      expectedBundleHash: bundleHash, expectedBuilder: candidateBuilder, verify: verifyAuditBuilder });
-    await fs.mkdir(rendererTmp, { mode: 0o700 });
-    await fs.writeFile(path.join(rendererTmp, 'renderer.private.html'), html, { mode: 0o600, flag: 'wx' });
-    await fs.writeFile(path.join(rendererTmp, 'manifest.private.json'), manifestBytes, { mode: 0o600, flag: 'wx' });
-    if (!(await stat(staged))) await fs.rename(builderTmp, staged);
-    await verifyAuditBuilder(staged, candidateBuilder);
-    if (!(await stat(renderer))) await fs.rename(rendererTmp, renderer);
-    const rendererStat = await stat(renderer);
-    if (!rendererStat?.isDirectory() || rendererStat.uid !== info.uid || rendererStat.mode & 0o077 ||
-        await fs.realpath(renderer) !== renderer) throw Error('Renderer staging directory is not private');
-    for (const [name, expected] of [['renderer.private.html',rendererSha],['manifest.private.json',rendererManifestSha]]) {
-      const file = path.join(renderer, name);
-      const metadata = await stat(file);
-      if (!metadata?.isFile() || metadata.uid !== info.uid || metadata.mode & 0o077 ||
-          metadata.size > 16 * 1024 * 1024 || digest(await fs.readFile(file)) !== expected) {
-        throw Error('Staged renderer differs from the reviewed release');
-      }
-    }
-    const settings = path.join(appRoot, 'server/.env.local');
-    const settingStat = await stat(settings);
-    if (!settingStat?.isFile() || settingStat.uid !== info.uid || settingStat.mode & 0o077 ||
-        settingStat.size > 1024 * 1024) throw Error('Existing private app settings required');
-    const current = await fs.readFile(settings, 'utf8');
-    const added = 'DRIVER_AUDIT_STAFF_RENDERER_DIR=' + JSON.stringify(renderer) + '\n' +
-      'DRIVER_AUDIT_STAFF_RENDERER_SHA256=' + rendererSha + '\n';
-    const cleaned = current.replace(/^(?:DRIVER_AUDIT_STAFF_RENDERER_DIR|DRIVER_AUDIT_STAFF_RENDERER_SHA256)=.*(?:\n|$)/gm,'');
-    const replacement = cleaned.replace(/\n?$/,'\n') + added;
-    if (replacement !== current) {
-      const settingsTmp = path.join(temporary, 'settings');
-      await fs.writeFile(settingsTmp, replacement, { mode: 0o600, flag: 'wx' });
-      if (await fs.readFile(settings, 'utf8') !== current) throw Error('App settings changed while staging');
-      await fs.rename(settingsTmp, settings);
-    }
-    return { status: 'release-staged', rendererSha256: rendererSha, builderSha256: candidateBuilder, generations };
-  } finally {
-    await fs.rm(temporary, { recursive: true, force: true });
-  }
-}
-
 async function main() {
   const appRoot = await fs.realpath(process.cwd());
   const expected = process.env.EXPECTED_DEPLOYED_SHA;
   const encoded = process.env.BUILDER_QUALIFICATION_BUNDLE;
   delete process.env.BUILDER_QUALIFICATION_BUNDLE;
-  const locator = process.env.DRIVER_REPORTS_RELEASE_LOCATOR;
-  delete process.env.DRIVER_REPORTS_RELEASE_LOCATOR;
   const git = await exec('git', ['rev-parse', 'HEAD'], { cwd: appRoot, timeout: 5000 });
   if (!sha.test(expected) || git.stdout.trim() !== expected) throw Error('Unexpected production checkout');
 
@@ -471,9 +357,7 @@ async function main() {
     if (entries.length > 1) throw Error('Multiple audit workers registered');
     [entry] = entries;
   }
-  if (process.env.STAGE_DRIVER_REPORTS_RELEASE === 'true') {
-    console.log(JSON.stringify(await stageRelease(appRoot, entry, locator)));
-  } else if (process.env.QUALIFY_BUILDER === 'true') {
+  if (process.env.QUALIFY_BUILDER === 'true') {
     console.log(JSON.stringify(await qualifyBuilder(appRoot, entry, pm2Home, encoded)));
   } else {
     console.log(JSON.stringify(await readAuditSyncStatus({ appRoot, pm2Home, entry })));
@@ -482,11 +366,6 @@ async function main() {
 
 if (process.argv[1] === '-' && process.argv[2] === '--print') {
   main().catch(() => {
-    if (process.env.STAGE_DRIVER_REPORTS_RELEASE === 'true') {
-      console.error('The approved private Driver Reports handoff could not be staged.');
-      process.exitCode = 1;
-      return;
-    }
     console.error(process.env.QUALIFY_BUILDER === 'true'
       ? 'Could not verify the pinned Linux builder on the reviewed production host.'
       : 'Could not read audit sync status from the reviewed production checkout.');
