@@ -27,7 +27,7 @@ async function fixture(t){
   };
   const recipe={builderSha256:sha('builder'),rendererSha256:sha('renderer'),journalsSha256:sha('journals'),baselineManifestSha256:sha('baseline')};
   const retirement={transport,sourceBasis:source=>source.basis,readSourceReceipt:async revision=>sources.get(revision),recipe};
-  async function add(revision,{archiveMirrors=false}={}){
+  async function add(revision,{archiveMirrors=false,generatedFiles=0}={}){
     const directory=path.join(root,'attempts',String(revision).padStart(8,'0')+'-0000-4000-8000-000000000000');
     const privateRoot=path.join(directory,'server-data'),bundleRoot=path.join(directory,'audit-objects'),saved=path.join(directory,'saved-current');
     for(const subdir of [privateRoot,bundleRoot,saved])await fs.mkdir(subdir,{recursive:true,mode:0o700});
@@ -42,6 +42,13 @@ async function fixture(t){
     await write(path.join(saved,'current-browser.private.json'),browser);
     await write(path.join(saved,'current-reviews.private.json'),reviews);
     const localFiles={'runtime.private.json':sha(browser),'generated.private.json':sha(reviews)};
+    const payload=Buffer.from('generated audit evidence');
+    const payloadHash=sha(payload);
+    for(let start=0;start<generatedFiles;start+=64){
+      const names=Array.from({length:Math.min(64,generatedFiles-start)},(_,offset)=>`generated-${start+offset}.private.json`);
+      await Promise.all(names.map(name=>write(path.join(privateRoot,name),payload)));
+      for(const name of names)localFiles[name]=payloadHash;
+    }
     const mirrors=[];
     if(archiveMirrors){
       for(const [kind,verified]of [['archived',true],['unverified',false]]){
@@ -487,4 +494,18 @@ test('abandoned direct builds can retire compacted source copies only after exac
   const result=await f.prune({abandoned:'apply'});
   assert.equal(result.abandoned.attempts,1);
   assert.deepEqual(await fs.readdir(orphan.saved),[]);
+});
+
+test('a production-sized superseded build retires after verified readback', async t => {
+  const f = await fixture(t);
+  const old = await f.add(1,{generatedFiles:12_600});
+  const previous = await f.add(2);
+  const current = await f.add(3);
+  await f.point();
+  const result = await f.prune();
+  assert.equal(result.attemptsRetired, 1);
+  assert.deepEqual(await fs.readdir(old.privateRoot), ['unknown.private.json']);
+  for (const item of [previous, current]) {
+    assert.deepEqual(await fs.readFile(path.join(item.privateRoot, 'runtime.private.json')), item.browser);
+  }
 });
