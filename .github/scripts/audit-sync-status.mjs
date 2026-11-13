@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
+import { gunzipSync } from 'node:zlib';
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -207,9 +210,138 @@ export async function readAuditSyncStatus({ appRoot, pm2Home, entry }) {
   };
 }
 
+// This payload is limited to the exact reviewed code-only export.
+const candidateBuilder = '13cfd8e5b543714ce6fa93d6aece9e229d4ff0e558768807622d595e29a200b7';
+const previousBuilder = '1df5fdc8ec706a7ab1b69c544a2c641b4951aa453859a5f48cf38818da09b6ee';
+const bundleHash = '769b2a83dc0b20715a434a5d2c27dc63a7b6370ae49f57780098063179e9d2ad';
+const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+const codePath = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*[A-Za-z0-9][A-Za-z0-9._-]*\.(?:mjs|js)$/;
+const smokeSource = String.raw`
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import {DatabaseSync} from 'node:sqlite';
+import {pathToFileURL} from 'node:url';
+import {gzip,gunzip} from 'node:zlib';
+import {promisify} from 'node:util';
+const [builder, expected, volume, verifier, ...rest] = process.argv.slice(2);
+const { verifyAuditBuilder } = await import(pathToFileURL(verifier).href);
+assert(path.isAbsolute(builder??'')&&path.isAbsolute(volume??'')&&!rest.length,'Expected builder path, SHA-256 and private scratch parent');
+await verifyAuditBuilder(builder,expected);
+const exportsByFile={
+  'integration/cloud/automatic-release.mjs':['automaticReleaseBasis','createAutomaticRelease'],
+  'integration/cloud/automatic-release-source.mjs':['createAutomaticReleaseSource'],
+  'integration/cloud/automatic-release-build.mjs':['buildAutomaticRelease'],
+  'scripts/run-automatic-report.mjs':['validateAutomaticCandidate'],
+};
+for(const [file,names] of Object.entries(exportsByFile)){
+  const loaded=await import(pathToFileURL(path.join(builder,file)).href);
+  for(const name of names)assert.equal(typeof loaded[name],'function');
+}
+
+const scratch=await fs.mkdtemp(path.join(await fs.realpath(volume),'audit-builder-smoke-'));
+try{
+  const db=new DatabaseSync(path.join(scratch,'lock.sqlite'));
+  try{db.exec('BEGIN EXCLUSIVE; ROLLBACK;');}finally{db.close();}
+  const original=Buffer.from('audit builder smoke\n'.repeat(256));
+  const file=path.join(scratch,'scratch.gz');
+  await fs.writeFile(file,await promisify(gzip)(original),{mode:0o600,flag:'wx'});
+  await fs.link(file,file+'.linked');
+  assert.equal((await fs.stat(file)).ino,(await fs.stat(file+'.linked')).ino);
+  assert.deepEqual(await promisify(gunzip)(await fs.readFile(file+'.linked')),original);
+  const directory=await fs.open(scratch,'r');
+  try{await directory.sync();}finally{await directory.close();}
+}finally{await fs.rm(scratch,{recursive:true,force:true});}
+console.log(JSON.stringify({status:'checked',platform:process.platform,release:os.release(),node:process.version,builderSha256:expected}));
+`;
+
+export async function stageQualificationBuilder({ source, target, encoded, expectedBundleHash, expectedBuilder, verify }) {
+  if (typeof encoded !== 'string' || encoded.length > 48000 || digest(encoded) !== expectedBundleHash) {
+    throw Error('Unexpected private builder bundle');
+  }
+  const bundle = JSON.parse(gunzipSync(Buffer.from(encoded, 'base64'), { maxOutputLength: 128 * 1024 }));
+  const manifestBytes = Buffer.from(bundle.manifest, 'base64');
+  const parsed = JSON.parse(manifestBytes);
+  if (bundle.version !== 1 || parsed.version !== 1 || digest(manifestBytes) !== expectedBuilder ||
+      !parsed.files || !bundle.delta || !Object.hasOwn(parsed.files, 'scripts/run-automatic-report.mjs')) {
+    throw Error('Unexpected replacement builder manifest');
+  }
+  const files = Object.entries(parsed.files);
+  if (files.length > 128 || Object.keys(bundle.delta).some(name => !Object.hasOwn(parsed.files, name)) ||
+      files.some(([name, hash]) => name.length >= 512 || !codePath.test(name) || !manifest.test(hash))) {
+    throw Error('Unexpected replacement builder file list');
+  }
+  await fs.mkdir(target, { mode: 0o700 });
+  for (const [name, hash] of files) {
+    const sourceFile = path.join(source, name);
+    const bytes = Object.hasOwn(bundle.delta, name)
+      ? Buffer.from(bundle.delta[name], 'base64')
+      : await fs.readFile(sourceFile);
+    if (bytes.length > 8 * 1024 * 1024 || digest(bytes) !== hash) throw Error('Replacement builder file hash mismatch');
+    const output = path.join(target, name);
+    await fs.mkdir(path.dirname(output), { recursive: true, mode: 0o700 });
+    await fs.writeFile(output, bytes, { mode: 0o600, flag: 'wx' });
+  }
+  await fs.writeFile(path.join(target, 'runtime-manifest.json'), manifestBytes, { mode: 0o600, flag: 'wx' });
+  await verify(target, expectedBuilder);
+  return files.length;
+}
+
+async function qualifyBuilder(appRoot, entry, pm2Home, encoded) {
+  if (process.platform !== 'linux' || entry?.pm2_env?.status !== 'online' ||
+      !Number.isSafeInteger(entry.pid) || entry.pid < 1) throw Error('Online Linux worker required');
+  const root = syncRoot(appRoot, entry);
+  const info = await stat(root);
+  const workerProc = '/proc/' + entry.pid;
+  if (!info?.isDirectory() || info.uid !== process.getuid() || info.mode & 0o077 ||
+      await fs.realpath(root) !== root || (await fs.stat(workerProc)).uid !== info.uid) {
+    throw Error('Managed worker ownership required');
+  }
+  const work = path.join(root, 'work');
+  if (await fs.realpath(work) !== work || (await fs.stat(work)).dev !== info.dev) throw Error('Build volume mismatch');
+  const source = path.join(root, 'builder');
+  const config = await json(path.join(root, 'sync.json'));
+  if (config?.root !== root || config.codeRoot !== source || config.builderSha256 !== previousBuilder) {
+    throw Error('Running builder pin differs from the reviewed predecessor');
+  }
+  const node = await fs.realpath(workerProc + '/exe');
+  const verifier = path.join(appRoot, 'server/vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs');
+  const { verifyAuditBuilder } = await import(pathToFileURL(verifier).href);
+  await verifyAuditBuilder(source, previousBuilder);
+
+  const directory = await fs.mkdtemp(path.join(work, 'audit-linux-qualification-'));
+  try {
+    const code = path.join(directory, 'builder');
+    const smoke = path.join(directory, 'smoke.mjs');
+    const files = await stageQualificationBuilder({ source, target: code, encoded,
+      expectedBundleHash: bundleHash, expectedBuilder: candidateBuilder, verify: verifyAuditBuilder });
+    await fs.writeFile(smoke, smokeSource, { mode: 0o600, flag: 'wx' });
+    const env = { PATH: '/usr/bin:/bin', HOME: directory, LANG: 'C' };
+    const result = await exec(node, [smoke, code, candidateBuilder, directory, verifier], { env, timeout: 30000 });
+    const receipt = JSON.parse(result.stdout);
+    if (receipt.status !== 'checked' || receipt.platform !== 'linux' || receipt.node !== 'v22.23.4' ||
+        receipt.builderSha256 !== candidateBuilder) throw Error('Unexpected Linux smoke receipt');
+    const after = await exec('pm2', ['jlist'], { env: { PATH: process.env.PATH, HOME: os.homedir(), PM2_HOME: pm2Home },
+      timeout: 5000, maxBuffer: 8 * 1024 * 1024 });
+    const rows = JSON.parse(after.stdout).filter(row => row.name === name);
+    if (rows.length !== 1 || rows[0].pid !== entry.pid || rows[0].pm_id !== entry.pm_id ||
+        rows[0].pm2_env.pm_uptime !== entry.pm2_env.pm_uptime || rows[0].pm2_env.restart_time !== entry.pm2_env.restart_time ||
+        rows[0].pm2_env.status !== 'online' || syncRoot(appRoot, rows[0]) !== root ||
+        (await json(path.join(root, 'sync.json')))?.builderSha256 !== previousBuilder) {
+      throw Error('Managed worker changed during qualification');
+    }
+    return { ...receipt, workerUnchanged: true, previousBuilderSha256: previousBuilder, files };
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+}
+
 async function main() {
   const appRoot = await fs.realpath(process.cwd());
   const expected = process.env.EXPECTED_DEPLOYED_SHA;
+  const encoded = process.env.BUILDER_QUALIFICATION_BUNDLE;
+  delete process.env.BUILDER_QUALIFICATION_BUNDLE;
   const git = await exec('git', ['rev-parse', 'HEAD'], { cwd: appRoot, timeout: 5000 });
   if (!sha.test(expected) || git.stdout.trim() !== expected) throw Error('Unexpected production checkout');
 
@@ -225,12 +357,18 @@ async function main() {
     if (entries.length > 1) throw Error('Multiple audit workers registered');
     [entry] = entries;
   }
-  console.log(JSON.stringify(await readAuditSyncStatus({ appRoot, pm2Home, entry })));
+  if (process.env.QUALIFY_BUILDER === 'true') {
+    console.log(JSON.stringify(await qualifyBuilder(appRoot, entry, pm2Home, encoded)));
+  } else {
+    console.log(JSON.stringify(await readAuditSyncStatus({ appRoot, pm2Home, entry })));
+  }
 }
 
 if (process.argv[1] === '-' && process.argv[2] === '--print') {
   main().catch(() => {
-    console.error('Could not read audit sync status from the reviewed production checkout.');
+    console.error(process.env.QUALIFY_BUILDER === 'true'
+      ? 'Could not verify the pinned Linux builder on the reviewed production host.'
+      : 'Could not read audit sync status from the reviewed production checkout.');
     process.exitCode = 1;
   });
 }
