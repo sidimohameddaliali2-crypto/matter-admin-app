@@ -13,6 +13,11 @@ on:
         type: boolean
         default: false
 
+      upgrade_builder:
+        description: Activate only the qualified, pinned reporting builder on the current app
+        type: boolean
+        default: false
+
       clear_reporting_build_caches:
         description: Reclaim only the reviewed npm download and frontend compiler caches
         type: boolean
@@ -53,6 +58,7 @@ jobs:
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
           EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
           QUALIFY_BUILDER: ${{ inputs.qualify_builder }}
+          UPGRADE_BUILDER: ${{ inputs.upgrade_builder }}
           BUILDER_QUALIFICATION_BUNDLE: ${{ inputs.qualify_builder && secrets.DRIVER_AUDIT_ONE_OFF_BUILDER_BUNDLE || '' }}
           CLEAR_REPORTING_BUILD_CACHES: ${{ inputs.clear_reporting_build_caches }}
           AUDIT_STATUS_CODE: ${{ steps.prepare.outputs.code }}
@@ -61,8 +67,8 @@ jobs:
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
-          command_timeout: 2m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,BUILDER_QUALIFICATION_BUNDLE,CLEAR_REPORTING_BUILD_CACHES
+          command_timeout: 20m
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,UPGRADE_BUILDER,BUILDER_QUALIFICATION_BUNDLE,CLEAR_REPORTING_BUILD_CACHES
           script: |
             set -e
             cd -- "$DO_APP_PATH"
