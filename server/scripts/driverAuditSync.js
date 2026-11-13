@@ -8,6 +8,7 @@ import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollectio
 import {driverAuditReplicaRetentionStatus,driverAuditRetentionImplementation} from '../services/driverAuditRetention.js';
 import {withDriverAuditWriter} from '../services/driverAuditWriter.js';
 import {compactActiveDriverAuditBuildFiles,compactPreviousDriverAuditInputs,compactRetiredDriverAuditInputs,hasDriverAuditBuildSpace,pruneDriverAuditWorkspace,reclaimDriverAuditBuildCache,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
+import {readDriverAuditBuildRecipe,saveDriverAuditBuildRecipe} from '../services/driverAuditBuildRecipe.js';
 import {acceptedWorkspace,prunePreviousDriverAuditCopies} from '../services/driverAuditWorkspaceRetirement.js';
 import {pathToFileURL} from 'node:url';
 import {createBudgetedAuditArchive,createBudgetedAuditState} from '../vendor/driver-audits/integration/cloud/driver-audit-archive.mjs';
@@ -79,6 +80,11 @@ async function main(){
    return {revision,body:JSON.stringify(receipt)};
   }}));
   const bootstrap=await privateAuditJson(path.join(root,'seed.json')).catch(()=>null);
+  const recipe={builderSha256,rendererSha256:rendererBuild.sha256,journalsSha256:journals.sha256,
+   baselineManifestSha256:bootstrap?.manifestSha256};
+  // A swap pins the pre-provenance recipe explicitly, or uses null when the
+  // original inputs cannot be attributed with evidence.
+  const legacyRecipe=config.legacyBuildRecipe===undefined?recipe:config.legacyBuildRecipe;
   const work=path.join(root,'work');
   const receiptRoot=path.join(root,'archive-receipts');
   const freeBuildBytes=async(directory=work)=>{
@@ -95,6 +101,7 @@ async function main(){
    root:work,baselineRoot,pinnedDirectSync:true,loadSource:async()=>pinned,
    async build(options){
     requireDriverAuditBuildSpace(await freeBuildBytes());
+    await saveDriverAuditBuildRecipe(options.output,recipe);
     return buildAutomaticRelease({...options,rendererBuild,archiveBackedBaseline:true});
    },
    async validate(candidate){
@@ -185,7 +192,7 @@ async function main(){
        async readSourceReceipt(revision){
         const receipt=await sourceReceipts.read(revision);
         return {revision:receipt.revision,body:JSON.parse(receipt.body).body_text};
-       },recipe:{builderSha256,rendererSha256:rendererBuild.sha256,journalsSha256:journals.sha256,baselineManifestSha256:bootstrap?.manifestSha256},
+       },readRecipe:directory=>readDriverAuditBuildRecipe(directory,legacyRecipe),
        retainedBaseline:{root:baselineRoot,manifestSha256:bootstrap?.manifestSha256}};
       const workspace=await pruneDriverAuditWorkspace({root:work,receiptRoot,protectedManifests,retirement,abandoned:'apply'});
       if(workspace.retirementDeferred)console.warn(JSON.stringify({event:'audit-workspace-retirement-deferred',attempts:workspace.retirementDeferred}));

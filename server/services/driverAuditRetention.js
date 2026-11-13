@@ -8,6 +8,7 @@ const sha256 = /^[a-f0-9]{64}$/;
 const digest = value => createHash('sha256').update(value).digest('hex');
 const implementationFiles = [
   'services/driverAuditGarbageCollection.js',
+  'services/driverAuditBuildRecipe.js',
   'services/driverAuditDirectImport.js',
   'services/driverAuditReplica.js',
   'services/driverAuditRetention.js',

@@ -14,6 +14,14 @@ on:
           - audit-sync-start
           - audit-retention-enable
           - audit-rollback
+          - audit-builder-upgrade
+          - audit-builder-rollback
+      audit_builder_from:
+        description: SHA-256 of the previously active builder
+        type: string
+      audit_builder_to:
+        description: SHA-256 of the reviewed replacement builder
+        type: string
       expected_sha:
         description: Exact reviewed application commit for audit operations
         type: string
@@ -91,6 +99,8 @@ jobs:
         shell: bash
         env:
           OPERATION: ${{ inputs.operation }}
+          BUILDER_FROM: ${{ inputs.audit_builder_from }}
+          BUILDER_TO: ${{ inputs.audit_builder_to }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           AUDIT_MANIFEST: ${{ inputs.audit_manifest_sha256 }}
           AUDIT_CAPACITY: ${{ inputs.audit_capacity_bytes }}
@@ -117,6 +127,12 @@ jobs:
           fi
           case "$OPERATION" in
             audit-rollback) exit 0 ;;
+            audit-builder-upgrade|audit-builder-rollback)
+              if [[ ! "$BUILDER_FROM" =~ ^[a-f0-9]{64}$ || ! "$BUILDER_TO" =~ ^[a-f0-9]{64}$ || "$BUILDER_FROM" = "$BUILDER_TO" ]]; then
+                echo "The previous and replacement builder hashes are required."
+                exit 1
+              fi
+              exit 0 ;;
             audit-preflight|audit-seed-enable|audit-sync-start|audit-retention-enable) ;;
             *) echo "Invalid audit operation."; exit 1 ;;
           esac
@@ -207,6 +223,8 @@ jobs:
         env:
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
           AUDIT_OPERATION: ${{ inputs.operation }}
+          DRIVER_AUDIT_BUILDER_FROM: ${{ inputs.audit_builder_from }}
+          DRIVER_AUDIT_BUILDER_TO: ${{ inputs.audit_builder_to }}
           DRIVER_AUDIT_DEPLOY_SHA: ${{ inputs.expected_sha }}
           DRIVER_AUDIT_DEPLOY_MANIFEST: ${{ inputs.audit_manifest_sha256 }}
           DRIVER_AUDIT_DEPLOY_CAPACITY_BYTES: ${{ inputs.audit_capacity_bytes }}
@@ -223,7 +241,7 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 20m
-          envs: DO_APP_PATH,AUDIT_OPERATION,DRIVER_AUDIT_DEPLOY_SHA,DRIVER_AUDIT_DEPLOY_MANIFEST,DRIVER_AUDIT_DEPLOY_CAPACITY_BYTES,DRIVER_AUDIT_DEPLOY_SECRET,DRIVER_AUDIT_STAFF_GENERATION,DRIVER_AUDIT_STAFF_VERIFICATION,DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256,DRIVER_AUDIT_RETAINED_GENERATIONS,DRIVER_AUDIT_SYNC_MIN_MEMORY,DRIVER_AUDIT_SYNC_MIN_DISK
+          envs: DO_APP_PATH,AUDIT_OPERATION,DRIVER_AUDIT_BUILDER_FROM,DRIVER_AUDIT_BUILDER_TO,DRIVER_AUDIT_DEPLOY_SHA,DRIVER_AUDIT_DEPLOY_MANIFEST,DRIVER_AUDIT_DEPLOY_CAPACITY_BYTES,DRIVER_AUDIT_DEPLOY_SECRET,DRIVER_AUDIT_STAFF_GENERATION,DRIVER_AUDIT_STAFF_VERIFICATION,DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256,DRIVER_AUDIT_RETAINED_GENERATIONS,DRIVER_AUDIT_SYNC_MIN_MEMORY,DRIVER_AUDIT_SYNC_MIN_DISK
           script: |
             set -e
             cd -- "$DO_APP_PATH"

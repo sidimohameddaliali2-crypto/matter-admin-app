@@ -223,7 +223,8 @@ async function planScratchCopies(directory,relative,original,files){
 }
 
 async function prepare({directory,seed,accepted,receiptRoot,retirement}){
-  const {transport,readSourceReceipt,sourceBasis,recipe}=retirement;
+  const {transport,readSourceReceipt,sourceBasis}=retirement;
+  const recipe=await attemptRecipe(directory,retirement);
   assert(typeof transport?.readObject==='function'&&typeof readSourceReceipt==='function'&&typeof sourceBasis==='function'
     &&['builderSha256','rendererSha256','journalsSha256','baselineManifestSha256'].every(key=>digest.test(recipe?.[key])),
   'Exact audit rebuild recipe required');
@@ -308,6 +309,10 @@ async function exactArchiveReceipt(receiptRoot,key,actual){
 }
 
 const archiveKey=relative=>relative.match(/^(?:server-data\/archive-([a-f0-9]{64})\.private\.bin|audit-objects\/([a-f0-9]{64})\.gz)$/)?.slice(1).find(Boolean);
+const attemptRecipe=(directory,retirement)=>retirement?.readRecipe
+  ?retirement.readRecipe(directory)
+  :retirement?.recipe;
+
 const proofForRecipe=recipe=>['builderSha256','rendererSha256','journalsSha256','baselineManifestSha256'].every(key=>digest.test(recipe?.[key]));
 
 export async function acceptedWorkspace(root,candidate,head){
@@ -394,7 +399,8 @@ export async function prunePreviousDriverAuditCopies({root,receiptRoot,head,stag
 }
 
 async function abandonedSource(directory,retirement){
-  const {transport,readSourceReceipt,sourceBasis,recipe}=retirement??{};
+  const {transport,readSourceReceipt,sourceBasis}=retirement??{};
+  const recipe=await attemptRecipe(directory,retirement);
   if(!transport||!readSourceReceipt||!sourceBasis||!proofForRecipe(recipe)||!await safeDirectory(path.join(directory,'saved-current')))return null;
   const state=await bytes(path.join(directory,'saved-current/collector-state.private.json'),2*1024*1024);
   if(!state)return null;
