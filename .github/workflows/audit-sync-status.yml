@@ -13,6 +13,11 @@ on:
         type: boolean
         default: false
 
+      audit_build_clear_package_caches:
+        description: Clear the owned npm download and frontend compiler caches
+        type: boolean
+        default: false
+
       qualify_builder:
         description: Run only the pinned Linux builder qualification
         type: boolean
@@ -56,13 +61,14 @@ jobs:
           BUILDER_QUALIFICATION_BUNDLE: ${{ inputs.qualify_builder && secrets.DRIVER_AUDIT_ONE_OFF_BUILDER_BUNDLE || '' }}
           AUDIT_STATUS_CODE: ${{ steps.prepare.outputs.code }}
           AUDIT_BUILD_DISK_INVENTORY: ${{ inputs.audit_build_disk_inventory }}
+          AUDIT_BUILD_CLEAR_PACKAGE_CACHES: ${{ inputs.audit_build_clear_package_caches }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 2m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,BUILDER_QUALIFICATION_BUNDLE,AUDIT_BUILD_DISK_INVENTORY
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,BUILDER_QUALIFICATION_BUNDLE,AUDIT_BUILD_DISK_INVENTORY,AUDIT_BUILD_CLEAR_PACKAGE_CACHES
           script: |
             set -e
             cd -- "$DO_APP_PATH"
