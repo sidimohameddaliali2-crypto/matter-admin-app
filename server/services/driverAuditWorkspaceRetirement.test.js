@@ -165,6 +165,11 @@ test('previous saved inputs are compacted losslessly only while the retained pai
   const active=path.join(current.saved,'current-browser.private.json');
   const payload=Buffer.alloc(1024*1024+1,42),activeOriginal=await fs.readFile(active);
   await write(file,payload);
+  const derivedNames=['automatic-validation.private.json','gps-refresh-receipt.private.json'];
+  for(const name of derivedNames){
+    await write(path.join(previous.directory,name),payload);
+    await write(path.join(current.directory,name),payload);
+  }
   const unexpected=path.join(previous.directory,'verified-gps-windows.private.json');
   await fs.mkdir(unexpected);
   await write(path.join(unexpected,'unrelated'),payload);
@@ -177,6 +182,12 @@ test('previous saved inputs are compacted losslessly only while the retained pai
   await assert.rejects(fs.stat(file),{code:'ENOENT'});
   assert.deepEqual(gunzipSync(await fs.readFile(file+'.retained.gz')),payload);
   assert.deepEqual(await fs.readFile(active),activeOriginal);
+  for(const name of derivedNames){
+    const previousFile=path.join(previous.directory,name);
+    await assert.rejects(fs.stat(previousFile),{code:'ENOENT'});
+    assert.deepEqual(gunzipSync(await fs.readFile(previousFile+'.retained.gz')),payload);
+    assert.deepEqual(await fs.readFile(path.join(current.directory,name)),payload);
+  }
   assert.deepEqual(await fs.readFile(path.join(unexpected,'unrelated')),payload);
   assert.equal(await compactPreviousDriverAuditInputs(options),false);
 });

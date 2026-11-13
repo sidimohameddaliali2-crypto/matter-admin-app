@@ -192,7 +192,12 @@ async function compactRetainedInputs(directory,{includeSources}) {
       await compactFiles(directory,sources,null,record,new Set(['current-browser.private.json','current-reviews.private.json']));
     }
   }
-  await compactFiles(directory,directory,null,record,new Set(['combined-reviews.private.json','verified-gps-windows.private.json']));
+  await compactFiles(directory,directory,null,record,new Set([
+    'combined-reviews.private.json',
+    'verified-gps-windows.private.json',
+    'gps-refresh-receipt.private.json',
+    'automatic-validation.private.json',
+  ]));
   return compacted;
 }
 
