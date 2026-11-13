@@ -40,6 +40,7 @@ const COPY = {
  * HTTP response, same pattern as `sendAndLogSlack`.
  */
 async function sendPushToDriver(driverId, title, body, data) {
+  if (process.env.DISABLE_DRIVER_PUSH === '1') return;
   try {
     if (!driverId) return;
 
