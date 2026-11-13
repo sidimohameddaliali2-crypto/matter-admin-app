@@ -46,17 +46,38 @@ Use `/api/health` to verify the database connection and the staging-only mode.
 Atlas TLS certificate verification stays enabled, and the Mongo pool is capped
 at five connections. Keep public access to port 5000 closed.
 
-If the independently reviewed `routes/driverEvents.js` is present, this entrypoint
-mounts it at `/api/driver-events`; its own environment gate still applies.
-Otherwise health reports `driverCaptureEnabled: false` and the endpoint returns
-404. The gate alone does not install the route. The capture ledger does not
-apply delivery/bag business actions, and an unfinished mobile uploader remains
-a blocker to end-to-end tracking acceptance.
+The capture endpoint is mounted before general JSON parsing, with its own
+64 KiB / 64-event JSON limit and a 750000-byte JPEG limit. Set
+`ENABLE_DRIVER_CAPTURE_INGESTION=1`; APP_ENV must remain staging. Health reports
+`driverCaptureEnabled`. No capture route is added to the production entrypoint.
 
-The existing mobile staging URL validator rejects `matterapp.online` and its
-subdomains. Approve the exact isolated staging hostname there before building
-the staging APK; do not remove production-host protection. Android builds,
-real-device testing and full-shift qualification happen outside this server.
+`POST /api/driver-events/batch` authenticates a driver, validates account-scoped
+stable IDs, preserves immutable original metadata and deduplicates by canonical
+payload hash. Accepted IDs are returned only after majority+journal Mongo writes
+and majority read-back. Partial failures are explicit; changed payloads conflict.
+It is a capture ledger: `deliveryStateApplied: false` is mandatory.
+
+`PUT /api/driver-events/photos/:photoId` accepts original JPEG bytes after its
+photo.captured ledger event. Use image/jpeg, X-Capture-Event-Id and X-Content-MD5.
+The account, delivery assignment, original size and checksum must match. Original
+bytes are stored privately in matter_staging.driver_capture_photos using the same
+write concern and read-back. Stable retries return the same receipt without
+recompressing/overwriting evidence. Photo bytes are not publicly served and this
+does not modify delivery proof, customer pins, bag state or business timestamps.
+There is no automatic capture retention/deletion policy; monitor staging DB size.
+
+The mobile staging build allows exactly https://staging.matterapp.online/api as
+an exception to the MATTER production/subdomain block. Native transport also
+requires com.matterapp.online.staging, refuses redirects and stores only an
+Android-Keystore-encrypted runtime bearer token. Passwords are never build inputs.
+Unique network-constrained WorkManager jobs retry bounded batches and stream
+original JPEG files. Additive SQLite v1-to-v2 migration preserves original rows;
+per-event metadata and byte receipts are separate, rejected evidence is retained,
+and acknowledgements do not delete local photos or apply business actions.
+Legacy delivery requests/retry queues remain responsible for business completion;
+full business replay/idempotency, pending-business-action migration and fleet
+qualification remain separate release requirements. Do not merge PR #69 to deploy
+staging: production deployment is triggered only from main, which is unchanged.
 
 Create a staging admin with a private password using the User model, then create
 the test driver through existing authenticated user APIs. Do not use the legacy

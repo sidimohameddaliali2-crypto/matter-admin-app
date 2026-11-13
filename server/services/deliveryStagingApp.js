@@ -20,6 +20,9 @@ export function createDeliveryStagingApp({ origin, uploadsDir, routers, protect,
   app.set('trust proxy', 'loopback');
   app.use(cors({ origin, credentials: true }));
   app.use(compression());
+  if (routers.driverEvents) app.use('/api/driver-events', (_req, res, next) => {
+    res.set('X-MATTER-Environment', 'staging-delivery'); next();
+  }, routers.driverEvents); // Capture owns strict JSON/binary limits before general body parsing.
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
   app.use((_req, res, next) => { res.set('X-MATTER-Environment', 'staging-delivery'); next(); });
@@ -45,7 +48,7 @@ export function createDeliveryStagingApp({ origin, uploadsDir, routers, protect,
   });
   app.use('/uploads', express.static(uploadsDir, { dotfiles: 'deny', index: false }));
   for (const [prefix, name] of deliveryStagingRoutes) app.use(prefix, routers[name]);
-  if (routers.driverEvents) app.use('/api/driver-events', routers.driverEvents);
+
   app.use((_req, res) => res.status(404).json({ success: false, message: 'Delivery staging API only. No website is installed.' }));
   app.use((error, _req, res, _next) => res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : error.status || 500)
     .json({ success: false, message: error.code === 'LIMIT_FILE_SIZE' ? 'Photo exceeds 10 MB.' : 'Staging request failed.' }));
