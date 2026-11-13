@@ -101,10 +101,12 @@ async function main(){
   const builder=createAutomaticRelease({
    root:work,baselineRoot,pinnedDirectSync:true,loadSource:async()=>pinned,
    async build(options){
-    requireDriverAuditBuildSpace(await freeBuildBytes(),buildSpace);
+    const [candidateVolume,baselineVolume]=await Promise.all([fs.stat(options.output),fs.stat(options.baselineRoot)]);
+    const policy={compact:buildSpace.compact&&candidateVolume.dev===baselineVolume.dev};
+    requireDriverAuditBuildSpace(await freeBuildBytes(),policy);
     await saveDriverAuditBuildRecipe(options.output,recipe);
     return buildAutomaticRelease({...options,rendererBuild,archiveBackedBaseline:true,
-     checkSpace:async()=>requireDriverAuditBuildSpace(await freeBuildBytes(),{...buildSpace,inProgress:true})});
+     checkSpace:async()=>requireDriverAuditBuildSpace(await freeBuildBytes(),{...policy,inProgress:true})});
    },
    async validate(candidate){
     const validation=await validateAutomaticCandidate(candidate,{journals});
