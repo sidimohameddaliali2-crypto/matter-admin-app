@@ -3,6 +3,7 @@ import { pathToFileURL } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
+import { createRequire } from 'node:module';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,6 +28,34 @@ const iso = value => typeof value === 'string' && value.length <= 40 && Number.i
   ? new Date(value).toISOString() : null;
 const allowed = (value, list) => list.includes(value) ? value : null;
 const byteCount = value => Number.isSafeInteger(value) && value >= 0;
+
+async function readRetentionInputs(appRoot) {
+  const server = path.join(appRoot, 'server');
+  await import(pathToFileURL(path.join(server, 'loadEnv.js')).href);
+  const require = createRequire(path.join(server, 'package.json'));
+  const mongoose = require('mongoose');
+  const connection = mongoose.createConnection(process.env.MONGODB_URI, {
+    autoIndex: false, autoCreate: false, serverSelectionTimeoutMS: 5000,
+  });
+  try {
+    await connection.asPromise();
+    const control = connection.db.collection('driverAuditControl');
+    const [entry, stage, capacity] = await Promise.all([
+      control.findOne({ _id: 'head' }, { projection: { head: 1 } }),
+      control.findOne({ _id: 'direct-stage' }, { projection: { _id: 1 } }),
+      control.findOne({ _id: 'capacity' }, { projection: { limit: 1, used: 1 } }),
+    ]);
+    const head = entry?.head;
+    if (![head?.generation, head?.previous?.generation].every(value => manifest.test(value)) ||
+        !byteCount(capacity?.limit) || !byteCount(capacity?.used) || capacity.used > capacity.limit) {
+      throw Error('The retained audit release identity is unavailable');
+    }
+    return { generation: head.generation, previousGeneration: head.previous.generation,
+      revision: number(head.directImport?.collectorRevision), previousRevision: number(head.previous.directImport?.collectorRevision),
+      importedAt: iso(head.importedAt instanceof Date ? head.importedAt.toISOString() : head.importedAt),
+      stagePending: !!stage, capacityBytes: capacity.limit, usedBytes: capacity.used };
+  } finally { await connection.close(); }
+}
 
 function capacityFailure(saved) {
   if (saved?.status !== 'capacity-blocked' || saved.errorCode !== 'AUDIT_CAPACITY') return null;
@@ -372,7 +401,9 @@ async function main() {
   if (process.env.QUALIFY_BUILDER === 'true') {
     console.log(JSON.stringify(await qualifyBuilder(appRoot, entry, pm2Home, encoded)));
   } else {
-    console.log(JSON.stringify(await readAuditSyncStatus({ appRoot, pm2Home, entry })));
+    const status = await readAuditSyncStatus({ appRoot, pm2Home, entry });
+    const releases = entry ? await readRetentionInputs(appRoot) : null;
+    console.log(JSON.stringify({ ...status, releases }));
   }
 }
 
