@@ -210,6 +210,9 @@ test('transfer sizing matches the direct package including its descriptor',async
     runBatch:async(_limits,operation)=>operation(),
   });
   assert.equal(checkVerifiedAuditPackageTransfer({privateRoot,maxBytes:actual.totalBytes,validation}),actual.totalBytes);
+  assert.throws(()=>checkVerifiedAuditPackageTransfer({privateRoot,maxBytes:1,validation}),{
+    code:'AUDIT_CAPACITY',capacity:{kind:'import-transfer',availableBytes:1,requiredBytes:actual.totalBytes},
+  });
   assert.throws(()=>checkVerifiedAuditPackageTransfer({privateRoot,maxBytes:actual.totalBytes-1,validation}),{
     code:'AUDIT_CAPACITY',capacity:{kind:'import-transfer',availableBytes:actual.totalBytes-1,requiredBytes:actual.totalBytes},
   });
