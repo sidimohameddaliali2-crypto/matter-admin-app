@@ -9,6 +9,7 @@ import Archive from '../models/MenuSelectionArchive.js';
 import MenuItem from '../models/MenuItem.js';
 import Breakfast from '../models/KitchenBreakfastPreset.js';
 import Snack from '../models/KitchenSnackPreset.js';
+import SnackRule from '../models/KitchenSnackRule.js';
 
 test('a production snapshot is invalidated by source edits, expiry, failure or a future timestamp', () => {
   const now = Date.now();
@@ -29,6 +30,8 @@ test('background preparation publishes one source version and an input edit inva
   t.mock.method(MenuItem, 'find', () => query([]));
   t.mock.method(Breakfast, 'findOne', () => query(null));
   t.mock.method(Snack, 'findOne', () => query(null));
+  let rules = [];
+  t.mock.method(SnackRule, 'find', () => query(rules));
   let job, finish;
   const saved = new Promise(resolve => { finish = resolve; });
   t.mock.method(Snapshot, 'findOne', filter => query(job && (filter._id || filter.status === job.status) ? job : null));
@@ -51,6 +54,9 @@ test('background preparation publishes one source version and an input edit inva
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(preparations, 2);
   assert.equal((await readKitchenState('menu', '2026-10-30')).state, 'ready');
+  rules = [{ _id: '42', version: 1, blockedSnacks: [{ key: 'muffin', name: 'Muffin' }] }];
+  assert.equal((await readKitchenState('menu', '2026-10-30')).state, 'missing', 'rule edit invalidates an otherwise fresh snapshot');
+  rules = [];
   menu.updatedAt = new Date('2026-10-28T10:01:00Z');
   assert.equal((await readKitchenState('menu', '2026-10-30')).state, 'missing');
 });

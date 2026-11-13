@@ -86,6 +86,7 @@ beforeEach(async () => {
   localStorage.clear();
   mockExcelRows.mockImplementation((rows) => rows);
   api.get.mockImplementation(async (path) => {
+    if (path === '/menus/kitchen-snack-rules') return { data: { success: true, data: { rules: [] } } };
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', isActive: true, isPublished: true, startDate: thursday, endDate: friday }, { _id: 'old-menu', title: 'Old menu', isActive: false, isPublished: true, startDate: thursday, endDate: friday }] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [{ email, firstName: 'Internal stale name', matterCustomerId: 'permanent', mealPerDay: 9, skippedDays: [{ date: thursday, pauseStatus: 'success' }], selectedMeals: [thursday, friday].map((date) => ({ date, mealType: 'main', mealName: 'Fixture dish' })) }] } };
     if (path.includes('/matter/')) throw new Error('Duplicate Matter lookup');
@@ -228,6 +229,38 @@ test('changing either date control keeps both synchronized and prepares the new 
 
 
 const downloadButton = (text) => [...container.querySelectorAll('button')].find((button) => button.textContent.includes(text));
+
+test('saving a snack rule flags the saved auto-snack immediately and prevents its kitchen paper export', async () => {
+  const originalGet = api.get.getMockImplementation();
+  let rules = [];
+  api.get.mockImplementation(async (path, options) => {
+    if (path === '/menus/kitchen-snack-rules/42') return { data: { success: true, data: { version: 0, blockedSnacks: [], catalogue: [{ key: 'muffin', name: 'Muffin', hasMacros: true }] } } };
+    if (path.endsWith('/kitchen-state')) return { data: { state: 'selection-open', data: { success: true, preparation: 'selection-open', data: {
+      kitchenSelections: [{ email, matterCustomerId: '42', selectedMeals: [{ date: friday, mealType: 'main', mealName: 'Chosen chicken' }, { date: friday, mealType: 'snack', mealName: 'Muffin', isAutoAssigned: true }] }],
+      kitchenInputs: [{ ...input(), customer_id: '42', snacks_per_day: 1 }],
+      kitchenRoster: [{ customer_id: '42', email, meal_frequency: 1, snacks_per_day: 1 }], rosterComplete: true,
+      kitchenSnackPreset: { presetsByName: { muffin: { C: 15, P: 10, F: 6 } } }, kitchenSnackRules: rules,
+    } } } };
+    return originalGet(path, options);
+  });
+  api.put.mockImplementation(async () => {
+    const rule = { customerId: '42', version: 1, blockedSnacks: [{ key: 'muffin', name: 'Muffin' }] };
+    rules = [rule]; return { data: { success: true, data: rule } };
+  });
+  await select(dateSelect(), friday);
+  const assignments = api.post.mock.calls.length;
+  await act(async () => downloadButton('Blocked snacks').click());
+  await act(async () => container.querySelector('[aria-label="Snack choices"] input').click());
+  await act(async () => downloadButton('Save snack rules').click());
+  expect(container.textContent).toContain('Blocked snack: Muffin');
+  expect(container.textContent).toContain('Chosen chicken');
+  expect(api.post).toHaveBeenCalledTimes(assignments);
+  mockPdfSave.mockClear();
+  await act(async () => downloadButton('Kitchen Paper').click());
+  await act(async () => downloadButton('Download Day PDF').click());
+  expect(container.textContent).toContain('Kitchen export blocked');
+  expect(mockPdfSave).not.toHaveBeenCalled();
+});
 
 test('a failed preparation is an error, not an empty selection, and refresh recovers', async () => {
   const successful = api.post.getMockImplementation();
