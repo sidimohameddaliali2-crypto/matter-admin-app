@@ -6,6 +6,17 @@ import { applyConfirmedPauses, previewSkipPauses, resolveSubscriptionContext, va
 import matterApiService from './matterApiService.js';
 import { matterWeekendEnabled } from './matterSubscriptionContract.js';
 
+test('preview does not implicitly pause an admin-restored Sunday alongside a saved Saturday', async (t) => {
+  t.mock.method(matterApiService, 'getSubscription', async () => ({ data: {
+    subscription_id: 'sub', delivery_schedule: [
+      { date: '2026-11-14', status: 'paused' }, { date: '2026-11-15', status: 'active' },
+    ],
+  } }));
+  t.mock.method(matterApiService, 'getSubscriptionPauses', async () => ({ paused_days: ['2026-11-14'] }));
+  const result = await previewSkipPauses({ matterSubscriptionId: 'sub', skippedDateKeys: ['2026-11-14'], restoredSkipDates: ['2026-11-15'] });
+  assert.deepEqual(result.pauses.map(p => p.date), ['2026-11-14']);
+});
+
 test('preview exposes availability without generating any resume dates or requiring cycle end', async (t) => {
   t.mock.method(matterApiService, 'getSubscription', async () => ({ data: {
     subscription_id: 'sub', delivery_schedule: [

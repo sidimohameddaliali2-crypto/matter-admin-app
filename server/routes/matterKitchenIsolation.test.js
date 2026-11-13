@@ -36,6 +36,31 @@ test('preparation follows permanent Matter ID across renewal without Internal re
   assert.equal(writes[0].$set.customerId, '42');
 });
 
+test('kitchen preparation releases a confirmed skip when Matter restores the active date', async (t) => {
+  blockInternal(t);
+  t.mock.method(Lease, 'findOneAndUpdate', async () => ({}));
+  t.mock.method(Lease, 'deleteOne', async () => ({}));
+  const date = '2026-10-22';
+  t.mock.method(matter, 'getSubscription', async () => ({ data: {
+    subscription_id: source.subscription_id, delivery_schedule: [{ date, status: 'active' }],
+  } }));
+  const nutrition = { ...source, active_delivery_dates: [date] };
+  const record = { _id: 'record', weeklyMenuId: 'menu', matterCustomerId: '42', matterSubscriptionId: 'renewal',
+    email: source.customer_email, matterEmail: source.customer_email,
+    selectedMeals: [{ date, mealType: 'main', quantity: 1 }],
+    skippedDays: [{ date, pauseStatus: 'success', subscriptionId: 'renewal', resumeDate: '2026-12-11' }],
+  };
+  t.mock.method(matter, 'findSubscriptionsWithDeliveryOnDate', async () => [{ kitchen_inputs: nutrition }]);
+  t.mock.method(Record, 'find', () => query([record]));
+  const writes = [];
+  t.mock.method(Record, 'updateOne', async (_, update) => { writes.push(update); return { matchedCount: 1 }; });
+  t.mock.method(Menu, 'findById', () => query({ snackOptionsByDate: {} }));
+  const result = await runAutoPopulateMissing('menu', date, { freshInputs: true });
+  assert.equal(result.data.alreadyCovered, 1);
+  assert.equal(record.skippedDays.length, 0);
+  assert.equal(writes[0].$push.unpausedDays.date, date);
+});
+
 test('menu sign-in reads only Internal allergies; identity and saved selections remain Matter-owned', async (t) => {
   blockInternal(t);
   // Owner (2026-10-21): internal allergy profiles are the sole exception.
