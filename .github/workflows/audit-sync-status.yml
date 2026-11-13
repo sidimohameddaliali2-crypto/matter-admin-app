@@ -8,6 +8,11 @@ on:
         type: string
         required: true
 
+      audit_build_archive_older:
+        description: Losslessly archive the reviewed older audit workspace
+        type: boolean
+        default: false
+
       qualify_builder:
         description: Run only the pinned Linux builder qualification
         type: boolean
@@ -50,13 +55,14 @@ jobs:
           QUALIFY_BUILDER: ${{ inputs.qualify_builder }}
           BUILDER_QUALIFICATION_BUNDLE: ${{ inputs.qualify_builder && secrets.DRIVER_AUDIT_ONE_OFF_BUILDER_BUNDLE || '' }}
           AUDIT_STATUS_CODE: ${{ steps.prepare.outputs.code }}
+          AUDIT_BUILD_ARCHIVE_OLDER: ${{ inputs.audit_build_archive_older }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
-          command_timeout: 2m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,BUILDER_QUALIFICATION_BUNDLE
+          command_timeout: 10m
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,BUILDER_QUALIFICATION_BUNDLE,AUDIT_BUILD_ARCHIVE_OLDER
           script: |
             set -e
             cd -- "$DO_APP_PATH"
