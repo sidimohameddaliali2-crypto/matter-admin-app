@@ -8,6 +8,11 @@ on:
         type: string
         required: true
 
+      qualify_builder:
+        description: Run only the pinned Linux builder qualification
+        type: boolean
+        default: false
+
 concurrency:
   group: production-deploy
   cancel-in-progress: false
@@ -42,6 +47,8 @@ jobs:
         env:
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
           EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
+          QUALIFY_BUILDER: ${{ inputs.qualify_builder }}
+          BUILDER_ARCHIVE_SECRET: ${{ inputs.qualify_builder && secrets.DRIVER_AUDIT_SUPABASE_SECRET || '' }}
           AUDIT_STATUS_CODE: ${{ steps.prepare.outputs.code }}
         with:
           host: ${{ secrets.DO_HOST }}
@@ -49,7 +56,7 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 2m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,BUILDER_ARCHIVE_SECRET
           script: |
             set -e
             cd -- "$DO_APP_PATH"

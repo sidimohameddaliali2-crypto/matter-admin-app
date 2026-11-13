@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import fs from 'node:fs/promises';
@@ -207,6 +209,65 @@ export async function readAuditSyncStatus({ appRoot, pm2Home, entry }) {
   };
 }
 
+// This payload is limited to the exact reviewed code-only export.
+const candidateBuilder = '13cfd8e5b543714ce6fa93d6aece9e229d4ff0e558768807622d595e29a200b7';
+const candidateArchive = '4e806406cae6d8b218cf5679d7381fb3402f5e52b19ca3fabe3c462102c03ef9';
+const candidateArchiveBytes = 155626;
+const smokeSource = "import assert from 'node:assert/strict';\nimport fs from 'node:fs/promises';\nimport os from 'node:os';\nimport path from 'node:path';\nimport {DatabaseSync} from 'node:sqlite';\nimport {pathToFileURL} from 'node:url';\nimport {gzip,gunzip} from 'node:zlib';\nimport {promisify} from 'node:util';\nconst {verifyAuditBuilder} = await import(pathToFileURL(process.argv[5]).href);\n\nconst [builder,expected,volume,verifier,...rest]=process.argv.slice(2);\nassert(path.isAbsolute(builder??'')&&path.isAbsolute(volume??'')&&!rest.length,'Expected builder path, SHA-256 and private scratch parent');\nawait verifyAuditBuilder(builder,expected);\nconst exportsByFile={\n  'integration/cloud/automatic-release.mjs':['automaticReleaseBasis','createAutomaticRelease'],\n  'integration/cloud/automatic-release-source.mjs':['createAutomaticReleaseSource'],\n  'integration/cloud/automatic-release-build.mjs':['buildAutomaticRelease'],\n  'scripts/run-automatic-report.mjs':['validateAutomaticCandidate'],\n};\nfor(const [file,names] of Object.entries(exportsByFile)){\n  const loaded=await import(pathToFileURL(path.join(builder,file)).href);\n  for(const name of names)assert.equal(typeof loaded[name],'function');\n}\n\nconst scratch=await fs.mkdtemp(path.join(await fs.realpath(volume),'audit-builder-smoke-'));\ntry{\n  const db=new DatabaseSync(path.join(scratch,'lock.sqlite'));\n  try{db.exec('BEGIN EXCLUSIVE; ROLLBACK;');}finally{db.close();}\n  const original=Buffer.from('audit builder smoke\\n'.repeat(256));\n  const file=path.join(scratch,'scratch.gz');\n  await fs.writeFile(file,await promisify(gzip)(original),{mode:0o600,flag:'wx'});\n  await fs.link(file,file+'.linked');\n  assert.equal((await fs.stat(file)).ino,(await fs.stat(file+'.linked')).ino);\n  assert.deepEqual(await promisify(gunzip)(await fs.readFile(file+'.linked')),original);\n  const directory=await fs.open(scratch,'r');\n  try{await directory.sync();}finally{await directory.close();}\n}finally{await fs.rm(scratch,{recursive:true,force:true});}\nconsole.log(JSON.stringify({status:'checked',platform:process.platform,release:os.release(),node:process.version,builderSha256:expected}));\n";
+
+async function qualifyBuilder(appRoot, entry, pm2Home) {
+  if (process.platform !== 'linux' || entry?.pm2_env?.status !== 'online' ||
+      !Number.isSafeInteger(entry.pid) || entry.pid < 1) throw Error('Online Linux worker required');
+  const root = syncRoot(appRoot, entry);
+  const info = await stat(root);
+  if (!info?.isDirectory() || info.mode & 0o077 || await fs.realpath(root) !== root) throw Error('Private sync root required');
+  const work = path.join(root, 'work');
+  if (await fs.realpath(work) !== work || (await fs.stat(work)).dev !== info.dev) throw Error('Build volume mismatch');
+  const node = await fs.realpath('/proc/' + entry.pid + '/exe');
+  const vendor = path.join(appRoot, 'server/vendor/driver-audits/integration');
+  const { createSupabaseArchiveTransport } = await import(pathToFileURL(vendor + '/hosted/supabase-archive.mjs').href);
+  const secret = process.env.BUILDER_ARCHIVE_SECRET;
+  delete process.env.BUILDER_ARCHIVE_SECRET;
+  const archive = createSupabaseArchiveTransport({secret});
+  await archive.assertPrivate();
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of await archive.readObject(candidateArchive + '.gz',{maxBytes:candidateArchiveBytes})) {
+    size += chunk.length;
+    if (size > candidateArchiveBytes) throw Error('Builder archive exceeds its reviewed size');
+    chunks.push(chunk);
+  }
+  const bytes = Buffer.concat(chunks);
+  if (size !== candidateArchiveBytes || createHash('sha256').update(bytes).digest('hex') !== candidateArchive) {
+    throw Error('Builder archive hash mismatch');
+  }
+
+  const directory = await fs.mkdtemp(path.join(root, 'audit-linux-qualification-'));
+  try {
+    const file = path.join(directory, 'builder.tar.gz');
+    const code = path.join(directory, 'builder');
+    const smoke = path.join(directory, 'smoke.mjs');
+    await fs.writeFile(file,bytes,{mode:0o600,flag:'wx'});
+    await fs.writeFile(smoke,smokeSource,{mode:0o600,flag:'wx'});
+    await fs.mkdir(code,{mode:0o700});
+    const env = {PATH:'/usr/bin:/bin',HOME:directory,LANG:'C'};
+    await exec('tar',['--extract','--gzip','--no-same-owner','--file',file,'--directory',code],{env,timeout:15000});
+    const result = await exec(node,[smoke,code,candidateBuilder,work,vendor + '/cloud/driver-audit-handoff.mjs'],{env,timeout:30000});
+    const smokeResult = JSON.parse(result.stdout);
+    if (smokeResult.status !== 'checked' || smokeResult.platform !== 'linux' ||
+        smokeResult.builderSha256 !== candidateBuilder) throw Error('Unexpected Linux smoke receipt');
+    const after = await exec('pm2',['jlist'],{env:{PATH:process.env.PATH,HOME:os.homedir(),PM2_HOME:pm2Home},timeout:5000,maxBuffer:8*1024*1024});
+    const rows = JSON.parse(after.stdout).filter(row => row.name === name);
+    if (rows.length !== 1 || rows[0].pid !== entry.pid || rows[0].pm_id !== entry.pm_id ||
+        rows[0].pm2_env.status !== 'online' || syncRoot(appRoot, rows[0]) !== root) {
+      throw Error('Managed worker changed during qualification');
+    }
+    return {...smokeResult,workerUnchanged:true,archiveBytes:size};
+  } finally {
+    await fs.rm(directory,{recursive:true,force:true});
+  }
+}
+
 async function main() {
   const appRoot = await fs.realpath(process.cwd());
   const expected = process.env.EXPECTED_DEPLOYED_SHA;
@@ -225,7 +286,11 @@ async function main() {
     if (entries.length > 1) throw Error('Multiple audit workers registered');
     [entry] = entries;
   }
-  console.log(JSON.stringify(await readAuditSyncStatus({ appRoot, pm2Home, entry })));
+  if (process.env.QUALIFY_BUILDER === 'true') {
+    console.log(JSON.stringify(await qualifyBuilder(appRoot, entry, pm2Home)));
+  } else {
+    console.log(JSON.stringify(await readAuditSyncStatus({ appRoot, pm2Home, entry })));
+  }
 }
 
 if (process.argv[1] === '-' && process.argv[2] === '--print') {
