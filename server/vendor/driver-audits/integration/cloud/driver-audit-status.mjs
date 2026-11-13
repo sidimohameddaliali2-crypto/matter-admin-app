@@ -4,18 +4,25 @@ const labels={
  pending:'New evidence is pending.',
  ready:'Verified against the latest saved evidence.',
  failed:'Sync needs attention. The last verified audit is still available.',
- 'capacity-blocked':'Sync is waiting for storage capacity. The last verified audit is still available.',
+ 'capacity-blocked':'The refresh reached a capacity limit. The last verified audit is still available.',
  'budget-deferred':'Sync is waiting for the existing allowance. The last verified audit is still available.',
+};
+const capacityLabels={
+ 'build-disk':'The report server needs more working space.',
+ 'replica-storage':'The saved report store reached its capacity limit.',
+ 'import-transfer':'The new report package exceeds the transfer limit.',
 };
 
 const safeJson=value=>JSON.stringify(value).replaceAll('<','\\u003c');
 
 export function addDriverAuditSyncStatus(html,initial){
- const script=`<script>(()=>{const labels=${safeJson(labels)};let displayed=false;const show=(data)=>{
+ const script=`<script>(()=>{const labels=${safeJson(labels)},capacityLabels=${safeJson(capacityLabels)};let displayed=false;const show=(data)=>{
   if(!data||!Object.hasOwn(labels,data.status))return false;
   const date=(value)=>{if(!value)return 'Unavailable';const parsed=new Date(value);return Number.isFinite(parsed.getTime())?new Intl.DateTimeFormat('en-GB',{dateStyle:'medium',timeStyle:'short',timeZone:'Asia/Dubai'}).format(parsed)+' Dubai':'Unavailable';};
   const banner=document.getElementById('matter-audit-sync-status');
-  if(banner){const text='Latest saved delivery capture '+date(data.latestCaptureAt)+' · Visible audit cutoff '+date(data.visibleCutoffAt)+' · '+labels[data.status];if(banner.textContent!==text)banner.textContent=text;displayed=true;}
+  const message=data.status==='capacity-blocked'&&Object.hasOwn(capacityLabels,data.capacityReason)
+   ?capacityLabels[data.capacityReason]+' The last verified audit is still available.':labels[data.status];
+  if(banner){const text='Latest saved delivery capture '+date(data.latestCaptureAt)+' · Visible audit cutoff '+date(data.visibleCutoffAt)+' · '+message;if(banner.textContent!==text)banner.textContent=text;displayed=true;}
   return displayed;
  };
  const unavailable=()=>{if(!displayed){const banner=document.getElementById('matter-audit-sync-status');if(banner)banner.textContent='Audit sync status is temporarily unavailable.';}};

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {gzipSync,gunzipSync} from 'node:zlib';
-import {compactPreviousDriverAuditInputs,compactRetiredDriverAuditInputs,pruneDriverAuditWorkspace} from './driverAuditWorkspace.js';
+import {compactActiveDriverAuditBuildFiles,compactPreviousDriverAuditInputs,compactRetiredDriverAuditInputs,pruneDriverAuditWorkspace} from './driverAuditWorkspace.js';
 import {prunePreviousDriverAuditCopies} from './driverAuditWorkspaceRetirement.js';
 import {driverAuditPackagePointer} from './driverAuditDirectImport.js';
 import {checkedAuditPointer} from '../vendor/driver-audits/integration/cloud/audit-replica.mjs';
@@ -192,6 +192,74 @@ test('previous saved inputs are compacted losslessly only while the retained pai
   assert.equal(await compactPreviousDriverAuditInputs(options),false);
 });
 
+test('active build scratch is compressed only for the published generation and retires with verified lineage',async t=>{
+  const f=await fixture(t),previous=await f.add(1),current=await f.add(2);
+  await f.point();
+  const payload=Buffer.alloc(1024*1024+1,23);
+  const name='combined-reviews.private.json',scratch=path.join(current.directory,name);
+  const interrupted=scratch+'.retained.gz.10000000-0000-4000-8000-000000000000';
+  const saved=path.join(current.saved,'current-reviews.private.json');
+  const serving=path.join(current.privateRoot,'runtime.private.json');
+  const [savedBefore,servingBefore]=await Promise.all([fs.readFile(saved),fs.readFile(serving)]);
+  await write(scratch,payload);
+  await write(interrupted,'interrupted gzip');
+  const options={root:f.root,head:{...current.head,previous:previous.head},stage:null,retentionStatus:'qualified'};
+  for(const override of [{retentionStatus:'proof-stale'},{stage:{pointer:previous.head}},{head:previous.head}]){
+    assert.equal(await compactActiveDriverAuditBuildFiles({...options,...override}),false);
+    assert.deepEqual(await fs.readFile(scratch),payload);
+    assert.equal(await fs.readFile(interrupted,'utf8'),'interrupted gzip');
+  }
+  assert.equal(await compactActiveDriverAuditBuildFiles(options),true);
+  await assert.rejects(fs.stat(scratch),{code:'ENOENT'});
+  await assert.rejects(fs.stat(interrupted),{code:'ENOENT'});
+  assert.deepEqual(gunzipSync(await fs.readFile(scratch+'.retained.gz')),payload);
+  assert.deepEqual(await fs.readFile(saved),savedBefore);
+  assert.deepEqual(await fs.readFile(serving),servingBefore);
+  await fs.link(scratch+'.retained.gz',interrupted);
+  assert.equal(await compactActiveDriverAuditBuildFiles(options),false);
+  await assert.rejects(fs.stat(interrupted),{code:'ENOENT'});
+  await f.add(3);await f.point();await f.add(4);await f.point();
+  assert.equal((await f.prune()).attemptsRetired,2);
+  await assert.rejects(fs.stat(scratch+'.retained.gz'),{code:'ENOENT'});
+});
+
+test('conflicting gzip preserves original scratch and lets other files compact',async t=>{
+  const f=await fixture(t),active=await f.add(1);
+  await f.point();
+  const payload=Buffer.alloc(1024*1024+1,23);
+  const corrupt=path.join(active.directory,'combined-reviews.private.json');
+  const resumable=path.join(active.directory,'gps-refresh-receipt.private.json');
+  for(const file of [corrupt,resumable])await write(file,payload);
+  await write(corrupt+'.retained.gz','corrupt');
+  const standalone=resumable+'.retained.gz.30000000-0000-4000-8000-000000000000';
+  const different=gzipSync(Buffer.from('different valid contents'));
+  await write(standalone,different);
+  await write(resumable+'.retained.gz',gzipSync(payload));
+  const options={root:f.root,head:active.head,stage:null,retentionStatus:'qualified'};
+  assert.equal(await compactActiveDriverAuditBuildFiles(options),true);
+  assert.deepEqual(await fs.readFile(corrupt),payload);
+  assert.equal(await fs.readFile(corrupt+'.retained.gz','utf8'),'corrupt');
+  assert.deepEqual(await fs.readFile(standalone),different);
+  await assert.rejects(fs.stat(resumable),{code:'ENOENT'});
+  assert.deepEqual(gunzipSync(await fs.readFile(resumable+'.retained.gz')),payload);
+});
+
+test('retirement reclaims interrupted aliases for an exact compressed copy',async t=>{
+  const f=await fixture(t),old=await f.add(1);
+  const scratch=path.join(old.directory,'combined-reviews.private.json');
+  const retained=scratch+'.retained.gz';
+  const temporary=retained+'.10000000-0000-4000-8000-000000000000';
+  const unrelated=retained+'.20000000-0000-4000-8000-000000000000';
+  await write(scratch,Buffer.alloc(1024*1024+1,42));
+  await write(retained,gzipSync(await fs.readFile(scratch)));
+  await fs.link(retained,temporary);
+  await write(unrelated,'unverified');
+  await f.add(2);await f.add(3);await f.point();
+  assert.equal((await f.prune()).attemptsRetired,1);
+  for(const file of [scratch,retained,temporary])await assert.rejects(fs.stat(file),{code:'ENOENT'});
+  assert.equal(await fs.readFile(unrelated,'utf8'),'unverified');
+});
+
 test('repeated cycles retire known generated data while restoring the archived package and keeping protected candidates',async t=>{
   const f=await fixture(t),retired=[];
   for(let revision=1;revision<=6;revision++){
@@ -220,7 +288,13 @@ test('repeated cycles retire known generated data while restoring the archived p
 test('retirement preserves local inputs when the exact source restore cannot be verified',async t=>{
   const f=await fixture(t),old=await f.add(1);
   await f.add(2);await f.add(3);await f.point();
+  const scratch=path.join(old.directory,'combined-reviews.private.json');
+  const payload=Buffer.alloc(1024*1024+1,42);
+  await write(scratch,payload);
+  await write(scratch+'.retained.gz','unverified');
   const status=await f.prune({retirement:{...f.retirement,readSourceReceipt:async()=>({revision:999,body:'{}'})}});
+  assert.deepEqual(await fs.readFile(scratch),payload);
+  assert.equal(await fs.readFile(scratch+'.retained.gz','utf8'),'unverified');
   assert.equal(status.retirementDeferred,1);
   assert.equal((await fs.stat(path.join(old.saved,'current-browser.private.json'))).isFile(),true);
   await assert.rejects(fs.stat(path.join(old.directory,'retired-workspace.private.json')),{code:'ENOENT'});

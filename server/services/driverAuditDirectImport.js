@@ -179,8 +179,16 @@ function plannedCapacity(chunks,ledger,capacityBytes){
     if(!Object.hasOwn(allocations,sha256))additionalChargeBytes+=charge;
     else if(allocations[sha256]!==charge)throw new DriverAuditDirectImportError('An existing audit allocation disagrees with the verified package.');
   }
-  if(transferBytes>maxTransferBytes||used+additionalChargeBytes>capacityBytes){
-    throw Object.assign(new DriverAuditDirectImportError('The audit package exceeds its transfer or storage capacity.'),{code:'AUDIT_CAPACITY'});
+  const freeReplicaBytes=capacityBytes-used;
+  const capacity=transferBytes>maxTransferBytes
+    ?{kind:'import-transfer',availableBytes:maxTransferBytes,requiredBytes:transferBytes}
+    :additionalChargeBytes>freeReplicaBytes
+      ?{kind:'replica-storage',availableBytes:freeReplicaBytes,requiredBytes:additionalChargeBytes}
+      :null;
+  if(capacity){
+    throw Object.assign(new DriverAuditDirectImportError('The audit package exceeds its transfer or storage capacity.'),{
+      code:'AUDIT_CAPACITY',capacity,
+    });
   }
   return {transferBytes,additionalChargeBytes};
 }

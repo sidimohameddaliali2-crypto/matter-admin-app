@@ -14,6 +14,12 @@ const CHUNK=8*1024*1024,MAX_FILE=128*1024*1024,MAX_CORE_FILE=64*1024*1024,MAX_CO
 // index. Keep transfer/storage bounds unchanged and bound only this decoder.
 const MAX_GPS_DECODED=256*1024*1024;
 function fail(message){throw Error(message);}
+function checkTransfer(requiredBytes,availableBytes){
+ if(requiredBytes<=availableBytes)return;
+ throw Object.assign(Error('Remote preview package exceeds upload cap'),{
+  code:'AUDIT_CAPACITY',capacity:{kind:'import-transfer',availableBytes,requiredBytes},
+ });
+}
 function json(bytes,label){try{return JSON.parse(bytes);}catch{fail('Invalid '+label);}}
 function readLocal(root,name,manifest){if(!safeName(name)||!hex(manifest[name]))fail('Invalid package filename or digest');const bytes=fs.readFileSync(path.join(root,name));if(sha(bytes)!==manifest[name])fail('Preview package source hash mismatch');return bytes;}
 async function scanFile(file,{chunks=false}={}){const stat=fs.statSync(file);if(!stat.isFile()||stat.size>MAX_FILE)fail('Preview package file exceeds limit');const whole=createHash('sha256'),parts=[];let pending=Buffer.alloc(0);for await(const data of fs.createReadStream(file)){whole.update(data);if(chunks){pending=pending.length?Buffer.concat([pending,data]):data;while(pending.length>=CHUNK){const bytes=pending.subarray(0,CHUNK);parts.push({offset:parts.reduce((n,x)=>n+x.size,0),size:bytes.length,sha256:sha(bytes)});pending=pending.subarray(CHUNK);}}}if(chunks&&pending.length)parts.push({offset:parts.reduce((n,x)=>n+x.size,0),size:pending.length,sha256:sha(pending)});return {size:stat.size,sha256:whole.digest('hex'),chunks:parts};}
@@ -36,7 +42,7 @@ function verifyGeneration(files,refs,reportHash,generation){
 
 // Prepare an immutable private archive package from a fully validated local candidate.
 // This function is inert until explicitly called with a transport that can write.
-function inspectPackage({privateRoot,maxBytes,validation,includeRetained=true}={}){
+function inspectPackage({privateRoot,maxBytes,validation,includeRetained=true}={},verifyFileHashes=true){
  if(!path.isAbsolute(privateRoot||'')||!Number.isSafeInteger(maxBytes)||maxBytes<=0||validation?.ok!==true)fail('Invalid remote preview package inputs');
  const root=fs.realpathSync(privateRoot),manifestPath=path.join(root,'files.private.json'),manifestBytes=fs.readFileSync(manifestPath),manifestSha256=sha(manifestBytes);
  if(validation.manifestSha256!==manifestSha256)fail('Validated preview manifest changed');
@@ -44,7 +50,7 @@ function inspectPackage({privateRoot,maxBytes,validation,includeRetained=true}={
  const local=new Map();let uploadBytes=0;
  for(const name of Object.keys(manifest)){
   if(!safeName(name)||!hex(manifest[name]))fail('Invalid preview manifest entry');
-  const file=path.join(root,name),meta=fs.statSync(file);if(!meta.isFile()||meta.size>MAX_FILE)fail('Preview package file exceeds limit');const actual=scanSync(file);if(actual!==manifest[name])fail('Preview package source hash mismatch');local.set(name,{file,size:meta.size,sha256:actual});
+  const file=path.join(root,name),meta=fs.statSync(file);if(!meta.isFile()||meta.size>MAX_FILE)fail('Preview package file exceeds limit');const actual=verifyFileHashes?scanSync(file):manifest[name];if(actual!==manifest[name])fail('Preview package source hash mismatch');local.set(name,{file,size:meta.size,sha256:actual});
   if(/^archive-[a-f0-9]{64}\.private\.bin$/.test(name)){
    const digest=name.slice(8,-12);if(actual!==digest)fail('Retained archive object hash mismatch');if(includeRetained)uploadBytes+=meta.size;
   }
@@ -58,30 +64,58 @@ function inspectPackage({privateRoot,maxBytes,validation,includeRetained=true}={
  const wanted=verifyGeneration(core,fileRefs,reportHash,generation);
  for(const name of wanted)if(!files.has(name)){if(!local.has(name))fail('Preview package file missing');files.set(name,local.get(name));}
  for(const [name,meta]of files){uploadBytes+=meta.size;}
- if(uploadBytes>maxBytes)fail('Remote preview package exceeds upload cap');
  return {root,local,files,core,manifestSha256,reportHash,generation,uploadBytes,maxBytes};
 }
 function scanSync(file){const fd=fs.openSync(file,'r'),hash=createHash('sha256'),buf=Buffer.alloc(CHUNK);try{let offset=0;for(;;){const n=fs.readSync(fd,buf,0,buf.length,offset);if(!n)break;hash.update(buf.subarray(0,n));offset+=n;}return hash.digest('hex');}finally{fs.closeSync(fd);}}
 function fileRef(name,meta,chunks){return {version:1,domain:'previewRuntime',path:name,kind:'immutable-evidence',size:meta.size,sha256:meta.sha256,chunks};}
+function descriptorFor(plan,files){
+ return {version:1,files,sourceManifestSha256:plan.manifestSha256,reportHash:plan.reportHash,generation:plan.generation};
+}
+
+// Private candidate validation already checks all file hashes. Fixed-width
+// placeholders give the exact descriptor length without reading those bytes again.
+function exactDirectTransfer(plan){
+ const refs={};
+ for(const [name,meta]of plan.files){
+  const chunks=[];
+  for(let offset=0;offset<meta.size;offset+=CHUNK){
+   chunks.push({offset,size:Math.min(CHUNK,meta.size-offset),sha256:meta.sha256});
+  }
+  refs[name]=fileRef(name,meta,chunks);
+ }
+ const descriptorBytes=Buffer.byteLength(JSON.stringify(descriptorFor(plan,refs)));
+ if(descriptorBytes>MAX_DESCRIPTOR)fail('Preview package descriptor exceeds limit');
+ const totalBytes=plan.uploadBytes+descriptorBytes;
+ checkTransfer(totalBytes,plan.maxBytes);
+ return totalBytes;
+}
+
+export function checkVerifiedAuditPackageTransfer({privateRoot,maxBytes,validation}){
+ return exactDirectTransfer(inspectPackage({privateRoot,maxBytes,validation,includeRetained:false},false));
+}
+
 export async function planRemotePreviewPackage(args={}){
  const plan=inspectPackage(args);
+ checkTransfer(plan.uploadBytes,plan.maxBytes);
  const refs={};for(const [name,meta]of plan.files){const scan=await scanFile(meta.file,{chunks:true});if(scan.sha256!==meta.sha256||scan.size!==meta.size)fail('Preview package changed during planning');refs[name]=fileRef(name,meta,scan.chunks);}
- const descriptorBytes=Buffer.from(JSON.stringify({version:1,files:refs,sourceManifestSha256:plan.manifestSha256,reportHash:plan.reportHash,generation:plan.generation}));if(descriptorBytes.length>MAX_DESCRIPTOR)fail('Preview package descriptor exceeds limit');const totalBytes=plan.uploadBytes+[...plan.files.values()].reduce((n,m)=>n+m.size,0)+descriptorBytes.length;if(totalBytes>plan.maxBytes)fail('Remote preview package exceeds upload cap');return {sourceManifestSha256:plan.manifestSha256,reportHash:plan.reportHash,generation:plan.generation,totalBytes,files:[...plan.files].map(([name,meta])=>({name,sha256:meta.sha256,size:meta.size})),retainedObjects:[...plan.local].filter(([name])=>/^archive-[a-f0-9]{64}\.private\.bin$/.test(name)).map(([name,meta])=>({key:name.slice(8,-12)+'.gz',sha256:name.slice(8,-12),size:meta.size}))};
+ const descriptorBytes=Buffer.from(JSON.stringify(descriptorFor(plan,refs)));if(descriptorBytes.length>MAX_DESCRIPTOR)fail('Preview package descriptor exceeds limit');const totalBytes=plan.uploadBytes+[...plan.files.values()].reduce((n,m)=>n+m.size,0)+descriptorBytes.length;checkTransfer(totalBytes,plan.maxBytes);return {sourceManifestSha256:plan.manifestSha256,reportHash:plan.reportHash,generation:plan.generation,totalBytes,files:[...plan.files].map(([name,meta])=>({name,sha256:meta.sha256,size:meta.size})),retainedObjects:[...plan.local].filter(([name])=>/^archive-[a-f0-9]{64}\.private\.bin$/.test(name)).map(([name,meta])=>({key:name.slice(8,-12)+'.gz',sha256:name.slice(8,-12),size:meta.size}))};
 }
 export async function prepareRemotePreviewPackage({privateRoot,transport,maxBytes,validation,runBatch,includeRetained=true}={}){
  if(typeof transport?.putVerifiedObject!=='function'||typeof runBatch!=='function')fail('Verified bounded upload adapter required');
  const plan=inspectPackage({privateRoot,maxBytes,validation,includeRetained});
+ if(includeRetained)checkTransfer(plan.uploadBytes,maxBytes);
+ else exactDirectTransfer(plan);
  const runtimeOps=[],refs={};
  // Hash each local file in bounded chunks; retain only chunk metadata until upload.
  for(const [name,meta]of plan.files){const scan=await scanFile(meta.file,{chunks:true});if(scan.sha256!==meta.sha256||scan.size!==meta.size)fail('Preview package changed during preparation');refs[name]=fileRef(name,meta,scan.chunks);for(const chunk of scan.chunks)runtimeOps.push({key:chunk.sha256+'.gz',file:meta.file,offset:chunk.offset,size:chunk.size,sha256:chunk.sha256});}
- const descriptor={version:1,files:refs,sourceManifestSha256:plan.manifestSha256,reportHash:plan.reportHash,generation:plan.generation};
+ const descriptor=descriptorFor(plan,refs);
  const descriptorBytes=Buffer.from(JSON.stringify(descriptor));if(descriptorBytes.length>MAX_DESCRIPTOR)fail('Preview package descriptor exceeds limit');
  const descriptorScan=scanBuffer(descriptorBytes),descriptorRef=fileRef('descriptor.json',{size:descriptorBytes.length,sha256:descriptorScan.sha256},descriptorScan.chunks);descriptorRef.domain='previewPackage';
  const rawOps=includeRetained?[...plan.local].filter(([name])=>/^archive-[a-f0-9]{64}\.private\.bin$/.test(name)).map(([name,meta])=>({key:name.slice(8,-12)+'.gz',file:meta.file,offset:0,size:meta.size,sha256:meta.sha256})):[];
  if([...rawOps,...runtimeOps].some(op=>op.size>32*1024*1024))fail('Single preview package object exceeds batch limit');
  const descriptorOps=descriptorScan.chunks.map(chunk=>({key:chunk.sha256+'.gz',bytes:descriptorBytes.subarray(chunk.offset,chunk.offset+chunk.size),size:chunk.size,sha256:chunk.sha256}));
  const all=[...rawOps,...runtimeOps,...descriptorOps];
- const actualBytes=plan.uploadBytes+(includeRetained?[...plan.files.values()].reduce((n,m)=>n+m.size,0):0)+descriptorBytes.length;if(actualBytes>maxBytes)fail('Remote preview package exceeds upload cap');
+ const actualBytes=plan.uploadBytes+(includeRetained?[...plan.files.values()].reduce((n,m)=>n+m.size,0):0)+descriptorBytes.length;checkTransfer(actualBytes,maxBytes);
  for(let i=0;i<all.length;){let end=i,bytes=0;while(end<all.length&&end-i<64&&bytes+all[end].size<=32*1024*1024){bytes+=all[end].size;end++;}if(end===i)fail('Single preview package object exceeds batch limit');const batch=all.slice(i,end),result=await runBatch({bytes,objects:batch.length},async()=>{for(const op of batch){const data=op.bytes||readRange(op.file,op.offset,op.size);if(sha(data)!==op.sha256)fail('Preview package changed during upload');const receipt=await transport.putVerifiedObject(op.key,data);if(receipt?.verified!==true||receipt.sha256!==op.sha256||receipt.key!==op.key)fail('Preview package upload was not verified');}return {status:'complete',uploaded:batch.length};});if(result?.status!=='complete')fail('Preview package upload batch incomplete');i=end;}
  return {descriptor:descriptorRef,generation:plan.generation,reportHash:plan.reportHash,totalBytes:actualBytes};
 }
