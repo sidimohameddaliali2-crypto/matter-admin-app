@@ -36,12 +36,13 @@ async function main(){
  await privateAuditDirectory(baselineRoot);
  await verifyAuditBuilder(codeRoot,builderSha256);
  const load=name=>import(pathToFileURL(path.join(codeRoot,name)).href);
- const [{automaticReleaseBasis,createAutomaticRelease},{createAutomaticReleaseSource},{buildAutomaticRelease},{validateAutomaticCandidate}]=await Promise.all([
+ const [{automaticReleaseBasis,createAutomaticRelease},{createAutomaticReleaseSource},{buildAutomaticRelease,compactDirectBuildVersion},{validateAutomaticCandidate}]=await Promise.all([
   load('integration/cloud/automatic-release.mjs'),
   load('integration/cloud/automatic-release-source.mjs'),
   load('integration/cloud/automatic-release-build.mjs'),
   load('scripts/run-automatic-report.mjs'),
  ]);
+ const buildSpace={compact:compactDirectBuildVersion===1};
  const {MONGODB_URI:uri,DRIVER_AUDIT_SUPABASE_SECRET:secret}=process.env;
  const capacityBytes=Number(process.env.DRIVER_AUDIT_CAPACITY_BYTES);
  if(process.env.DRIVER_AUDIT_ENABLED!=='1'||process.env.DRIVER_AUDIT_IMPORT_ENABLED!=='0'||!uri||!secret||
@@ -100,9 +101,12 @@ async function main(){
   const builder=createAutomaticRelease({
    root:work,baselineRoot,pinnedDirectSync:true,loadSource:async()=>pinned,
    async build(options){
-    requireDriverAuditBuildSpace(await freeBuildBytes());
+    const [candidateVolume,baselineVolume]=await Promise.all([fs.stat(options.output),fs.stat(options.baselineRoot)]);
+    const policy={compact:buildSpace.compact&&candidateVolume.dev===baselineVolume.dev};
+    requireDriverAuditBuildSpace(await freeBuildBytes(),policy);
     await saveDriverAuditBuildRecipe(options.output,recipe);
-    return buildAutomaticRelease({...options,rendererBuild,archiveBackedBaseline:true});
+    return buildAutomaticRelease({...options,rendererBuild,archiveBackedBaseline:true,
+     checkSpace:async()=>requireDriverAuditBuildSpace(await freeBuildBytes(),{...policy,inProgress:true})});
    },
    async validate(candidate){
     const validation=await validateAutomaticCandidate(candidate,{journals});
@@ -147,6 +151,48 @@ async function main(){
       saved.pointer?.descriptor?.sha256!==stage.pointer?.descriptor?.sha256)throw Error('Unresolved audit stage requires its pinned package');
    await importConfig(saved);
   }
+  const availableOnHost=()=>freeBuildBytes().catch(error=>{
+   if(error.code==='ENOENT')return freeBuildBytes(root);
+   throw error;
+  });
+  const retirement=()=>({transport:pinned.transport,sourceBasis:automaticReleaseBasis,
+   async readSourceReceipt(revision){
+    const receipt=await sourceReceipts.read(revision);
+    return {revision:receipt.revision,body:JSON.parse(receipt.body).body_text};
+   },readRecipe:directory=>readDriverAuditBuildRecipe(directory,legacyRecipe),
+   retainedBaseline:{root:baselineRoot,manifestSha256:bootstrap?.manifestSha256}});
+  async function maintainWorkspace(expectedHead,{beforeBuild=false}={}){
+   const before=await availableOnHost();
+   const workspace=await withDriverAuditWriter(db,async()=>{
+    const head=await readHead(),stage=await control.findOne({_id:'direct-stage'});
+    if(!head||head.sourceBodySha256!==expectedHead?.sourceBodySha256||stage!==null)return null;
+    const protectedManifests=[head,head.previous].map(pointer=>pointer?.directImport?.manifestSha256).filter(Boolean);
+    const result=await pruneDriverAuditWorkspace({root:work,receiptRoot,protectedManifests,
+     retirement:retirement(),abandoned:'apply'});
+    if(collectReplicas&&(!beforeBuild||!hasDriverAuditBuildSpace(await availableOnHost(),buildSpace))){
+     const options={root:work,receiptRoot,head,stage,retentionStatus:replicaGcStatus,protectedManifests};
+     const copies=await prunePreviousDriverAuditCopies(options);
+     if(copies==='proof-unavailable')result.retirementDeferred++;
+     else if(copies)result.archiveCopies=copies;
+     if(!hasDriverAuditBuildSpace(await availableOnHost(),buildSpace)){
+      for(const compact of [compactActiveDriverAuditBuildFiles,compactPreviousDriverAuditInputs,compactRetiredDriverAuditInputs]){
+       if(hasDriverAuditBuildSpace(await availableOnHost(),buildSpace))break;
+       await compact(options).catch(()=>console.warn('Audit scratch compaction deferred.'));
+      }
+     }
+    }
+    return result;
+   });
+   if(!workspace)return;
+   if(beforeBuild){
+    const available=await availableOnHost();
+    if(!hasDriverAuditBuildSpace(available,buildSpace))Object.assign(workspace,await reclaimDriverAuditBuildCache(work,available,buildSpace));
+   }
+   const freeDiskDeltaBytes=await availableOnHost()-before;
+   if(workspace.retirementDeferred||workspace.abandoned.attempts||workspace.attemptsRetired||workspace.archiveCopies||freeDiskDeltaBytes>0){
+    console.info(JSON.stringify({event:'audit-workspace-maintenance',...workspace,freeDiskDeltaBytes}));
+   }
+  }
   const heartbeat=path.join(root,'sync-status.private.json');
   const scheduled=await privateAuditJson(heartbeat).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
   let next=Date.parse(scheduled?.nextCheckAt??'');
@@ -185,59 +231,8 @@ async function main(){
       const capacity=savedAuditTransferBlock(block,{sourceBasis:latest.basis,
        baselineManifestSha256:prior?.manifestSha256??bootstrap?.manifestSha256??null,policy:transferPolicy});
       if(capacity)throw Object.assign(Error('Saved audit evidence exceeds the transfer limit'),{code:'AUDIT_CAPACITY',capacity});
-      const head=await readHead(),stage=await control.findOne({_id:'direct-stage'});
-      const protectedManifests=[head,head?.previous,stage?.pointer]
-       .map(pointer=>pointer?.directImport?.manifestSha256).filter(Boolean);
-      const retirement={transport:pinned.transport,sourceBasis:automaticReleaseBasis,
-       async readSourceReceipt(revision){
-        const receipt=await sourceReceipts.read(revision);
-        return {revision:receipt.revision,body:JSON.parse(receipt.body).body_text};
-       },readRecipe:directory=>readDriverAuditBuildRecipe(directory,legacyRecipe),
-       retainedBaseline:{root:baselineRoot,manifestSha256:bootstrap?.manifestSha256}};
-      const workspace=await pruneDriverAuditWorkspace({root:work,receiptRoot,protectedManifests,retirement,abandoned:'apply'});
-      if(workspace.retirementDeferred)console.warn(JSON.stringify({event:'audit-workspace-retirement-deferred',attempts:workspace.retirementDeferred}));
-      if(workspace.abandoned.attempts)console.warn(JSON.stringify({event:'audit-workspace-abandoned-retired',...workspace.abandoned}));
-      const availableOnHost=()=>freeBuildBytes().catch(error=>{
-       if(error.code==='ENOENT')return freeBuildBytes(root);
-       throw error;
-      });
-      const before=await availableOnHost();
-      let available=before;
-      if(collectReplicas&&!hasDriverAuditBuildSpace(available)){
-       const copies=await withDriverAuditWriter(db,async()=>prunePreviousDriverAuditCopies({
-        root:work,receiptRoot,head:await readHead(),stage:await control.findOne({_id:'direct-stage'}),retentionStatus:replicaGcStatus,
-       }));
-       if(copies==='proof-unavailable')console.warn(JSON.stringify({event:'audit-workspace-retirement-deferred',attempts:1}));
-       else if(copies){
-        available=await freeBuildBytes();
-        console.warn(JSON.stringify({event:'audit-workspace-archive-copies-retired',...copies,
-         freeDiskDeltaBytes:available-before}));
-       }
-      }
-      if(!hasDriverAuditBuildSpace(available)){
-       const reclaimed=await reclaimDriverAuditBuildCache(work,available);
-       if(reclaimed.cacheBytesRemoved){
-        const after=await availableOnHost();
-        console.warn(JSON.stringify({event:'audit-workspace-cache-reclaimed',...reclaimed,freeDiskDeltaBytes:after-available}));
-        available=after;
-       }
-      }
-      if(collectReplicas&&!hasDriverAuditBuildSpace(available)){
-       const compacted=await withDriverAuditWriter(db,async()=>{
-        const currentHead=await readHead(),stage=await control.findOne({_id:'direct-stage'});
-        const options={root:work,head:currentHead,stage,retentionStatus:replicaGcStatus,
-         protectedManifests:[currentHead,currentHead?.previous,stage?.pointer].map(pointer=>pointer?.directImport?.manifestSha256).filter(Boolean)};
-        const tryCompaction=compact=>compact(options).catch(()=>{
-         console.warn('Could not compact audit scratch. Checking other available space.');
-         return false;
-        });
-        const active=await tryCompaction(compactActiveDriverAuditBuildFiles);
-        const previous=!hasDriverAuditBuildSpace(await availableOnHost())&&await tryCompaction(compactPreviousDriverAuditInputs);
-        const retired=!hasDriverAuditBuildSpace(await availableOnHost())&&await tryCompaction(compactRetiredDriverAuditInputs);
-        return active||previous||retired;
-       });
-       if(compacted)console.info(JSON.stringify({event:'audit-workspace-retained-inputs-compacted',freeDiskDeltaBytes:await availableOnHost()-available}));
-      }
+      const head=await readHead();
+      await maintainWorkspace(head,{beforeBuild:true}).catch(()=>console.warn('Driver audit workspace maintenance deferred.'));
       const accepted=await current().then(candidate=>acceptedWorkspace(work,candidate,head)).catch(()=>null);
       // The pinned source checks every local object's content hash and size.
       if(accepted)localArchiveRoots.push(accepted.accepted.privateRoot);
@@ -254,6 +249,8 @@ async function main(){
       await privateAuditWrite(configFor(candidate),JSON.stringify(config));
       await importConfig(config);
      },
+     maintain:maintainWorkspace,
+     onMaintenanceError:()=>console.warn('Driver audit workspace maintenance deferred.'),
      status,
     });
    }catch(error){

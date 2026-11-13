@@ -408,10 +408,17 @@ async function abandonedSource(directory,retirement){
   if(!Number.isSafeInteger(local.revision)||local.revision<1||typeof local.body!=='string')return null;
   const pinned=JSON.parse(local.body),seed={collectorRevision:local.revision,sourceBasis:sourceBasis(pinned)};
   const copies=new Map();
+  const journal=await privateAuditJson(path.join(directory,'compacted-files.private.json')).catch(missing);
+  const retained=new Map((journal?.files??[]).map(item=>[item.path,item]));
   const source=await savedSource({directory,seed,transport,readSourceReceipt,sourceBasis,async original(relative){
     const actual=await localFingerprint(path.join(directory,relative));
-    if(actual)copies.set(relative,actual);
-    return actual;
+    if(actual){copies.set(relative,actual);return actual;}
+    const item=retained.get(relative);
+    if(item?.retainedPath!==relative+'.retained.gz')return null;
+    const file=path.join(directory,item.retainedPath),decoded=await localFingerprint(file,true);
+    assert(decoded?.sha256===item.sha256&&decoded?.bytes===item.bytes,'Compacted audit source changed');
+    copies.set(item.retainedPath,await localFingerprint(file));
+    return decoded;
   }});
   return {source,sourceBasis:seed.sourceBasis,head:pinned.head,copies,recipe};
 }

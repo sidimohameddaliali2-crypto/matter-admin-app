@@ -97,3 +97,12 @@ test('disk pressure below the build reserve reclaims only enough of the oldest a
   assert.equal(await fs.readFile(protectedFile,'utf8'),'active');
   assert.equal((await fs.lstat(path.join(cache,'c'.repeat(64)+'.gz'))).isSymbolicLink(),true);
 });
+
+test('the compact builder uses its measured reserve and retains an in-progress floor',()=>{
+ const compact={compact:true},inProgress={...compact,inProgress:true};
+ assert.doesNotThrow(()=>requireDriverAuditBuildSpace(1217294336,compact));
+ assert.throws(()=>requireDriverAuditBuildSpace(1024*1024*1024-1,compact),{code:'AUDIT_CAPACITY'});
+ assert.throws(()=>requireDriverAuditBuildSpace(1217294336),{code:'AUDIT_CAPACITY'});
+ assert.doesNotThrow(()=>requireDriverAuditBuildSpace(256*1024*1024,inProgress));
+ assert.throws(()=>requireDriverAuditBuildSpace(256*1024*1024-1,inProgress),{code:'AUDIT_CAPACITY'});
+});
