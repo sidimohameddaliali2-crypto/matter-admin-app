@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {gzipSync,gunzipSync} from 'node:zlib';
-import {pruneDriverAuditWorkspace} from './driverAuditWorkspace.js';
+import {compactPreviousDriverAuditInputs,compactRetiredDriverAuditInputs,pruneDriverAuditWorkspace} from './driverAuditWorkspace.js';
 import {prunePreviousDriverAuditCopies} from './driverAuditWorkspaceRetirement.js';
 import {driverAuditPackagePointer} from './driverAuditDirectImport.js';
 import {checkedAuditPointer} from '../vendor/driver-audits/integration/cloud/audit-replica.mjs';
@@ -156,6 +156,29 @@ test('a prepared archive copy inventory resumes only against the same verified p
   assert.equal((await prunePreviousDriverAuditCopies(options)).files,2);
   assert.equal(JSON.parse(await fs.readFile(proof)).status,'retired');
   await assert.rejects(fs.stat(file),{code:'ENOENT'});
+});
+
+test('previous saved inputs are compacted losslessly only while the retained pair is qualified',async t=>{
+  const f=await fixture(t),previous=await f.add(1),current=await f.add(2);
+  await f.point();
+  const file=path.join(previous.saved,'current-browser.private.json');
+  const active=path.join(current.saved,'current-browser.private.json');
+  const payload=Buffer.alloc(1024*1024+1,42),activeOriginal=await fs.readFile(active);
+  await write(file,payload);
+  const unexpected=path.join(previous.directory,'verified-gps-windows.private.json');
+  await fs.mkdir(unexpected);
+  await write(path.join(unexpected,'unrelated'),payload);
+  const options={root:f.root,head:{...current.head,previous:previous.head},stage:null,retentionStatus:'qualified'};
+  for(const override of [{retentionStatus:'proof-stale'},{stage:{pointer:previous.head}},
+    {head:{...options.head,sourceRevision:999}}]){
+    assert.equal(await compactPreviousDriverAuditInputs({...options,...override}),false);
+  }
+  assert.equal(await compactPreviousDriverAuditInputs(options),true);
+  await assert.rejects(fs.stat(file),{code:'ENOENT'});
+  assert.deepEqual(gunzipSync(await fs.readFile(file+'.retained.gz')),payload);
+  assert.deepEqual(await fs.readFile(active),activeOriginal);
+  assert.deepEqual(await fs.readFile(path.join(unexpected,'unrelated')),payload);
+  assert.equal(await compactPreviousDriverAuditInputs(options),false);
 });
 
 test('repeated cycles retire known generated data while restoring the archived package and keeping protected candidates',async t=>{
@@ -349,4 +372,19 @@ test('abandoned workspace resumes a durable inventory after unlink interruption'
   await f.prune({abandoned:'apply',retirement:{...f.retirement,readSourceReceipt:async()=>assert.fail('Prepared inventory must resume locally')}});
   assert.equal(JSON.parse(await fs.readFile(proof)).status,'retired');
   assert.deepEqual(await fs.readdir(orphan.saved),[]);
+});
+
+test('terminal abandoned copy cleanup preserves leftover build data in verified compressed form',async t=>{
+  const {f,orphan,current}=await abandonedFixture(t);
+  const pathToFile=path.join(orphan.directory,'combined-reviews.private.json');
+  const data=Buffer.alloc(2*1024*1024,42);
+  await write(pathToFile,data);
+  const proof=path.join(orphan.directory,'abandoned-workspace.private.json');
+  await write(proof,json({version:1,kind:'abandoned',status:'retired',manifestSha256:orphan.accepted.manifestSha256}));
+  const options={root:f.root,protectedManifests:[current.accepted.manifestSha256],stage:null,retentionStatus:'qualified'};
+  assert.equal(await compactRetiredDriverAuditInputs({...options,protectedManifests:[orphan.accepted.manifestSha256]}),false);
+  assert.equal(await compactRetiredDriverAuditInputs(options),true);
+  assert.deepEqual(gunzipSync(await fs.readFile(pathToFile+'.retained.gz')),data);
+  await assert.rejects(fs.stat(pathToFile),{code:'ENOENT'});
+  assert.equal(await compactRetiredDriverAuditInputs(options),false);
 });

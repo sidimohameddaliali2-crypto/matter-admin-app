@@ -4,8 +4,9 @@ import {createReadStream,createWriteStream} from 'node:fs';
 import {createHash,randomUUID} from 'node:crypto';
 import {createGzip,createGunzip} from 'node:zlib';
 import {pipeline} from 'node:stream/promises';
+import {isDeepStrictEqual} from 'node:util';
 import {readDriverAuditSeedConfig} from './driverAuditDirectImport.js';
-import {retireAbandonedDriverAuditAttempt,retireDriverAuditAttempt} from './driverAuditWorkspaceRetirement.js';
+import {acceptedWorkspace,retireAbandonedDriverAuditAttempt,retireDriverAuditAttempt} from './driverAuditWorkspaceRetirement.js';
 import {privateAuditJson,privateAuditWrite} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
 
 const digest = /^[a-f0-9]{64}$/;
@@ -126,6 +127,75 @@ export async function reclaimDriverAuditBuildCache(root, availableBytes) {
   return pruneArchiveCache(root,{bytesToReclaim:minimumBuildBytes-availableBytes+buildStartOverheadBytes});
 }
 
+// Keep exact copies of prior build inputs on disk in a smaller form. Neither
+// the live report nor the active build baseline reads these files.
+export async function compactPreviousDriverAuditInputs({root,head,stage,retentionStatus}) {
+  if (retentionStatus!=='qualified'||stage!==null||!head?.previous) return false;
+  const pointer=await optionalJson(path.join(root,'current.private.json'));
+  if (!pointer?.previous||pointer.baselineRoot!==pointer.previous.privateRoot
+    ||pointer.previous.privateRoot===pointer.privateRoot) return false;
+  const pair=await Promise.all([acceptedWorkspace(root,pointer,head),
+    acceptedWorkspace(root,pointer.previous,head.previous)]).catch(()=>null);
+  if (!pair?.every(Boolean)||!isDeepStrictEqual(pointer,pair[0].accepted)
+    ||pair[0].seed.collectorRevision<=pair[1].seed.collectorRevision) return false;
+  const {directory}=pair[1];
+  return compactRetainedInputs(directory,{includeSources:true});
+}
+
+// The abandoned retirement inventory is terminal. Preserve the remaining
+// inputs byte for byte, even when their provenance was insufficient for removal.
+export async function compactRetiredDriverAuditInputs({root,protectedManifests,stage,retentionStatus}) {
+  if(retentionStatus!=='qualified'||stage!==null)return false;
+  const pointer=await optionalJson(path.join(root,'current.private.json'));
+  if(!pointer?.privateRoot)return false;
+  const keep=new Set([pointer.privateRoot,pointer.previous?.privateRoot,pointer.baselineRoot].filter(Boolean).map(value=>path.dirname(value)));
+  const status=await optionalJson(path.join(root,'status.private.json'));
+  const activeId=status?.id??status?.attempt?.id;
+  const attempts=path.join(root,'attempts');
+  const attemptsReal=await fs.realpath(attempts).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
+  if(attemptsReal!==attempts)return false;
+  let compacted=false;
+  for(const entry of await fs.readdir(attempts,{withFileTypes:true})){
+    if(!entry.isDirectory()||!attemptName.test(entry.name)||entry.name===activeId)continue;
+    const directory=path.join(attempts,entry.name);
+    if(keep.has(directory))continue;
+    const proof=await optionalJson(path.join(directory,'abandoned-workspace.private.json')).catch(()=>null);
+    if(proof?.kind!=='abandoned'||proof.version!==1||proof.status!=='retired'||protectedManifests.includes(proof.manifestSha256))continue;
+    const exists=file=>fs.lstat(path.join(directory,file)).then(()=>true,error=>error.code!=='ENOENT');
+    if(await exists('accepted.private.json')||await exists('direct-seed.private.json'))continue;
+    if(await compactRetainedInputs(directory,{includeSources:false}))compacted=true;
+  }
+  return compacted;
+}
+
+async function compactRetainedInputs(directory,{includeSources}) {
+  const stat=await fs.lstat(directory);
+  if(!stat.isDirectory()||stat.uid!==process.getuid()||stat.mode&0o077||await fs.realpath(directory)!==directory)return false;
+  const journalPath=path.join(directory,'compacted-files.private.json');
+  const journal=await optionalJson(journalPath)||{version:1,complete:false,files:[]};
+  if(journal.version!==1||!Array.isArray(journal.files)) throw Error('Invalid audit compaction journal');
+  if(journal.complete) return false;
+  let compacted=false;
+  const record=async entry=>{
+    const prior=journal.files.find(item=>item.path===entry.path);
+    if(prior&&JSON.stringify(prior)!==JSON.stringify(entry))throw Error('Audit compaction receipt changed');
+    if(!prior)journal.files.push(entry);
+    await privateAuditWrite(journalPath,JSON.stringify(journal));
+    await syncFile(journalPath);
+    await syncFile(directory);
+    compacted=true;
+  };
+  if(includeSources){
+    const sources=path.join(directory,'saved-current');
+    const sourceStat=await fs.lstat(sources).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
+    if(sourceStat?.isDirectory()&&sourceStat.uid===process.getuid()&&await fs.realpath(sources)===sources){
+      await compactFiles(directory,sources,null,record,new Set(['current-browser.private.json','current-reviews.private.json']));
+    }
+  }
+  await compactFiles(directory,directory,null,record,new Set(['combined-reviews.private.json','verified-gps-windows.private.json']));
+  return compacted;
+}
+
 async function pruneArchiveCache(root,{maxCacheBytes=Infinity,bytesToReclaim=0}) {
   const cache = path.join(root, 'archive-cache');
   for (const directory of [root,cache]) {
@@ -164,15 +234,24 @@ async function hashFile(file, compressed = false) {
   return {sha256:hash.digest('hex'),bytes};
 }
 
+async function syncFile(file) {
+  const handle=await fs.open(file,'r');
+  try{await handle.sync();}finally{await handle.close();}
+}
+
 // Preserve all validation receipts and inputs byte-for-byte in compressed form.
 // Only hash-addressed replicas with an exact archive receipt are removed.
-async function compactFiles(root, directory, receiptRoot, record) {
+async function compactFiles(root, directory, receiptRoot, record, names) {
   for (const entry of await fs.readdir(directory,{withFileTypes:true})) {
+    if (names&&!names.has(entry.name)) continue;
     const file = path.join(directory,entry.name);
-    if (entry.isDirectory()) { await compactFiles(root,file,receiptRoot,record); continue; }
+    if (entry.isDirectory()) {
+      if(!names)await compactFiles(root,file,receiptRoot,record);
+      continue;
+    }
     if (!entry.isFile() || /\.retained\.gz(?:\.[a-f0-9-]{36})?$/.test(entry.name) || entry.name==='compacted-files.private.json') continue;
     const stat = await fs.lstat(file);
-    if (stat.size < 1024*1024) continue;
+    if (!stat.isFile()||stat.size<1024*1024||names&&(stat.uid!==process.getuid()||stat.mode&0o077||stat.nlink!==1)) continue;
     const original = await hashFile(file);
     const key = entry.name.match(/^(?:archive-)?([a-f0-9]{64})(?:\.gz|\.private\.bin)$/)?.[1];
     const receipt = key && receiptRoot ? await optionalJson(path.join(receiptRoot,key+'.gz.json')) : null;
@@ -195,8 +274,13 @@ async function compactFiles(root, directory, receiptRoot, record) {
         const existing=await hashFile(target,true);
         if(existing.sha256!==original.sha256 || existing.bytes!==original.bytes) throw Error('Conflicting retained audit copy');
       });
+      if(names){
+        await syncFile(target);
+        await syncFile(directory);
+      }
       await record({path:path.relative(root,file),...original,retainedPath:path.relative(root,target)});
       await fs.unlink(file);
+      if(names)await syncFile(directory);
     } finally { await fs.rm(temporary,{force:true}); }
   }
 }
