@@ -3,8 +3,8 @@ const sameEvidence=(source,active)=>source.basis===active.directImport.sourceBas
 
 export async function runDriverAuditSyncTick({readSource,readHead,getCandidate,build,apply,status}){
  let active=await readHead(), latest;
- const update=async(state,pending,errorCode=null)=>status({
-  status:state,pending,errorCode,latestCaptureAt:latest?.observedAt??null,visibleCutoffAt:active?.visibleCutoffAt??null,
+ const update=async(state,pending,errorCode=null,capacity=null)=>status({
+  status:state,pending,errorCode,capacity,latestCaptureAt:latest?.observedAt??null,visibleCutoffAt:active?.visibleCutoffAt??null,
  });
  try{
   if(active?.directImport?.version!==1)throw Error('An active direct audit seed is required');
@@ -26,7 +26,7 @@ export async function runDriverAuditSyncTick({readSource,readHead,getCandidate,b
   await update(pending?'pending':'ready',pending);
  }catch(error){
   const state=error.code==='AUDIT_CAPACITY'?'capacity-blocked':error.code==='AUDIT_BUDGET'?'budget-deferred':'failed';
-  await update(state,true,state==='failed'?'SYNC_FAILED':error.code);
+  await update(state,true,state==='failed'?'SYNC_FAILED':error.code,state==='capacity-blocked'?error.capacity??null:null);
   throw error;
  }
 }

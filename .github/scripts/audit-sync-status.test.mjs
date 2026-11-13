@@ -51,6 +51,19 @@ test('status rejects a named worker pointing outside the fixed audit directory',
   await assert.rejects(readAuditSyncStatus(args), /reviewed audit worker/);
 });
 
+test('status exposes only validated capacity measurements for the current failure', async t => {
+  const f = await fixture(t);
+  const file = path.join(f.root, 'sync-status.private.json');
+  const save = (status, capacity) => fs.writeFile(file, JSON.stringify({ status, errorCode: 'AUDIT_CAPACITY', capacity }), { mode: 0o600 });
+  const capacity = { kind: 'build-disk', availableBytes: 120, requiredBytes: 200 };
+  await save('capacity-blocked', { ...capacity, file: 'private-value' });
+  assert.deepEqual((await readAuditSyncStatus(f)).heartbeat.capacity, capacity);
+  await save('capacity-blocked', { ...capacity, availableBytes: -1 });
+  assert.equal((await readAuditSyncStatus(f)).heartbeat.capacity, null);
+  await save('ready', capacity);
+  assert.equal((await readAuditSyncStatus(f)).heartbeat.capacity, null);
+});
+
 test('inventory identifies populated, protected, prepared and retired attempts without exposing payloads', async t => {
   const f = await fixture(t), parent = path.dirname(f.attempt);
   const id = n => `${String(n).padStart(8, '0')}-0000-4000-8000-000000000000`;

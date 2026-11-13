@@ -23,7 +23,14 @@ export function hasDriverAuditBuildSpace(availableBytes) {
 
 export function requireDriverAuditBuildSpace(availableBytes) {
   if (!hasDriverAuditBuildSpace(availableBytes)) {
-    throw Object.assign(Error('Audit disk reserve unavailable'), {code:'AUDIT_CAPACITY'});
+    throw Object.assign(Error('Audit disk reserve unavailable'), {
+      code:'AUDIT_CAPACITY',
+      capacity:{
+        kind:'build-disk',
+        availableBytes:Number.isSafeInteger(availableBytes)&&availableBytes>=0?availableBytes:null,
+        requiredBytes:minimumBuildBytes,
+      },
+    });
   }
 }
 

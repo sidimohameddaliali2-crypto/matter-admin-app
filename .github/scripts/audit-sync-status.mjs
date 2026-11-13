@@ -23,6 +23,15 @@ const number = value => Number.isFinite(value) && value >= 0 ? value : null;
 const iso = value => typeof value === 'string' && value.length <= 40 && Number.isFinite(Date.parse(value))
   ? new Date(value).toISOString() : null;
 const allowed = (value, list) => list.includes(value) ? value : null;
+const byteCount = value => Number.isSafeInteger(value) && value >= 0;
+
+function capacityFailure(saved) {
+  if (saved?.status !== 'capacity-blocked' || saved.errorCode !== 'AUDIT_CAPACITY') return null;
+  const { kind, availableBytes, requiredBytes } = saved.capacity ?? {};
+  if (!allowed(kind, ['build-disk', 'replica-storage', 'import-transfer']) || !byteCount(requiredBytes)
+    || requiredBytes === 0 || (availableBytes === null ? kind !== 'build-disk' : !byteCount(availableBytes) || availableBytes >= requiredBytes)) return null;
+  return { kind, availableBytes, requiredBytes };
+}
 
 async function readTail(file, maximumBytes, privateOnly = false) {
   const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(missing);
@@ -184,6 +193,7 @@ export async function readAuditSyncStatus({ appRoot, pm2Home, entry }) {
       pid: number(entry.pid), restarts: number(pm.restart_time), elapsedMs: started ? Math.max(0, Date.now() - started) : null,
       rssBytes: number(entry.monit?.memory), cpuPercent: number(entry.monit?.cpu) },
     heartbeat: saved && { status: allowed(saved.status, heartbeatStates), errorCode: allowed(saved.errorCode, ['AUDIT_BUDGET', 'AUDIT_CAPACITY', 'SYNC_FAILED']),
+      capacity: capacityFailure(saved),
       replicaGcStatus: allowed(saved.replicaGcStatus, ['off', 'qualified', 'proof-required', 'proof-stale']),
       checkedAt: iso(saved.checkedAt), nextCheckAt: iso(saved.nextCheckAt), latestCaptureAt: iso(saved.latestCaptureAt), visibleCutoffAt: iso(saved.visibleCutoffAt) },
     build: { status: allowed(progress?.status, buildStates), startedAt: iso(progress?.startedAt ?? progress?.attempt?.startedAt),

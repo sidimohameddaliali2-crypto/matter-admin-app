@@ -14,7 +14,7 @@ const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 const capacityBytes=1024*1024;
 const at='2026-11-12T00:00:00.000Z';
 
-async function fixture(t,{mode='bootstrap',collectorRevision=42}={}){
+async function fixture(t,{mode='bootstrap',collectorRevision=42,oversized=false}={}){
   const bundleRoot=await fs.mkdtemp(path.join(os.tmpdir(),'driver-audit-seed-'));
   t.after(()=>fs.rm(bundleRoot,{recursive:true,force:true}));
   const browser=Buffer.from(JSON.stringify({collectorRevision}));
@@ -39,6 +39,12 @@ async function fixture(t,{mode='bootstrap',collectorRevision=42}={}){
   const files={};
   for(const [name,bytes] of Object.entries(values)){
     files[name]=await archiveBytes(transport,bytes,{domain:'previewRuntime',path:name});
+  }
+  if(oversized){
+    const size=8*1024*1024;
+    files['browser-data.private.json.gz'].chunks=Array.from({length:17},(_,index)=>({
+      offset:index*size,size,sha256:sha('oversized-chunk-'+index),
+    }));
   }
   const manifestSha256=sha('manifest-'+collectorRevision),sourceBasis=sha('basis-'+collectorRevision);
   const descriptor=await archiveBytes(transport,Buffer.from(JSON.stringify({
@@ -159,7 +165,9 @@ test('source conflicts, unexpected target heads and insufficient capacity fail b
   const db=fakeDatabase();
   const run=(config,overrides={})=>runDriverAuditDirectImport({config,db,capacityBytes,apply:true,...overrides});
   await assert.rejects(run(second.config),/bootstrap/i);
-  await assert.rejects(run(first.config,{capacityBytes:8}),{code:'AUDIT_CAPACITY'});
+  await assert.rejects(run(first.config,{capacityBytes:8}),error=>
+    error.code==='AUDIT_CAPACITY'&&error.capacity?.kind==='replica-storage'&&
+    error.capacity.availableBytes===8&&error.capacity.requiredBytes>8);
   assert.equal(db.writes(),0);
   const control=db.tables.get('driverAuditControl');
   control.set('head',{head:{sourceRevision:1,sourceBodySha256:sha('hosted')}});
@@ -171,6 +179,15 @@ test('source conflicts, unexpected target heads and insufficient capacity fail b
   const writes=db.writes(),sourceBasis=sha('different');
   await assert.rejects(run({...first.config,mode:'sync',sourceBasis,closureReceipt:{...first.config.closureReceipt,sourceBasis}}),/revision conflict/i);
   assert.equal(db.writes(),writes);
+});
+
+test('a package beyond the transfer cap reports that limit before checking replica headroom',async t=>{
+  const {config}=await fixture(t,{oversized:true});
+  const db=fakeDatabase();
+  await assert.rejects(runDriverAuditDirectImport({config,db,capacityBytes,apply:true}),error=>
+    error.code==='AUDIT_CAPACITY'&&error.capacity?.kind==='import-transfer'&&
+    error.capacity.availableBytes===128*1024*1024&&error.capacity.requiredBytes>128*1024*1024);
+  assert.equal(db.writes(),0);
 });
 
 test('writer lock and unresolved stage protect interruption and exact retry',async t=>{

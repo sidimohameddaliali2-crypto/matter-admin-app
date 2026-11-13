@@ -31,10 +31,12 @@ test('retry applies an already verified candidate before rebuilding from the new
 });
 
 test('capacity failure retains active cutoff and produces a visible pending state',async()=>{
- const {deps,events}=fixture({fail:Object.assign(Error('Capacity exceeded'),{code:'AUDIT_CAPACITY'})});
+ const capacity={kind:'build-disk',availableBytes:100,requiredBytes:200};
+ const {deps,events}=fixture({fail:Object.assign(Error('Capacity exceeded'),{code:'AUDIT_CAPACITY',capacity})});
  await assert.rejects(runDriverAuditSyncTick(deps),{code:'AUDIT_CAPACITY'});
  assert.equal(events.at(-1)[1].status,'capacity-blocked');
  assert.equal(events.at(-1)[1].visibleCutoffAt,active(1,'a').visibleCutoffAt);
+ assert.deepEqual(events.at(-1)[1].capacity,capacity);
 });
 
 test('sync readiness belongs to the generation actually visible to staff',async()=>{
@@ -45,4 +47,19 @@ test('sync readiness belongs to the generation actually visible to staff',async(
  assert.equal((await readDriverAuditSyncStatus(db,basis('b'),clock)).status,'pending');
  assert.equal((await readDriverAuditSyncStatus(db,basis('a'),clock)).status,'ready');
  assert.equal((await readDriverAuditSyncStatus(db,basis('a'),()=>clock()+31*60_000)).status,'failed');
+});
+
+test('staff see the cause of a current capacity failure without internal measurements',async()=>{
+ const {readDriverAuditSyncStatus}=await import('./driverAuditSyncStatus.js');
+ const checkedAt='2026-11-11T18:00:00.000Z';
+ const saved={checkedAt,status:'capacity-blocked',pending:true,errorCode:'AUDIT_CAPACITY',
+  capacity:{kind:'build-disk',availableBytes:100,requiredBytes:200}};
+ const db={collection:()=>({findOne:async()=>saved})};
+ const clock=()=>Date.parse(checkedAt)+1000;
+ const current=await readDriverAuditSyncStatus(db,basis('a'),clock);
+ assert.equal(current.capacityReason,'build-disk');
+ assert.equal(Object.hasOwn(current,'capacity'),false);
+ assert.equal((await readDriverAuditSyncStatus(db,basis('a'),()=>clock()+31*60_000)).capacityReason,undefined);
+ saved.capacity.kind='unknown';
+ assert.equal((await readDriverAuditSyncStatus(db,basis('a'),clock)).capacityReason,undefined);
 });

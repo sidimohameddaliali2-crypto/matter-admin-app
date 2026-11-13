@@ -22,7 +22,7 @@
     "integration/cloud/preview-read-view.mjs": "e5e3938c7583f6eb85dbc28cf799e752a36b7d730f3770b35240f7ac12a75d5e",
     "integration/cloud/preview-archive-cache.mjs": "117ce59459776dbe419e2781713edbb1e27953c52a84f12b38dd590d495e13ca",
     "integration/cloud/preview-fonts.mjs": "659d679d2b34015b87543c6db10495d76aa840cfffc7c7b6ad508a76543475a3",
-    "integration/cloud/driver-audit-status.mjs": "a44e8fc89e478513dcd338aac275ed1b3238bea8b23dd155e267386807c78d0f",
+    "integration/cloud/driver-audit-status.mjs": "0b92cdecacfb269ffd8978c4cfd8e0fbe74f9b4923fa0e24f16e878c6ecce5ad",
     "integration/cloud/hosted-identities.mjs": "e74d652d6761d87a04f9eb49562af0e3b4ec6a9fed39ab35c62a5390e3304e8c",
     "integration/cloud/immutable-evidence-cache.mjs": "247595a845ff1876810cee544bc967f50d6de24bfae09cb3e8fa6d69e24cf4df",
     "integration/cloud/cloud-state.mjs": "e6c47677008a2ff83971e1e896e7316d70e54b712713905d4175882edae01982",

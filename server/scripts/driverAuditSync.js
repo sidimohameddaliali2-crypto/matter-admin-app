@@ -100,7 +100,7 @@ async function main(){
    const apply=()=>runDriverAuditDirectImport({config,db,capacityBytes,apply:true});
    try{await apply();}
    catch(error){
-    if(error.code!=='AUDIT_CAPACITY'||!collectReplicas)throw error;
+    if(error.code!=='AUDIT_CAPACITY'||error.capacity?.kind!=='replica-storage'||!collectReplicas)throw error;
     const reclaimed=await withDriverAuditWriter(db,writerToken=>collectDriverAuditGarbage({
      db,client:connection.getClient(),archive:{readObject:archive.readBounded},writerToken,apply:true,
     }));
@@ -129,7 +129,7 @@ async function main(){
   process.once('SIGINT',stop);
   async function status(value){
    const active=await readHead();
-   const report={version:1,...value,replicaGcStatus,activeGeneration:active?.generation??null,checkedAt:new Date().toISOString(),nextCheckAt:new Date(next).toISOString()};
+   const report={version:1,capacity:null,...value,replicaGcStatus,activeGeneration:active?.generation??null,checkedAt:new Date().toISOString(),nextCheckAt:new Date(next).toISOString()};
    await control.updateOne({_id:'sync-status'},{$set:report},{upsert:true});
    await privateAuditWrite(heartbeat,JSON.stringify(report));
   }
@@ -221,6 +221,7 @@ async function main(){
     const active=await readHead().catch(()=>null);
     const previous=await privateAuditJson(heartbeat).catch(()=>null);
     await status({status:state,pending:true,errorCode:state==='failed'?'SYNC_FAILED':error.code,
+     capacity:state==='capacity-blocked'?error.capacity??null:null,
      visibleCutoffAt:active?.visibleCutoffAt??null,latestCaptureAt:previous?.latestCaptureAt??null}).catch(()=>{});
     console.error('Driver audit sync paused this refresh. See private sync status.');
    }

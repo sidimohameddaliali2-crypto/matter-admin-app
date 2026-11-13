@@ -1,4 +1,5 @@
 const states=new Set(['checking','pending','ready','failed','capacity-blocked','budget-deferred']);
+const capacityReasons=new Set(['build-disk','replica-storage','import-transfer']);
 const iso=value=>typeof value==='string'&&Number.isFinite(Date.parse(value))?new Date(value).toISOString():null;
 
 export async function readDriverAuditSyncStatus(db,generation,clock=Date.now){
@@ -11,6 +12,8 @@ export async function readDriverAuditSyncStatus(db,generation,clock=Date.now){
  const current=age>=0&&age<30*60_000;
  const status=current&&states.has(saved.status)?saved.status:'failed';
  const visibleStatus=status==='ready'&&saved.activeGeneration!==generation?'pending':status;
+ const reason=saved.capacity?.kind;
+ const showCapacity=visibleStatus==='capacity-blocked'&&saved.errorCode==='AUDIT_CAPACITY'&&capacityReasons.has(reason);
  return {status:visibleStatus,pending:saved.pending===true||visibleStatus==='failed'||visibleStatus==='pending',
-  latestCaptureAt:iso(saved.latestCaptureAt),checkedAt};
+  latestCaptureAt:iso(saved.latestCaptureAt),checkedAt,...(showCapacity?{capacityReason:reason}:{})};
 }
