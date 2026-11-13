@@ -21,20 +21,26 @@ const buildScratchNames = new Set([
 // The saved-data replay used 1.32 GB of working space. Retain additional room
 // for a larger capture.
 const minimumBuildBytes = 2560 * 1024 * 1024;
+const compactBuildBytes = 1024 * 1024 * 1024;
+const remainingBuildBytes = 256 * 1024 * 1024;
 const buildStartOverheadBytes = 8 * 1024 * 1024;
 
-export function hasDriverAuditBuildSpace(availableBytes) {
-  return Number.isSafeInteger(availableBytes) && availableBytes >= minimumBuildBytes;
+function buildReserve({compact=false,inProgress=false}={}) {
+  return inProgress&&compact?remainingBuildBytes:compact?compactBuildBytes:minimumBuildBytes;
 }
 
-export function requireDriverAuditBuildSpace(availableBytes) {
-  if (!hasDriverAuditBuildSpace(availableBytes)) {
+export function hasDriverAuditBuildSpace(availableBytes,policy) {
+  return Number.isSafeInteger(availableBytes) && availableBytes >= buildReserve(policy);
+}
+
+export function requireDriverAuditBuildSpace(availableBytes,policy) {
+  if (!hasDriverAuditBuildSpace(availableBytes,policy)) {
     throw Object.assign(Error('Audit disk reserve unavailable'), {
       code:'AUDIT_CAPACITY',
       capacity:{
         kind:'build-disk',
         availableBytes:Number.isSafeInteger(availableBytes)&&availableBytes>=0?availableBytes:null,
-        requiredBytes:minimumBuildBytes,
+        requiredBytes:buildReserve(policy),
       },
     });
   }
@@ -132,12 +138,12 @@ export async function pruneDriverAuditWorkspace({root, receiptRoot, retirement, 
 
 // The saved source loader fills this cache only from hash-verified immutable
 // archive objects. A cache miss uses its normal verified archive read.
-export async function reclaimDriverAuditBuildCache(root, availableBytes) {
+export async function reclaimDriverAuditBuildCache(root, availableBytes,policy) {
   if (!path.isAbsolute(root) || !Number.isSafeInteger(availableBytes) || availableBytes < 0) {
     throw Error('Invalid audit cache headroom');
   }
-  if (hasDriverAuditBuildSpace(availableBytes)) return {cacheBytesRemoved:0,cacheAllocatedBytesRemoved:0};
-  return pruneArchiveCache(root,{bytesToReclaim:minimumBuildBytes-availableBytes+buildStartOverheadBytes});
+  if (hasDriverAuditBuildSpace(availableBytes,policy)) return {cacheBytesRemoved:0,cacheAllocatedBytesRemoved:0};
+  return pruneArchiveCache(root,{bytesToReclaim:buildReserve(policy)-availableBytes+buildStartOverheadBytes});
 }
 
 // Keep exact copies of prior build inputs on disk in a smaller form. Neither

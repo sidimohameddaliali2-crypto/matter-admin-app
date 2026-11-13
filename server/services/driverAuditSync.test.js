@@ -107,3 +107,21 @@ test('staff see the cause of a current capacity failure without internal measure
  saved.capacity.kind='unknown';
  assert.equal((await readDriverAuditSyncStatus(db,basis('a'),clock)).capacityReason,undefined);
 });
+
+test('workspace maintenance runs only after readback and resumes on an unchanged tick',async()=>{
+ const {deps,events}=fixture({later:source(2,'b')});
+ deps.maintain=async head=>events.push(['maintain',head.directImport.collectorRevision]);
+ await runDriverAuditSyncTick(deps);
+ await runDriverAuditSyncTick({...deps,async readSource(){return source(2,'b');}});
+ assert.deepEqual(events.filter(([type])=>type!=='status'),[['build',2],['apply',2],['maintain',2],['maintain',2]]);
+});
+
+test('maintenance failure leaves verified sync ready and does not replay the import',async()=>{
+ const {deps,events}=fixture({later:source(2,'b')});
+ deps.maintain=async()=>{throw Error('Retention proof unavailable');};
+ deps.onMaintenanceError=()=>events.push(['deferred']);
+ await runDriverAuditSyncTick(deps);
+ assert.equal(events.filter(([type])=>type==='apply').length,1);
+ assert.equal(events.findLast(([type])=>type==='status')[1].status,'ready');
+ assert.deepEqual(events.at(-1),['deferred']);
+});

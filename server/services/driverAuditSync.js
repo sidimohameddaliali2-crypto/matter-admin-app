@@ -20,17 +20,22 @@ export function savedAuditTransferBlock(receipt,{sourceBasis,baselineManifestSha
  return {kind:capacity.kind,availableBytes:capacity.availableBytes,requiredBytes:capacity.requiredBytes};
 }
 
-export async function runDriverAuditSyncTick({readSource,readHead,getCandidate,build,apply,status}){
+export async function runDriverAuditSyncTick({readSource,readHead,getCandidate,build,apply,status,maintain,onMaintenanceError}){
  let active=await readHead(), latest;
  const update=async(state,pending,errorCode=null,capacity=null)=>status({
   status:state,pending,errorCode,capacity,latestCaptureAt:latest?.observedAt??null,visibleCutoffAt:active?.visibleCutoffAt??null,
  });
+ const maintainVerified=async()=>{
+  try{await maintain?.(active);}
+  catch(error){onMaintenanceError?.(error);}
+ };
  try{
   if(active?.directImport?.version!==1)throw Error('An active direct audit seed is required');
   latest=await readSource();
   if(latest.revision<active.directImport.collectorRevision)throw Error('Saved audit source moved backwards');
   if(sameEvidence(latest,active)){
    await update('ready',false);
+   await maintainVerified();
    return;
   }
   await update('checking',true);
@@ -55,6 +60,7 @@ export async function runDriverAuditSyncTick({readSource,readHead,getCandidate,b
   latest=await readSource();
   const pending=!sameEvidence(latest,active);
   await update(pending?'pending':'ready',pending);
+  await maintainVerified();
  }catch(error){
   const failure=describeDriverAuditSyncFailure(error);
   await update(failure.status,true,failure.errorCode,failure.capacity);

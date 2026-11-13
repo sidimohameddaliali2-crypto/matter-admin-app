@@ -473,3 +473,18 @@ test('terminal abandoned copy cleanup preserves leftover build data in verified 
   await assert.rejects(fs.stat(pathToFile),{code:'ENOENT'});
   assert.equal(await compactRetiredDriverAuditInputs(options),false);
 });
+
+test('abandoned direct builds can retire compacted source copies only after exact source readback',async t=>{
+  const {f,orphan}=await abandonedFixture(t);
+  const files=[];
+  for(const name of ['current-browser.private.json','current-reviews.private.json']){
+    const file=path.join(orphan.saved,name),bytes=await fs.readFile(file);
+    await write(file+'.retained.gz',gzipSync(bytes));
+    await fs.unlink(file);
+    files.push({path:'saved-current/'+name,sha256:sha(bytes),bytes:bytes.length,retainedPath:'saved-current/'+name+'.retained.gz'});
+  }
+  await write(path.join(orphan.directory,'compacted-files.private.json'),json({version:1,complete:false,files}));
+  const result=await f.prune({abandoned:'apply'});
+  assert.equal(result.abandoned.attempts,1);
+  assert.deepEqual(await fs.readdir(orphan.saved),[]);
+});
