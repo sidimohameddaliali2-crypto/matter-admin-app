@@ -259,8 +259,11 @@ export async function applyChangesToDelivery(delivery, changes) {
   return updatedDelivery;
 }
 
-// Helper function to check and apply pending changes for a new delivery
-async function checkAndApplyPendingChanges(delivery) {
+// Helper function to check and apply pending changes for a new delivery.
+// Only changes that were saved as applied count (issue #12). A thrown write
+// stays pending and is not reported as applied. The in-memory delivery is
+// reloaded so the create response and socket event match the saved record.
+export async function checkAndApplyPendingChanges(delivery) {
   const { startOfDay, endOfDayExclusive } = getBusinessDayBounds(delivery.scheduledTime);
 
   console.log('========== AUTO-APPLY PENDING CHANGES ==========');
@@ -320,40 +323,52 @@ async function checkAndApplyPendingChanges(delivery) {
   }
   console.log('================================================');
 
-  // Apply each pending change
+  // Apply each pending change. Failures stay pending and are not counted.
+  let applied = 0;
   for (const change of pendingChanges) {
     try {
       console.log('Applying pending change:', change._id.toString(), 'with changes:', change.changes);
       console.log('Change status BEFORE update:', change.status);
-      
+
+      const before = typeof delivery.toObject === 'function' ? delivery.toObject() : { ...delivery };
       const updatedDelivery = await applyChangesToDelivery(delivery, change.changes);
-      
-      // Mark change as applied
+      await flagDeliveryChangeIfNeeded(before, updatedDelivery.toObject());
+
+      // Mark change as applied only after the delivery write succeeded.
       change.status = 'applied';
       change.appliedAt = new Date();
       change.appliedToDelivery = delivery._id;
-      
+
       console.log('Change status AFTER update (before save):', change.status);
       console.log('AppliedToDelivery:', change.appliedToDelivery.toString());
-      
+
       await change.save();
-      
+      applied += 1;
+
       console.log('✅ Pending change applied successfully and SAVED:', change._id.toString());
-      
-      // Verify the save worked by re-querying
+
+      // Verify the save worked by re-querying. A missed read does not undo it.
       const verifyChange = await DeliveryChange.findById(change._id);
-      console.log('Verification - change status in DB:', verifyChange.status, 'appliedTo:', verifyChange.appliedToDelivery?.toString());
-      
+      console.log('Verification - change status in DB:', verifyChange?.status, 'appliedTo:', verifyChange?.appliedToDelivery?.toString());
     } catch (error) {
       console.error('❌ Error applying pending change:', change._id.toString(), error.message);
       // Continue with other changes even if one fails
     }
   }
 
-  console.log(`Applied ${pendingChanges.length} pending changes to delivery ${delivery._id.toString()}`);
+  if (applied > 0) {
+    const fresh = await Delivery.findById(delivery._id);
+    if (fresh) {
+      const plain = typeof fresh.toObject === 'function' ? fresh.toObject() : fresh;
+      if (typeof delivery.set === 'function') delivery.set(plain);
+      else Object.assign(delivery, plain);
+    }
+  }
+
+  console.log(`Applied ${applied} of ${pendingChanges.length} pending changes to delivery ${delivery._id.toString()}`);
   console.log('================================================');
 
-  return pendingChanges.length;
+  return applied;
 }
 
 // All routes are protected
