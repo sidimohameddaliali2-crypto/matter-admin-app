@@ -398,6 +398,11 @@ async function main() {
     if (entries.length > 1) throw Error('Multiple audit workers registered');
     [entry] = entries;
   }
+  if (process.env.ARCHIVE_SUPERSEDED_REPORTING_BUILD === 'true') {
+    if (process.env.QUALIFY_BUILDER === 'true' || process.env.CLEAR_REPORTING_BUILD_CACHES === 'true') throw Error('Select one audit operation');
+    console.log(JSON.stringify(await archiveOlderAuditBuild(appRoot, entry, expected)));
+    return;
+  }
   if (process.env.CLEAR_REPORTING_BUILD_CACHES === 'true') {
     if (process.env.QUALIFY_BUILDER === 'true') throw Error('Select one audit operation');
     const root = syncRoot(appRoot, entry);
@@ -425,6 +430,122 @@ async function main() {
     const status = await readAuditSyncStatus({ appRoot, pm2Home, entry });
     const releases = entry ? await readRetentionInputs(appRoot) : null;
     console.log(JSON.stringify({ ...status, releases }));
+  }
+}
+
+async function archiveOlderAuditBuild(appRoot, entry, expected) {
+  const id = 'c4ad5967-258e-4d85-855d-33d4f77505a7';
+  const revision = 3082;
+  const root = syncRoot(appRoot, entry);
+  const work = path.join(root, 'work');
+  const attempts = path.join(work, 'attempts');
+  const directory = path.join(attempts, id);
+  const hold = path.join(work, 'retained-audit-builds');
+  const archive = path.join(hold, id + '.tar.gz');
+  const deploy = path.join(appRoot, 'server/scripts/driverAuditDeploy.js');
+  const verifier = path.join(appRoot, 'server/vendor/driver-audits/integration/hosted/worker-lock.mjs');
+  const settings = path.join(appRoot, 'server/loadEnv.js');
+  const owned = async directory => {
+    const info = await stat(directory);
+    if (!info?.isDirectory() || info.uid !== process.getuid() || info.mode & 0o077 ||
+        await fs.realpath(directory) !== directory) throw Error('Expected an owned private audit directory');
+    return info;
+  };
+  const disk = async () => {
+    const value = await fs.statfs(work);
+    return value.bavail * value.bsize;
+  };
+  const worker = operation => exec(process.execPath, [deploy, operation], {
+    env: { ...process.env, DRIVER_AUDIT_DEPLOY_SHA: expected }, timeout: 45000, maxBuffer: 65536,
+  });
+  const sync = async file => {
+    const handle = await fs.open(file, 'r');
+    try { await handle.sync(); } finally { await handle.close(); }
+  };
+  const before = await disk();
+  if (before >= 1600000000) return { archivedOlderBuild: false, beforeBytes: before, afterBytes: before };
+  if (entry?.pm2_env?.status !== 'online') throw Error('Expected the existing online audit worker');
+  await owned(work);
+  await owned(attempts);
+  await owned(directory);
+  await fs.mkdir(hold, { mode: 0o700, recursive: true });
+  if ((await owned(hold)).dev !== (await owned(directory)).dev || await stat(archive)) {
+    throw Error('Unexpected archive destination');
+  }
+  await import(pathToFileURL(settings).href);
+  const { acquireWorkerLock } = await import(pathToFileURL(verifier).href);
+  const mongoose = createRequire(path.join(appRoot, 'server/package.json'))('mongoose');
+  const connection = mongoose.createConnection(process.env.MONGODB_URI, {
+    autoIndex: false, autoCreate: false, maxPoolSize: 1, serverSelectionTimeoutMS: 5000,
+  });
+  const tmp = path.join(hold, id + '.partial');
+  let paused = false, lock;
+  try {
+    await connection.asPromise();
+    const stopped = await worker('deploy-worker-pause');
+    paused = stopped.stdout.trim().endsWith('paused');
+    if (!paused) throw Error('Could not pause the reviewed audit worker');
+    lock = await acquireWorkerLock(path.join(path.dirname(root), 'sync-worker.lock'));
+    const control = connection.db.collection('driverAuditControl');
+    const [head, stage, current, progress, localManifest, accepted, seed] = await Promise.all([
+      control.findOne({ _id: 'head' }),
+      control.findOne({ _id: 'direct-stage' }, { projection: { _id: 1 } }),
+      json(path.join(work, 'current.private.json')),
+      json(path.join(work, 'status.private.json')),
+      readTail(path.join(directory, 'server-data/files.private.json'), 16 * 1024 * 1024, true),
+      json(path.join(directory, 'accepted.private.json')),
+      json(path.join(directory, 'direct-seed.private.json')),
+    ]);
+    const protectedRoots = [current?.privateRoot, current?.previous?.privateRoot, current?.baselineRoot];
+    const protectedManifests = [head?.head, head?.head?.previous].map(p => p?.directImport?.manifestSha256);
+    if (stage || !current || !progress || !localManifest || accepted?.collectorRevision !== revision ||
+        seed?.collectorRevision !== revision || accepted.manifestSha256 !== digest(localManifest) ||
+        seed.manifestSha256 !== accepted.manifestSha256 || accepted.privateRoot !== path.join(directory, 'server-data') ||
+        !(head?.head?.previous?.directImport?.collectorRevision > revision) ||
+        protectedManifests.some(hash => !manifest.test(hash)) ||
+        (localManifest && protectedManifests.includes(digest(localManifest))) ||
+        protectedRoots.some(file => typeof file === 'string' && file.startsWith(directory + '/')) ||
+        [progress.id, progress.attempt?.id].includes(id)) throw Error('Older build is protected');
+    const exclusiveBytes = async folder => {
+      let total = 0;
+      for await (const entry of await fs.opendir(folder)) {
+        const file = path.join(folder, entry.name);
+        const info = await fs.lstat(file);
+        if (info.uid !== process.getuid() || info.mode & 0o077) throw Error('Unexpected workspace ownership');
+        if (info.isDirectory()) total += await exclusiveBytes(file);
+        else if (info.isFile() && info.nlink === 1) total += info.blocks * 512;
+        else if (!info.isFile()) throw Error('Unexpected workspace file type');
+      }
+      return total;
+    };
+    const reclaimable = await exclusiveBytes(directory);
+    if (reclaimable < 100 * 1024 * 1024) return { archivedOlderBuild: false, beforeBytes: before, reclaimableBytes: reclaimable };
+    const tarEnv = { PATH: '/usr/bin:/bin', HOME: hold, LANG: 'C' };
+    const tar = args => exec('tar', args, { env: tarEnv, timeout: 240000, maxBuffer: 65536 });
+    await fs.writeFile(tmp, '', { mode: 0o600, flag: 'wx' });
+    await tar(['--create', '--gzip', '--one-file-system', '--file', tmp, '--directory', attempts, '--', id]);
+    await tar(['--compare', '--gzip', '--file', tmp, '--directory', attempts]);
+    if ((await fs.stat(tmp)).blocks * 512 + 64 * 1024 * 1024 > reclaimable) {
+      return { archivedOlderBuild: false, beforeBytes: before, reclaimableBytes: reclaimable, archiveBytes: (await fs.stat(tmp)).size };
+    }
+    await sync(tmp);
+    await fs.rename(tmp, archive);
+    await sync(hold);
+    await fs.rm(directory, { recursive: true });
+    await sync(attempts);
+    return { archivedOlderBuild: true, archiveBytes: (await fs.stat(archive)).size,
+      beforeBytes: before, afterBytes: await disk() };
+  } finally {
+    try {
+      if (lock) await lock.release();
+    } finally {
+      try {
+        if (paused) await worker('deploy-worker-resume');
+      } finally {
+        await connection.close();
+        await fs.rm(tmp, { force: true });
+      }
+    }
   }
 }
 
