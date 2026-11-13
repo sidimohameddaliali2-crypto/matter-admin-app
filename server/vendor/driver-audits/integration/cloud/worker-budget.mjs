@@ -48,7 +48,10 @@ function readDocument(body,policy){
 function currentMonth(now){if(!Number.isSafeInteger(now)||now<0)fail('Invalid worker budget clock');const d=new Date(now);if(!Number.isFinite(d.getTime()))fail('Invalid worker budget clock');return d.toISOString().slice(0,7);}
 function settledMicros(policy,elapsedMs,extraMicros){if(!Number.isSafeInteger(elapsedMs)||elapsedMs<0||elapsedMs>policy.maxRunMs)fail('Uncertain worker duration');if(!Number.isSafeInteger(extraMicros)||extraMicros<0||extraMicros>policy.reservationMicros)fail('Uncertain additional cost');const cost=Math.max(100,Math.ceil((elapsedMs+policy.overheadMs)*policy.rateMicrosPerHour/3_600_000/100)*100)+extraMicros;if(!Number.isSafeInteger(cost)||cost>policy.reservationMicros)fail('Uncertain total cost');return cost;}
 export const NOVEMBER_RECOVERY_READER_BUDGET_KEY='reader-budget-recovery-20261112';
-const novemberReaderBudgetKeys=new Set(['reader-budget-release-20261112','reader-budget-sync-20261112',NOVEMBER_RECOVERY_READER_BUDGET_KEY]);
+export const NOVEMBER_OVERNIGHT_READER_BUDGET_KEY='reader-budget-overnight-20261113';
+export const NOVEMBER_OVERNIGHT_COLLECTION_BUDGET_KEY='worker-budget-overnight-20261113';
+const NOVEMBER_OVERNIGHT_COLLECTION_POLICY=Object.freeze({...WORKER_BUDGET_DEFAULTS,monthlyMicros:5_000_000});
+const novemberReaderBudgetKeys=new Set(['reader-budget-release-20261112','reader-budget-sync-20261112',NOVEMBER_RECOVERY_READER_BUDGET_KEY,NOVEMBER_OVERNIGHT_READER_BUDGET_KEY]);
 const readerBudgetKeys=new Set(['reader-budget','reader-budget-reserve','reader-budget-approved-20261106',...novemberReaderBudgetKeys]);
 
 export function createWorkerBudget({stateStore,clock=Date.now,policy=WORKER_BUDGET_DEFAULTS,key='worker-budget',requestId=randomUUID,maxRetries=8}={}){
@@ -82,7 +85,7 @@ export function createWorkerBudget({stateStore,clock=Date.now,policy=WORKER_BUDG
   async reserve({reservationMicros=policy.reservationMicros}={}){
    if(!validReservationMicros(reservationMicros,policy))fail('Invalid worker budget reservation amount');
    const id=requestId(),now=clock(),period=currentMonth(now);if(!ID.test(id))fail('Invalid worker budget request');
-   const novemberRelease=novemberReaderBudgetKeys.has(key);
+   const novemberRelease=novemberReaderBudgetKeys.has(key)||key===NOVEMBER_OVERNIGHT_COLLECTION_BUDGET_KEY;
    if(novemberRelease&&period!=='2026-11')return {allowed:false,period,reason:'release-expired'};
    return mutate('reserve',id,doc=>{
     if(novemberRelease){
@@ -136,4 +139,30 @@ export function createWorkerBudget({stateStore,clock=Date.now,policy=WORKER_BUDG
  };
 }
 // Worker completion can only release an excess reservation after a known success.
+export function createCollectionBudget({approvedNovemberOvernight=false,clock=Date.now,...options}={}){
+ if(typeof approvedNovemberOvernight!=='boolean')fail('Explicit November collection approval required');
+ const base=createWorkerBudget({...options,clock});
+ if(!approvedNovemberOvernight)return base;
+ const supplement=createWorkerBudget({...options,clock,key:NOVEMBER_OVERNIGHT_COLLECTION_BUDGET_KEY,policy:NOVEMBER_OVERNIGHT_COLLECTION_POLICY});
+ return {
+  async reserve(){
+   const began=clock();
+   const reservation=await base.reserve();
+   if(reservation.allowed)return {...reservation,collectionPool:'base'};
+   const fallback=await supplement.reserve();
+   return {...fallback,collectionPool:'novemberOvernight',
+    collectionPoolDelayMs:fallback.allowed?fallback.startedAtMs-began:0};
+  },
+  settle(reservation,measurement){
+   if(reservation?.collectionPool==='base')return base.settle(reservation,measurement);
+   if(reservation?.collectionPool==='novemberOvernight'){
+    const delay=reservation.collectionPoolDelayMs;
+    if(!Number.isSafeInteger(delay)||delay<0)fail('Uncertain collection pool admission duration');
+    return supplement.settle(reservation,{...measurement,preReservationMs:(measurement?.preReservationMs??0)+delay});
+   }
+   fail('Invalid collection budget pool reservation');
+  },
+ };
+}
+
 export async function runWithWorkerBudget(budget,operation,{monotonic=()=>performance.now()}={}){if(!budget?.reserve||!budget?.settle||typeof operation!=='function'||typeof monotonic!=='function')fail('Invalid worker budget execution');const start=monotonic(),reservation=await budget.reserve();if(!reservation.allowed)return {status:'budget-exhausted',period:reservation.period};const result=await operation(),elapsedMs=Math.ceil(monotonic()-start);let settlement;try{settlement=await budget.settle(reservation,{elapsedMs});}catch{settlement={settled:false,reason:'unconfirmed'};}return {...result,budgetSettlement:settlement.settled?'settled':'retained'};}
