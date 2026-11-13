@@ -140,6 +140,48 @@ test('API bridge never follows redirects or retries uncertain writes', async () 
   await assert.rejects(failure('PUT', `/deliveries/${recordId}`, { body: {} }), /may have been saved/);
 });
 
+test('meal tools are read-only, scope/permission gated, and forward exact menu date and identity', async () => {
+  for (const policy of [
+    { allowMealReads: false, permissions: { menus: true, customers: true } },
+    { allowMealReads: true, permissions: { customers: true } },
+  ]) {
+    const fixture = await connectFixture({ ...policy, allowWrites: false }, async () => assert.fail('No meal calls expected'));
+    try { assert.ok(!(await fixture.client.listTools()).tools.some(tool => tool.name.includes('daily_menu') || tool.name.includes('meal_selections'))); }
+    finally { await fixture.close(); }
+  }
+  const calls = [];
+  const fixture = await connectFixture({ permissions: { menus: true, customers: true }, allowMealReads: true, allowWrites: false, oauth: true },
+    async (...args) => { calls.push(args); return { success: true, data: {} }; });
+  try {
+    const tools = (await fixture.client.listTools()).tools;
+    for (const name of ['matter_get_daily_menu', 'matter_get_customer_meal_selections']) {
+      const tool = tools.find(entry => entry.name === name);
+      assert.equal(tool.annotations.readOnlyHint, true);
+      assert.equal(tool.annotations.destructiveHint, false);
+      assert.deepEqual(tool._meta.securitySchemes[0].scopes, ['deliveries:read', 'meals:read']);
+    }
+    await fixture.client.callTool({ name: 'matter_get_daily_menu', arguments: { date: '2026-11-08' } });
+    assert.deepEqual(calls[0], ['GET', '/mcp-meals/menus', { query: { date: '2026-11-08' } }]);
+    await fixture.client.callTool({ name: 'matter_get_customer_meal_selections', arguments: {
+      date: '2026-11-08', menuId: recordId, email: 'customer@example.com',
+    } });
+    assert.deepEqual(calls[1], ['GET', '/mcp-meals/selections', { query: {
+      date: '2026-11-08', menuId: recordId, email: 'customer@example.com',
+    } }]);
+    const invalid = await fixture.client.callTool({ name: 'matter_get_customer_meal_selections', arguments: {
+      date: '2026-11-08', menuId: recordId, email: 'customer@example.com', matterCustomerId: 'other',
+    } });
+    assert.equal(invalid.isError, true);
+    assert.equal(calls.length, 2);
+  } finally { await fixture.close(); }
+  const menuOnly = await connectFixture({ permissions: { kitchen_list: true }, allowMealReads: true, allowWrites: false }, async () => ({}));
+  try {
+    const tools = (await menuOnly.client.listTools()).tools;
+    assert.ok(tools.some(tool => tool.name === 'matter_get_daily_menu'));
+    assert.ok(!tools.some(tool => tool.name === 'matter_get_customer_meal_selections'));
+  } finally { await menuOnly.close(); }
+});
+
 test('deletion is opt-in for admin credentials and accepts exactly one versioned delivery', async () => {
   assert.equal((await authenticateMcpCredential(`Bearer ${credential}`, {
     credentialsJson, findUser: async () => ({ ...staff, role: 'admin' }),

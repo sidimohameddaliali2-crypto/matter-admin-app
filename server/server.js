@@ -203,6 +203,7 @@ import externalDriverLocationApiRoutes from './routes/externalDriverLocationApi.
 import mobileUpdatesRoutes from './routes/mobileUpdates.js';
 import { createMcpRouter } from './routes/mcp.js';
 import { createMcpOAuthIntegration } from './routes/mcpOAuth.js';
+import mcpMealsRoutes from './routes/mcpMeals.js';
 
 // Import cache initialization
 import { initRedis, getRedisClient } from './config/cache.js';
@@ -218,6 +219,7 @@ app.use('/api/deliveries', deliveryRoutes);
 const mcpOAuth = createMcpOAuthIntegration();
 app.use(mcpOAuth.router);
 app.use('/api/mcp', createMcpRouter({ oauthProvider: mcpOAuth.provider }));
+app.use('/api/mcp-meals', mcpMealsRoutes);
 app.use('/api/bags', bagRoutes);
 app.use('/api/bag-operations', bagOperationsRoutes);
 app.use('/api/bag-refunds', bagRefundRoutes);
