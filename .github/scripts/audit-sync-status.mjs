@@ -240,9 +240,10 @@ export async function readAuditSyncStatus({ appRoot, pm2Home, entry }) {
 }
 
 // This payload is limited to the exact reviewed code-only export.
-const candidateBuilder = '5ee269b38fa25a6ccb2f418822155a1255b2237a80bb0156ddb24100b47c6729';
-const previousBuilder = '13cfd8e5b543714ce6fa93d6aece9e229d4ff0e558768807622d595e29a200b7';
-const bundleHash = '7cd0c2e4c4f8364359e5b8566e6e5aac51c53e7d240473f4cd5b15d4b5fb021c';
+const candidateBuilder = '5780bdb95450558e4cc7dba91b3ed593fdd0b149648a6602b7c5ed441dec84c3';
+const previousBuilder = '5ee269b38fa25a6ccb2f418822155a1255b2237a80bb0156ddb24100b47c6729';
+const reviewedAppCommit = '55b3519d2ad759a4c1ac5ccd0e78cce8c7bf8f5e';
+const bundleHash = 'cd3cc458e4046cead217cbeb3cbdb90014e00af111b1d0bd52681cb142026024';
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const codePath = /^(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*[A-Za-z0-9][A-Za-z0-9._-]*\.(?:mjs|js)$/;
 const smokeSource = String.raw`
@@ -331,9 +332,10 @@ async function qualifyBuilder(appRoot, entry, pm2Home, encoded) {
   }
   const work = path.join(root, 'work');
   if (await fs.realpath(work) !== work || (await fs.stat(work)).dev !== info.dev) throw Error('Build volume mismatch');
-  const source = path.join(root, 'builder');
   const config = await json(path.join(root, 'sync.json'));
-  if (config?.root !== root || config.codeRoot !== source || config.builderSha256 !== previousBuilder) {
+  const source = config?.codeRoot;
+  const reviewedRoots = [path.join(root, 'builder'), path.join(root, 'builder-staged-' + previousBuilder)];
+  if (config?.root !== root || !reviewedRoots.includes(source) || config.builderSha256 !== previousBuilder) {
     throw Error('Running builder pin differs from the reviewed predecessor');
   }
   const node = await fs.realpath(workerProc + '/exe');
@@ -386,6 +388,11 @@ async function main() {
   const git = await exec('git', ['rev-parse', 'HEAD'], { cwd: appRoot, timeout: 5000 });
   if (!sha.test(expected) || git.stdout.trim() !== expected) throw Error('Unexpected production checkout');
 
+  const qualify = process.env.QUALIFY_BUILDER === 'true';
+  const upgrade = process.env.UPGRADE_BUILDER === 'true';
+  const clearCaches = process.env.CLEAR_REPORTING_BUILD_CACHES === 'true';
+  if ([qualify, upgrade, clearCaches].filter(Boolean).length > 1) throw Error('Select one audit operation');
+
   const pm2Home = process.env.PM2_HOME || path.join(os.homedir(), '.pm2');
   const socket = await stat(path.join(pm2Home, 'rpc.sock'));
   let entry;
@@ -398,8 +405,7 @@ async function main() {
     if (entries.length > 1) throw Error('Multiple audit workers registered');
     [entry] = entries;
   }
-  if (process.env.CLEAR_REPORTING_BUILD_CACHES === 'true') {
-    if (process.env.QUALIFY_BUILDER === 'true') throw Error('Select one audit operation');
+  if (clearCaches) {
     const root = syncRoot(appRoot, entry);
     const configured = await exec('npm', ['config', 'get', 'cache'], { timeout: 5000 });
     const npmCache = path.join(os.homedir(), '.npm');
@@ -419,8 +425,27 @@ async function main() {
       afterBytes: after.bavail * after.bsize }));
     return;
   }
-  if (process.env.QUALIFY_BUILDER === 'true') {
+  if (qualify) {
     console.log(JSON.stringify(await qualifyBuilder(appRoot, entry, pm2Home, encoded)));
+  } else if (upgrade) {
+    if (expected !== reviewedAppCommit || process.platform !== 'linux' || !entry) {
+      throw Error('The qualified production application and registered Linux worker are required');
+    }
+    const root = syncRoot(appRoot, entry);
+    const verifier = path.join(appRoot, 'server/vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs');
+    const { verifyAuditBuilder } = await import(pathToFileURL(verifier).href);
+    await verifyAuditBuilder(path.join(root, 'builder-staged-' + candidateBuilder), candidateBuilder);
+    const { stdout } = await exec(process.execPath,
+      [path.join(appRoot, 'server/scripts/driverAuditDeploy.js'), 'audit-builder-upgrade'], {
+        cwd: appRoot,
+        env: { ...process.env, DRIVER_AUDIT_DEPLOY_SHA: expected,
+          DRIVER_AUDIT_BUILDER_FROM: previousBuilder, DRIVER_AUDIT_BUILDER_TO: candidateBuilder },
+        timeout: 19 * 60_000, maxBuffer: 65536,
+      });
+    const receipt = JSON.parse(stdout);
+    if (receipt.status !== 'builder-started' || receipt.builderSha256 !== candidateBuilder ||
+        receipt.productionAcceptancePending !== true) throw Error('Unexpected builder transition receipt');
+    console.log(JSON.stringify({ status: receipt.status, builderSha256: candidateBuilder, productionAcceptancePending: true }));
   } else {
     const status = await readAuditSyncStatus({ appRoot, pm2Home, entry });
     const releases = entry ? await readRetentionInputs(appRoot) : null;
@@ -430,6 +455,11 @@ async function main() {
 
 if (process.argv[1] === '-' && process.argv[2] === '--print') {
   main().catch(() => {
+    if (process.env.UPGRADE_BUILDER === 'true') {
+      console.error('Could not confirm activation of the exact qualified builder on the reviewed production checkout.');
+      process.exitCode = 1;
+      return;
+    }
     console.error(process.env.QUALIFY_BUILDER === 'true'
       ? 'Could not verify the pinned Linux builder on the reviewed production host.'
       : 'Could not read audit sync status from the reviewed production checkout.');
