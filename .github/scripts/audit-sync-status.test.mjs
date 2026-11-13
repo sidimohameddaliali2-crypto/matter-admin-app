@@ -60,6 +60,9 @@ test('status exposes only validated capacity measurements for the current failur
   assert.deepEqual((await readAuditSyncStatus(f)).heartbeat.capacity, capacity);
   await save('capacity-blocked', { ...capacity, availableBytes: -1 });
   assert.equal((await readAuditSyncStatus(f)).heartbeat.capacity, null);
+  const fullDisk = { kind: 'build-disk', availableBytes: null, requiredBytes: null };
+  await save('capacity-blocked', fullDisk);
+  assert.deepEqual((await readAuditSyncStatus(f)).heartbeat.capacity, fullDisk);
   await save('ready', capacity);
   assert.equal((await readAuditSyncStatus(f)).heartbeat.capacity, null);
 });

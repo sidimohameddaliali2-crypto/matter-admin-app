@@ -108,8 +108,8 @@ export async function pruneDriverAuditWorkspace({root, receiptRoot, retirement, 
       || accepted.sourceBasis !== seed.sourceBasis || accepted.collectorRevision !== seed.collectorRevision) continue;
     if(Number.isSafeInteger(pointer?.collectorRevision)&&accepted.collectorRevision<pointer.collectorRevision){
       const retired=await retireDriverAuditAttempt({directory,seed,accepted,receiptRoot,retirement});
-      if(retired==='proof-unavailable')retirementDeferred++;
-      else if(retired){if(retired==='retired')attemptsRetired++;continue;}
+      if(retired==='proof-unavailable'){retirementDeferred++;continue;}
+      if(retired){if(retired==='retired')attemptsRetired++;continue;}
     }
     const journalPath=path.join(directory,'compacted-files.private.json');
     const journal=await optionalJson(journalPath) || {version:1,complete:false,files:[]};
@@ -212,7 +212,7 @@ async function compactRetainedInputs(directory,{includeSources}) {
   if(includeSources){
     const sources=path.join(directory,'saved-current');
     const sourceStat=await fs.lstat(sources).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
-    if(sourceStat?.isDirectory()&&sourceStat.uid===process.getuid()&&await fs.realpath(sources)===sources){
+    if(sourceStat?.isDirectory()&&sourceStat.uid===process.getuid()&&!(sourceStat.mode&0o077)&&await fs.realpath(sources)===sources){
       const sourceNames=new Set(['current-browser.private.json','current-reviews.private.json']);
       await discardInterruptedCompactions(sources,sourceNames);
       await compactFiles(directory,sources,null,record,sourceNames);
@@ -234,10 +234,22 @@ async function discardInterruptedCompactions(directory,names) {
     });
     // A duplicate link is safe to drop even after the original was replaced.
     const sameCopy=retained?.isFile()&&retained.dev===stat.dev&&retained.ino===stat.ino;
-    if(sameCopy||(await fs.lstat(original).catch(error=>{
+    const raw=sameCopy?null:await fs.lstat(original).catch(error=>{
       if(error.code==='ENOENT')return null;
       throw error;
-    }))?.isFile())await fs.unlink(file);
+    });
+    if(!sameCopy){
+      if(!raw?.isFile()||raw.uid!==process.getuid()||raw.mode&0o077)continue;
+      const compressed=await hashFile(file,true).catch(error=>{
+        if(['Z_DATA_ERROR','Z_BUF_ERROR'].includes(error.code))return null;
+        throw error;
+      });
+      if(compressed){
+        const current=await hashFile(original);
+        if(compressed.sha256!==current.sha256||compressed.bytes!==current.bytes)continue;
+      }
+    }
+    await fs.unlink(file);
   }
 }
 
@@ -274,8 +286,11 @@ async function pruneArchiveCache(root,{maxCacheBytes=Infinity,bytesToReclaim=0})
 async function hashFile(file, compressed = false) {
   const hash = createHash('sha256');
   let bytes = 0;
-  const stream = compressed ? createReadStream(file).pipe(createGunzip()) : createReadStream(file);
-  for await (const part of stream) { hash.update(part); bytes += part.length; }
+  const consume=async stream=>{
+    for await(const part of stream){hash.update(part);bytes+=part.length;}
+  };
+  if(compressed)await pipeline(createReadStream(file),createGunzip(),consume);
+  else await consume(createReadStream(file));
   return {sha256:hash.digest('hex'),bytes};
 }
 
@@ -308,17 +323,31 @@ async function compactFiles(root, directory, receiptRoot, record, names) {
     }
     const target=file+'.retained.gz',temporary=target+'.'+randomUUID();
     try {
-      await pipeline(createReadStream(file),createGzip(),createWriteStream(temporary,{mode:0o600,flags:'wx'}));
-      const restored=await hashFile(temporary,true);
-      if (restored.sha256!==original.sha256 || restored.bytes!==original.bytes) throw Error('Retained audit copy failed verification');
-      if ((await fs.stat(temporary)).size>=stat.size) continue;
-      await fs.link(temporary,target).catch(async error=>{
-        if(error.code!=='EEXIST') throw error;
-        const retained=await fs.lstat(target);
-        if(!retained.isFile() || retained.mode&0o077 || retained.uid!==process.getuid()) throw Error('Retained audit copy must be an owner-only regular file');
-        const existing=await hashFile(target,true);
-        if(existing.sha256!==original.sha256 || existing.bytes!==original.bytes) throw Error('Conflicting retained audit copy');
+      const retained=await fs.lstat(target).catch(error=>{
+        if(error.code==='ENOENT')return null;
+        throw error;
       });
+      if(retained){
+        if(!retained.isFile()||retained.mode&0o077||retained.uid!==process.getuid()){
+          if(names)continue;
+          throw Error('Retained audit copy must be an owner-only regular file');
+        }
+        const existing=await hashFile(target,true).catch(error=>{
+          if(names&&['Z_DATA_ERROR','Z_BUF_ERROR'].includes(error.code))return null;
+          throw error;
+        });
+        if(existing?.sha256!==original.sha256||existing.bytes!==original.bytes){
+          if(names)continue;
+          throw Error('Conflicting retained audit copy');
+        }
+      }else{
+        await pipeline(createReadStream(file),createGzip(),createWriteStream(temporary,{mode:0o600,flags:'wx'}));
+        const restored=await hashFile(temporary,true);
+        if(restored.sha256!==original.sha256||restored.bytes!==original.bytes)throw Error('Retained audit copy failed verification');
+        if((await fs.stat(temporary)).size>=stat.size)continue;
+        await fs.link(temporary,target);
+        await fs.unlink(temporary);
+      }
       if(names){
         await syncFile(target);
         await syncFile(directory);

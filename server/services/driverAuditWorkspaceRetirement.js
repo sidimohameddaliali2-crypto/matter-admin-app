@@ -3,6 +3,7 @@ import {constants} from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import {Readable} from 'node:stream';
+import {pipeline} from 'node:stream/promises';
 import {isDeepStrictEqual} from 'node:util';
 import {createGunzip,gzipSync,gunzipSync} from 'node:zlib';
 import {driverAuditPackagePointer,driverAuditSourceHead,readDriverAuditSeedConfig} from './driverAuditDirectImport.js';
@@ -13,6 +14,7 @@ import {createCloudRepository,readManifestBytes} from '../vendor/driver-audits/i
 const digest=/^[a-f0-9]{64}$/;
 const filename=/^[A-Za-z0-9][A-Za-z0-9._-]{0,239}$/;
 const objectName=/^[a-f0-9]{64}\.gz$/;
+const temporaryGzip=/^(.+\.retained\.gz)\.[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const maxFile=128*1024*1024;
 const receiptName='retired-workspace.private.json';
 const inventoryName='retired-workspace-inventory.private.json.gz';
@@ -58,11 +60,19 @@ async function fingerprint(stream){
 async function localFingerprint(file,compressed=false){
   return readPrivate(file,async handle=>{
     const raw=handle.createReadStream({autoClose:false});
-    return fingerprint(compressed?raw.pipe(createGunzip()):raw);
+    if(!compressed)return fingerprint(raw);
+    let result;
+    await pipeline(raw,createGunzip(),async stream=>{result=await fingerprint(stream);});
+    return result;
   });
 }
 
 function eligible(relative){
+  const temporary=temporaryGzip.exec(relative);
+  if(temporary){
+    const original=temporary[1].slice(0,-12);
+    return buildFiles.has(original)||original.startsWith('saved-current/')&&savedFiles.includes(original.slice('saved-current/'.length));
+  }
   const original=relative.endsWith('.retained.gz')?relative.slice(0,-12):relative;
   const [part,file,...rest]=original.split('/');
   if(rest.length||!filename.test(part)||file&&!filename.test(file))return false;
@@ -190,6 +200,28 @@ async function savedSource({directory,seed,transport,readSourceReceipt,sourceBas
   return {revision:source.revision,stateSha256:sha(source.body),browserSha256:sourceHashes[0],reviewsSha256:sourceHashes[1],gpsStateSha256:gps};
 }
 
+// An interrupted compressor may have left a second link to the same gzip.
+async function planScratchCopies(directory,relative,original,files){
+  if(!buildFiles.has(relative)&&!relative.startsWith('saved-current/'))return;
+  const retained=relative+'.retained.gz';
+  const file=path.join(directory,retained);
+  const stat=await fs.lstat(file).catch(missing);
+  if(!stat?.isFile()||stat.uid!==process.getuid()||stat.mode&0o077)return;
+  const restored=await localFingerprint(file,true).catch(()=>null);
+  if(restored?.sha256!==original.sha256||restored.bytes!==original.bytes)return;
+  const packed=await localFingerprint(file);
+  if(!files.some(item=>item.path===retained))files.push({path:retained,...packed});
+  if(stat.nlink<2)return;
+  const parent=path.dirname(file);
+  for(const entry of await fs.readdir(parent,{withFileTypes:true})){
+    if(!entry.isFile()||temporaryGzip.exec(entry.name)?.[1]!==path.basename(file))continue;
+    const alias=await fs.lstat(path.join(parent,entry.name)).catch(missing);
+    if(alias?.isFile()&&alias.ino===stat.ino&&alias.dev===stat.dev){
+      files.push({path:path.relative(directory,path.join(parent,entry.name)),...packed});
+    }
+  }
+}
+
 async function prepare({directory,seed,accepted,receiptRoot,retirement}){
   const {transport,readSourceReceipt,sourceBasis,recipe}=retirement;
   assert(typeof transport?.readObject==='function'&&typeof readSourceReceipt==='function'&&typeof sourceBasis==='function'
@@ -217,6 +249,7 @@ async function prepare({directory,seed,accepted,receiptRoot,retirement}){
     assert(!expected||decoded.sha256===expected,'Audit workspace file changed after validation');
     const stored=target===relative?decoded:await localFingerprint(path.join(directory,target));
     files.push({path:target,...stored});
+    await planScratchCopies(directory,relative,decoded,files);
     return decoded;
   }
   const objects=await archivedPackage({directory,seed,receiptRoot,transport});

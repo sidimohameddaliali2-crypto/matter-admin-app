@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {runDriverAuditSyncTick} from './driverAuditSync.js';
+import {runDriverAuditSyncTick,savedAuditTransferBlock} from './driverAuditSync.js';
 
 const basis=char=>char.repeat(64);
 const source=(revision,id)=>({revision,basis:basis(id),observedAt:'2026-11-11T17:40:00.000Z'});
@@ -30,6 +30,41 @@ test('retry applies an already verified candidate before rebuilding from the new
  assert.deepEqual(events.filter(([type])=>type!=='status'),[['apply',2]]);
 });
 
+test('an oversized pinned candidate yields to newer evidence',async()=>{
+ const {deps,events}=fixture({initial:source(3,'c'),pinned:candidate(2,'b')});
+ const apply=deps.apply;
+ deps.apply=async saved=>{
+  if(saved.collectorRevision===2){
+   events.push(['apply',2]);
+   throw Object.assign(Error('Oversized'),{code:'AUDIT_CAPACITY',capacity:{kind:'import-transfer'}});
+  }
+  return apply(saved);
+ };
+ await runDriverAuditSyncTick(deps);
+ assert.deepEqual(events.filter(([type])=>type!=='status'),[['apply',2],['build',3],['apply',3]]);
+});
+
+test('a saved oversize result only applies to the exact evidence, baseline and policy',()=>{
+ const policy={version:1,maxBytes:128,builderSha256:basis('d')};
+ const capacity={kind:'import-transfer',availableBytes:128,requiredBytes:129};
+ const context={sourceBasis:basis('b'),baselineManifestSha256:basis('a'),policy};
+ const saved={...policy,sourceBasis:context.sourceBasis,baselineManifestSha256:context.baselineManifestSha256,
+  candidateManifestSha256:basis('c'),capacity};
+ assert.deepEqual(savedAuditTransferBlock(JSON.parse(JSON.stringify(saved)),context),capacity);
+ assert.equal(savedAuditTransferBlock(null,context),null);
+ assert.equal(savedAuditTransferBlock(saved,{...context,sourceBasis:basis('f')}),null);
+ assert.equal(savedAuditTransferBlock(saved,{...context,baselineManifestSha256:basis('f')}),null);
+ assert.equal(savedAuditTransferBlock(saved,{...context,policy:{...policy,builderSha256:basis('f')}}),null);
+ assert.equal(savedAuditTransferBlock({...saved,capacity:{...capacity,requiredBytes:128}},context),null);
+});
+
+test('a replica capacity block retries the pinned candidate even when evidence advances',async()=>{
+ const fail=Object.assign(Error('Replica full'),{code:'AUDIT_CAPACITY',capacity:{kind:'replica-storage'}});
+ const {deps,events}=fixture({initial:source(3,'c'),pinned:candidate(2,'b'),fail});
+ await assert.rejects(runDriverAuditSyncTick(deps),{code:'AUDIT_CAPACITY'});
+ assert.deepEqual(events.filter(([type])=>type!=='status'),[['apply',2]]);
+});
+
 test('capacity failure retains active cutoff and produces a visible pending state',async()=>{
  const capacity={kind:'build-disk',availableBytes:100,requiredBytes:200};
  const {deps,events}=fixture({fail:Object.assign(Error('Capacity exceeded'),{code:'AUDIT_CAPACITY',capacity})});
@@ -37,6 +72,15 @@ test('capacity failure retains active cutoff and produces a visible pending stat
  assert.equal(events.at(-1)[1].status,'capacity-blocked');
  assert.equal(events.at(-1)[1].visibleCutoffAt,active(1,'a').visibleCutoffAt);
  assert.deepEqual(events.at(-1)[1].capacity,capacity);
+});
+
+test('a full filesystem reports disk capacity without guessing the failed write size',async()=>{
+ const {deps,events}=fixture({fail:Object.assign(Error('Disk full'),{code:'ENOSPC'})});
+ await assert.rejects(runDriverAuditSyncTick(deps),{code:'ENOSPC'});
+ const status=events.at(-1)[1];
+ assert.equal(status.status,'capacity-blocked');
+ assert.equal(status.errorCode,'AUDIT_CAPACITY');
+ assert.deepEqual(status.capacity,{kind:'build-disk',availableBytes:null,requiredBytes:null});
 });
 
 test('sync readiness belongs to the generation actually visible to staff',async()=>{

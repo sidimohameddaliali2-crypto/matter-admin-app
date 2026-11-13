@@ -4,7 +4,10 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import {gzipSync} from 'node:zlib';
+import {gzipSync,gunzipSync} from 'node:zlib';
+import {checkVerifiedAuditPackageTransfer,prepareRemotePreviewPackage} from '../vendor/driver-audits/integration/cloud/remote-preview-package.mjs';
+import {prepareDirectAuditBundle} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
+import {runDriverAuditSyncTick} from './driverAuditSync.js';
 import {archiveBytes} from '../vendor/driver-audits/integration/cloud/repository.mjs';
 import {readDriverAuditSeedConfig,runDriverAuditDirectImport} from './driverAuditDirectImport.js';
 import {withDriverAuditWriter} from './driverAuditWriter.js';
@@ -188,6 +191,65 @@ test('a package beyond the transfer cap reports that limit before checking repli
     error.code==='AUDIT_CAPACITY'&&error.capacity?.kind==='import-transfer'&&
     error.capacity.availableBytes===128*1024*1024&&error.capacity.requiredBytes>128*1024*1024);
   assert.equal(db.writes(),0);
+});
+
+test('transfer sizing matches the direct package including its descriptor',async t=>{
+  const {config}=await fixture(t);
+  const privateRoot=await fs.realpath(config.bundleRoot);
+  const descriptor=JSON.parse(await fs.readFile(path.join(privateRoot,config.pointer.descriptor.chunks[0].sha256+'.gz')));
+  const files={};
+  for(const [name,reference] of Object.entries(descriptor.files)){
+    await fs.copyFile(path.join(privateRoot,reference.chunks[0].sha256+'.gz'),path.join(privateRoot,name));
+    files[name]=reference.sha256;
+  }
+  const manifest=Buffer.from(JSON.stringify(files));
+  await fs.writeFile(path.join(privateRoot,'files.private.json'),manifest,{mode:0o600});
+  const validation={ok:true,manifestSha256:sha(manifest)};
+  const actual=await prepareRemotePreviewPackage({privateRoot,maxBytes:128*1024*1024,validation,includeRetained:false,
+    transport:{async putVerifiedObject(key,bytes){return {key,sha256:sha(bytes),verified:true};}},
+    runBatch:async(_limits,operation)=>operation(),
+  });
+  assert.equal(checkVerifiedAuditPackageTransfer({privateRoot,maxBytes:actual.totalBytes,validation}),actual.totalBytes);
+  assert.throws(()=>checkVerifiedAuditPackageTransfer({privateRoot,maxBytes:actual.totalBytes-1,validation}),{
+    code:'AUDIT_CAPACITY',capacity:{kind:'import-transfer',availableBytes:actual.totalBytes-1,requiredBytes:actual.totalBytes},
+  });
+});
+
+test('oversized package preparation reports the transfer limit before any archive reads',async t=>{
+  const {config}=await fixture(t);
+  const privateRoot=await fs.realpath(config.bundleRoot);
+  const descriptor=JSON.parse(await fs.readFile(path.join(privateRoot,config.pointer.descriptor.chunks[0].sha256+'.gz')));
+  for(const [name,reference] of Object.entries(descriptor.files)){
+    await fs.copyFile(path.join(privateRoot,reference.chunks[0].sha256+'.gz'),path.join(privateRoot,name));
+  }
+  const deferred=Buffer.alloc(64*1024*1024);
+  const deferredNames=['deferred-history.private.gz','deferred-gps.private.gz'];
+  for(const name of deferredNames)await fs.writeFile(path.join(privateRoot,name),deferred,{mode:0o600});
+  const viewFile=path.join(privateRoot,'preview-read-view.private.json.gz');
+  const view=JSON.parse(gunzipSync(await fs.readFile(viewFile)));
+  view.deferredQueryFiles={history:deferredNames[0],gps:deferredNames[1]};
+  await fs.writeFile(viewFile,gzipSync(JSON.stringify(view)));
+  const files={};
+  for(const name of [...Object.keys(descriptor.files),...deferredNames])files[name]=sha(await fs.readFile(path.join(privateRoot,name)));
+  const manifest=Buffer.from(JSON.stringify(files));
+  await fs.writeFile(path.join(privateRoot,'files.private.json'),manifest,{mode:0o600});
+  const statuses=[];
+  const candidate={collectorRevision:43,sourceBasis:sha('new evidence'),privateRoot};
+  const bundleRoot=path.join(privateRoot,'audit-objects');
+  await assert.rejects(runDriverAuditSyncTick({
+    readHead:async()=>({directImport:{version:1,collectorRevision:42,sourceBasis:sha('previous evidence')}}),
+    readSource:async()=>({revision:43,basis:candidate.sourceBasis}),
+    getCandidate:async()=>candidate,
+    build:async()=>assert.fail('Expected the pinned candidate'),
+    apply:async()=>prepareDirectAuditBundle({privateRoot,bundleRoot,validation:{ok:true,manifestSha256:sha(manifest)},
+      archive:{verify:async()=>assert.fail('No archive reads before the capacity check')},mode:'sync'}),
+    status:async value=>statuses.push(value),
+  }),{code:'AUDIT_CAPACITY'});
+  assert.equal(statuses.at(-1).status,'capacity-blocked');
+  assert.equal(statuses.at(-1).capacity.kind,'import-transfer');
+  assert.equal(statuses.at(-1).capacity.availableBytes,128*1024*1024);
+  assert.ok(statuses.at(-1).capacity.requiredBytes>128*1024*1024);
+  assert.deepEqual(await fs.readdir(bundleRoot),[]);
 });
 
 test('writer lock and unresolved stage protect interruption and exact retry',async t=>{

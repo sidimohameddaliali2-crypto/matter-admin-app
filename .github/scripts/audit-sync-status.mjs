@@ -28,6 +28,7 @@ const byteCount = value => Number.isSafeInteger(value) && value >= 0;
 function capacityFailure(saved) {
   if (saved?.status !== 'capacity-blocked' || saved.errorCode !== 'AUDIT_CAPACITY') return null;
   const { kind, availableBytes, requiredBytes } = saved.capacity ?? {};
+  if (kind === 'build-disk' && availableBytes === null && requiredBytes === null) return { kind, availableBytes, requiredBytes };
   if (!allowed(kind, ['build-disk', 'replica-storage', 'import-transfer']) || !byteCount(requiredBytes)
     || requiredBytes === 0 || (availableBytes === null ? kind !== 'build-disk' : !byteCount(availableBytes) || availableBytes >= requiredBytes)) return null;
   return { kind, availableBytes, requiredBytes };

@@ -2,7 +2,7 @@ import '../loadEnv.js';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import mongoose from 'mongoose';
-import {runDriverAuditSyncTick} from '../services/driverAuditSync.js';
+import {describeDriverAuditSyncFailure,runDriverAuditSyncTick,savedAuditTransferBlock} from '../services/driverAuditSync.js';
 import {runDriverAuditDirectImport} from '../services/driverAuditDirectImport.js';
 import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollection.js';
 import {driverAuditReplicaRetentionStatus,driverAuditRetentionImplementation} from '../services/driverAuditRetention.js';
@@ -12,6 +12,7 @@ import {acceptedWorkspace,prunePreviousDriverAuditCopies} from '../services/driv
 import {pathToFileURL} from 'node:url';
 import {createBudgetedAuditArchive,createBudgetedAuditState} from '../vendor/driver-audits/integration/cloud/driver-audit-archive.mjs';
 import {prepareDirectAuditBundle,privateAuditDirectory,privateAuditJson,privateAuditWrite,verifyAuditBuilder} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
+import {checkVerifiedAuditPackageTransfer} from '../vendor/driver-audits/integration/cloud/remote-preview-package.mjs';
 import {createCloudState} from '../vendor/driver-audits/integration/cloud/cloud-state.mjs';
 import {createHostedRpc} from '../vendor/driver-audits/integration/cloud/rpc.mjs';
 import {createSupabaseArchiveTransport} from '../vendor/driver-audits/integration/hosted/supabase-archive.mjs';
@@ -19,6 +20,7 @@ import {acquireWorkerLock} from '../vendor/driver-audits/integration/hosted/work
 
 const interval=60_000;
 const budgetRetry=5*interval;
+const maxAuditPackageBytes=128*1024*1024;
 const nullableIso=value=>typeof value==='string'&&Number.isFinite(Date.parse(value))?new Date(value).toISOString():null;
 
 async function main(){
@@ -86,13 +88,32 @@ async function main(){
   const localArchiveRoots=[baselineRoot];
   const loadSource=createAutomaticReleaseSource({secret,stateStore:sourceState,cacheRoot:path.join(work,'archive-cache'),localRoots:localArchiveRoots,archiveTransport:{readObject:archive.readBounded}});
   let pinned;
+  const transferBlockFile=path.join(work,'transfer-block.private.json');
+  const transferPolicy={version:1,maxBytes:maxAuditPackageBytes,builderSha256,
+   rendererSha256:rendererBuild.sha256,journalsSha256:journals.sha256};
   const builder=createAutomaticRelease({
    root:work,baselineRoot,pinnedDirectSync:true,loadSource:async()=>pinned,
    async build(options){
     requireDriverAuditBuildSpace(await freeBuildBytes());
     return buildAutomaticRelease({...options,rendererBuild,archiveBackedBaseline:true});
    },
-   validate:candidate=>validateAutomaticCandidate(candidate,{journals}),
+   async validate(candidate){
+    const validation=await validateAutomaticCandidate(candidate,{journals});
+    if(!validation.ok)return validation;
+    try{checkVerifiedAuditPackageTransfer({privateRoot:candidate.privateRoot,maxBytes:maxAuditPackageBytes,validation});}
+    catch(error){
+     if(error.code==='AUDIT_CAPACITY'&&error.capacity?.kind==='import-transfer'){
+      const prior=await current();
+      await privateAuditWrite(transferBlockFile,JSON.stringify({
+       ...transferPolicy,sourceBasis:candidate.sourceBasis,
+       baselineManifestSha256:prior?.manifestSha256??bootstrap?.manifestSha256??null,
+       candidateManifestSha256:validation.manifestSha256,capacity:error.capacity,
+      }));
+     }
+     throw error;
+    }
+    return validation;
+   },
   });
   const current=async()=>privateAuditJson(builder.pointerFile).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
   const configFor=candidate=>path.join(path.dirname(candidate.privateRoot),'direct-seed.private.json');
@@ -148,7 +169,15 @@ async function main(){
       pinned=await loadSource();
       return {revision:pinned.savedState.revision,basis:automaticReleaseBasis(pinned.publication),observedAt:nullableIso(pinned.publication.head.source?.observedAt)};
      },
-     readHead,getCandidate:current,build:async()=>{
+     readHead,getCandidate:current,build:async latest=>{
+      const prior=await current();
+      const block=await privateAuditJson(transferBlockFile).catch(error=>{
+       if(error.code==='ENOENT')return null;
+       throw error;
+      });
+      const capacity=savedAuditTransferBlock(block,{sourceBasis:latest.basis,
+       baselineManifestSha256:prior?.manifestSha256??bootstrap?.manifestSha256??null,policy:transferPolicy});
+      if(capacity)throw Object.assign(Error('Saved audit evidence exceeds the transfer limit'),{code:'AUDIT_CAPACITY',capacity});
       const head=await readHead(),stage=await control.findOne({_id:'direct-stage'});
       const protectedManifests=[head,head?.previous,stage?.pointer]
        .map(pointer=>pointer?.directImport?.manifestSha256).filter(Boolean);
@@ -191,9 +220,13 @@ async function main(){
         const currentHead=await readHead(),stage=await control.findOne({_id:'direct-stage'});
         const options={root:work,head:currentHead,stage,retentionStatus:replicaGcStatus,
          protectedManifests:[currentHead,currentHead?.previous,stage?.pointer].map(pointer=>pointer?.directImport?.manifestSha256).filter(Boolean)};
-        const active=await compactActiveDriverAuditBuildFiles(options);
-        const previous=!hasDriverAuditBuildSpace(await availableOnHost())&&await compactPreviousDriverAuditInputs(options);
-        const retired=!hasDriverAuditBuildSpace(await availableOnHost())&&await compactRetiredDriverAuditInputs(options);
+        const tryCompaction=compact=>compact(options).catch(()=>{
+         console.warn('Could not compact audit scratch. Checking other available space.');
+         return false;
+        });
+        const active=await tryCompaction(compactActiveDriverAuditBuildFiles);
+        const previous=!hasDriverAuditBuildSpace(await availableOnHost())&&await tryCompaction(compactPreviousDriverAuditInputs);
+        const retired=!hasDriverAuditBuildSpace(await availableOnHost())&&await tryCompaction(compactRetiredDriverAuditInputs);
         return active||previous||retired;
        });
        if(compacted)console.info(JSON.stringify({event:'audit-workspace-retained-inputs-compacted',freeDiskDeltaBytes:await availableOnHost()-available}));
@@ -218,11 +251,10 @@ async function main(){
     });
    }catch(error){
     if(error.code==='AUDIT_BUDGET')next=Date.now()+budgetRetry;
-    const state=error.code==='AUDIT_CAPACITY'?'capacity-blocked':error.code==='AUDIT_BUDGET'?'budget-deferred':'failed';
+    const failure=describeDriverAuditSyncFailure(error);
     const active=await readHead().catch(()=>null);
     const previous=await privateAuditJson(heartbeat).catch(()=>null);
-    await status({status:state,pending:true,errorCode:state==='failed'?'SYNC_FAILED':error.code,
-     capacity:state==='capacity-blocked'?error.capacity??null:null,
+    await status({...failure,pending:true,
      visibleCutoffAt:active?.visibleCutoffAt??null,latestCaptureAt:previous?.latestCaptureAt??null}).catch(()=>{});
     console.error('Driver audit sync paused this refresh. See private sync status.');
    }
