@@ -1,7 +1,7 @@
 {
   "version": 1,
   "files": {
-    "integration/cloud/preview-runtime.mjs": "2e37057be7b1be804542627942fb151bfae6590d28c5363c3fe627b2682eb70e",
+    "integration/cloud/preview-runtime.mjs": "6296aab0c683ac8784a5199ae809c97b0b90e6574789d97b1666c622750e9df6",
     "integration/cloud/audit-replica.mjs": "ae7db2f5948958b8d6763bc1f69b5db797354ef82851d4a2b71fe723a182b559",
     "integration/cloud/automatic-hosted-preview.mjs": "5d2f6b9c73bee499fe15afdd7a0754773566c51b31e3ac88038a6a4836c6a18f",
     "integration/cloud/automatic-preview-publication.mjs": "e3e14f618b792eb74da2b46e0d8d98e532834183a5a1940b4360718aa5121866",
@@ -19,7 +19,7 @@
     "integration/cloud/preview-order-timing.mjs": "5e0e98c4dc6559ac1cba571086ff5e105bb6d90eb74bee1710b3d434342ef5d9",
     "integration/cloud/preview-corrections.mjs": "cd26b4e40a783d434d3569583da86c5e7721fe00bd288711403501913611b655",
     "integration/cloud/preview-roads.mjs": "eaec6e3d263cd6eed38512ce943627b97d13a3c5141cd99e1868a7f072db6931",
-    "integration/cloud/preview-read-view.mjs": "e5e3938c7583f6eb85dbc28cf799e752a36b7d730f3770b35240f7ac12a75d5e",
+    "integration/cloud/preview-read-view.mjs": "774e93e414c2490694565c3a29cfd820b97ad1482f3c3c14057d8297443d2278",
     "integration/cloud/preview-archive-cache.mjs": "117ce59459776dbe419e2781713edbb1e27953c52a84f12b38dd590d495e13ca",
     "integration/cloud/preview-fonts.mjs": "659d679d2b34015b87543c6db10495d76aa840cfffc7c7b6ad508a76543475a3",
     "integration/cloud/driver-audit-status.mjs": "0b92cdecacfb269ffd8978c4cfd8e0fbe74f9b4923fa0e24f16e878c6ecce5ad",
@@ -32,8 +32,8 @@
     "integration/cloud/hosted-access.mjs": "2f97316c539b14f99d1d07ea0d49939971e6e93c431463c59a7b831ef637d6d0",
     "integration/cloud/hosted-auth.mjs": "f0b82031a5bf6829507f4508187b32430d36a75f0ed7e5ed690fcb475c5294cc",
     "integration/cloud/hosted-reviews.mjs": "ed2665d1e2b70e998c7850f1c094a917d8cc36220f5bce298c3f44bbc8beb429",
-    "integration/cloud/report-service.mjs": "fa366205f4c1a2d1604fd0999bbf49b0084f825e6edef6d9217f8b1fc85c31fe",
-    "integration/cloud/cloud-http.mjs": "3bb0932ccd58213436ebaca319f73aae15c2085f79adf5a9da1b40935dda00fb",
+    "integration/cloud/report-service.mjs": "976a59a9c71e4408e695a91246135bb2d61675a03ba59ee55762c2c735435456",
+    "integration/cloud/cloud-http.mjs": "42e7c59ad85532edac8e920183c2188f013cccb3658f0e4a272e910d8697c849",
     "integration/cloud/password-login.mjs": "f487f3499fbf4959400abd04cb61ad9998e3a80c404568499ff762a5e476226d",
     "integration/cloud/preview-gps.mjs": "969c0bb314d4a3e8d67625a6e2eaae2de03c2cfb32d501a9d6c9fc878f47ff23",
     "integration/cloud/preview-map-access.mjs": "b35ca049abfdf5f9645e7d354b8e9db72ad17f143d0bd86cbb1cb3ba3c4ab5ac",
@@ -92,6 +92,7 @@
     "integration/cloud/photo-visual-v2.mjs": "171229a278f5900e11ba26bf7a6e479638fd3b5de5908ba788802110f5ae367a",
     "reporting-local-store.mjs": "42a74a5e20c2f7368f12a5b756d492b779074c9a4e07eae0fb113b2bb6b4fe3d",
     "integration/cloud/photo-grader.mjs": "406130e8cead14bf7fb360545f7d978cfc917f23abd99561a4135a2475ed0d5d",
-    "integration/hosted/automatic-photo-review.mjs": "db6ee65487f3679e85072afd1d6a5459c2d9a568786c63fe63196fce0501aa2f"
+    "integration/hosted/automatic-photo-review.mjs": "db6ee65487f3679e85072afd1d6a5459c2d9a568786c63fe63196fce0501aa2f",
+    "integration/cloud/photo-unavailable.mjs": "8646a437e2bcd4484f4d98e90df6ef8ad45bd81c708665bf62a5e72a73f35a45"
   }
 }

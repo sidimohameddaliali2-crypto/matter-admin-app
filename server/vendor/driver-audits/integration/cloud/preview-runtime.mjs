@@ -1,3 +1,4 @@
+import {bindReportManifest} from '../hosted/report-projection.mjs';
 import {createCandidateMapAccess} from './candidate-map-access.mjs';
 import {prioritizePreviewStartup} from './preview-early-startup.mjs';
 import {addPreviewPhotoPrime} from './preview-photo-prime.mjs';
@@ -29,7 +30,7 @@ export function createImportedAuditRuntime(options){
  const url=new URL(options.origin);if(url.origin!==options.origin||!(url.protocol==='https:'||url.hostname==='127.0.0.1'&&url.protocol==='http:'))throw Error('Invalid audit integration origin');
  return buildPreviewRuntime({...options,roadsKey:null},true);
 }
-async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allowedEmail,additionalAllowedEmails=[],privateRoot,packageOverride,authOverride,stateOverride,transportOverride,roadsKey=process.env.MATTER_PREVIEW_ROADS_KEY,local=false,reviewNamespace=PREVIEW_NAMESPACE,afterResponse,automaticFeed=false,automaticRefresh=false,onAuthenticatedRequest,auditImportStatus,auditSyncStatus,publicPathPrefix='',remoteReadsBudgeted=false,staffReportFrame=false},staffIntegration){
+async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allowedEmail,additionalAllowedEmails=[],privateRoot,packageOverride,authOverride,stateOverride,transportOverride,roadsKey=process.env.MATTER_PREVIEW_ROADS_KEY,local=false,reviewNamespace=PREVIEW_NAMESPACE,afterResponse,automaticFeed=false,automaticRefresh=false,onAuthenticatedRequest,auditImportStatus,auditSyncStatus,publicPathPrefix='',staffRenderer,remoteReadsBudgeted=false,staffReportFrame=false},staffIntegration){
  if(typeof staffReportFrame!=='boolean'||staffReportFrame&&(!staffIntegration||publicPathPrefix!=='/api/reporting'))throw Error('Trusted staff report frame required');
  if(typeof remoteReadsBudgeted!=='boolean'||remoteReadsBudgeted&&!staffIntegration)throw Error('Trusted remote archive accounting required');
  if(auditImportStatus!==undefined&&(!staffIntegration||typeof auditImportStatus!=='function'))throw Error('Trusted audit import status required');
@@ -54,11 +55,19 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
  const readView=JSON.parse(gunzipSync(read('preview-read-view.private.json.gz')));
  let report;const reviews=createHostedReviews({stateStore:state,snapshotFor:hash=>report.snapshotFor(hash)}),identities=createHostedIdentities({stateStore:{read:async()=>identity,compareAndSwap:async()=>{throw Object.assign(Error('Preview is read-only for identities'),{status:403});}},config:JSON.parse(identity.body).config,rows:async()=>(await report.gpsSnapshotFor(head.reportHash)).rows});
  report=createCloudReportService({repository,reviewStore:reviews,identityStore:identities,evidenceCache:createImmutableEvidenceCache({maxBytes:96*1024*1024,maxEntries:96}),photoBindingRegistry:has('preview-photo-bindings.private.json')?json('preview-photo-bindings.private.json'):null,deferredPhotoProgress:staffIntegration&&remoteReadsBudgeted});
- report=createPreviewReadView({service:report,repository,read,readAsync,view:readView,has});
+ report=createPreviewReadView({service:report,repository,read,readAsync,view:readView,gpsIndex:index,has});
  if(Object.hasOwn(manifest,'corrections.private.json'))report=connectPreviewCorrections(report,readView,{...json('corrections.private.json'),...(Object.hasOwn(manifest,'release-gps-availability.private.json')?{gpsAvailability:json('release-gps-availability.private.json')}:{})});
  report=connectPreviewOrderTiming(report,readView,index,{frozen:true,households:createHouseholdStore(state),decisions:Object.hasOwn(manifest,'case-decisions.private.json')?json('case-decisions.private.json'):undefined});
  const streams=new Map();const gps=createPreviewGps({snapshotFor:report.gpsSnapshotFor,index,readStream:async key=>{const file=index.streamFiles[key];if(!file)throw Error('GPS stream unavailable');if(!streams.has(key)){streams.set(key,JSON.parse(gunzipSync(await readAsync(file))));while(streams.size>8)streams.delete(streams.keys().next().value);}return streams.get(key);}});
- const fonts=extractPreviewFonts(read('renderer.private.html').toString(),publicPathPrefix);
+ const build=json('build.private.json');
+ let renderer=read('renderer.private.html').toString();
+ if(staffIntegration&&staffRenderer?.templateSnapshotSha256===build.snapshot.sha256){
+  try{
+   bindReportManifest(staffRenderer.html.replace(build.snapshot.path,'report-data/snapshot-'+build.snapshot.sha256+'.json'),build.snapshot,head.manifest);
+   renderer=staffRenderer.html;
+  }catch{console.warn('Driver Reports renderer override is incompatible with the verified package');}
+ }
+ const fonts=extractPreviewFonts(renderer,publicPathPrefix);
  const roads=createPreviewRoads({gps,state,config:maps.roads,key:roadsKey,geometryCache:local?undefined:createPreviewRoadCache({rpc})});
  report={...report,roadEvidence:roads.read,fontAsset:fonts.asset,gpsEvidence:async(...args)=>{const evidence=await gps.read(...args),sharedHouseholdStop=await report.householdStopFor(evidence.recordKey);return {...evidence,sharedHouseholdStop,roadDisplayAvailable:false};},mapsAccess:maps.candidateConfiguration?createCandidateMapAccess({stateStore:rawState,allowanceStore:namespaceState(rawState,PREVIEW_NAMESPACE),stateKey:maps.candidateConfiguration.stateKey,origin,config:maps}):createPreviewMapAccess({stateStore:state,config:maps})};
  const syncStatus=async()=>{
@@ -77,7 +86,7 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
   }
   return result;
  };
- const build=json('build.private.json'),photoHints=Object.hasOwn(manifest,'photo-prime.private.json')?json('photo-prime.private.json'):null;let html=null;
+ const photoHints=Object.hasOwn(manifest,'photo-prime.private.json')?json('photo-prime.private.json'):null;let html=null;
  // The staff app supplies navigation. Keep the archived report content and its evidence runtime.
  const frameHead=`<meta name="matter-driver-reports" content="1"><style>
  [data-data-app-chrome="topbar"], .mm-workspace-shell > .mm-app-header,

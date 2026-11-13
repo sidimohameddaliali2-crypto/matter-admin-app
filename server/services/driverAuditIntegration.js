@@ -1,3 +1,4 @@
+import {loadStaffAuditRenderer} from './driverAuditStaffRenderer.js';
 import {createDriverAuditAuth} from './driverAuditAuth.js';
 import {createDriverAuditReplica} from './driverAuditReplica.js';
 import {readDriverAuditSyncStatus} from './driverAuditSyncStatus.js';
@@ -54,6 +55,7 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
   };
   const createCoordinator=dependencies.createCoordinator||createAutomaticHostedPreview;
   const createRuntime=dependencies.createRuntime||createImportedAuditRuntime;
+  const staffRenderer=await loadStaffAuditRenderer(env.DRIVER_AUDIT_STAFF_RENDERER_DIR,env.DRIVER_AUDIT_STAFF_RENDERER_SHA256);
   let preload,preloadFailed=false;
   const coordinator=createCoordinator({clock,refreshOnRequest:false,restorePrevious:true,loadPointer:async()=>await store.head(),async loadPackage({descriptor,pointer}){
    const directSnapshot=pointer?.directImport?.version===1;
@@ -70,7 +72,7 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    localOnly=false; // Lazy evidence reads on the published handler retain the normal fallback.
    return {...loaded,directSnapshot};
   },createRuntime:({packageOverride,automaticFeed})=>createRuntime({origin,publicPathPrefix:reportApi,packageOverride,automaticFeed,
-   auditImportStatus:health,auditSyncStatus:packageOverride.directSnapshot?()=>readDriverAuditSyncStatus(db(),packageOverride.generation,clock):undefined,
+   staffRenderer:packageOverride.directSnapshot?staffRenderer:undefined,auditImportStatus:health,auditSyncStatus:packageOverride.directSnapshot?()=>readDriverAuditSyncStatus(db(),packageOverride.generation,clock):undefined,
    authOverride:requestAuth,staffReportFrame:true,stateOverride:state,transportOverride:archive,remoteReadsBudgeted:true,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
   function health(){const runtime=coordinator.status();return {status:runtime.status==='stale'?'failed':runtime.status==='refreshing'?'checking':env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'?'disabled':importStatus,checkedAt:attempt===null?null:new Date(attempt).toISOString(),servingGeneration:runtime.active?.generation||null};}
   function prewarm(){
