@@ -197,21 +197,27 @@ test('active build scratch is compressed only for the published generation and r
   await f.point();
   const payload=Buffer.alloc(1024*1024+1,23);
   const name='combined-reviews.private.json',scratch=path.join(current.directory,name);
+  const interrupted=scratch+'.retained.gz.10000000-0000-4000-8000-000000000000';
   const saved=path.join(current.saved,'current-reviews.private.json');
   const serving=path.join(current.privateRoot,'runtime.private.json');
   const [savedBefore,servingBefore]=await Promise.all([fs.readFile(saved),fs.readFile(serving)]);
   await write(scratch,payload);
+  await write(interrupted,'interrupted gzip');
   const options={root:f.root,head:{...current.head,previous:previous.head},stage:null,retentionStatus:'qualified'};
   for(const override of [{retentionStatus:'proof-stale'},{stage:{pointer:previous.head}},{head:previous.head}]){
     assert.equal(await compactActiveDriverAuditBuildFiles({...options,...override}),false);
     assert.deepEqual(await fs.readFile(scratch),payload);
+    assert.equal(await fs.readFile(interrupted,'utf8'),'interrupted gzip');
   }
   assert.equal(await compactActiveDriverAuditBuildFiles(options),true);
   await assert.rejects(fs.stat(scratch),{code:'ENOENT'});
+  await assert.rejects(fs.stat(interrupted),{code:'ENOENT'});
   assert.deepEqual(gunzipSync(await fs.readFile(scratch+'.retained.gz')),payload);
   assert.deepEqual(await fs.readFile(saved),savedBefore);
   assert.deepEqual(await fs.readFile(serving),servingBefore);
+  await fs.link(scratch+'.retained.gz',interrupted);
   assert.equal(await compactActiveDriverAuditBuildFiles(options),false);
+  await assert.rejects(fs.stat(interrupted),{code:'ENOENT'});
   await f.add(3);await f.point();await f.add(4);await f.point();
   assert.equal((await f.prune()).attemptsRetired,2);
   await assert.rejects(fs.stat(scratch+'.retained.gz'),{code:'ENOENT'});

@@ -11,6 +11,12 @@ import {privateAuditJson,privateAuditWrite} from '../vendor/driver-audits/integr
 
 const digest = /^[a-f0-9]{64}$/;
 const attemptName = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+const buildScratchNames = new Set([
+  'combined-reviews.private.json',
+  'verified-gps-windows.private.json',
+  'gps-refresh-receipt.private.json',
+  'automatic-validation.private.json',
+]);
 
 // The saved-data replay used 1.32 GB of working space. Retain additional room
 // for a larger capture.
@@ -191,6 +197,7 @@ async function compactRetainedInputs(directory,{includeSources}) {
   const journalPath=path.join(directory,'compacted-files.private.json');
   const journal=await optionalJson(journalPath)||{version:1,complete:false,files:[]};
   if(journal.version!==1||!Array.isArray(journal.files)) throw Error('Invalid audit compaction journal');
+  await discardInterruptedCompactions(directory,buildScratchNames);
   if(journal.complete) return false;
   let compacted=false;
   const record=async entry=>{
@@ -206,16 +213,32 @@ async function compactRetainedInputs(directory,{includeSources}) {
     const sources=path.join(directory,'saved-current');
     const sourceStat=await fs.lstat(sources).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
     if(sourceStat?.isDirectory()&&sourceStat.uid===process.getuid()&&await fs.realpath(sources)===sources){
-      await compactFiles(directory,sources,null,record,new Set(['current-browser.private.json','current-reviews.private.json']));
+      const sourceNames=new Set(['current-browser.private.json','current-reviews.private.json']);
+      await discardInterruptedCompactions(sources,sourceNames);
+      await compactFiles(directory,sources,null,record,sourceNames);
     }
   }
-  await compactFiles(directory,directory,null,record,new Set([
-    'combined-reviews.private.json',
-    'verified-gps-windows.private.json',
-    'gps-refresh-receipt.private.json',
-    'automatic-validation.private.json',
-  ]));
+  await compactFiles(directory,directory,null,record,buildScratchNames);
   return compacted;
+}
+
+async function discardInterruptedCompactions(directory,names) {
+  for(const entry of await fs.readdir(directory,{withFileTypes:true})){
+    const match=/^(.+)\.retained\.gz\.([a-f0-9-]+)$/.exec(entry.name);
+    if(!entry.isFile()||!match||!names.has(match[1])||!attemptName.test(match[2]))continue;
+    const file=path.join(directory,entry.name),stat=await fs.lstat(file);
+    if(!stat.isFile()||stat.uid!==process.getuid()||stat.mode&0o077)continue;
+    const original=path.join(directory,match[1]),retained=await fs.lstat(original+'.retained.gz').catch(error=>{
+      if(error.code==='ENOENT')return null;
+      throw error;
+    });
+    // A duplicate link is safe to drop even after the original was replaced.
+    const sameCopy=retained?.isFile()&&retained.dev===stat.dev&&retained.ino===stat.ino;
+    if(sameCopy||(await fs.lstat(original).catch(error=>{
+      if(error.code==='ENOENT')return null;
+      throw error;
+    }))?.isFile())await fs.unlink(file);
+  }
 }
 
 async function pruneArchiveCache(root,{maxCacheBytes=Infinity,bytesToReclaim=0}) {
