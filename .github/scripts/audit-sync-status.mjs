@@ -512,13 +512,19 @@ async function archiveOlderAuditBuild(appRoot, entry, expected) {
     const copies = [];
     let reclaimable = 0;
     const data = path.join(directory, 'server-data');
-    await owned(data);
+    const dataInfo = await stat(data);
+    if (!dataInfo?.isDirectory() || dataInfo.uid !== process.getuid() || await fs.realpath(data) !== data) {
+      throw Object.assign(Error('Generated workspace is not inside the private attempt'), { code: 'DATA_ROOT' });
+    }
+    phase = 'select-copies';
     const expectedFiles = JSON.parse(localManifest);
     for (const [name, hash] of Object.entries(expectedFiles)) {
       if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,239}$/.test(name) || !manifest.test(hash)) continue;
       const file = path.join(data, name);
       const info = await stat(file);
       if (!info?.isFile() || info.uid !== process.getuid() || info.nlink !== 1 || info.size < 1024 * 1024) continue;
+      const actual = createHash('sha256').update(await fs.readFile(file)).digest('hex');
+      if (actual !== hash) throw Object.assign(Error('Superseded build file differs from its manifest'), { code: 'COPY_HASH' });
       copies.push(path.join(id, 'server-data', name));
       reclaimable += info.blocks * 512;
     }
