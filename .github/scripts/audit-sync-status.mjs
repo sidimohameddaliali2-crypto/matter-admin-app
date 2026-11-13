@@ -479,13 +479,15 @@ async function archiveOlderAuditBuild(appRoot, entry, expected) {
     autoIndex: false, autoCreate: false, maxPoolSize: 1, serverSelectionTimeoutMS: 5000,
   });
   const tmp = path.join(hold, id + '.partial');
-  let paused = false, lock;
+  let paused = false, lock, phase = 'connection';
   try {
     await connection.asPromise();
+    phase = 'pause';
     const stopped = await worker('deploy-worker-pause');
     paused = stopped.stdout.trim().endsWith('paused');
     if (!paused) throw Error('Could not pause the reviewed audit worker');
     lock = await acquireWorkerLock(path.join(path.dirname(root), 'sync-worker.lock'));
+    phase = 'protect';
     const control = connection.db.collection('driverAuditControl');
     const [head, stage, current, progress, localManifest, accepted, seed] = await Promise.all([
       control.findOne({ _id: 'head' }),
@@ -518,16 +520,20 @@ async function archiveOlderAuditBuild(appRoot, entry, expected) {
       }
       return total;
     };
+    phase = 'allocation';
     const reclaimable = await exclusiveBytes(directory);
     if (reclaimable < 100 * 1024 * 1024) return { archivedOlderBuild: false, beforeBytes: before, reclaimableBytes: reclaimable };
     const tarEnv = { PATH: '/usr/bin:/bin', HOME: hold, LANG: 'C' };
     const tar = args => exec('tar', args, { env: tarEnv, timeout: 240000, maxBuffer: 65536 });
+    phase = 'archive';
     await fs.writeFile(tmp, '', { mode: 0o600, flag: 'wx' });
     await tar(['--create', '--gzip', '--one-file-system', '--file', tmp, '--directory', attempts, '--', id]);
+    phase = 'compare';
     await tar(['--compare', '--gzip', '--file', tmp, '--directory', attempts]);
     if ((await fs.stat(tmp)).blocks * 512 + 64 * 1024 * 1024 > reclaimable) {
       return { archivedOlderBuild: false, beforeBytes: before, reclaimableBytes: reclaimable, archiveBytes: (await fs.stat(tmp)).size };
     }
+    phase = 'install';
     await sync(tmp);
     await fs.rename(tmp, archive);
     await sync(hold);
@@ -535,6 +541,10 @@ async function archiveOlderAuditBuild(appRoot, entry, expected) {
     await sync(attempts);
     return { archivedOlderBuild: true, archiveBytes: (await fs.stat(archive)).size,
       beforeBytes: before, afterBytes: await disk() };
+  } catch (error) {
+    const code = typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{1,32}$/.test(error.code) ? error.code : Number.isSafeInteger(error.code) ? error.code : null;
+    console.log(JSON.stringify({ archiveFailed: true, phase, code, full: /No space left on device/.test(error.stderr ?? '') }));
+    throw error;
   } finally {
     try {
       if (lock) await lock.release();
