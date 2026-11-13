@@ -18,6 +18,11 @@ on:
         type: boolean
         default: false
 
+      audit_build_archive_interrupted:
+        description: Losslessly archive the one reviewed interrupted audit build
+        type: boolean
+        default: false
+
       qualify_builder:
         description: Run only the pinned Linux builder qualification
         type: boolean
@@ -62,13 +67,14 @@ jobs:
           AUDIT_STATUS_CODE: ${{ steps.prepare.outputs.code }}
           AUDIT_BUILD_DISK_INVENTORY: ${{ inputs.audit_build_disk_inventory }}
           AUDIT_BUILD_CLEAR_PACKAGE_CACHES: ${{ inputs.audit_build_clear_package_caches }}
+          AUDIT_BUILD_ARCHIVE_INTERRUPTED: ${{ inputs.audit_build_archive_interrupted }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
-          command_timeout: 2m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,BUILDER_QUALIFICATION_BUNDLE,AUDIT_BUILD_DISK_INVENTORY,AUDIT_BUILD_CLEAR_PACKAGE_CACHES
+          command_timeout: 10m
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,BUILDER_QUALIFICATION_BUNDLE,AUDIT_BUILD_DISK_INVENTORY,AUDIT_BUILD_CLEAR_PACKAGE_CACHES,AUDIT_BUILD_ARCHIVE_INTERRUPTED
           script: |
             set -e
             cd -- "$DO_APP_PATH"
