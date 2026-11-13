@@ -16,8 +16,8 @@ function fixedHostBudget(stateStore,options){
  })};
 }
 
-export function createBudgetedAuditArchive({rpc,state,remote,receiptRoot,requestBytes=4096,approvedNovemberRelease=false,approvedNovemberSync=false,approvedNovemberRecovery=false,clock=Date.now}){
- const budget=fixedHostBudget(state,{approvedNovemberRelease,approvedNovemberSync,approvedNovemberRecovery,clock});
+export function createBudgetedAuditArchive({rpc,state,remote,receiptRoot,requestBytes=4096,approvedNovemberRelease=false,approvedNovemberSync=false,approvedNovemberRecovery=false,approvedNovemberOvernight=false,clock=Date.now}){
+ const budget=fixedHostBudget(state,{approvedNovemberRelease,approvedNovemberSync,approvedNovemberRecovery,approvedNovemberOvernight,clock});
  const reader=createBudgetedArchiveReader({transport:remote,budget,requestBytes});
  const storage=createArchiveReservation({rpc,transport:remote,ensureCapacity:createArchiveCapacity({rpc})});
  const queued=[];
@@ -72,8 +72,8 @@ export function createBudgetedAuditArchive({rpc,state,remote,receiptRoot,request
  };
 }
 
-export function createBudgetedAuditState({state,budgetState,responseLimit,requestBytes=4096,approvedNovemberRelease=false,approvedNovemberSync=false,approvedNovemberRecovery=false,clock=Date.now}){
- const budget=fixedHostBudget(budgetState,{approvedNovemberRelease,approvedNovemberSync,approvedNovemberRecovery,clock});
+export function createBudgetedAuditState({state,budgetState,responseLimit,requestBytes=4096,approvedNovemberRelease=false,approvedNovemberSync=false,approvedNovemberRecovery=false,approvedNovemberOvernight=false,clock=Date.now}){
+ const budget=fixedHostBudget(budgetState,{approvedNovemberRelease,approvedNovemberSync,approvedNovemberRecovery,approvedNovemberOvernight,clock});
  const cached=new Map();
  return {async read(key){
   let transfer=0;

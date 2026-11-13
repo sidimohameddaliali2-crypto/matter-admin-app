@@ -277,7 +277,7 @@ async function exactArchiveReceipt(receiptRoot,key,actual){
 const archiveKey=relative=>relative.match(/^(?:server-data\/archive-([a-f0-9]{64})\.private\.bin|audit-objects\/([a-f0-9]{64})\.gz)$/)?.slice(1).find(Boolean);
 const proofForRecipe=recipe=>['builderSha256','rendererSha256','journalsSha256','baselineManifestSha256'].every(key=>digest.test(recipe?.[key]));
 
-async function acceptedWorkspace(root,candidate,head){
+export async function acceptedWorkspace(root,candidate,head){
   if(!candidate||head?.version!==1||!digest.test(candidate.basis)
     ||typeof candidate.privateRoot!=='string')return null;
   const directory=path.dirname(candidate.privateRoot);

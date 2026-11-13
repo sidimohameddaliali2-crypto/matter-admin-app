@@ -8,7 +8,7 @@ import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollectio
 import {driverAuditReplicaRetentionStatus,driverAuditRetentionImplementation} from '../services/driverAuditRetention.js';
 import {withDriverAuditWriter} from '../services/driverAuditWriter.js';
 import {hasDriverAuditBuildSpace,pruneDriverAuditWorkspace,reclaimDriverAuditBuildCache,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
-import {prunePreviousDriverAuditCopies} from '../services/driverAuditWorkspaceRetirement.js';
+import {acceptedWorkspace,prunePreviousDriverAuditCopies} from '../services/driverAuditWorkspaceRetirement.js';
 import {pathToFileURL} from 'node:url';
 import {createBudgetedAuditArchive,createBudgetedAuditState} from '../vendor/driver-audits/integration/cloud/driver-audit-archive.mjs';
 import {prepareDirectAuditBundle,privateAuditDirectory,privateAuditJson,privateAuditWrite,verifyAuditBuilder} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
@@ -66,9 +66,10 @@ async function main(){
    return;
   }
   lock=await acquireWorkerLock(path.join(path.dirname(root),'sync-worker.lock'));
-  const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true});
+  const reportingAllowances={approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true,approvedNovemberOvernight:true};
+  const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),...reportingAllowances});
   const boundedState=(responseLimit,select=cloud=>cloud)=>createBudgetedAuditState({state:select(createCloudState({rpc:createHostedRpc({secret,maxResponseBytes:responseLimit})})),
-   budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret),approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true});
+   budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret),...reportingAllowances});
   const sourceState=boundedState(2*1024*1024),reviewState=boundedState(8*1024*1024);
   const sourceReceipts=boundedState(2*1024*1024,cloud=>({async read(revision){
    const [receipt]=await cloud.receipts('collector-state',{after:revision-1});
@@ -82,7 +83,8 @@ async function main(){
    const disk=await fs.statfs(directory);
    return disk.bavail*disk.bsize;
   };
-  const loadSource=createAutomaticReleaseSource({secret,stateStore:sourceState,cacheRoot:path.join(work,'archive-cache'),localRoots:[baselineRoot],archiveTransport:{readObject:archive.readBounded}});
+  const localArchiveRoots=[baselineRoot];
+  const loadSource=createAutomaticReleaseSource({secret,stateStore:sourceState,cacheRoot:path.join(work,'archive-cache'),localRoots:localArchiveRoots,archiveTransport:{readObject:archive.readBounded}});
   let pinned;
   const builder=createAutomaticRelease({
    root:work,baselineRoot,pinnedDirectSync:true,loadSource:async()=>pinned,
@@ -180,7 +182,11 @@ async function main(){
        if(reclaimed.cacheBytesRemoved)console.warn(JSON.stringify({event:'audit-workspace-cache-reclaimed',...reclaimed,
         freeDiskDeltaBytes:await freeBuildBytes()-available}));
       }
-      return builder.tick();
+      const accepted=await current().then(candidate=>acceptedWorkspace(work,candidate,head)).catch(()=>null);
+      // The pinned source checks every local object's content hash and size.
+      if(accepted)localArchiveRoots.push(accepted.accepted.privateRoot);
+      try{return await builder.tick();}
+      finally{localArchiveRoots.length=1;}
      },
      async apply(candidate){
       const config=await prepareDirectAuditBundle({
