@@ -479,6 +479,7 @@ async function archiveOlderAuditBuild(appRoot, entry, expected) {
     autoIndex: false, autoCreate: false, maxPoolSize: 1, serverSelectionTimeoutMS: 5000,
   });
   const tmp = path.join(hold, id + '.partial');
+  const inventory = path.join(hold, id + '.inventory.partial');
   let paused = false, lock, phase = 'connection';
   try {
     await connection.asPromise();
@@ -508,26 +509,26 @@ async function archiveOlderAuditBuild(appRoot, entry, expected) {
         (localManifest && protectedManifests.includes(digest(localManifest))) ||
         protectedRoots.some(file => typeof file === 'string' && file.startsWith(directory + '/')) ||
         [progress.id, progress.attempt?.id].includes(id)) throw Error('Older build is protected');
-    const exclusiveBytes = async folder => {
-      let total = 0;
-      for await (const entry of await fs.opendir(folder)) {
-        const file = path.join(folder, entry.name);
-        const info = await fs.lstat(file);
-        if (info.uid !== process.getuid()) throw Object.assign(Error('Unexpected workspace ownership'), { code: 'ENTRY_OWNER' });
-        if (info.isDirectory()) total += await exclusiveBytes(file);
-        else if (info.isFile() && info.nlink === 1) total += info.blocks * 512;
-        else if (!info.isFile() && !info.isSymbolicLink()) throw Object.assign(Error('Unexpected workspace file type'), { code: 'ENTRY_TYPE' });
-      }
-      return total;
-    };
-    phase = 'allocation';
-    const reclaimable = await exclusiveBytes(directory);
+    const copies = [];
+    let reclaimable = 0;
+    const data = path.join(directory, 'server-data');
+    await owned(data);
+    const expectedFiles = JSON.parse(localManifest);
+    for (const [name, hash] of Object.entries(expectedFiles)) {
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,239}$/.test(name) || !manifest.test(hash)) continue;
+      const file = path.join(data, name);
+      const info = await stat(file);
+      if (!info?.isFile() || info.uid !== process.getuid() || info.nlink !== 1 || info.size < 1024 * 1024) continue;
+      copies.push(path.join(id, 'server-data', name));
+      reclaimable += info.blocks * 512;
+    }
     if (reclaimable < 100 * 1024 * 1024) return { archivedOlderBuild: false, beforeBytes: before, reclaimableBytes: reclaimable };
     const tarEnv = { PATH: '/usr/bin:/bin', HOME: hold, LANG: 'C' };
     const tar = args => exec('tar', args, { env: tarEnv, timeout: 240000, maxBuffer: 65536 });
     phase = 'archive';
     await fs.writeFile(tmp, '', { mode: 0o600, flag: 'wx' });
-    await tar(['--create', '--gzip', '--one-file-system', '--file', tmp, '--directory', attempts, '--', id]);
+    await fs.writeFile(inventory, copies.join('\0') + '\0', { mode: 0o600, flag: 'wx' });
+    await tar(['--create', '--gzip', '--file', tmp, '--directory', attempts, '--null', '--verbatim-files-from', '--files-from', inventory]);
     phase = 'compare';
     await tar(['--compare', '--gzip', '--file', tmp, '--directory', attempts]);
     if ((await fs.stat(tmp)).blocks * 512 + 64 * 1024 * 1024 > reclaimable) {
@@ -537,7 +538,8 @@ async function archiveOlderAuditBuild(appRoot, entry, expected) {
     await sync(tmp);
     await fs.rename(tmp, archive);
     await sync(hold);
-    await fs.rm(directory, { recursive: true });
+    for (const copy of copies) await fs.unlink(path.join(attempts, copy));
+    await sync(data);
     await sync(attempts);
     return { archivedOlderBuild: true, archiveBytes: (await fs.stat(archive)).size,
       beforeBytes: before, afterBytes: await disk() };
@@ -554,6 +556,7 @@ async function archiveOlderAuditBuild(appRoot, entry, expected) {
       } finally {
         await connection.close();
         await fs.rm(tmp, { force: true });
+        await fs.rm(inventory, { force: true });
       }
     }
   }
