@@ -380,6 +380,27 @@ async function main() {
     console.log(JSON.stringify({ diskInventory: values, freeBytes: usage.bavail * usage.bsize }));
     return;
   }
+  if (process.env.AUDIT_BUILD_CLEAR_PACKAGE_CACHES === 'true') {
+    const root = syncRoot(appRoot, entry);
+    const configured = await exec('npm', ['config', 'get', 'cache'], { timeout: 5000 });
+    const npmCache = path.join(os.homedir(), '.npm');
+    const clientCache = path.join(appRoot, 'client/node_modules/.cache');
+    const caches = [path.join(npmCache, '_cacache'), clientCache];
+    if (configured.stdout.trim() !== npmCache) throw Error('The npm cache differs from the reviewed location');
+    const before = await fs.statfs(root);
+    for (const cache of caches) {
+      const info = await stat(cache);
+      if (!info) continue;
+      if (!info.isDirectory() || info.uid !== process.getuid() || await fs.realpath(cache) !== cache) {
+        throw Error('The package cache is not an owned directory');
+      }
+      await fs.rm(cache, { recursive: true });
+    }
+    const after = await fs.statfs(root);
+    console.log(JSON.stringify({ packageCachesCleared: true, beforeBytes: before.bavail * before.bsize,
+      afterBytes: after.bavail * after.bsize }));
+    return;
+  }
   if (process.env.QUALIFY_BUILDER === 'true') {
     console.log(JSON.stringify(await qualifyBuilder(appRoot, entry, pm2Home, encoded)));
   } else {
