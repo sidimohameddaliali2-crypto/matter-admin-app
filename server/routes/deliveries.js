@@ -10,7 +10,9 @@ import { body, validationResult } from 'express-validator';
 import Delivery from '../models/Delivery.js';
 import DeliveryChange from '../models/DeliveryChange.js';
 import Bag from '../models/Bag.js';
-import User from '../models/User.js';
+import User, { effectivePermissions } from '../models/User.js';
+import { customerListStatsPipeline } from '../services/customerListStats.js';
+import { customerDetailUsagePipeline } from '../services/customerDetailUsage.js';
 import Customer from '../models/Customer.js';
 import { protect, authorize, admin } from '../middleware/auth.js'; // Fixed import
 import { upload, handleUploadError } from '../middleware/upload.js';
@@ -22,6 +24,7 @@ import { flagDeliveryChangeIfNeeded } from '../services/deliveryChangeFlag.js';
 import { recalculateDriverKPI } from '../services/driverKpiService.js';
 import { businessRangeBounds, getTimingOverview, getTimingRecords } from '../services/deliveryTimingHistory.js';
 import { businessOffsetMs, getBusinessDayBounds, isDateKey, setBusinessTimeOfDay } from '../utils/businessDate.js';
+import { renewalUsagePipeline } from '../services/renewalUsage.js';
 import { protectMatterRevenueInput } from '../middleware/matterRevenueInput.js';
 import { fillProofAddressInBackground, resolveProofAddressWithin } from '../services/proofLocationAddress.js';
 import { recordProofReceipt } from '../services/truckoomVisitRules.js';
@@ -1235,6 +1238,76 @@ async function annotateWeekendCombo(delivery) {
   }
   return delivery;
 }
+
+// Customer-detail Days Used. GET /deliveries?customerId caps a page at 500 and
+// then combines weekend stops, so the detail box cannot count that page.
+// Cancelled rows still count. since is the existing plan-start comparison.
+// GET /api/deliveries/customer-detail-usage?customerId=&since=
+router.get('/customer-detail-usage', async (req, res) => {
+  try {
+    if (!effectivePermissions(req.user).customers) {
+      return res.status(403).json({ success: false, message: 'Not authorized to access customers' });
+    }
+    const customerId = typeof req.query.customerId === 'string' ? req.query.customerId.trim() : '';
+    if (!customerId) {
+      return res.status(400).json({ success: false, message: 'customerId is required' });
+    }
+    const since = typeof req.query.since === 'string' ? req.query.since : '';
+    if (since && Number.isNaN(new Date(since).getTime())) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({ success: true, data: { customerId, used: 0 } });
+    }
+    const rows = await Delivery.aggregate(customerDetailUsagePipeline({
+      customerId,
+      since: since || undefined,
+    }));
+    const used = Number(rows[0]?.used) || 0;
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: { customerId, used } });
+  } catch (error) {
+    console.error('Customer detail usage error:', error);
+    res.status(500).json({ success: false, message: 'Error fetching customer detail usage' });
+  }
+});
+
+// Customer-list counters. GET /deliveries caps a page at 500 oldest rows and
+// then combines weekend stops, so the customers page cannot count from that
+// list. This groups every delivery by customer with no limit.
+// GET /api/deliveries/customer-list-stats
+router.get('/customer-list-stats', async (req, res) => {
+  try {
+    if (!effectivePermissions(req.user).customers) {
+      return res.status(403).json({ success: false, message: 'Not authorized to access customers' });
+    }
+    const stats = await Delivery.aggregate(customerListStatsPipeline());
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: stats });
+  } catch (error) {
+    console.error('Customer list stats error:', error);
+    res.status(500).json({ success: false, message: 'Error fetching customer list stats' });
+  }
+});
+
+// Renewal allowance counts. GET /deliveries caps a page at 500 oldest rows and
+// then combines weekend stops, so the renewal screen cannot count from that
+// list. This groups every non-cancelled delivery by customer with no limit.
+// GET /api/deliveries/renewal-usage
+router.get('/renewal-usage', async (req, res) => {
+  try {
+    if (!effectivePermissions(req.user).renewal) {
+      return res.status(403).json({ success: false, message: 'Not authorized to access renewal' });
+    }
+    const usage = await Delivery.aggregate(renewalUsagePipeline({
+      dateFrom: req.query.dateFrom,
+      dateTo: req.query.dateTo,
+    }));
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ success: true, data: usage });
+  } catch (error) {
+    console.error('Renewal usage error:', error);
+    res.status(500).json({ success: false, message: 'Error fetching renewal usage' });
+  }
+});
 
 // Monthly delivery count grouped by customerId
 // GET /api/deliveries/monthly-count?dateFrom=2026-05-01&dateTo=2026-05-31
