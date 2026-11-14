@@ -393,8 +393,9 @@ async function main() {
   const clearCaches = process.env.CLEAR_REPORTING_BUILD_CACHES === 'true';
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
   const pauseReporting = process.env.PAUSE_REPORTING_SYNC === 'true';
+  const resumeReporting = process.env.RESUME_REPORTING_SYNC === 'true';
   const deployPhotoReads = process.env.DEPLOY_BOUNDED_PHOTO_READS;
-  if ([qualify, upgrade, clearCaches, deployAccounting, pauseReporting, deployPhotoReads].filter(Boolean).length > 1) throw Error('Select one audit operation');
+  if ([qualify, upgrade, clearCaches, deployAccounting, pauseReporting, resumeReporting, deployPhotoReads].filter(Boolean).length > 1) throw Error('Select one audit operation');
 
   const pm2Home = process.env.PM2_HOME || path.join(os.homedir(), '.pm2');
   const socket = await stat(path.join(pm2Home, 'rpc.sock'));
@@ -408,22 +409,25 @@ async function main() {
     if (entries.length > 1) throw Error('Multiple audit workers registered');
     [entry] = entries;
   }
-  if (pauseReporting) {
-    if (!entry || process.platform !== 'linux' || expected !== '904ea1c11efe9185e23aa880070bd1d0f047c735') {
+  if (pauseReporting || resumeReporting) {
+    if (!entry || process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0') {
       throw Error('The reviewed production reporting worker is required');
     }
     syncRoot(appRoot, entry);
     const config = { cwd: appRoot, timeout: 30_000, maxBuffer: 1024 * 1024 };
-    if (entry.pm2_env.status === 'online') {
-      const { stdout } = await exec(process.execPath, [path.join(appRoot,'server/scripts/driverAuditDeploy.js'), 'deploy-worker-pause'],
+    const during = resumeReporting ? 'online' : 'stopped';
+    const before = resumeReporting ? 'stopped' : 'online';
+    const operation = resumeReporting ? 'resume' : 'pause';
+    if (entry.pm2_env.status === before) {
+      const { stdout } = await exec(process.execPath, [path.join(appRoot,'server/scripts/driverAuditDeploy.js'), 'deploy-worker-'+operation],
         { ...config, env: { ...process.env, DRIVER_AUDIT_DEPLOY_SHA: expected } });
-      if (stdout.trim() !== 'paused') throw Error('The reporting worker could not be paused');
+      if (stdout.trim() !== (resumeReporting ? 'resumed' : 'paused')) throw Error('The reporting worker operation failed');
     }
     const { stdout } = await exec('pm2', ['jlist'], config);
     const workers = JSON.parse(stdout).filter(row => row.name === name);
-    if (workers.length !== 1 || workers[0].pm2_env?.status !== 'stopped') throw Error('The reporting worker is not stopped');
-    await exec('pm2', ['save'], config);
-    console.log(JSON.stringify({ reportingSync: 'stopped', stoppedAt: new Date().toISOString() }));
+    if (workers.length !== 1 || workers[0].pm2_env?.status !== during) throw Error('Reporting worker status could not be verified');
+    if (pauseReporting) await exec('pm2', ['save'], config);
+    console.log(JSON.stringify({ reportingSync: during, checkedAt: new Date().toISOString() }));
     return;
   }
   if (deployPhotoReads) {
