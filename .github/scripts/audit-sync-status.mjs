@@ -136,8 +136,8 @@ async function readTail(file, maximumBytes, privateOnly = false, binary = false)
   }
 }
 
-async function json(file) {
-  const source = await readTail(file, 256 * 1024, true);
+async function json(file, limit = 256 * 1024) {
+  const source = await readTail(file, limit, true);
   try { return source ? JSON.parse(source) : null; }
   catch { return null; }
 }
@@ -578,23 +578,29 @@ async function reclaimRetainedBuild(appRoot, entry, expected, apply) {
     const [status, progress, pointer, accepted, seed, releases, backup, source] = await Promise.all([
       json(path.join(root, 'sync-status.private.json')),
       json(path.join(work, 'status.private.json')),
-      json(path.join(work, 'current.private.json')),
-      json(path.join(directory, 'accepted.private.json')),
-      json(path.join(directory, 'direct-seed.private.json')),
+      json(path.join(work, 'current.private.json'), 16 * 1024 * 1024),
+      json(path.join(directory, 'accepted.private.json'), 16 * 1024 * 1024),
+      json(path.join(directory, 'direct-seed.private.json'), 16 * 1024 * 1024),
       readRetentionInputs(appRoot),
       stat(path.join(work, 'retained-audit-builds', id + '.tar.gz')),
       readTail(path.join(data, 'files.private.json'), 16 * 1024 * 1024, true, true),
     ]);
-    if (!progress || !pointer || !source || status?.replicaGcStatus !== 'qualified' ||
-        !backup?.isFile() || backup.uid !== process.getuid() || (backup.mode & 0o077) ||
-        releases.stagePending || !(releases.previousRevision > 3008) ||
-        accepted?.collectorRevision !== 3008 || seed?.collectorRevision !== 3008 ||
-        accepted.privateRoot !== data || accepted.manifestSha256 !== digest(source) ||
-        seed.manifestSha256 !== accepted.manifestSha256 || seed.pointer?.generation === releases.generation ||
-        seed.pointer?.generation === releases.previousGeneration ||
-        [progress.id, progress.attempt?.id].includes(id) ||
-        [pointer.privateRoot, pointer.previous?.privateRoot, pointer.baselineRoot]
-          .some(value => typeof value === 'string' && value.startsWith(directory + '/'))) throw Error('Retained audit build is protected');
+    const checks = {
+      publishedState: !!progress && !!pointer && status?.replicaGcStatus === 'qualified',
+      backup: !!backup?.isFile() && backup.uid === process.getuid() && !(backup.mode & 0o077),
+      release: !releases.stagePending && releases.previousRevision > 3008,
+      identity: accepted?.collectorRevision === 3008 && seed?.collectorRevision === 3008 && accepted.privateRoot === data,
+      manifest: !!source && accepted?.manifestSha256 === digest(source) && seed?.manifestSha256 === accepted.manifestSha256,
+      generation: manifest.test(seed?.pointer?.generation) && seed.pointer.generation !== releases.generation &&
+        seed.pointer.generation !== releases.previousGeneration,
+      unreferenced: !!progress && !!pointer && ![progress.id, progress.attempt?.id].includes(id) &&
+        ![pointer.privateRoot, pointer.previous?.privateRoot, pointer.baselineRoot]
+          .some(value => typeof value === 'string' && value.startsWith(directory + '/')),
+    };
+    if (Object.values(checks).some(value => !value)) {
+      console.log(JSON.stringify({ retainedAuditProtection: checks }));
+      throw Error('Retained audit build is protected');
+    }
     const before = await fs.statfs(work);
     const result = await reclaimArchivedAuditCopies(data, path.join(root, 'archive-receipts'), JSON.parse(source), apply);
     const after = await fs.statfs(work);
