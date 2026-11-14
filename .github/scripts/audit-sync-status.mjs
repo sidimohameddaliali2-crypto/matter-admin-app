@@ -391,8 +391,8 @@ async function main() {
   const qualify = process.env.QUALIFY_BUILDER === 'true';
   const upgrade = process.env.UPGRADE_BUILDER === 'true';
   const clearCaches = process.env.CLEAR_REPORTING_BUILD_CACHES === 'true';
-  const archiveSuperseded = process.env.ARCHIVE_SUPERSEDED_REPORTING_BUILD === 'true';
-  if ([qualify, upgrade, clearCaches, archiveSuperseded].filter(Boolean).length > 1) throw Error('Select one audit operation');
+  const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
+  if ([qualify, upgrade, clearCaches, deployAccounting].filter(Boolean).length > 1) throw Error('Select one audit operation');
 
   const pm2Home = process.env.PM2_HOME || path.join(os.homedir(), '.pm2');
   const socket = await stat(path.join(pm2Home, 'rpc.sock'));
@@ -426,8 +426,8 @@ async function main() {
       afterBytes: after.bavail * after.bsize }));
     return;
   }
-  if (archiveSuperseded) {
-    console.log(JSON.stringify(await archiveOlderAuditBuild(appRoot, entry, expected)));
+  if (deployAccounting) {
+    console.log(JSON.stringify(await deployReportingAccounting(appRoot, entry, expected)));
     return;
   }
   if (qualify) {
@@ -458,138 +458,66 @@ async function main() {
   }
 }
 
-async function archiveOlderAuditBuild(appRoot, entry, expected) {
-  const id = '2789d13d-6cd1-49ae-aa5a-f74a77b485db';
-  const revision = 3008;
-  const root = syncRoot(appRoot, entry);
-  const work = path.join(root, 'work');
-  const attempts = path.join(work, 'attempts');
-  const directory = path.join(attempts, id);
-  const hold = path.join(work, 'retained-audit-builds');
-  const archive = path.join(hold, id + '.tar.gz');
-  const deploy = path.join(appRoot, 'server/scripts/driverAuditDeploy.js');
-  const verifier = path.join(appRoot, 'server/vendor/driver-audits/integration/hosted/worker-lock.mjs');
-  const settings = path.join(appRoot, 'server/loadEnv.js');
-  const owned = async directory => {
-    const info = await stat(directory);
-    if (!info?.isDirectory() || info.uid !== process.getuid() || info.mode & 0o077 ||
-        await fs.realpath(directory) !== directory) throw Error('Expected an owned private audit directory');
-    return info;
-  };
-  const disk = async () => {
-    const value = await fs.statfs(work);
-    return value.bavail * value.bsize;
-  };
-  const worker = operation => exec(process.execPath, [deploy, operation], {
-    env: { ...process.env, DRIVER_AUDIT_DEPLOY_SHA: expected }, timeout: 45000, maxBuffer: 65536,
-  });
-  const sync = async file => {
-    const handle = await fs.open(file, 'r');
-    try { await handle.sync(); } finally { await handle.close(); }
-  };
-  const before = await disk();
-  if (before >= 1600000000) return { archivedOlderBuild: false, beforeBytes: before, afterBytes: before };
-  if (expected !== reviewedAppCommit || entry?.pm2_env?.status !== 'online') throw Error('Expected the existing online audit worker');
-  await owned(work);
-  await owned(attempts);
-  await owned(directory);
-  await fs.mkdir(hold, { mode: 0o700, recursive: true });
-  if ((await owned(hold)).dev !== (await owned(directory)).dev || await stat(archive)) {
-    throw Error('Unexpected archive destination');
+
+async function deployReportingAccounting(appRoot, entry, expected) {
+  if (process.platform !== 'linux' || !entry || expected !== reviewedAppCommit) {
+    throw Error('The reviewed Linux deployment and reporting worker are required');
   }
-  await import(pathToFileURL(settings).href);
-  const { acquireWorkerLock } = await import(pathToFileURL(verifier).href);
-  const mongoose = createRequire(path.join(appRoot, 'server/package.json'))('mongoose');
-  const connection = mongoose.createConnection(process.env.MONGODB_URI, {
-    autoIndex: false, autoCreate: false, maxPoolSize: 1, serverSelectionTimeoutMS: 5000,
+  const target = '904ea1c11efe9185e23aa880070bd1d0f047c735';
+  const root = syncRoot(appRoot, entry);
+  const progress = await json(path.join(root, 'work/status.private.json'));
+  if (!progress || ['building','validating'].includes(progress.status)) {
+    throw Error('Wait for the active reporting build to finish');
+  }
+  const runtime = 'server/vendor/driver-audits/';
+  const budget = runtime + 'integration/cloud/worker-budget.mjs';
+  const manifestPath = runtime + 'runtime-manifest.json';
+  const allowed = new Set([
+    budget, manifestPath, '.github/scripts/audit-sync-status.mjs', '.github/workflows/audit-sync-status.yml',
+  ]);
+  const git = args => exec('git', args, { cwd: appRoot, timeout: 30000, maxBuffer: 1024 * 1024 });
+  await git(['fetch','--no-tags','origin','refs/heads/main:refs/remotes/origin/main']);
+  const { stdout: diff } = await git(['diff','--name-only',expected,target,'--']);
+  const changed = diff.trim().split('\n');
+  if (changed.length !== allowed.size || changed.some(file => !allowed.has(file))) {
+    throw Error('The reviewed release contains unexpected paths');
+  }
+  const {stdout: prior} = await git(['status','--porcelain','--untracked-files=no']);
+  if (prior.length) throw Error('Production checkout has tracked changes');
+  const {stdout: source} = await git(['show',target+':'+budget]);
+  const {stdout: record} = await git(['show',target+':'+manifestPath]);
+  const expectedHash = '7366a1d70fdddec4722a1c097b36c6fc9d8449e7adf157a01576e1914adb66a2';
+  if (digest(source) !== expectedHash || JSON.parse(record).files['integration/cloud/worker-budget.mjs'] !== expectedHash) {
+    throw Error('The accounting module differs from its reviewed runtime pin');
+  }
+
+  const deploy = path.join(appRoot, 'server/scripts/driverAuditDeploy.js');
+  const command = (name, args, env = process.env) => exec(name, args, {
+    cwd: appRoot, env, timeout: 60000, maxBuffer: 1024 * 1024,
   });
-  const tmp = path.join(hold, id + '.partial');
-  const inventory = path.join(hold, id + '.inventory.partial');
-  let paused = false, lock, phase = 'connection';
+  const worker = (operation, commit) => command(process.execPath, [deploy, operation],
+    { ...process.env, DRIVER_AUDIT_DEPLOY_SHA: commit });
+  const restartApi = () => command('pm2',['restart','matter-delivery-api']);
+  const verify = () => command(process.execPath, [path.join(appRoot,'server/scripts/customerServiceDeploy.js'),'--verify']);
+  const pause = await worker('deploy-worker-pause',expected);
+  if (pause.stdout.trim() !== 'paused') throw Error('The reporting worker could not be paused');
+  let applied = false;
   try {
-    await connection.asPromise();
-    phase = 'pause';
-    const stopped = await worker('deploy-worker-pause');
-    paused = stopped.stdout.trim().endsWith('paused');
-    if (!paused) throw Error('Could not pause the reviewed audit worker');
-    lock = await acquireWorkerLock(path.join(path.dirname(root), 'sync-worker.lock'));
-    phase = 'protect';
-    const control = connection.db.collection('driverAuditControl');
-    const [head, stage, current, progress, localManifest, accepted, seed] = await Promise.all([
-      control.findOne({ _id: 'head' }),
-      control.findOne({ _id: 'direct-stage' }, { projection: { _id: 1 } }),
-      json(path.join(work, 'current.private.json')),
-      json(path.join(work, 'status.private.json')),
-      readTail(path.join(directory, 'server-data/files.private.json'), 16 * 1024 * 1024, true),
-      json(path.join(directory, 'accepted.private.json')),
-      json(path.join(directory, 'direct-seed.private.json')),
-    ]);
-    const protectedRoots = [current?.privateRoot, current?.previous?.privateRoot, current?.baselineRoot];
-    const protectedManifests = [head?.head, head?.head?.previous].map(p => p?.directImport?.manifestSha256);
-    if (stage || !current || !progress || !localManifest || accepted?.collectorRevision !== revision ||
-        seed?.collectorRevision !== revision || accepted.manifestSha256 !== digest(localManifest) ||
-        seed.manifestSha256 !== accepted.manifestSha256 || accepted.privateRoot !== path.join(directory, 'server-data') ||
-        !(head?.head?.previous?.directImport?.collectorRevision > revision) ||
-        protectedManifests.some(hash => !manifest.test(hash)) ||
-        (localManifest && protectedManifests.includes(digest(localManifest))) ||
-        protectedRoots.some(file => typeof file === 'string' && file.startsWith(directory + '/')) ||
-        [progress.id, progress.attempt?.id].includes(id)) throw Error('Older build is protected');
-    const copies = [];
-    let reclaimable = 0;
-    const data = path.join(directory, 'server-data');
-    const dataInfo = await stat(data);
-    if (!dataInfo?.isDirectory() || dataInfo.uid !== process.getuid() || await fs.realpath(data) !== data) {
-      throw Object.assign(Error('Generated workspace is not inside the private attempt'), { code: 'DATA_ROOT' });
-    }
-    phase = 'select-copies';
-    const expectedFiles = JSON.parse(localManifest);
-    for (const [name, hash] of Object.entries(expectedFiles)) {
-      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,239}$/.test(name) || !manifest.test(hash)) continue;
-      const file = path.join(data, name);
-      const info = await stat(file);
-      if (!info?.isFile() || info.uid !== process.getuid() || info.nlink !== 1 || info.size < 1024 * 1024) continue;
-      const actual = createHash('sha256').update(await fs.readFile(file)).digest('hex');
-      if (actual !== hash) throw Object.assign(Error('Superseded build file differs from its manifest'), { code: 'COPY_HASH' });
-      copies.push(path.join(id, 'server-data', name));
-      reclaimable += info.blocks * 512;
-    }
-    if (reclaimable < 100 * 1024 * 1024) return { archivedOlderBuild: false, beforeBytes: before, reclaimableBytes: reclaimable };
-    const tarEnv = { PATH: '/usr/bin:/bin', HOME: hold, LANG: 'C' };
-    const tar = args => exec('tar', args, { env: tarEnv, timeout: 240000, maxBuffer: 65536 });
-    phase = 'archive';
-    await fs.writeFile(tmp, '', { mode: 0o600, flag: 'wx' });
-    await fs.writeFile(inventory, copies.join('\0') + '\0', { mode: 0o600, flag: 'wx' });
-    await tar(['--create', '--gzip', '--file', tmp, '--directory', attempts, '--null', '--verbatim-files-from', '--files-from', inventory]);
-    phase = 'compare';
-    await tar(['--compare', '--gzip', '--file', tmp, '--directory', attempts]);
-    if ((await fs.stat(tmp)).blocks * 512 + 64 * 1024 * 1024 > reclaimable) {
-      return { archivedOlderBuild: false, beforeBytes: before, reclaimableBytes: reclaimable, archiveBytes: (await fs.stat(tmp)).size };
-    }
-    phase = 'install';
-    await sync(tmp);
-    await fs.rename(tmp, archive);
-    await sync(hold);
-    for (const copy of copies) await fs.unlink(path.join(attempts, copy));
-    await sync(data);
-    await sync(attempts);
-    return { archivedOlderBuild: true, archiveBytes: (await fs.stat(archive)).size,
-      beforeBytes: before, afterBytes: await disk() };
+    await git(['merge','--ff-only',target]);
+    applied = true;
+    await restartApi();
+    await verify();
+    await worker('deploy-worker-resume',target);
+    return { installed: target, reportingAccountingSha256: expectedHash, validated: true };
   } catch (error) {
-    const code = typeof error.code === 'string' && /^[A-Z][A-Z0-9_]{1,32}$/.test(error.code) ? error.code : Number.isSafeInteger(error.code) ? error.code : null;
-    console.log(JSON.stringify({ archiveFailed: true, phase, code, full: /No space left on device/.test(error.stderr ?? '') }));
-    throw error;
-  } finally {
-    try {
-      if (lock) await lock.release();
-    } finally {
-      try {
-        if (paused) await worker('deploy-worker-resume');
-      } finally {
-        await connection.close();
-        await fs.rm(tmp, { force: true });
-        await fs.rm(inventory, { force: true });
-      }
+    if (applied) {
+      await worker('deploy-worker-pause',target);
+      await git(['reset','--hard',expected]);
+      await restartApi();
+      await verify();
     }
+    await worker('deploy-worker-resume',expected);
+    throw error;
   }
 }
 
