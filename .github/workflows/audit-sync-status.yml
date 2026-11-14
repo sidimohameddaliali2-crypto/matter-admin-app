@@ -33,6 +33,10 @@ on:
         type: boolean
         default: false
 
+      deploy_bounded_photo_reads:
+        description: Install the reviewed photo read limit while report sync is paused
+        type: string
+
 concurrency:
   group: production-deploy
   cancel-in-progress: false
@@ -73,6 +77,7 @@ jobs:
           CLEAR_REPORTING_BUILD_CACHES: ${{ inputs.clear_reporting_build_caches }}
           DEPLOY_REPORTING_ACCOUNTING: ${{ inputs.deploy_reporting_accounting }}
           PAUSE_REPORTING_SYNC: ${{ inputs.pause_reporting_sync }}
+          DEPLOY_BOUNDED_PHOTO_READS: ${{ inputs.deploy_bounded_photo_reads }}
           AUDIT_STATUS_CODE: ${{ steps.prepare.outputs.code }}
         with:
           host: ${{ secrets.DO_HOST }}
@@ -80,7 +85,7 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 20m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,UPGRADE_BUILDER,BUILDER_QUALIFICATION_BUNDLE,CLEAR_REPORTING_BUILD_CACHES,DEPLOY_REPORTING_ACCOUNTING,PAUSE_REPORTING_SYNC
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,UPGRADE_BUILDER,BUILDER_QUALIFICATION_BUNDLE,CLEAR_REPORTING_BUILD_CACHES,DEPLOY_REPORTING_ACCOUNTING,PAUSE_REPORTING_SYNC,DEPLOY_BOUNDED_PHOTO_READS
           script: |
             set -e
             cd -- "$DO_APP_PATH"

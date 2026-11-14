@@ -393,7 +393,8 @@ async function main() {
   const clearCaches = process.env.CLEAR_REPORTING_BUILD_CACHES === 'true';
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
   const pauseReporting = process.env.PAUSE_REPORTING_SYNC === 'true';
-  if ([qualify, upgrade, clearCaches, deployAccounting, pauseReporting].filter(Boolean).length > 1) throw Error('Select one audit operation');
+  const deployPhotoReads = process.env.DEPLOY_BOUNDED_PHOTO_READS;
+  if ([qualify, upgrade, clearCaches, deployAccounting, pauseReporting, deployPhotoReads].filter(Boolean).length > 1) throw Error('Select one audit operation');
 
   const pm2Home = process.env.PM2_HOME || path.join(os.homedir(), '.pm2');
   const socket = await stat(path.join(pm2Home, 'rpc.sock'));
@@ -423,6 +424,10 @@ async function main() {
     if (workers.length !== 1 || workers[0].pm2_env?.status !== 'stopped') throw Error('The reporting worker is not stopped');
     await exec('pm2', ['save'], config);
     console.log(JSON.stringify({ reportingSync: 'stopped', stoppedAt: new Date().toISOString() }));
+    return;
+  }
+  if (deployPhotoReads) {
+    console.log(JSON.stringify(await deployBoundedPhotoReads(appRoot, entry, expected, deployPhotoReads)));
     return;
   }
   if (clearCaches) {
@@ -477,6 +482,50 @@ async function main() {
   }
 }
 
+
+async function deployBoundedPhotoReads(appRoot, entry, expected, target) {
+  if (process.platform !== 'linux' || entry?.pm2_env?.status !== 'stopped' ||
+      expected !== '904ea1c11efe9185e23aa880070bd1d0f047c735' || !sha.test(target)) {
+    throw Error('The reviewed production app and paused reporting worker are required');
+  }
+  syncRoot(appRoot, entry);
+  const command = (name, args) => exec(name, args, { cwd: appRoot, timeout: 60_000, maxBuffer: 1024 * 1024 });
+  const git = args => command('git', args);
+  await git(['fetch','--no-tags','origin','refs/heads/main:refs/remotes/origin/main']);
+  const { stdout } = await git(['rev-parse','origin/main']);
+  if (stdout.trim() !== target) throw Error('The exact approved photo read release is required');
+  const runtime = 'server/vendor/driver-audits/';
+  const modules = ['integration/cloud/report-service.mjs','integration/cloud/preview-runtime.mjs'];
+  const manifestPath = runtime + 'runtime-manifest.json';
+  const allowed = new Set([...modules.map(file=>runtime+file),manifestPath,
+    '.github/scripts/audit-sync-status.mjs','.github/workflows/audit-sync-status.yml']);
+  const { stdout: diff } = await git(['diff','--name-only',expected,target,'--']);
+  const changed = diff.trim().split('\n');
+  if (changed.length !== allowed.size || changed.some(file=>!allowed.has(file))) {
+    throw Error('The bounded photo read release contains unexpected paths');
+  }
+  const { stdout: prior } = await git(['status','--porcelain','--untracked-files=no']);
+  const { stdout: pins } = await git(['show',target+':'+manifestPath]);
+  if (prior.length) throw Error('Production checkout has tracked changes');
+  const files = JSON.parse(pins).files;
+  for (const file of modules) {
+    const { stdout: source } = await git(['show',target+':'+runtime+file]);
+    if (digest(source) !== files[file]) throw Error('The photo runtime differs from its reviewed pin');
+  }
+  const restart = () => command('pm2',['restart','matter-delivery-api']);
+  const verify = () => command(process.execPath,[path.join(appRoot,'server/scripts/customerServiceDeploy.js'),'--verify']);
+  await git(['merge','--ff-only',target]);
+  try {
+    await restart();
+    await verify();
+    return { installed: target, validated: true };
+  } catch (error) {
+    await git(['reset','--hard',expected]);
+    await restart();
+    await verify();
+    throw error;
+  }
+}
 
 async function deployReportingAccounting(appRoot, entry, expected) {
   if (process.platform !== 'linux' || !entry || expected !== reviewedAppCommit) {

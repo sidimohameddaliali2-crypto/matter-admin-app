@@ -112,7 +112,7 @@ export function createCloudReportService({repository,reviewStore,identityStore,n
   async completed(params){const {head,app}=await current(),meta=app.matter.validatedReporting,rows=app.queries[meta.queryId||'reporting_validated_deliveries_summary']?.rows||[];return completedReport({...app,queries:{...app.queries,reporting_validated_deliveries:{rows}}},head,{from:params.get('from'),to:params.get('to')||params.get('from'),reportId:params.get('reportId')},now());},
   snapshotFor,photoRowsFor,photoInventoryFor:pinnedInventories,reviews:actor=>reviewStore.read(actor),saveReview:async(input,actor)=>{const receipt=await reviewStore.save(input,actor);return {...receipt,state:await reviewStore.read(actor)};},identities:actor=>identityStore.read(actor),saveIdentity:(input,actor)=>identityStore.save(input,actor),
   async photo(params,image){const keys=params.getAll('record'),hashes=params.getAll('snapshot');if(keys.length!==1||hashes.length!==1||!keys[0]||keys[0].length>300||!hex(hashes[0]))throw fail(400);const [snapshot,inventories]=await Promise.all([snapshotFor(hashes[0]),pinnedInventories(hashes[0])]);let row=snapshot.rows.find(r=>r.key===keys[0]);if(!row)return unavailablePhoto('record-unavailable');[row]=await photoBoundRows(hashes[0],[row],inventories);const digest=row.delivery?.photo_sha256;if(!hex(digest))return unboundPhoto(row.delivery);let bytes;try{bytes=await readImage(digest);}catch(e){if(e.code==='ENOENT')return unavailablePhoto('archive-missing');throw e;}let mime;if(bytes[0]===255&&bytes[1]===216&&bytes[2]===255)mime='image/jpeg';else if(bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])))mime='image/png';else if(bytes.toString('ascii',0,4)==='RIFF'&&bytes.toString('ascii',8,12)==='WEBP')mime='image/webp';else throw Error('Invalid image');if(image)return {bytes,mime};const query=new URLSearchParams({record:keys[0],snapshot:hashes[0]});return {status:'cached',sha256:digest,downloadedAt:null,thumbnail:'/api/reporting/photo/image?'+query,original:'/api/reporting/photo/image?'+query+'&original=1',reviewed:false};},
-  async photoProposals(params,actor){
+  async photoProposals(params,actor,{includeProgress=true}={}){
    const reportHash=params.get('snapshot'),results=await Promise.all(proposals.map(s=>s(params))),inventories=await pinnedInventories(reportHash);if(results.length!==2)throw Error('Photo inventory unavailable');
    const merged=results[0].proposals.map((old,i)=>chooseLegacyProposal(old,results[1].proposals[i])),snapshot=await snapshotFor(reportHash),rows=await photoBoundRows(reportHash,snapshot.rows,inventories),pointers=repository.publication?.cloudPhotoResults||{},journal=actor?await reviewStore.read(actor):{records:{reportingReviews:[]}};if(!Array.isArray(journal?.records?.reportingReviews))throw Error('Invalid review journal');
    const completedDays=new Set(),blockedKeys=new Set();for(const inv of inventories){for(const day of inv.queue.completedReportDays||[])completedDays.add(day);for(const item of inv.queue.items)if(inv.proposals?.[item.id]||inv.flags?.[item.id]||inv.attempts?.[item.id]){if(item.recordKey)blockedKeys.add(item.recordKey);if(item.datedRecordKey)blockedKeys.add(item.datedRecordKey);}}
@@ -155,7 +155,7 @@ export function createCloudReportService({repository,reviewStore,identityStore,n
    }
    const response={rubricVersion:results[1].rubricVersion||results[0].rubricVersion,progressScope:'current-photo-records',
     legacyProgress:combinedPhotoProgress(inventories),proposals:merged};
-   if(deferredPhotoProgress){
+   if(deferredPhotoProgress||!includeProgress){
     const requested=new Map(merged.map(proposal=>[proposal.recordKey,proposal]));
     const requestedRows=rows.filter(row=>requested.has(row.key));
     if(requestedRows.length!==requested.size||new Set(requestedRows.map(row=>row.key)).size!==requested.size){
@@ -164,6 +164,7 @@ export function createCloudReportService({repository,reviewStore,identityStore,n
     const selected=actor?requestedRows.filter(row=>applicable(requested.get(row.key))):[];
     const cloud=new Map(await Promise.all(selected.map(async row=>[row.key,await loadCloud(row)])));
     mergeCloud(cloud);
+    if(!includeProgress)return response;
     return {...response,...readDeferredPhotoProgress(cacheKey,()=>loadProgress(cloud))};
    }
    let pending=cacheKey&&photoProgressCache.get(cacheKey);
