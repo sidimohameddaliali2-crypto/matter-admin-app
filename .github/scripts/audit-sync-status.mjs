@@ -60,9 +60,15 @@ export async function reclaimReportingMetadata(work) {
 }
 
 export async function reclaimArchivedAuditCopies(data, receipts, files, apply) {
+  // Build output may have a normal directory mode, inside its owned private attempt.
+  // The selected files and the independent receipt directory are still owner-only.
+  const parent = path.dirname(data);
+  const container = await stat(parent);
+  if (!container?.isDirectory() || container.uid !== process.getuid() || (container.mode & 0o077) ||
+      await fs.realpath(parent) !== parent) throw Error('Expected an owned private audit attempt');
   for (const directory of [data, receipts]) {
     const info = await stat(directory);
-    if (!info?.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077) ||
+    if (!info?.isDirectory() || info.uid !== process.getuid() || (info.mode & (directory === receipts ? 0o077 : 0o022)) ||
         await fs.realpath(directory) !== directory) throw Error('Expected an owned private audit directory');
   }
   const matches = [];
