@@ -59,6 +59,31 @@ export async function reclaimReportingMetadata(work) {
   return { removed, beforeBytes, afterBytes: await freeBytes() };
 }
 
+export async function reclaimArchivedAuditCopies(data, receipts, files, apply) {
+  for (const directory of [data, receipts]) {
+    const info = await stat(directory);
+    if (!info?.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077) ||
+        await fs.realpath(directory) !== directory) throw Error('Expected an owned private audit directory');
+  }
+  const matches = [];
+  for (const [name, hash] of Object.entries(files)) {
+    if (!manifest.test(hash) || name !== 'archive-' + hash + '.private.bin') continue;
+    const file = path.join(data, name);
+    const info = await stat(file);
+    if (!info?.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) ||
+        info.nlink !== 1 || info.size < 1 || info.size > 8 * 1024 * 1024 || !info.blocks) continue;
+    const key = hash + '.gz';
+    const receipt = await json(path.join(receipts, key + '.json'));
+    if (receipt?.target !== 'matter-report-archive' || receipt.key !== key || receipt.sha256 !== hash ||
+        receipt.bytes !== info.size || receipt.verified !== true) continue;
+    const bytes = await readTail(file, 8 * 1024 * 1024, true, true);
+    if (!bytes || bytes.length !== info.size || digest(bytes) !== hash) throw Error('Superseded audit copy hash mismatch');
+    matches.push({ file, allocatedBytes: info.blocks * 512 });
+  }
+  if (apply) for (const { file } of matches) await fs.unlink(file);
+  return { copies: matches.length, allocatedBytes: matches.reduce((total, item) => total + item.allocatedBytes, 0) };
+}
+
 async function readRetentionInputs(appRoot) {
   const server = path.join(appRoot, 'server');
   await import(pathToFileURL(path.join(server, 'loadEnv.js')).href);
@@ -423,11 +448,13 @@ async function main() {
   const upgrade = process.env.UPGRADE_BUILDER === 'true';
   const clearCaches = process.env.CLEAR_REPORTING_BUILD_CACHES === 'true';
   const reclaimMetadata = process.env.RECLAIM_REPORTING_METADATA === 'true';
+  const reclaimArchived = process.env.RECLAIM_ARCHIVED_REPORTING_WORKSPACE;
+  if (reclaimArchived && !['plan','apply'].includes(reclaimArchived)) throw Error('Invalid archive reclamation mode');
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
   const pauseReporting = process.env.PAUSE_REPORTING_SYNC === 'true';
   const resumeReporting = process.env.RESUME_REPORTING_SYNC === 'true';
   const deployPhotoReads = process.env.DEPLOY_BOUNDED_PHOTO_READS;
-  if ([qualify, upgrade, clearCaches, reclaimMetadata, deployAccounting, pauseReporting, resumeReporting, deployPhotoReads].filter(Boolean).length > 1) throw Error('Select one audit operation');
+  if ([qualify, upgrade, clearCaches, reclaimMetadata, reclaimArchived, deployAccounting, pauseReporting, resumeReporting, deployPhotoReads].filter(Boolean).length > 1) throw Error('Select one audit operation');
 
   const pm2Home = process.env.PM2_HOME || path.join(os.homedir(), '.pm2');
   const socket = await stat(path.join(pm2Home, 'rpc.sock'));
@@ -480,6 +507,10 @@ async function main() {
     }
     return;
   }
+  if (reclaimArchived) {
+    console.log(JSON.stringify(await reclaimRetainedBuild(appRoot, entry, expected, reclaimArchived === 'apply')));
+    return;
+  }
   if (clearCaches) {
     const root = syncRoot(appRoot, entry);
     const configured = await exec('npm', ['config', 'get', 'cache'], { timeout: 5000 });
@@ -529,6 +560,48 @@ async function main() {
     const status = await readAuditSyncStatus({ appRoot, pm2Home, entry });
     const releases = entry ? await readRetentionInputs(appRoot) : null;
     console.log(JSON.stringify({ ...status, releases }));
+  }
+}
+
+async function reclaimRetainedBuild(appRoot, entry, expected, apply) {
+  if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' ||
+      !entry || (apply && entry.pm2_env?.status !== 'stopped')) throw Error('The reviewed reporting worker is required');
+  const root = syncRoot(appRoot, entry);
+  const work = path.join(root, 'work');
+  const id = '2789d13d-6cd1-49ae-aa5a-f74a77b485db';
+  const directory = path.join(work, 'attempts', id);
+  const data = path.join(directory, 'server-data');
+  const lockModule = path.join(appRoot, 'server/vendor/driver-audits/integration/hosted/worker-lock.mjs');
+  const { acquireWorkerLock } = await import(pathToFileURL(lockModule).href);
+  const lock = apply ? await acquireWorkerLock(path.join(path.dirname(root), 'sync-worker.lock')) : null;
+  try {
+    const [status, progress, pointer, accepted, seed, releases, backup, source] = await Promise.all([
+      json(path.join(root, 'sync-status.private.json')),
+      json(path.join(work, 'status.private.json')),
+      json(path.join(work, 'current.private.json')),
+      json(path.join(directory, 'accepted.private.json')),
+      json(path.join(directory, 'direct-seed.private.json')),
+      readRetentionInputs(appRoot),
+      stat(path.join(work, 'retained-audit-builds', id + '.tar.gz')),
+      readTail(path.join(data, 'files.private.json'), 16 * 1024 * 1024, true, true),
+    ]);
+    if (!progress || !pointer || !source || status?.replicaGcStatus !== 'qualified' ||
+        !backup?.isFile() || backup.uid !== process.getuid() || (backup.mode & 0o077) ||
+        releases.stagePending || !(releases.previousRevision > 3008) ||
+        accepted?.collectorRevision !== 3008 || seed?.collectorRevision !== 3008 ||
+        accepted.privateRoot !== data || accepted.manifestSha256 !== digest(source) ||
+        seed.manifestSha256 !== accepted.manifestSha256 || seed.pointer?.generation === releases.generation ||
+        seed.pointer?.generation === releases.previousGeneration ||
+        [progress.id, progress.attempt?.id].includes(id) ||
+        [pointer.privateRoot, pointer.previous?.privateRoot, pointer.baselineRoot]
+          .some(value => typeof value === 'string' && value.startsWith(directory + '/'))) throw Error('Retained audit build is protected');
+    const before = await fs.statfs(work);
+    const result = await reclaimArchivedAuditCopies(data, path.join(root, 'archive-receipts'), JSON.parse(source), apply);
+    const after = await fs.statfs(work);
+    return { retainedRevision: 3008, applied: apply, ...result, beforeBytes: before.bavail * before.bsize,
+      afterBytes: after.bavail * after.bsize };
+  } finally {
+    await lock?.release();
   }
 }
 
