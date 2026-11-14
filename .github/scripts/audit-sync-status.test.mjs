@@ -3,7 +3,29 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import {readAuditSyncStatus} from './audit-sync-status.mjs';
+import {createHash} from 'node:crypto';
+import {readAuditSyncStatus,reclaimReportingMetadata} from './audit-sync-status.mjs';
+
+test('reclaims only hash-verified reporting metadata copies when build space is short', async t => {
+  const { root } = await fixture(t);
+  const data = path.join(root, 'work/metadata');
+  await fs.mkdir(data, { mode: 0o700 });
+  const bytes = Buffer.from('saved catalog metadata');
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  const copy = path.join(data, digest + '.gz');
+  const unrelated = path.join(data, 'private-review.json');
+  const corrupt = path.join(data, 'b'.repeat(64) + '.gz');
+  await Promise.all([copy, unrelated, corrupt].map(file => fs.writeFile(file, bytes, { mode: 0o600 })));
+  await fs.symlink(copy, path.join(data, 'c'.repeat(64) + '.gz'));
+  const floor = 1024 * 1024 * 1024;
+  t.mock.method(fs, 'statfs', async () => ({bsize: 1, bavail: floor - 1}));
+  const result = await reclaimReportingMetadata(path.join(root, 'work'));
+  assert.equal(result.removed, 1);
+  await assert.rejects(fs.stat(copy), {code: 'ENOENT'});
+  assert.ok(await fs.stat(unrelated));
+  assert.ok(await fs.stat(corrupt));
+  assert.ok((await fs.lstat(path.join(data, 'c'.repeat(64) + '.gz'))).isSymbolicLink());
+});
 
 async function fixture(t) {
   const appRoot = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'audit-status-'));
