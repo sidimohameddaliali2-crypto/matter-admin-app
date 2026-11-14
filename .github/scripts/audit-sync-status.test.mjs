@@ -4,7 +4,32 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
-import {readAuditSyncStatus,reclaimReportingMetadata} from './audit-sync-status.mjs';
+import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies} from './audit-sync-status.mjs';
+
+test('superseded scratch reclamation requires an exact private archive receipt', async t => {
+  const { root, attempt } = await fixture(t);
+  const receipts = path.join(root, 'archive-receipts');
+  const data = path.join(attempt, 'server-data');
+  await Promise.all([receipts, data].map(dir => fs.mkdir(dir, { mode: 0o700 })));
+  const originals = [Buffer.from('old verified object'), Buffer.from('old object without receipt')];
+  const hashes = originals.map(bytes => createHash('sha256').update(bytes).digest('hex'));
+  const names = hashes.map(hash => 'archive-' + hash + '.private.bin');
+  for (const [i, name] of names.entries()) {
+    await fs.writeFile(path.join(data, name), originals[i], { mode: 0o600 });
+  }
+  const manifest = Object.fromEntries(names.map((name, i) => [name, hashes[i]]));
+  const key = hashes[0] + '.gz';
+  await fs.writeFile(path.join(receipts, key + '.json'), JSON.stringify({
+    target: 'matter-report-archive', key, sha256: hashes[0], bytes: originals[0].length, verified: true,
+  }), { mode: 0o600 });
+  const plan = await reclaimArchivedAuditCopies(data, receipts, manifest, false);
+  assert.equal(plan.copies, 1);
+  assert.ok(await fs.stat(path.join(data, names[0])));
+  const applied = await reclaimArchivedAuditCopies(data, receipts, manifest, true);
+  assert.equal(applied.copies, 1);
+  await assert.rejects(fs.stat(path.join(data, names[0])), {code: 'ENOENT'});
+  assert.ok(await fs.stat(path.join(data, names[1])));
+});
 
 test('reclaims only hash-verified reporting metadata copies when build space is short', async t => {
   const { root } = await fixture(t);
