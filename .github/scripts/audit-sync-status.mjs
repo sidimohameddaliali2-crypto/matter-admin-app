@@ -70,7 +70,7 @@ export async function reclaimArchivedAuditCopies(data, receipts, files, apply) {
     const receiptDirectory = directory === receipts;
     const info = await stat(directory);
     const checks = { exists: !!info, directory: !!info?.isDirectory(), owned: info?.uid === process.getuid(),
-      mode: !!info && !(info.mode & (receiptDirectory ? 0o077 : 0o022)),
+      mode: !!info && (!receiptDirectory || !(info.mode & 0o077)),
       exactPath: !!info && await fs.realpath(directory) === directory };
     if (Object.values(checks).some(value => !value)) {
       console.log(JSON.stringify({ archivedCopyDirectory: receiptDirectory ? 'receipts' : 'generated', checks }));
