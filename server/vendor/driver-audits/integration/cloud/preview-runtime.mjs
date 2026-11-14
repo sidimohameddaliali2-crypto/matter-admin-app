@@ -56,6 +56,11 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
  let report;const reviews=createHostedReviews({stateStore:state,snapshotFor:hash=>report.snapshotFor(hash)}),identities=createHostedIdentities({stateStore:{read:async()=>identity,compareAndSwap:async()=>{throw Object.assign(Error('Preview is read-only for identities'),{status:403});}},config:JSON.parse(identity.body).config,rows:async()=>(await report.gpsSnapshotFor(head.reportHash)).rows});
  report=createCloudReportService({repository,reviewStore:reviews,identityStore:identities,evidenceCache:createImmutableEvidenceCache({maxBytes:96*1024*1024,maxEntries:96}),photoBindingRegistry:has('preview-photo-bindings.private.json')?json('preview-photo-bindings.private.json'):null,deferredPhotoProgress:staffIntegration&&remoteReadsBudgeted});
  report=createPreviewReadView({service:report,repository,read,readAsync,view:readView,gpsIndex:index,has});
+ if(staffIntegration&&remoteReadsBudgeted){
+  const proposalPage=report.photoProposals;
+  // Each page verifies its own cases. A staff request never downloads the image archive to count other cases.
+  report.photoProposals=(params,actor)=>proposalPage(params,actor,{includeProgress:false});
+ }
  if(Object.hasOwn(manifest,'corrections.private.json'))report=connectPreviewCorrections(report,readView,{...json('corrections.private.json'),...(Object.hasOwn(manifest,'release-gps-availability.private.json')?{gpsAvailability:json('release-gps-availability.private.json')}:{})});
  report=connectPreviewOrderTiming(report,readView,index,{frozen:true,households:createHouseholdStore(state),decisions:Object.hasOwn(manifest,'case-decisions.private.json')?json('case-decisions.private.json'):undefined});
  const streams=new Map();const gps=createPreviewGps({snapshotFor:report.gpsSnapshotFor,index,readStream:async key=>{const file=index.streamFiles[key];if(!file)throw Error('GPS stream unavailable');if(!streams.has(key)){streams.set(key,JSON.parse(gunzipSync(await readAsync(file))));while(streams.size>8)streams.delete(streams.keys().next().value);}return streams.get(key);}});
