@@ -602,10 +602,16 @@ async function reclaimRetainedBuild(appRoot, entry, expected, apply) {
       throw Error('Retained audit build is protected');
     }
     const before = await fs.statfs(work);
-    const result = await reclaimArchivedAuditCopies(data, path.join(root, 'archive-receipts'), JSON.parse(source), apply);
+    const result = await reclaimArchivedAuditCopies(data, path.join(root, 'archive-receipts'), JSON.parse(source.toString('utf8')), apply);
     const after = await fs.statfs(work);
     return { retainedRevision: 3008, applied: apply, ...result, beforeBytes: before.bavail * before.bsize,
       afterBytes: after.bavail * after.bsize };
+  } catch (error) {
+    const category = typeof error.code === 'string' && /^[A-Z_]{2,32}$/.test(error.code) ? error.code : null;
+    const namedFailure = ['Expected an owned private audit directory', 'Superseded audit copy hash mismatch',
+      'Retained audit build is protected'].find(message => error.message === message);
+    console.log(JSON.stringify({ retainedAuditFailure: { category, namedFailure: namedFailure ?? null } }));
+    throw error;
   } finally {
     await lock?.release();
   }
