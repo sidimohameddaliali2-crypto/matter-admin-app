@@ -4,7 +4,36 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
-import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies} from './audit-sync-status.mjs';
+import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup} from './audit-sync-status.mjs';
+
+test('old workspace backup is removed only after every chunk has a verified private archive copy', async t => {
+  const { root } = await fixture(t);
+  const backup = path.join(root, 'backup.tar.gz');
+  const content = Buffer.from('file contents of a fixture archive');
+  await fs.writeFile(backup, content, { mode: 0o600 });
+  const known = new Map();
+  let fail = true, saved = null;
+  async function verify(key, size, local) {
+    if (fail && known.size === 1) throw Error('archive unavailable');
+    const bytes = await local();
+    assert.equal(bytes.length, size);
+    assert.equal(key, createHash('sha256').update(bytes).digest('hex') + '.gz');
+    known.set(key, bytes);
+    return { verified: true, key, sha256: key.slice(0, -3) };
+  }
+  const publish = () => offloadReportingBackup({
+    backup, maxChunkBytes: 10, verify, save: manifest => { saved = manifest; },
+  });
+  await assert.rejects(async () => publish(), /archive unavailable/);
+  assert.equal(saved, null);
+  assert.deepEqual(await fs.readFile(backup), content);
+  fail = false;
+  const result = await publish();
+  assert.deepEqual(Buffer.concat(saved.chunks.map(ref => known.get(ref.key))), content);
+  assert.equal(saved.sha256, createHash('sha256').update(content).digest('hex'));
+  assert.equal(result.bytes, content.length);
+  await assert.rejects(fs.stat(backup), {code: 'ENOENT'});
+});
 
 test('superseded scratch reclamation requires an exact private archive receipt', async t => {
   const { root, attempt } = await fixture(t);
