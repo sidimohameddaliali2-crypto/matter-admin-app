@@ -29,6 +29,36 @@ const iso = value => typeof value === 'string' && value.length <= 40 && Number.i
 const allowed = (value, list) => list.includes(value) ? value : null;
 const byteCount = value => Number.isSafeInteger(value) && value >= 0;
 
+export async function reclaimReportingMetadata(work) {
+  const directory = path.join(work, 'metadata');
+  const freeBytes = async () => {
+    const disk = await fs.statfs(work);
+    return disk.bavail * disk.bsize;
+  };
+  const beforeBytes = await freeBytes();
+  const startFloor = 1024 * 1024 * 1024;
+  let removed = 0;
+  if (beforeBytes >= startFloor) return { removed, beforeBytes, afterBytes: beforeBytes };
+  const info = await stat(directory);
+  if (!info) return { removed, beforeBytes, afterBytes: beforeBytes };
+  if (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077) ||
+      await fs.realpath(directory) !== directory) throw Error('Expected the owned private reporting metadata cache');
+  const target = startFloor + 32 * 1024 * 1024;
+  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+    if (!entry.isFile() || !/^[a-f0-9]{64}\.gz$/.test(entry.name)) continue;
+    const file = path.join(directory, entry.name);
+    const saved = await stat(file);
+    if (!saved?.isFile() || saved.uid !== process.getuid() || (saved.mode & 0o077) ||
+        saved.nlink !== 1 || saved.size < 1 || saved.size > 8 * 1024 * 1024) continue;
+    const bytes = await readTail(file, 8 * 1024 * 1024, true, true);
+    if (!bytes || createHash('sha256').update(bytes).digest('hex') + '.gz' !== entry.name) continue;
+    await fs.unlink(file);
+    removed++;
+    if (await freeBytes() >= target) break;
+  }
+  return { removed, beforeBytes, afterBytes: await freeBytes() };
+}
+
 async function readRetentionInputs(appRoot) {
   const server = path.join(appRoot, 'server');
   await import(pathToFileURL(path.join(server, 'loadEnv.js')).href);
@@ -66,7 +96,7 @@ function capacityFailure(saved) {
   return { kind, availableBytes, requiredBytes };
 }
 
-async function readTail(file, maximumBytes, privateOnly = false) {
+async function readTail(file, maximumBytes, privateOnly = false, binary = false) {
   const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(missing);
   if (!handle) return null;
   try {
@@ -74,7 +104,8 @@ async function readTail(file, maximumBytes, privateOnly = false) {
     if (!info.isFile() || privateOnly && (info.mode & 0o077 || info.size > maximumBytes)) return null;
     const length = Math.min(info.size, maximumBytes), bytes = Buffer.alloc(length);
     const { bytesRead } = await handle.read(bytes, 0, length, info.size - length);
-    return bytes.subarray(0, bytesRead).toString('utf8');
+    const result = bytes.subarray(0, bytesRead);
+    return binary ? result : result.toString('utf8');
   } finally {
     await handle.close();
   }
@@ -391,11 +422,12 @@ async function main() {
   const qualify = process.env.QUALIFY_BUILDER === 'true';
   const upgrade = process.env.UPGRADE_BUILDER === 'true';
   const clearCaches = process.env.CLEAR_REPORTING_BUILD_CACHES === 'true';
+  const reclaimMetadata = process.env.RECLAIM_REPORTING_METADATA === 'true';
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
   const pauseReporting = process.env.PAUSE_REPORTING_SYNC === 'true';
   const resumeReporting = process.env.RESUME_REPORTING_SYNC === 'true';
   const deployPhotoReads = process.env.DEPLOY_BOUNDED_PHOTO_READS;
-  if ([qualify, upgrade, clearCaches, deployAccounting, pauseReporting, resumeReporting, deployPhotoReads].filter(Boolean).length > 1) throw Error('Select one audit operation');
+  if ([qualify, upgrade, clearCaches, reclaimMetadata, deployAccounting, pauseReporting, resumeReporting, deployPhotoReads].filter(Boolean).length > 1) throw Error('Select one audit operation');
 
   const pm2Home = process.env.PM2_HOME || path.join(os.homedir(), '.pm2');
   const socket = await stat(path.join(pm2Home, 'rpc.sock'));
@@ -432,6 +464,20 @@ async function main() {
   }
   if (deployPhotoReads) {
     console.log(JSON.stringify(await deployBoundedPhotoReads(appRoot, entry, expected, deployPhotoReads)));
+    return;
+  }
+  if (reclaimMetadata) {
+    if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' ||
+        entry?.pm2_env?.status !== 'stopped') throw Error('The reviewed stopped reporting worker is required');
+    const root = syncRoot(appRoot, entry);
+    const lockModule = path.join(appRoot, 'server/vendor/driver-audits/integration/hosted/worker-lock.mjs');
+    const { acquireWorkerLock } = await import(pathToFileURL(lockModule).href);
+    const lock = await acquireWorkerLock(path.join(path.dirname(root), 'sync-worker.lock'));
+    try {
+      console.log(JSON.stringify({ reportingMetadata: await reclaimReportingMetadata(path.join(root, 'work')) }));
+    } finally {
+      await lock.release();
+    }
     return;
   }
   if (clearCaches) {
