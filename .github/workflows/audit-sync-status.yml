@@ -23,6 +23,11 @@ on:
         type: boolean
         default: false
 
+      archive_superseded_reporting_build:
+        description: Losslessly archive exclusive generated files from the reviewed superseded build
+        type: boolean
+        default: false
+
 concurrency:
   group: production-deploy
   cancel-in-progress: false
@@ -61,6 +66,7 @@ jobs:
           UPGRADE_BUILDER: ${{ inputs.upgrade_builder }}
           BUILDER_QUALIFICATION_BUNDLE: ${{ inputs.qualify_builder && secrets.DRIVER_AUDIT_ONE_OFF_BUILDER_BUNDLE || '' }}
           CLEAR_REPORTING_BUILD_CACHES: ${{ inputs.clear_reporting_build_caches }}
+          ARCHIVE_SUPERSEDED_REPORTING_BUILD: ${{ inputs.archive_superseded_reporting_build }}
           AUDIT_STATUS_CODE: ${{ steps.prepare.outputs.code }}
         with:
           host: ${{ secrets.DO_HOST }}
@@ -68,7 +74,7 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 20m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,UPGRADE_BUILDER,BUILDER_QUALIFICATION_BUNDLE,CLEAR_REPORTING_BUILD_CACHES
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,UPGRADE_BUILDER,BUILDER_QUALIFICATION_BUNDLE,CLEAR_REPORTING_BUILD_CACHES,ARCHIVE_SUPERSEDED_REPORTING_BUILD
           script: |
             set -e
             cd -- "$DO_APP_PATH"
