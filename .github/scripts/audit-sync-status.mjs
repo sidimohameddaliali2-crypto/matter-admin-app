@@ -392,7 +392,8 @@ async function main() {
   const upgrade = process.env.UPGRADE_BUILDER === 'true';
   const clearCaches = process.env.CLEAR_REPORTING_BUILD_CACHES === 'true';
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
-  if ([qualify, upgrade, clearCaches, deployAccounting].filter(Boolean).length > 1) throw Error('Select one audit operation');
+  const pauseReporting = process.env.PAUSE_REPORTING_SYNC === 'true';
+  if ([qualify, upgrade, clearCaches, deployAccounting, pauseReporting].filter(Boolean).length > 1) throw Error('Select one audit operation');
 
   const pm2Home = process.env.PM2_HOME || path.join(os.homedir(), '.pm2');
   const socket = await stat(path.join(pm2Home, 'rpc.sock'));
@@ -405,6 +406,24 @@ async function main() {
     const entries = JSON.parse(result.stdout).filter(row => row.name === name);
     if (entries.length > 1) throw Error('Multiple audit workers registered');
     [entry] = entries;
+  }
+  if (pauseReporting) {
+    if (!entry || process.platform !== 'linux' || expected !== '904ea1c11efe9185e23aa880070bd1d0f047c735') {
+      throw Error('The reviewed production reporting worker is required');
+    }
+    syncRoot(appRoot, entry);
+    const config = { cwd: appRoot, timeout: 30_000, maxBuffer: 1024 * 1024 };
+    if (entry.pm2_env.status === 'online') {
+      const { stdout } = await exec(process.execPath, [path.join(appRoot,'server/scripts/driverAuditDeploy.js'), 'deploy-worker-pause'],
+        { ...config, env: { ...process.env, DRIVER_AUDIT_DEPLOY_SHA: expected } });
+      if (stdout.trim() !== 'paused') throw Error('The reporting worker could not be paused');
+    }
+    const { stdout } = await exec('pm2', ['jlist'], config);
+    const workers = JSON.parse(stdout).filter(row => row.name === name);
+    if (workers.length !== 1 || workers[0].pm2_env?.status !== 'stopped') throw Error('The reporting worker is not stopped');
+    await exec('pm2', ['save'], config);
+    console.log(JSON.stringify({ reportingSync: 'stopped', stoppedAt: new Date().toISOString() }));
+    return;
   }
   if (clearCaches) {
     const root = syncRoot(appRoot, entry);
