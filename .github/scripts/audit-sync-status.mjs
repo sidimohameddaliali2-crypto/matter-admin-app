@@ -96,6 +96,40 @@ export async function reclaimArchivedAuditCopies(data, receipts, files, apply) {
   return { copies: matches.length, allocatedBytes: matches.reduce((total, item) => total + item.allocatedBytes, 0) };
 }
 
+export async function offloadReportingBackup({ backup, maxChunkBytes = 8 * 1024 * 1024, verify, save }) {
+  if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes < 1 || maxChunkBytes > 8 * 1024 * 1024) {
+    throw Error('Invalid archive chunk size');
+  }
+  const handle = await fs.open(backup, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) ||
+        info.nlink !== 1 || info.size < 1 || info.size > 700 * 1024 * 1024) throw Error('Unverified retained reporting backup');
+    const hash = createHash('sha256');
+    const chunks = [];
+    for (let offset = 0; offset < info.size; offset += maxChunkBytes) {
+      const size = Math.min(maxChunkBytes, info.size - offset);
+      const bytes = Buffer.alloc(size);
+      const { bytesRead } = await handle.read(bytes, 0, size, offset);
+      if (bytesRead !== size) throw Error('The retained reporting backup changed');
+      hash.update(bytes);
+      const sha256 = digest(bytes);
+      const key = sha256 + '.gz';
+      const receipt = await verify(key, size, async () => bytes);
+      if (receipt?.verified !== true || receipt.key !== key || receipt.sha256 !== sha256) throw Error('Unverified reporting archive chunk');
+      chunks.push({ offset, size, sha256, key });
+    }
+    const current = await stat(backup);
+    if (!current || current.dev !== info.dev || current.ino !== info.ino || current.size !== info.size ||
+        current.mtimeMs !== info.mtimeMs || current.ctimeMs !== info.ctimeMs) throw Error('The retained reporting backup changed');
+    await save({ version: 1, size: info.size, sha256: hash.digest('hex'), chunks });
+    await fs.unlink(backup);
+    return { bytes: info.size, chunks: chunks.length };
+  } finally {
+    await handle.close();
+  }
+}
+
 async function readRetentionInputs(appRoot) {
   const server = path.join(appRoot, 'server');
   await import(pathToFileURL(path.join(server, 'loadEnv.js')).href);
@@ -461,7 +495,7 @@ async function main() {
   const clearCaches = process.env.CLEAR_REPORTING_BUILD_CACHES === 'true';
   const reclaimMetadata = process.env.RECLAIM_REPORTING_METADATA === 'true';
   const reclaimArchived = process.env.RECLAIM_ARCHIVED_REPORTING_WORKSPACE;
-  if (reclaimArchived && !['plan','apply'].includes(reclaimArchived)) throw Error('Invalid archive reclamation mode');
+  if (reclaimArchived && !['plan','apply','offload'].includes(reclaimArchived)) throw Error('Invalid archive reclamation mode');
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
   const pauseReporting = process.env.PAUSE_REPORTING_SYNC === 'true';
   const resumeReporting = process.env.RESUME_REPORTING_SYNC === 'true';
@@ -520,7 +554,7 @@ async function main() {
     return;
   }
   if (reclaimArchived) {
-    console.log(JSON.stringify(await reclaimRetainedBuild(appRoot, entry, expected, reclaimArchived === 'apply')));
+    console.log(JSON.stringify(await reclaimRetainedBuild(appRoot, entry, expected, reclaimArchived)));
     return;
   }
   if (clearCaches) {
@@ -575,7 +609,8 @@ async function main() {
   }
 }
 
-async function reclaimRetainedBuild(appRoot, entry, expected, apply) {
+async function reclaimRetainedBuild(appRoot, entry, expected, mode) {
+  const apply = mode !== 'plan';
   if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' ||
       !entry || (apply && entry.pm2_env?.status !== 'stopped')) throw Error('The reviewed reporting worker is required');
   const root = syncRoot(appRoot, entry);
@@ -614,7 +649,8 @@ async function reclaimRetainedBuild(appRoot, entry, expected, apply) {
       throw Error('Retained audit build is protected');
     }
     const before = await fs.statfs(work);
-    const result = await reclaimArchivedAuditCopies(data, path.join(root, 'archive-receipts'), JSON.parse(source.toString('utf8')), apply);
+    const result = mode === 'offload' ? await offloadRetainedBuild(root, work, id, appRoot) :
+      await reclaimArchivedAuditCopies(data, path.join(root, 'archive-receipts'), JSON.parse(source.toString('utf8')), apply);
     const after = await fs.statfs(work);
     return { retainedRevision: 3008, applied: apply, ...result, beforeBytes: before.bavail * before.bsize,
       afterBytes: after.bavail * after.bsize };
@@ -627,6 +663,47 @@ async function reclaimRetainedBuild(appRoot, entry, expected, apply) {
   } finally {
     await lock?.release();
   }
+}
+
+async function offloadRetainedBuild(root, work, id, appRoot) {
+  if (id !== '2789d13d-6cd1-49ae-aa5a-f74a77b485db') throw Error('Unexpected reporting backup');
+  const directory = path.join(work, 'retained-audit-builds');
+  const info = await stat(directory);
+  if (!info?.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077) ||
+      await fs.realpath(directory) !== directory) throw Error('Expected an owned private reporting backup directory');
+  const backup = path.join(directory, id + '.tar.gz');
+  const archiveRoot = path.join(appRoot, 'server/vendor/driver-audits/integration');
+  const load = file => import(pathToFileURL(path.join(archiveRoot, file)).href);
+  const [{createHostedRpc}, {createCloudState, createArchiveCapacity}, {createSupabaseArchiveTransport},
+    {createBudgetedAuditArchive}, {privateAuditJson, privateAuditWrite}] = await Promise.all([
+    load('cloud/rpc.mjs'), load('cloud/cloud-state.mjs'), load('hosted/supabase-archive.mjs'),
+    load('cloud/driver-audit-archive.mjs'), load('cloud/driver-audit-handoff.mjs'),
+  ]);
+  const secret = process.env.DRIVER_AUDIT_SUPABASE_SECRET;
+  const rpc = createHostedRpc({secret});
+  const remote = createSupabaseArchiveTransport({secret});
+  await remote.assertPrivate();
+  if (!await createArchiveCapacity({rpc})({bytes: 682054645})) throw Error('Existing private archive capacity unavailable');
+  const archive = createBudgetedAuditArchive({
+    rpc, state: createCloudState({rpc}), remote, receiptRoot: path.join(root, 'archive-receipts'),
+    requestBytes: 4096 + 2 * Buffer.byteLength(secret),
+    approvedNovemberRelease: true, approvedNovemberSync: true,
+    approvedNovemberRecovery: true, approvedNovemberOvernight: true,
+  });
+  const receipt = path.join(directory, id + '.private.json');
+  return offloadReportingBackup({backup, verify: archive.verify, async save(value) {
+    if (value.size !== 682054645) throw Error('Unexpected retained reporting backup length');
+    const proof = { ...value, kind: 'retained-reporting-workspace-tar-gzip', collectorRevision: 3008 };
+    const serialized = JSON.stringify(proof);
+    await privateAuditWrite(receipt, serialized);
+    const handle = await fs.open(receipt, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      await handle.sync();
+      if (JSON.stringify(await privateAuditJson(receipt)) !== serialized) throw Error('Reporting backup manifest verification failed');
+    } finally { await handle.close(); }
+    const dirHandle = await fs.open(directory, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try { await dirHandle.sync(); } finally { await dirHandle.close(); }
+  }});
 }
 
 
