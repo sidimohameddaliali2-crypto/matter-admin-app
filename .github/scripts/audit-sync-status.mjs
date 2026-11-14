@@ -67,9 +67,15 @@ export async function reclaimArchivedAuditCopies(data, receipts, files, apply) {
   if (!container?.isDirectory() || container.uid !== process.getuid() || (container.mode & 0o077) ||
       await fs.realpath(parent) !== parent) throw Error('Expected an owned private audit attempt');
   for (const directory of [data, receipts]) {
+    const receiptDirectory = directory === receipts;
     const info = await stat(directory);
-    if (!info?.isDirectory() || info.uid !== process.getuid() || (info.mode & (directory === receipts ? 0o077 : 0o022)) ||
-        await fs.realpath(directory) !== directory) throw Error('Expected an owned private audit directory');
+    const checks = { exists: !!info, directory: !!info?.isDirectory(), owned: info?.uid === process.getuid(),
+      mode: !!info && !(info.mode & (receiptDirectory ? 0o077 : 0o022)),
+      exactPath: !!info && await fs.realpath(directory) === directory };
+    if (Object.values(checks).some(value => !value)) {
+      console.log(JSON.stringify({ archivedCopyDirectory: receiptDirectory ? 'receipts' : 'generated', checks }));
+      throw Error('Expected an owned private audit directory');
+    }
   }
   const matches = [];
   for (const [name, hash] of Object.entries(files)) {
