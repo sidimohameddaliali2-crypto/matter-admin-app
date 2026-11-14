@@ -5,6 +5,10 @@ import {randomInt,randomUUID} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 const MONTH=/^\d{4}-(?:0[1-9]|1[0-2])$/,ID=/^[a-f0-9-]{36}$/i;
 export const WORKER_BUDGET_DEFAULTS=Object.freeze({monthlyMicros:12_000_000,reservationMicros:40_000,maxRunMs:300_000,overheadMs:10_000,rateMicrosPerHour:428_800});
+// Keep the conservative byte bound and substitute $0.10/GB for $0.78/GB
+// on direct archive transfers. The new rate covers Supabase uncached egress
+// and rounds the DigitalOcean outbound overage up to $0.01 per GB.
+export const fixedHostArchiveMicros=legacyMicros=>Math.ceil(legacyMicros*10/78);
 const fail=message=>{throw Error(message)};
 const pendingLedgers=new WeakMap();
 
@@ -127,7 +131,7 @@ export function createWorkerBudget({stateStore,clock=Date.now,policy=WORKER_BUDG
    let charge=settledMicros(policy,elapsedMs,extraMicros);
    // A verified archive transfer from a fixed-cost host incurs no Vercel compute.
    // Keep its measured duration in the receipt and charge the bounded transfer.
-   if(archiveTransferOnly)charge=extraMicros;
+   if(archiveTransferOnly)charge=fixedHostArchiveMicros(extraMicros);
    if(cpuMicros!==undefined){if(!readerBudgetKeys.has(key)||accountingBasis!==undefined)fail('Invalid reader compute accounting');charge=readerComputeMicros({elapsedMs,cpuMicros})+extraMicros;}
    return mutate('settle',reservation.id,doc=>{
     const r=doc.active[reservation.id];if(!r)return {commit:false,result:{settled:false,reason:'not-active'}};
@@ -135,7 +139,7 @@ export function createWorkerBudget({stateStore,clock=Date.now,policy=WORKER_BUDG
     if(charge>r.reservationMicros)fail('Uncertain total cost exceeds reservation');
     const now=clock();if(!Number.isSafeInteger(now)||now<r.startedAtMs||now-r.startedAtMs+preReservationMs+10<elapsedMs)fail('Uncertain worker duration');
     const p=doc.periods[r.period],refund=r.reservationMicros-charge;if(p.usedMicros<refund)fail('Invalid worker budget ledger');p.usedMicros-=refund;p.settlements++;delete doc.active[reservation.id];
-    return {commit:true,event:{id:reservation.id,period:r.period,elapsedMs,preReservationMs,extraMicros,chargedMicros:charge,...(readerUsage?{readerUsage}:{}),...(accountingBasis?{accountingBasis}:cpuMicros!==undefined?{accountingBasis:'measured-cpu-memory-v1',cpuMicros}:{})},result:{settled:true,period:r.period,chargedMicros:charge,refundedMicros:refund}};
+    return {commit:true,event:{id:reservation.id,period:r.period,elapsedMs,preReservationMs,extraMicros,chargedMicros:charge,...(readerUsage?{readerUsage}:{}),...(archiveTransferOnly?{accountingBasis:'remote-archive-transfer-v2'}:accountingBasis?{accountingBasis}:cpuMicros!==undefined?{accountingBasis:'measured-cpu-memory-v1',cpuMicros}:{})},result:{settled:true,period:r.period,chargedMicros:charge,refundedMicros:refund}};
    });
   }
  };
