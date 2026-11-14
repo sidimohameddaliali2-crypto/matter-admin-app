@@ -12,6 +12,7 @@ test('superseded scratch reclamation requires an exact private archive receipt',
   const data = path.join(attempt, 'server-data');
   await fs.mkdir(receipts, { mode: 0o700 });
   await fs.mkdir(data, { mode: 0o755 });
+  await fs.chmod(data, 0o775);
   const originals = [Buffer.from('old verified object'), Buffer.from('old object without receipt')];
   const hashes = originals.map(bytes => createHash('sha256').update(bytes).digest('hex'));
   const names = hashes.map(hash => 'archive-' + hash + '.private.bin');
