@@ -675,7 +675,8 @@ async function main() {
   const reclaimArchived = process.env.RECLAIM_ARCHIVED_REPORTING_WORKSPACE;
   const verifyRenderer = process.env.VERIFY_REPORTING_RENDERER === 'true';
   if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload','bundle-plan','bundle-release',
-    'bundle-previous-plan','bundle-previous-release','bundle-baseline-plan','bundle-baseline-release'].includes(reclaimArchived)) {
+    'bundle-previous-plan','bundle-previous-release','bundle-baseline-plan','bundle-baseline-release',
+    'inventory'].includes(reclaimArchived)) {
     throw Error('Invalid archive reclamation mode');
   }
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
@@ -740,6 +741,26 @@ async function main() {
     return;
   }
   if (reclaimArchived) {
+    if (reclaimArchived === 'inventory') {
+      if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' || !entry) {
+        throw Error('The reviewed Linux reporting worker is required');
+      }
+      const root = syncRoot(appRoot, entry), work = path.join(root, 'work');
+      const sizes = await Promise.all(Object.entries({
+        git:path.join(appRoot, '.git'), supervisorLogs:path.join(pm2Home, 'logs'),
+        reportBuilder:path.join(root, 'builder'), reportWorkspace:work,
+        archivedBuildBackups:path.join(work, 'retained-audit-builds'),
+        reportReceipts:path.join(root, 'archive-receipts'),
+        reportMetadata:path.join(work, 'metadata'),
+        packageCache:path.join(os.homedir(), '.npm', '_cacache'),
+      }).map(async ([key, directory]) => {
+        if (!(await stat(directory))?.isDirectory() || await fs.realpath(directory) !== directory) return [key, null];
+        const {stdout} = await exec('/usr/bin/du', ['-sxB1', '--', directory], {timeout:20_000, maxBuffer:1024});
+        return [key, number(Number(stdout.split(/\s+/, 1)[0]))];
+      }));
+      console.log(JSON.stringify({reportingDiskInventory:Object.fromEntries(sizes)}));
+      return;
+    }
     const run = reclaimArchived.startsWith('bundle-') ? reclaimActiveBundle :
       reclaimArchived.startsWith('scratch-') ? offloadRetiredScratch : reclaimRetainedBuild;
     console.log(JSON.stringify(await run(appRoot, entry, expected, reclaimArchived)));
