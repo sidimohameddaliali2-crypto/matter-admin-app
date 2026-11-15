@@ -134,6 +134,63 @@ export async function offloadReportingBackup({ backup, maxChunkBytes = 8 * 1024 
   }
 }
 
+const scratchNames = new Set(['combined-reviews.private.json', 'verified-gps-windows.private.json',
+  'gps-refresh-receipt.private.json', 'automatic-validation.private.json']);
+const maximumScratchBytes = 256 * 1024 * 1024;
+
+async function ownsDirectory(directory, privateOnly = true) {
+  const info = await stat(directory);
+  return !!info?.isDirectory() && info.uid === process.getuid() &&
+    (!privateOnly || !(info.mode & 0o077)) && await fs.realpath(directory) === directory;
+}
+
+export async function planRetiredReportingScratch(work, protectedRoots, latestAttempt) {
+  const attempts = path.join(work, 'attempts');
+  if (!await ownsDirectory(attempts)) throw Error('Expected private audit attempts');
+  const candidates = [];
+  async function add(id, name, size, expectedSha256) {
+    const relative = path.join(id, name);
+    const info = await stat(path.join(attempts, relative));
+    if (!info?.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) ||
+        info.nlink !== 1 || info.size < 512 * 1024 || info.size > size || !info.blocks) return;
+    candidates.push({ relative, size: info.size, blocks: info.blocks, expectedSha256 });
+  }
+  for (const child of await fs.readdir(attempts, { withFileTypes: true })) {
+    const id = child.name;
+    if (!child.isDirectory() || !attempt.test(id) || id === latestAttempt) continue;
+    const directory = path.join(attempts, id);
+    if (protectedRoots.some(root => root === directory || root.startsWith(directory + '/')) ||
+        !await ownsDirectory(directory)) continue;
+    const [proof, accepted, seed] = await Promise.all([
+      json(path.join(directory, 'abandoned-workspace.private.json')),
+      stat(path.join(directory, 'accepted.private.json')),
+      stat(path.join(directory, 'direct-seed.private.json')),
+    ]);
+    if (proof?.version !== 1 || proof.kind !== 'abandoned' || proof.status !== 'retired' || accepted || seed) continue;
+    for (const name of scratchNames) {
+      await add(id, name, maximumScratchBytes);
+      await add(id, name + '.retained.gz', maximumScratchBytes);
+    }
+    const data = path.join(directory, 'server-data');
+    if (!manifest.test(proof.manifestSha256) || !await ownsDirectory(data, false)) continue;
+    const source = await readTail(path.join(data, 'files.private.json'), 16 * 1024 * 1024, true, true);
+    if (!source || digest(source) !== proof.manifestSha256) continue;
+    for (const [file, sha256] of Object.entries(JSON.parse(source.toString('utf8')))) {
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,239}$/.test(file) || !manifest.test(sha256)) continue;
+      await add(id, 'server-data/' + file, maximumScratchBytes, sha256);
+    }
+  }
+  const files = [];
+  let bytes = 0, allocatedBytes = 0;
+  for (const file of candidates.sort((a, b) => b.blocks - a.blocks || a.relative.localeCompare(b.relative))) {
+    if (bytes + file.size > maximumScratchBytes) continue;
+    files.push(file);
+    bytes += file.size;
+    allocatedBytes += file.blocks * 512;
+  }
+  return { attempts, files, bytes, allocatedBytes };
+}
+
 async function readRetentionInputs(appRoot) {
   const server = path.join(appRoot, 'server');
   await import(pathToFileURL(path.join(server, 'loadEnv.js')).href);
@@ -500,7 +557,7 @@ async function main() {
   const reclaimMetadata = process.env.RECLAIM_REPORTING_METADATA === 'true';
   const reclaimArchived = process.env.RECLAIM_ARCHIVED_REPORTING_WORKSPACE;
   const verifyRenderer = process.env.VERIFY_REPORTING_RENDERER === 'true';
-  if (reclaimArchived && !['plan','apply','offload'].includes(reclaimArchived)) throw Error('Invalid archive reclamation mode');
+  if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload'].includes(reclaimArchived)) throw Error('Invalid archive reclamation mode');
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
   const pauseReporting = process.env.PAUSE_REPORTING_SYNC === 'true';
   const resumeReporting = process.env.RESUME_REPORTING_SYNC === 'true';
@@ -563,7 +620,8 @@ async function main() {
     return;
   }
   if (reclaimArchived) {
-    console.log(JSON.stringify(await reclaimRetainedBuild(appRoot, entry, expected, reclaimArchived)));
+    const run = reclaimArchived.startsWith('scratch-') ? offloadRetiredScratch : reclaimRetainedBuild;
+    console.log(JSON.stringify(await run(appRoot, entry, expected, reclaimArchived)));
     return;
   }
   if (clearCaches) {
@@ -734,6 +792,15 @@ async function offloadRetainedBuild(root, work, id, appRoot) {
   if (!info?.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077) ||
       await fs.realpath(directory) !== directory) throw Error('Expected an owned private reporting backup directory');
   const backup = path.join(directory, id + '.tar.gz');
+  const receipt = path.join(directory, id + '.private.json');
+  const { archive, save } = await reportingBackupTransport(appRoot, root, 682054645);
+  return offloadReportingBackup({backup, verify: archive.verify, async save(value) {
+    if (value.size !== 682054645) throw Error('Unexpected retained reporting backup length');
+    await save(receipt, { ...value, kind: 'retained-reporting-workspace-tar-gzip', collectorRevision: 3008 });
+  }});
+}
+
+async function reportingBackupTransport(appRoot, root, requiredCapacity) {
   const archiveRoot = path.join(appRoot, 'server/vendor/driver-audits/integration');
   const load = file => import(pathToFileURL(path.join(archiveRoot, file)).href);
   const [{createHostedRpc}, {createCloudState, createArchiveCapacity}, {createSupabaseArchiveTransport},
@@ -745,17 +812,14 @@ async function offloadRetainedBuild(root, work, id, appRoot) {
   const rpc = createHostedRpc({secret});
   const remote = createSupabaseArchiveTransport({secret});
   await remote.assertPrivate();
-  if (!await createArchiveCapacity({rpc})({bytes: 682054645})) throw Error('Existing private archive capacity unavailable');
+  if (!await createArchiveCapacity({rpc})({bytes: requiredCapacity})) throw Error('Existing private archive capacity unavailable');
   const archive = createBudgetedAuditArchive({
     rpc, state: createCloudState({rpc}), remote, receiptRoot: path.join(root, 'archive-receipts'),
     requestBytes: 4096 + 2 * Buffer.byteLength(secret),
     approvedNovemberRelease: true, approvedNovemberSync: true,
     approvedNovemberRecovery: true, approvedNovemberOvernight: true,
   });
-  const receipt = path.join(directory, id + '.private.json');
-  return offloadReportingBackup({backup, verify: archive.verify, async save(value) {
-    if (value.size !== 682054645) throw Error('Unexpected retained reporting backup length');
-    const proof = { ...value, kind: 'retained-reporting-workspace-tar-gzip', collectorRevision: 3008 };
+  async function save(receipt, proof) {
     const serialized = JSON.stringify(proof);
     await privateAuditWrite(receipt, serialized);
     const handle = await fs.open(receipt, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -763,9 +827,75 @@ async function offloadRetainedBuild(root, work, id, appRoot) {
       await handle.sync();
       if (JSON.stringify(await privateAuditJson(receipt)) !== serialized) throw Error('Reporting backup manifest verification failed');
     } finally { await handle.close(); }
-    const dirHandle = await fs.open(directory, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const dirHandle = await fs.open(path.dirname(receipt), constants.O_RDONLY | constants.O_NOFOLLOW);
     try { await dirHandle.sync(); } finally { await dirHandle.close(); }
-  }});
+  }
+  return { archive, save };
+}
+
+async function offloadRetiredScratch(appRoot, entry, expected, mode) {
+  const apply = mode === 'scratch-offload';
+  if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' ||
+      !entry || (apply && entry.pm2_env?.status !== 'stopped')) throw Error('The reviewed reporting worker is required');
+  const root = syncRoot(appRoot, entry), work = path.join(root, 'work');
+  if (!await ownsDirectory(work)) throw Error('Expected private audit workspace');
+  const lockModule = path.join(appRoot, 'server/vendor/driver-audits/integration/hosted/worker-lock.mjs');
+  const { acquireWorkerLock } = await import(pathToFileURL(lockModule).href);
+  const lock = apply ? await acquireWorkerLock(path.join(path.dirname(root), 'sync-worker.lock')) : null;
+  try {
+    const [status, progress, pointer, releases] = await Promise.all([
+      json(path.join(root, 'sync-status.private.json')),
+      json(path.join(work, 'status.private.json')),
+      json(path.join(work, 'current.private.json'), 16 * 1024 * 1024),
+      readRetentionInputs(appRoot),
+    ]);
+    const protectedRoots = [pointer?.privateRoot, pointer?.previous?.privateRoot, pointer?.baselineRoot];
+    if (status?.replicaGcStatus !== 'qualified' || releases.stagePending ||
+        !progress || !protectedRoots.every(file => typeof file === 'string' && path.isAbsolute(file))) {
+      throw Error('The active, previous and baseline reporting workspaces must be protected');
+    }
+    const plan = await planRetiredReportingScratch(work, protectedRoots, progress.id ?? progress.attempt?.id);
+    const before = await fs.statfs(work);
+    const beforeBytes = before.bavail * before.bsize;
+    const summary = { retiredScratch: true, applied: apply, files: plan.files.length, allocatedBytes: plan.allocatedBytes, beforeBytes };
+    if (!apply || plan.allocatedBytes < 100 * 1024 * 1024) return summary;
+    if (beforeBytes < maximumScratchBytes + 256 * 1024 * 1024) throw Error('Insufficient safe temporary archive space');
+    const directory = path.join(work, 'retained-audit-builds');
+    if (!await ownsDirectory(directory)) throw Error('Expected private audit backup directory');
+    // Read concurrently with neither the reporting worker nor another recovery.
+    const files = [];
+    for (const file of plan.files) {
+      const bytes = await readTail(path.join(plan.attempts, file.relative), file.size, true, true);
+      const sha256 = bytes && digest(bytes);
+      if (!bytes || bytes.length !== file.size || (file.expectedSha256 && sha256 !== file.expectedSha256)) {
+        throw Error('Retired reporting file changed');
+      }
+      files.push({ file: file.relative, size: file.size, sha256 });
+    }
+    const identity = digest(JSON.stringify(files));
+    const receipt = path.join(directory, 'retired-' + identity + '.private.json');
+    const temp = await fs.mkdtemp(path.join(directory, 'scratch-'));
+    try {
+      const inventory = path.join(temp, 'files'), backup = path.join(temp, 'reporting.tar.gz');
+      await fs.writeFile(inventory, files.map(item => item.file).join('\0') + '\0', { mode: 0o600, flag: 'wx' });
+      await fs.writeFile(backup, '', { mode: 0o600, flag: 'wx' });
+      const tar = args => exec('/bin/tar', args, { timeout: 180000, maxBuffer: 65536 });
+      await tar(['--create','--gzip','--file',backup,'--directory',plan.attempts,'--null','--verbatim-files-from','--files-from',inventory]);
+      await tar(['--compare','--gzip','--file',backup,'--directory',plan.attempts]);
+      const { size } = await fs.stat(backup);
+      const { archive, save } = await reportingBackupTransport(appRoot, root, size + 512 * 1024 * 1024);
+      const backupResult = await offloadReportingBackup({backup, verify: archive.verify,
+        save: value => save(receipt, { ...value, kind: 'retired-reporting-scratch-tar-gzip', files }) });
+      // Keep the exact recovery manifest after a partial local cleanup.
+      for (const item of files) await fs.unlink(path.join(plan.attempts, item.file));
+      const after = await fs.statfs(work);
+      return { ...summary, archiveBytes: backupResult.bytes, afterBytes: after.bavail * after.bsize };
+    } finally {
+      await fs.rm(temp, { recursive: true, force: true });
+    }
+  } finally {
+    await lock?.release();
+  }
 }
 
 

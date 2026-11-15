@@ -29,7 +29,7 @@ on:
         default: false
 
       reclaim_archived_reporting_workspace:
-        description: Plan or reclaim verified copies, or offload the exact old backup for superseded build 3008
+        description: Plan or reclaim verified workspace copies, or plan and move retired build scratch
         type: string
 
       verify_reporting_renderer:
