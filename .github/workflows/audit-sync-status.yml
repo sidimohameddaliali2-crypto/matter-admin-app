@@ -32,6 +32,11 @@ on:
         description: Plan or reclaim verified copies, or offload the exact old backup for superseded build 3008
         type: string
 
+      verify_reporting_renderer:
+        description: Read and prepare the active MongoDB report in an isolated process
+        type: boolean
+        default: false
+
       deploy_reporting_accounting:
         description: Deploy the exact reviewed reporting accounting change
         type: boolean
@@ -91,6 +96,7 @@ jobs:
           CLEAR_REPORTING_BUILD_CACHES: ${{ inputs.clear_reporting_build_caches }}
           RECLAIM_REPORTING_METADATA: ${{ inputs.reclaim_reporting_metadata }}
           RECLAIM_ARCHIVED_REPORTING_WORKSPACE: ${{ inputs.reclaim_archived_reporting_workspace }}
+          VERIFY_REPORTING_RENDERER: ${{ inputs.verify_reporting_renderer }}
           DEPLOY_REPORTING_ACCOUNTING: ${{ inputs.deploy_reporting_accounting }}
           PAUSE_REPORTING_SYNC: ${{ inputs.pause_reporting_sync }}
           RESUME_REPORTING_SYNC: ${{ inputs.resume_reporting_sync }}
@@ -102,7 +108,7 @@ jobs:
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 20m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,UPGRADE_BUILDER,BUILDER_QUALIFICATION_BUNDLE,CLEAR_REPORTING_BUILD_CACHES,RECLAIM_REPORTING_METADATA,RECLAIM_ARCHIVED_REPORTING_WORKSPACE,DEPLOY_REPORTING_ACCOUNTING,PAUSE_REPORTING_SYNC,RESUME_REPORTING_SYNC,DEPLOY_BOUNDED_PHOTO_READS
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,AUDIT_STATUS_CODE,QUALIFY_BUILDER,UPGRADE_BUILDER,BUILDER_QUALIFICATION_BUNDLE,CLEAR_REPORTING_BUILD_CACHES,RECLAIM_REPORTING_METADATA,RECLAIM_ARCHIVED_REPORTING_WORKSPACE,VERIFY_REPORTING_RENDERER,DEPLOY_REPORTING_ACCOUNTING,PAUSE_REPORTING_SYNC,RESUME_REPORTING_SYNC,DEPLOY_BOUNDED_PHOTO_READS
           script: |
             set -e
             cd -- "$DO_APP_PATH"
