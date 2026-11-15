@@ -4,7 +4,33 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
-import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup,planRetiredReportingScratch,reclaimReplicatedBundle,reclaimPreviousRuntimeCopies} from './audit-sync-status.mjs';
+import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup,planRetiredReportingScratch,reclaimReplicatedBundle,reclaimPreviousRuntimeCopies,linkIdenticalBaselineArchive} from './audit-sync-status.mjs';
+
+test('baseline archive relink leaves both exact paths readable and skips unbound data', async t => {
+  const {root, attempt} = await fixture(t);
+  const baseline = path.join(root,'baseline'), current = path.join(attempt,'server-data');
+  await Promise.all([baseline,current].map(file => fs.mkdir(file, {mode:0o700})));
+  const content = Buffer.from('retained compressed archive object');
+  const sha256 = createHash('sha256').update(content).digest('hex'), name = 'archive-'+sha256+'.private.bin';
+  const source = path.join(current,name), target = path.join(baseline,name);
+  for (const file of [source, target]) await fs.writeFile(file, content, {mode:0o600});
+  const matches = {[name]:sha256};
+  const run = (apply, activeFiles=matches) => linkIdenticalBaselineArchive({
+    baseline, current, baselineFiles:matches, activeFiles, apply,
+  });
+  assert.equal((await run(true, {})).linked, 0);
+  assert.equal((await run(false)).linked, 1);
+  assert.notEqual((await fs.stat(source)).ino, (await fs.stat(target)).ino);
+  await fs.writeFile(target, Buffer.alloc(content.length));
+  await assert.rejects(() => run(true), /archive hash mismatch/);
+  assert.notEqual((await fs.stat(source)).ino, (await fs.stat(target)).ino);
+  await fs.writeFile(target, content);
+  assert.equal((await run(true)).linked, 1);
+  assert.equal((await fs.stat(source)).ino, (await fs.stat(target)).ino);
+  assert.equal((await run(true)).linked, 0);
+  await fs.unlink(source);
+  assert.deepEqual(await fs.readFile(target), content);
+});
 
 test('previous local runtime is reclaimed only when its exact bytes are protected in both stores', async t => {
   const { root, attempt } = await fixture(t);
