@@ -761,7 +761,18 @@ async function main() {
         const {stdout} = await exec('/usr/bin/du', ['-sxB1', '--', directory], {timeout:20_000, maxBuffer:1024});
         return [key, number(Number(stdout.split(/\s+/, 1)[0]))];
       }));
-      console.log(JSON.stringify({reportingDiskInventory:Object.fromEntries(sizes)}));
+      const logs = path.join(pm2Home, 'logs');
+      const supervisorLogs = {reportSync:0, deliveryApi:0, rotated:0, other:0};
+      for (const filename of await fs.readdir(logs).catch(() => [])) {
+        if (!filename.endsWith('.log') && !filename.endsWith('.log.gz')) continue;
+        const file = await stat(path.join(logs, filename));
+        if (!file?.isFile() || file.nlink !== 1) continue;
+        const key = filename.match(/^matter-driver-audit-sync-(?:out|error)\.log$/) ? 'reportSync' :
+          filename.match(/^matter-delivery-api-(?:out|error)\.log$/) ? 'deliveryApi' :
+          filename.endsWith('.log.gz') || /(?:out|error)[-_.]\d/.test(filename) ? 'rotated' : 'other';
+        supervisorLogs[key] += file.blocks * 512;
+      }
+      console.log(JSON.stringify({reportingDiskInventory:Object.fromEntries(sizes), supervisorLogs}));
       return;
     }
     const run = reclaimArchived.startsWith('heap-') ? recoverReportingWorkerHeap :
@@ -858,10 +869,16 @@ async function reclaimActiveBundle(appRoot, entry, expected, mode) {
         json(path.join(work, 'status.private.json')),
       ]);
       const head = saved?.head;
-      if (stage || !head || !progress || ['building','validating'].includes(progress.status) ||
+      const interrupted = ['building','validating'].includes(progress?.status);
+      if (stage || !head || !progress || interrupted && !apply ||
           head.generation !== heartbeat.activeGeneration) throw Error('The stable active reporting bundle is required');
       const accepted = await acceptedWorkspace(work, pointer, head);
       if (!accepted || accepted.manifest.sha256 !== head.directImport.manifestSha256) throw Error('Active local bundle differs from MongoDB');
+      const interruptedAttempt = progress.id ?? progress.attempt?.id;
+      if (interrupted && (!attempt.test(interruptedAttempt) || path.basename(accepted.directory) === interruptedAttempt ||
+          path.basename(path.dirname(pointer.previous?.privateRoot ?? '')) === interruptedAttempt)) {
+        throw Error('An interrupted attempt would overlap a protected bundle');
+      }
       if (baseline) {
         const baselineRoot = path.join(root, 'baseline');
         const [config, seed, bytes] = await Promise.all([
