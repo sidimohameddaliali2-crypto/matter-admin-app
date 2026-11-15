@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { execFile } from 'node:child_process';
@@ -142,6 +142,44 @@ async function ownsDirectory(directory, privateOnly = true) {
   const info = await stat(directory);
   return !!info?.isDirectory() && info.uid === process.getuid() &&
     (!privateOnly || !(info.mode & 0o077)) && await fs.realpath(directory) === directory;
+}
+
+export async function linkIdenticalBaselineArchive({ baseline, current, baselineFiles, activeFiles, apply }) {
+  if (baseline === current || !await ownsDirectory(baseline, false) ||
+      !await ownsDirectory(path.dirname(baseline)) || !await ownsDirectory(current, false) ||
+      !await ownsDirectory(path.dirname(current))) throw Error('Expected two verified local archive directories');
+  const matches = [];
+  let allocatedBytes = 0;
+  for (const [name, hash] of Object.entries(baselineFiles)) {
+    if (!manifest.test(hash) || name !== 'archive-' + hash + '.private.bin' || activeFiles[name] !== hash) continue;
+    const source = path.join(current, name), target = path.join(baseline, name);
+    const [from, to] = await Promise.all([stat(source),stat(target)]);
+    if (!from?.isFile() || !to?.isFile() || from.uid !== process.getuid() || to.uid !== from.uid ||
+        from.dev !== to.dev || from.ino === to.ino || from.mode !== to.mode || (to.mode & 0o022) ||
+        to.nlink !== 1 || !to.blocks || from.size !== to.size || to.size < 1 || to.size > 32 * 1024 * 1024) continue;
+    const [original, duplicate] = await Promise.all([
+      readTail(source, from.size, false, true), readTail(target, to.size, false, true),
+    ]);
+    if (!original || original.length !== from.size || digest(original) !== hash || !duplicate?.equals(original)) {
+      throw Error('Staged baseline archive hash mismatch');
+    }
+    matches.push({source,target,from,to});
+    allocatedBytes += to.blocks * 512;
+  }
+  if (apply) for (const {source,target,from,to} of matches) {
+    const temporary = path.join(baseline, '.shared-' + randomUUID());
+    await fs.link(source, temporary);
+    try {
+      const [linked, previous] = await Promise.all([stat(temporary),stat(target)]);
+      if (linked?.ino !== from.ino || linked.dev !== from.dev || linked.size !== from.size || linked.mtimeMs !== from.mtimeMs ||
+          previous?.ino !== to.ino || previous.dev !== to.dev || previous.size !== to.size || previous.mtimeMs !== to.mtimeMs ||
+          previous.nlink !== 1) throw Error('Staged baseline archive changed before relinking');
+      await fs.rename(temporary, target);
+    } finally {
+      await fs.unlink(temporary).catch(missing);
+    }
+  }
+  return { linked: matches.length, allocatedBytes };
 }
 
 async function verifiedArchiveChunk(receipts, sha256, size) {
@@ -637,7 +675,9 @@ async function main() {
   const reclaimArchived = process.env.RECLAIM_ARCHIVED_REPORTING_WORKSPACE;
   const verifyRenderer = process.env.VERIFY_REPORTING_RENDERER === 'true';
   if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload','bundle-plan','bundle-release',
-    'bundle-previous-plan','bundle-previous-release'].includes(reclaimArchived)) throw Error('Invalid archive reclamation mode');
+    'bundle-previous-plan','bundle-previous-release','bundle-baseline-plan','bundle-baseline-release'].includes(reclaimArchived)) {
+    throw Error('Invalid archive reclamation mode');
+  }
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
   const pauseReporting = process.env.PAUSE_REPORTING_SYNC === 'true';
   const resumeReporting = process.env.RESUME_REPORTING_SYNC === 'true';
@@ -759,6 +799,7 @@ async function main() {
 
 async function reclaimActiveBundle(appRoot, entry, expected, mode) {
   const apply = mode.endsWith('-release'), previous = mode.startsWith('bundle-previous-');
+  const baseline = mode.startsWith('bundle-baseline-');
   if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' ||
       !entry || (apply && entry.pm2_env?.status !== 'stopped')) throw Error('The reviewed reporting worker is required');
   const root = syncRoot(appRoot, entry), work = path.join(root, 'work');
@@ -795,6 +836,21 @@ async function reclaimActiveBundle(appRoot, entry, expected, mode) {
           head.generation !== heartbeat.activeGeneration) throw Error('The stable active reporting bundle is required');
       const accepted = await acceptedWorkspace(work, pointer, head);
       if (!accepted || accepted.manifest.sha256 !== head.directImport.manifestSha256) throw Error('Active local bundle differs from MongoDB');
+      if (baseline) {
+        const baselineRoot = path.join(root, 'baseline');
+        const [config, seed, bytes] = await Promise.all([
+          json(path.join(root, 'sync.json')),
+          json(path.join(root, 'seed.json')),
+          readTail(path.join(baselineRoot, 'files.private.json'), 16*1024*1024, true, true),
+        ]);
+        if (config?.baselineRoot !== baselineRoot || !manifest.test(seed?.manifestSha256) ||
+            !bytes || digest(bytes) !== seed.manifestSha256) throw Error('The original staged baseline differs from its verified seed');
+        const before = await fs.statfs(work);
+        const result = await linkIdenticalBaselineArchive({baseline:baselineRoot, current:accepted.manifest.root,
+          baselineFiles:JSON.parse(bytes), activeFiles:accepted.manifest.files, apply});
+        const after = await fs.statfs(work);
+        return {baselineLinks:true, applied:apply, ...result, beforeBytes:before.bavail*before.bsize, afterBytes:after.bavail*after.bsize};
+      }
       const selected = previous ? head.previous : head;
       if (!selected || previous && (!pointer.previous || pointer.baselineRoot !== pointer.previous.privateRoot ||
           pointer.previous.privateRoot === pointer.privateRoot || selected.generation === head.generation)) {
