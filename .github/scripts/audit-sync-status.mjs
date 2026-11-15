@@ -78,22 +78,26 @@ export async function reclaimArchivedAuditCopies(data, receipts, files, apply) {
     }
   }
   const matches = [];
+  const counts = { absent: 0, shared: 0, fileMode: 0, missingReceipt: 0, mismatchedReceipt: 0 };
   for (const [name, hash] of Object.entries(files)) {
     if (!manifest.test(hash) || name !== 'archive-' + hash + '.private.bin') continue;
     const file = path.join(data, name);
     const info = await stat(file);
-    if (!info?.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) ||
-        info.nlink !== 1 || info.size < 1 || info.size > 8 * 1024 * 1024 || !info.blocks) continue;
+    if (!info?.isFile()) { counts.absent++; continue; }
+    if (info.nlink !== 1) { counts.shared++; continue; }
+    if (info.uid !== process.getuid() || (info.mode & 0o077) ||
+        info.size < 1 || info.size > 8 * 1024 * 1024 || !info.blocks) { counts.fileMode++; continue; }
     const key = hash + '.gz';
     const receipt = await json(path.join(receipts, key + '.json'));
-    if (receipt?.target !== 'matter-report-archive' || receipt.key !== key || receipt.sha256 !== hash ||
-        receipt.bytes !== info.size || receipt.verified !== true) continue;
+    if (!receipt) { counts.missingReceipt++; continue; }
+    if (receipt.target !== 'matter-report-archive' || receipt.key !== key || receipt.sha256 !== hash ||
+        receipt.bytes !== info.size || receipt.verified !== true) { counts.mismatchedReceipt++; continue; }
     const bytes = await readTail(file, 8 * 1024 * 1024, true, true);
     if (!bytes || bytes.length !== info.size || digest(bytes) !== hash) throw Error('Superseded audit copy hash mismatch');
     matches.push({ file, allocatedBytes: info.blocks * 512 });
   }
   if (apply) for (const { file } of matches) await fs.unlink(file);
-  return { copies: matches.length, allocatedBytes: matches.reduce((total, item) => total + item.allocatedBytes, 0) };
+  return { copies: matches.length, allocatedBytes: matches.reduce((total, item) => total + item.allocatedBytes, 0), counts };
 }
 
 export async function offloadReportingBackup({ backup, maxChunkBytes = 8 * 1024 * 1024, verify, save }) {
@@ -692,7 +696,7 @@ async function reclaimRetainedBuild(appRoot, entry, expected, mode) {
     ]);
     const checks = {
       publishedState: !!progress && !!pointer && status?.replicaGcStatus === 'qualified',
-      backup: !!backup?.isFile() && backup.uid === process.getuid() && !(backup.mode & 0o077),
+      backup: mode !== 'offload' || (!!backup?.isFile() && backup.uid === process.getuid() && !(backup.mode & 0o077)),
       release: !releases.stagePending && releases.previousRevision > 3008,
       identity: accepted?.collectorRevision === 3008 && seed?.collectorRevision === 3008 && accepted.privateRoot === data,
       manifest: !!source && accepted?.manifestSha256 === digest(source) && seed?.manifestSha256 === accepted.manifestSha256,
