@@ -743,7 +743,7 @@ async function main() {
   if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload','bundle-plan','bundle-release',
     'bundle-previous-plan','bundle-previous-release','bundle-baseline-plan','bundle-baseline-release',
     'inventory','original-backup-plan','original-backup-offload','heap-plan','heap-resume',
-    'log-plan','log-compact'].includes(reclaimArchived)) {
+    'log-plan','log-compact','bundle-compact-release'].includes(reclaimArchived)) {
     throw Error('Invalid archive reclamation mode');
   }
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
@@ -958,6 +958,16 @@ async function reclaimActiveBundle(appRoot, entry, expected, mode) {
       if (interrupted && (!attempt.test(interruptedAttempt) || path.basename(accepted.directory) === interruptedAttempt ||
           path.basename(path.dirname(pointer.previous?.privateRoot ?? '')) === interruptedAttempt)) {
         throw Error('An interrupted attempt would overlap a protected bundle');
+      }
+      if (mode === 'bundle-compact-release') {
+        const {compactActiveDriverAuditBuildFiles,compactPreviousDriverAuditInputs} = await load('services/driverAuditWorkspace.js');
+        const options = {root:work,head,stage,retentionStatus:heartbeat.replicaGcStatus};
+        const before = await fs.statfs(work);
+        const active = await compactActiveDriverAuditBuildFiles(options);
+        const previous = await compactPreviousDriverAuditInputs(options);
+        const after = await fs.statfs(work);
+        return {compactedAcceptedAuditInputs:true,active,previous,beforeBytes:before.bavail*before.bsize,
+          afterBytes:after.bavail*after.bsize};
       }
       if (baseline) {
         const baselineRoot = path.join(root, 'baseline');
