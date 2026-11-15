@@ -4,7 +4,26 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
-import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup,planRetiredReportingScratch,reclaimReplicatedBundle,reclaimPreviousRuntimeCopies,linkIdenticalBaselineArchive} from './audit-sync-status.mjs';
+import {gunzipSync} from 'node:zlib';
+import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup,planRetiredReportingScratch,reclaimReplicatedBundle,reclaimPreviousRuntimeCopies,linkIdenticalBaselineArchive,compactRotatedReportingLogs} from './audit-sync-status.mjs';
+
+test('closed rotated logs keep exact bytes and never match an active supervisor path', async t => {
+  const {root} = await fixture(t);
+  const directory = path.join(root,'rotated-logs');
+  await fs.mkdir(directory,{mode:0o700});
+  const source = path.join(directory,'matter-driver-audit-sync-out__2026-11-13_06-00-00.log');
+  const contents = Buffer.alloc(128*1024,86);
+  await fs.writeFile(source,contents,{mode:0o600});
+  const old = new Date(Date.now()-48*60*60*1000);
+  await fs.utimes(source,old,old);
+  const run = (apply,active=new Set()) => compactRotatedReportingLogs({directory,active,apply});
+  assert.equal((await run(false)).files,1);
+  assert.equal((await run(true,new Set([source]))).files,0);
+  assert.equal((await run(true)).files,1);
+  await assert.rejects(fs.stat(source),{code:'ENOENT'});
+  assert.deepEqual(gunzipSync(await fs.readFile(source+'.verified.gz')),contents);
+  assert.equal((await run(true)).files,0);
+});
 
 test('baseline archive relink leaves both exact paths readable and skips unbound data', async t => {
   const {root, attempt} = await fixture(t);
