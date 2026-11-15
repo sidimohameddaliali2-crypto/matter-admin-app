@@ -4,7 +4,24 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
-import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup} from './audit-sync-status.mjs';
+import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup,planRetiredReportingScratch} from './audit-sync-status.mjs';
+
+test('retired scratch offload selects exclusive files inside only terminal abandoned attempts', async t => {
+  const { root, attempt } = await fixture(t);
+  const work = path.join(root, 'work');
+  const write = (file, value) => fs.writeFile(file, value, { mode: 0o600 });
+  await write(path.join(attempt, 'abandoned-workspace.private.json'), JSON.stringify({
+    version: 1, kind: 'abandoned', status: 'retired', manifestSha256: null,
+  }));
+  const generated = path.join(attempt, 'combined-reviews.private.json.retained.gz');
+  await write(generated, Buffer.alloc(2 * 1024 * 1024, 37));
+  await write(path.join(attempt, 'operator-note.private.json'), Buffer.alloc(2 * 1024 * 1024, 40));
+  const find = protectedRoots => planRetiredReportingScratch(work, protectedRoots, null);
+  assert.equal((await find([])).files.length, 1);
+  assert.equal((await find([path.join(attempt, 'server-data')])).files.length, 0);
+  await fs.link(generated, path.join(attempt, 'another-copy.private.gz'));
+  assert.equal((await find([])).files.length, 0);
+});
 
 test('old workspace backup is removed only after every chunk has a verified private archive copy', async t => {
   const { root } = await fixture(t);
