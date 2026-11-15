@@ -679,7 +679,7 @@ async function main() {
   const verifyRenderer = process.env.VERIFY_REPORTING_RENDERER === 'true';
   if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload','bundle-plan','bundle-release',
     'bundle-previous-plan','bundle-previous-release','bundle-baseline-plan','bundle-baseline-release',
-    'inventory','original-backup-plan','original-backup-offload'].includes(reclaimArchived)) {
+    'inventory','original-backup-plan','original-backup-offload','heap-plan','heap-resume'].includes(reclaimArchived)) {
     throw Error('Invalid archive reclamation mode');
   }
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
@@ -764,7 +764,8 @@ async function main() {
       console.log(JSON.stringify({reportingDiskInventory:Object.fromEntries(sizes)}));
       return;
     }
-    const run = reclaimArchived.startsWith('original-backup-') ? offloadOriginalReportingBackup :
+    const run = reclaimArchived.startsWith('heap-') ? recoverReportingWorkerHeap :
+      reclaimArchived.startsWith('original-backup-') ? offloadOriginalReportingBackup :
       reclaimArchived.startsWith('bundle-') ? reclaimActiveBundle :
       reclaimArchived.startsWith('scratch-') ? offloadRetiredScratch : reclaimRetainedBuild;
     console.log(JSON.stringify(await run(appRoot, entry, expected, reclaimArchived)));
@@ -909,6 +910,76 @@ async function reclaimActiveBundle(appRoot, entry, expected, mode) {
     return apply ? await withDriverAuditWriter(db, run) : await run();
   } finally {
     try { await lock?.release(); } finally { await connection.close(); }
+  }
+}
+
+async function recoverReportingWorkerHeap(appRoot, entry, expected, mode) {
+  const apply = mode === 'heap-resume', mib = 1024 * 1024;
+  if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' ||
+      !entry || (apply && entry.pm2_env?.status !== 'stopped')) throw Error('The reviewed reporting worker is required');
+  const root = syncRoot(appRoot, entry);
+  const settings = entry.pm2_env;
+  const inherited = settings.env?.NODE_OPTIONS ?? settings.NODE_OPTIONS ?? '';
+  const nodeArgs = settings.node_args;
+  if (typeof inherited !== 'string' || (inherited !== '' && !/^--max-old-space-size=\d{1,5}$/.test(inherited)) ||
+      (nodeArgs && (!Array.isArray(nodeArgs) || nodeArgs.length)) || settings.exec_interpreter !== process.execPath) {
+    throw Error('Unrecognized reporting worker interpreter settings');
+  }
+  const pmEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    ['HOME','PATH','USER','LOGNAME','SHELL','LANG','PM2_HOME'].includes(key) || key.startsWith('LC_')));
+  const command = (bin, args, env) => exec(bin, args, {cwd:appRoot, env, timeout:15_000, maxBuffer:8*1024*1024});
+  const node = async options => {
+    const {stdout} = await command(process.execPath, ['-e',
+      'console.log(JSON.stringify({limit:require("node:v8").getHeapStatistics().heap_size_limit,constrained:process.constrainedMemory()}))',
+    ], {...pmEnv,NODE_OPTIONS:options});
+    return JSON.parse(stdout);
+  };
+  const current = await node(inherited);
+  const targetMib = Math.min(4608, Math.floor(current.limit/mib) + 768);
+  const options = '--max-old-space-size=' + targetMib;
+  const next = await node(options);
+  const memory = await fs.readFile('/proc/meminfo','utf8');
+  const available = Number(/^MemAvailable:\s+(\d+) kB$/m.exec(memory)?.[1])*1024;
+  const hostLimit = next.constrained > 0 ? Math.min(os.totalmem(),next.constrained) : os.totalmem();
+  const needed = next.limit + 2048*mib;
+  const ceiling = Number(settings.max_memory_restart ?? 0);
+  const disk = await fs.statfs(path.join(root,'work'));
+  const freeDiskBytes = disk.bavail*disk.bsize;
+  const safe = Number.isSafeInteger(available) && next.limit > current.limit &&
+    next.limit - current.limit <= 896*mib && available >= needed && hostLimit >= needed &&
+    (ceiling === 0 || ceiling >= next.limit + 768*mib) && freeDiskBytes >= 1024*mib;
+  const plan = {reportingHeap:true, applied:apply, safe, currentLimit:current.limit, nextLimit:next.limit,
+    memoryAvailable:available, hostLimit, freeDiskBytes, existingProcessMemoryCap:ceiling};
+  if (!apply) return plan;
+  if (!safe) throw Error('The reviewed reporting worker has insufficient headroom');
+  const pm2 = (args, env=pmEnv) => command('pm2',args,env);
+  const restart = value => pm2(['restart',name,'--update-env'],{...pmEnv,NODE_OPTIONS:value});
+  const before = Date.now();
+  try {
+    await restart(options);
+    const {stdout} = await pm2(['jlist']);
+    const workers = JSON.parse(stdout).filter(row=>row.name===name);
+    if (workers.length!==1 || syncRoot(appRoot,workers[0])!==root || workers[0].pm2_env.status!=='online' ||
+        !Number.isSafeInteger(workers[0].pid) || workers[0].pid<1) throw Error('Reporting worker did not restart');
+    const environment = await fs.readFile('/proc/'+workers[0].pid+'/environ','utf8');
+    if (!environment.split('\0').includes('NODE_OPTIONS='+options)) throw Error('Reporting worker did not apply the reviewed heap');
+    const statusFile = path.join(root,'sync-status.private.json');
+    let ready = false;
+    for (let attempt=0; attempt<15; attempt++) {
+      const status = await json(statusFile);
+      if (Date.parse(status?.checkedAt)>=before && !status.errorCode && status.replicaGcStatus==='qualified') {
+        ready = true;
+        break;
+      }
+      await new Promise(resolve=>setTimeout(resolve,600));
+    }
+    if (!ready) throw Error('Reporting worker did not report fresh qualified status');
+    await pm2(['save']);
+    return {...plan, status:'online'};
+  } catch (error) {
+    await restart(inherited);
+    await pm2(['save']);
+    throw error;
   }
 }
 
