@@ -4,7 +4,34 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
-import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup,planRetiredReportingScratch} from './audit-sync-status.mjs';
+import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup,planRetiredReportingScratch,reclaimReplicatedBundle} from './audit-sync-status.mjs';
+
+test('active build staging cache only reclaims bytes verified in Mongo and the private archive', async t => {
+  const { root, attempt } = await fixture(t);
+  const bundle = path.join(attempt, 'audit-objects');
+  const receipts = path.join(root, 'archive-receipts');
+  await Promise.all([bundle, receipts].map(file => fs.mkdir(file, {mode: 0o700})));
+  const body = Buffer.from('exact selected report object');
+  const sha256 = createHash('sha256').update(body).digest('hex');
+  const key = sha256 + '.gz', file = path.join(bundle, key);
+  const write = (target, value) => fs.writeFile(target, value, {mode: 0o600});
+  await write(file, body);
+  await write(path.join(receipts, key + '.json'), JSON.stringify({
+    target: 'matter-report-archive', key, sha256, bytes: body.length, verified: true,
+  }));
+  const ref = {sha256, size: body.length, chunks: [{sha256, size: body.length, offset: 0}]};
+  const read = async(_key, {maxBytes}) => { assert.equal(maxBytes, body.length); return [body]; };
+  const make = (skip, apply, replicaRead = read) => reclaimReplicatedBundle({
+    bundle, receipts, references: [ref], skip, replicaRead, apply,
+  });
+  assert.equal((await make(new Set([key]), true)).removed, 0);
+  assert.equal((await make(new Set(), false)).removed, 1);
+  assert.ok(await fs.stat(file));
+  await assert.rejects(() => make(new Set(), true, async() => [Buffer.alloc(body.length)]), /replica readback/);
+  assert.ok(await fs.stat(file));
+  assert.equal((await make(new Set(), true)).removed, 1);
+  await assert.rejects(fs.stat(file), {code: 'ENOENT'});
+});
 
 test('retired scratch offload selects exclusive files inside only terminal abandoned attempts', async t => {
   const { root, attempt } = await fixture(t);
