@@ -124,6 +124,10 @@ test('old workspace backup is removed only after every chunk has a verified priv
   const publish = () => offloadReportingBackup({
     backup, maxChunkBytes: 10, verify, save: manifest => { saved = manifest; },
   });
+  await assert.rejects(() => offloadReportingBackup({
+    backup, expectedBytes:content.length+1, verify, save:()=>assert.fail('Mismatched backup can never be saved'),
+  }), /Unverified retained reporting backup/);
+  assert.equal(known.size, 0);
   await assert.rejects(async () => publish(), /archive unavailable/);
   assert.equal(saved, null);
   assert.deepEqual(await fs.readFile(backup), content);

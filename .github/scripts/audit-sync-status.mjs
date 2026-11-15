@@ -100,7 +100,7 @@ export async function reclaimArchivedAuditCopies(data, receipts, files, apply) {
   return { copies: matches.length, allocatedBytes: matches.reduce((total, item) => total + item.allocatedBytes, 0), counts };
 }
 
-export async function offloadReportingBackup({ backup, maxChunkBytes = 8 * 1024 * 1024, verify, save }) {
+export async function offloadReportingBackup({ backup, maxChunkBytes = 8 * 1024 * 1024, expectedBytes, verify, save }) {
   if (!Number.isSafeInteger(maxChunkBytes) || maxChunkBytes < 1 || maxChunkBytes > 8 * 1024 * 1024) {
     throw Error('Invalid archive chunk size');
   }
@@ -108,7 +108,10 @@ export async function offloadReportingBackup({ backup, maxChunkBytes = 8 * 1024 
   try {
     const info = await handle.stat();
     if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) ||
-        info.nlink !== 1 || info.size < 1 || info.size > 700 * 1024 * 1024) throw Error('Unverified retained reporting backup');
+        info.nlink !== 1 || info.size < 1 ||
+        (expectedBytes === undefined ? info.size > 700 * 1024 * 1024 : info.size !== expectedBytes)) {
+      throw Error('Unverified retained reporting backup');
+    }
     const hash = createHash('sha256');
     const chunks = [];
     for (let offset = 0; offset < info.size; offset += maxChunkBytes) {
@@ -676,7 +679,7 @@ async function main() {
   const verifyRenderer = process.env.VERIFY_REPORTING_RENDERER === 'true';
   if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload','bundle-plan','bundle-release',
     'bundle-previous-plan','bundle-previous-release','bundle-baseline-plan','bundle-baseline-release',
-    'inventory'].includes(reclaimArchived)) {
+    'inventory','original-backup-plan','original-backup-offload'].includes(reclaimArchived)) {
     throw Error('Invalid archive reclamation mode');
   }
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
@@ -761,7 +764,8 @@ async function main() {
       console.log(JSON.stringify({reportingDiskInventory:Object.fromEntries(sizes)}));
       return;
     }
-    const run = reclaimArchived.startsWith('bundle-') ? reclaimActiveBundle :
+    const run = reclaimArchived.startsWith('original-backup-') ? offloadOriginalReportingBackup :
+      reclaimArchived.startsWith('bundle-') ? reclaimActiveBundle :
       reclaimArchived.startsWith('scratch-') ? offloadRetiredScratch : reclaimRetainedBuild;
     console.log(JSON.stringify(await run(appRoot, entry, expected, reclaimArchived)));
     return;
@@ -1030,6 +1034,44 @@ async function offloadRetainedBuild(root, work, id, appRoot) {
     if (value.size !== 682054645) throw Error('Unexpected retained reporting backup length');
     await save(receipt, { ...value, kind: 'retained-reporting-workspace-tar-gzip', collectorRevision: 3008 });
   }});
+}
+
+async function offloadOriginalReportingBackup(appRoot, entry, expected, mode) {
+  const apply = mode === 'original-backup-offload';
+  if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' ||
+      !entry || (apply && entry.pm2_env?.status !== 'stopped')) throw Error('The reviewed reporting worker is required');
+  const collectorRevision = 2994, expectedBytes = 835257724;
+  const id = '7a10b3b0-0a43-4629-b92a-e8f7c623add9';
+  const root = syncRoot(appRoot, entry), work = path.join(root, 'work');
+  const directory = path.join(work, 'retained-audit-builds');
+  if (!await ownsDirectory(directory)) throw Error('Expected private reporting backup directory');
+  const backup = path.join(directory, id + '.tar.gz');
+  const receipt = path.join(directory, id + '.private.json');
+  const load = file => import(pathToFileURL(path.join(appRoot, 'server', file)).href);
+  const {acquireWorkerLock} = await load('vendor/driver-audits/integration/hosted/worker-lock.mjs');
+  const lock = apply ? await acquireWorkerLock(path.join(path.dirname(root), 'sync-worker.lock')) : null;
+  try {
+    const [info, priorReceipt, retention, heartbeat] = await Promise.all([
+      stat(backup), stat(receipt), readRetentionInputs(appRoot), json(path.join(root, 'sync-status.private.json')),
+    ]);
+    if (!info?.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) || info.nlink !== 1 ||
+        info.size !== expectedBytes || priorReceipt || retention.stagePending || retention.previousRevision <= collectorRevision ||
+        !Number.isSafeInteger(retention.previousRevision) || heartbeat?.replicaGcStatus !== 'qualified') {
+      throw Error('The exact verified superseded report backup is required');
+    }
+    const before = await fs.statfs(work);
+    const result = { originalBackup:true, applied:apply, collectorRevision, bytes:expectedBytes,
+      beforeBytes:before.bavail*before.bsize };
+    if (!apply) return result;
+    const {archive,save} = await reportingBackupTransport(appRoot, root, expectedBytes + 512*1024*1024);
+    const archived = await offloadReportingBackup({backup, expectedBytes, verify:archive.verify, save: value =>
+      save(receipt, {...value, kind:'retained-reporting-workspace-tar-gzip', collectorRevision}),
+    });
+    const after = await fs.statfs(work);
+    return {...result, verifiedChunks:archived.chunks, afterBytes:after.bavail*after.bsize};
+  } finally {
+    await lock?.release();
+  }
 }
 
 async function reportingBackupTransport(appRoot, root, requiredCapacity) {
