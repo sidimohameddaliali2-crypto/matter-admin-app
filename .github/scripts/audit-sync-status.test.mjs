@@ -4,7 +4,37 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
-import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup,planRetiredReportingScratch,reclaimReplicatedBundle} from './audit-sync-status.mjs';
+import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup,planRetiredReportingScratch,reclaimReplicatedBundle,reclaimPreviousRuntimeCopies} from './audit-sync-status.mjs';
+
+test('previous local runtime is reclaimed only when its exact bytes are protected in both stores', async t => {
+  const { root, attempt } = await fixture(t);
+  const directory = path.join(attempt, 'server-data'), receipts = path.join(root, 'archive-receipts');
+  await Promise.all([directory, receipts].map(file => fs.mkdir(file, {mode: 0o700})));
+  const name = 'browser-data.private.json.gz', file = path.join(directory, name);
+  const bytes = Buffer.from('complete previous runtime bytes');
+  const sha256 = createHash('sha256').update(bytes).digest('hex'), key = sha256 + '.gz';
+  const reference = {version:1, domain:'previewRuntime', path:name, size:bytes.length, sha256,
+    chunks:[{sha256, size:bytes.length, offset:0}]};
+  const receipt = path.join(receipts, key + '.json');
+  await fs.writeFile(file, bytes, {mode: 0o600});
+  const verify = async () => fs.writeFile(receipt, JSON.stringify({
+    target:'matter-report-archive', key, sha256, bytes:bytes.length, verified:true,
+  }), {mode: 0o600});
+  const run = (apply, readFile = async ref => { assert.equal(ref, reference); return bytes; }) =>
+    reclaimPreviousRuntimeCopies({directory, receipts, files:{[name]:reference},
+      manifestFiles:{[name]:sha256}, readFile, apply});
+  assert.equal((await run(true)).removed, 0);
+  await verify();
+  const shared = path.join(root, 'active-copy');
+  await fs.link(file, shared);
+  assert.equal((await run(true)).removed, 0);
+  await fs.unlink(shared);
+  assert.equal((await run(false)).removed, 1);
+  await assert.rejects(() => run(true, async () => Buffer.alloc(bytes.length)), /replica readback/);
+  assert.deepEqual(await fs.readFile(file), bytes);
+  assert.equal((await run(true)).removed, 1);
+  await assert.rejects(fs.stat(file), {code:'ENOENT'});
+});
 
 test('active build staging cache only reclaims bytes verified in Mongo and the private archive', async t => {
   const { root, attempt } = await fixture(t);
