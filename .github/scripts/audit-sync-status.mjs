@@ -1,12 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
-import { gunzipSync } from 'node:zlib';
+import { createGunzip, createGzip, gunzipSync } from 'node:zlib';
 import { execFile } from 'node:child_process';
-import { constants } from 'node:fs';
+import { constants, createReadStream, createWriteStream } from 'node:fs';
 import { createRequire } from 'node:module';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { promisify } from 'node:util';
 
 const exec = promisify(execFile);
@@ -145,6 +146,68 @@ async function ownsDirectory(directory, privateOnly = true) {
   const info = await stat(directory);
   return !!info?.isDirectory() && info.uid === process.getuid() &&
     (!privateOnly || !(info.mode & 0o077)) && await fs.realpath(directory) === directory;
+}
+
+export async function compactRotatedReportingLogs({directory, active, apply}) {
+  if (!await ownsDirectory(directory,false)) throw Error('Expected the existing supervisor log directory');
+  const candidates = [];
+  let allocatedBytes = 0, packedBytes = 0, files = 0;
+  const aged = Date.now() - 2*60*60*1000;
+  const matches = /^(?:matter-driver-audit-sync|matter-delivery-api)-(?:out|error)[-_.]+\d{4}-\d{2}-\d{2}[-_0-9T:.]*\.log$/;
+  for (const filename of await fs.readdir(directory)) {
+    if (!matches.test(filename)) continue;
+    const file = path.join(directory,filename), info = await stat(file);
+    if (active.has(file) || !info?.isFile() || info.uid!==process.getuid() || (info.mode & 0o022) ||
+        info.nlink!==1 || info.mtimeMs>=aged || info.size<16*1024 || info.size>512*1024*1024 ||
+        await stat(file+'.verified.gz')) continue;
+    candidates.push({file,info});
+  }
+  for (const {file,info} of candidates.sort((left,right)=>right.info.blocks-left.info.blocks)) {
+    if (allocatedBytes>=400*1024*1024) break;
+    if (apply) {
+      const temporary = file+'.temporary-'+randomUUID(), destination = file+'.verified.gz';
+      const original = createHash('sha256'), recovered = createHash('sha256');
+      let originalBytes=0, recoveredBytes=0;
+      try {
+        await pipeline(createReadStream(file,{flags:constants.O_RDONLY|constants.O_NOFOLLOW}), async function* (stream) {
+          for await (const chunk of stream) {
+            original.update(chunk);
+            originalBytes+=chunk.length;
+            yield chunk;
+          }
+        }, createGzip({level:3}), createWriteStream(temporary,{flags:'wx',mode:0o600}));
+        const copy = await fs.stat(temporary);
+        if (copy.blocks>=info.blocks) continue;
+        await pipeline(createReadStream(temporary),createGunzip(),async stream=>{
+          for await (const chunk of stream) {
+            recovered.update(chunk);
+            recoveredBytes+=chunk.length;
+          }
+        });
+        const latest = await stat(file);
+        if (originalBytes!==info.size || recoveredBytes!==originalBytes || original.digest('hex')!==recovered.digest('hex') ||
+            latest?.ino!==info.ino || latest.dev!==info.dev || latest.size!==info.size ||
+            latest.mtimeMs!==info.mtimeMs || latest.ctimeMs!==info.ctimeMs || latest.nlink!==1) {
+          throw Error('Closed supervisor log changed during compression');
+        }
+        const handle = await fs.open(temporary,constants.O_RDONLY|constants.O_NOFOLLOW);
+        try { await handle.sync(); } finally { await handle.close(); }
+        await fs.link(temporary,destination);
+        const folder = await fs.open(directory,constants.O_RDONLY|constants.O_DIRECTORY);
+        try {
+          await folder.sync();
+          await fs.unlink(file);
+          await folder.sync();
+        } finally { await folder.close(); }
+        packedBytes+=copy.blocks*512;
+      } finally {
+        await fs.unlink(temporary).catch(missing);
+      }
+    }
+    allocatedBytes+=info.blocks*512;
+    files++;
+  }
+  return {files,allocatedBytes,packedBytes};
 }
 
 export async function linkIdenticalBaselineArchive({ baseline, current, baselineFiles, activeFiles, apply }) {
@@ -679,7 +742,8 @@ async function main() {
   const verifyRenderer = process.env.VERIFY_REPORTING_RENDERER === 'true';
   if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload','bundle-plan','bundle-release',
     'bundle-previous-plan','bundle-previous-release','bundle-baseline-plan','bundle-baseline-release',
-    'inventory','original-backup-plan','original-backup-offload','heap-plan','heap-resume'].includes(reclaimArchived)) {
+    'inventory','original-backup-plan','original-backup-offload','heap-plan','heap-resume',
+    'log-plan','log-compact'].includes(reclaimArchived)) {
     throw Error('Invalid archive reclamation mode');
   }
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
@@ -744,6 +808,22 @@ async function main() {
     return;
   }
   if (reclaimArchived) {
+    if (reclaimArchived.startsWith('log-')) {
+      const apply = reclaimArchived==='log-compact';
+      if (process.platform!=='linux' || expected!=='9699b53ac9c69758f125f129fb4e2e7588db8af0' ||
+          !entry || apply && entry.pm2_env?.status!=='stopped') throw Error('The reviewed reporting worker is required');
+      const work = path.join(syncRoot(appRoot,entry),'work');
+      const {stdout} = await exec('pm2',['jlist'],{timeout:5000,maxBuffer:8*1024*1024});
+      const active = new Set(JSON.parse(stdout).flatMap(({pm2_env:value})=>[
+        value?.pm_out_log_path,value?.pm_err_log_path,value?.pm_log_path,
+      ]).filter(Boolean));
+      const before = await fs.statfs(work);
+      const result=await compactRotatedReportingLogs({directory:path.join(pm2Home,'logs'),active,apply});
+      const after=await fs.statfs(work);
+      console.log(JSON.stringify({rotatedReportingLogs:true,applied:apply,...result,
+        beforeBytes:before.bavail*before.bsize,afterBytes:after.bavail*after.bsize}));
+      return;
+    }
     if (reclaimArchived === 'inventory') {
       if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' || !entry) {
         throw Error('The reviewed Linux reporting worker is required');
