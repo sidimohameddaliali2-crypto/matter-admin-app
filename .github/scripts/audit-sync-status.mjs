@@ -144,6 +144,50 @@ async function ownsDirectory(directory, privateOnly = true) {
     (!privateOnly || !(info.mode & 0o077)) && await fs.realpath(directory) === directory;
 }
 
+export async function reclaimReplicatedBundle({ bundle, receipts, references, skip, replicaRead, apply }) {
+  if (!await ownsDirectory(bundle, false) || !await ownsDirectory(path.dirname(bundle)) ||
+      !await ownsDirectory(receipts)) throw Error('Expected a private staged reporting cache');
+  const objects = new Map();
+  for (const ref of references) {
+    let offset = 0;
+    for (const chunk of ref.chunks) {
+      const {sha256, size} = chunk;
+      if (!manifest.test(sha256) || !Number.isSafeInteger(size) || size < 1 || size > 8 * 1024 * 1024 ||
+          chunk.offset !== offset) throw Error('Invalid reporting replica archive reference');
+      const key = sha256 + '.gz';
+      if (objects.has(key) && objects.get(key) !== size) throw Error('Conflicting audit replica chunk lengths');
+      objects.set(key, size);
+      offset += size;
+    }
+    if (offset !== ref.size) throw Error('Invalid reporting replica archive length');
+  }
+  const matches = [];
+  let allocatedBytes = 0;
+  for (const [key, size] of objects) {
+    if (skip.has(key)) continue;
+    const file = path.join(bundle, key), info = await stat(file);
+    if (!info?.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) || info.nlink !== 1 || info.size !== size) continue;
+    const receipt = await json(path.join(receipts, key + '.json'));
+    const sha256 = key.slice(0, -3);
+    if (receipt?.target !== 'matter-report-archive' || receipt.key !== key || receipt.sha256 !== sha256 ||
+        receipt.bytes !== size || receipt.verified !== true) continue;
+    const local = await readTail(file, size, true, true);
+    if (!local || digest(local) !== sha256) throw Error('Local reporting bundle hash mismatch');
+    const parts = [];
+    let n = 0;
+    for await (const part of await replicaRead(key, {maxBytes: size})) {
+      n += part.length;
+      if (n > size) throw Error('Reporting replica readback mismatch');
+      parts.push(part);
+    }
+    if (n !== size || !Buffer.concat(parts).equals(local)) throw Error('Reporting replica readback mismatch');
+    matches.push(file);
+    allocatedBytes += info.blocks * 512;
+  }
+  if (apply) for (const file of matches) await fs.unlink(file);
+  return { removed: matches.length, allocatedBytes };
+}
+
 export async function planRetiredReportingScratch(work, protectedRoots, latestAttempt) {
   const attempts = path.join(work, 'attempts');
   if (!await ownsDirectory(attempts)) throw Error('Expected private audit attempts');
@@ -557,7 +601,7 @@ async function main() {
   const reclaimMetadata = process.env.RECLAIM_REPORTING_METADATA === 'true';
   const reclaimArchived = process.env.RECLAIM_ARCHIVED_REPORTING_WORKSPACE;
   const verifyRenderer = process.env.VERIFY_REPORTING_RENDERER === 'true';
-  if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload'].includes(reclaimArchived)) throw Error('Invalid archive reclamation mode');
+  if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload','bundle-plan','bundle-release'].includes(reclaimArchived)) throw Error('Invalid archive reclamation mode');
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
   const pauseReporting = process.env.PAUSE_REPORTING_SYNC === 'true';
   const resumeReporting = process.env.RESUME_REPORTING_SYNC === 'true';
@@ -620,7 +664,8 @@ async function main() {
     return;
   }
   if (reclaimArchived) {
-    const run = reclaimArchived.startsWith('scratch-') ? offloadRetiredScratch : reclaimRetainedBuild;
+    const run = reclaimArchived.startsWith('bundle-') ? reclaimActiveBundle :
+      reclaimArchived.startsWith('scratch-') ? offloadRetiredScratch : reclaimRetainedBuild;
     console.log(JSON.stringify(await run(appRoot, entry, expected, reclaimArchived)));
     return;
   }
@@ -673,6 +718,64 @@ async function main() {
     const status = await readAuditSyncStatus({ appRoot, pm2Home, entry });
     const releases = entry ? await readRetentionInputs(appRoot) : null;
     console.log(JSON.stringify({ ...status, releases }));
+  }
+}
+
+async function reclaimActiveBundle(appRoot, entry, expected, mode) {
+  const apply = mode === 'bundle-release';
+  if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' ||
+      !entry || (apply && entry.pm2_env?.status !== 'stopped')) throw Error('The reviewed reporting worker is required');
+  const root = syncRoot(appRoot, entry), work = path.join(root, 'work');
+  const heartbeat = await json(path.join(root, 'sync-status.private.json'));
+  if (heartbeat?.replicaGcStatus !== 'qualified') throw Error('Reporting archive restore proof is required');
+  const server = path.join(appRoot, 'server');
+  const load = file => import(pathToFileURL(path.join(server, file)).href);
+  await load('loadEnv.js');
+  const [{ acceptedWorkspace },{ createDriverAuditReplica },{ withDriverAuditWriter },{ readManifestBytes },{ acquireWorkerLock }] =
+    await Promise.all([
+      load('services/driverAuditWorkspaceRetirement.js'), load('services/driverAuditReplica.js'),
+      load('services/driverAuditWriter.js'), load('vendor/driver-audits/integration/cloud/repository.mjs'),
+      load('vendor/driver-audits/integration/hosted/worker-lock.mjs'),
+    ]);
+  const mongoose = createRequire(path.join(server, 'package.json'))('mongoose');
+  const connection = mongoose.createConnection(process.env.MONGODB_URI, {
+    autoIndex: false, autoCreate: false, maxPoolSize: 2, serverSelectionTimeoutMS: 5000,
+  });
+  let lock;
+  try {
+    if (apply) lock = await acquireWorkerLock(path.join(path.dirname(root), 'sync-worker.lock'));
+    await connection.asPromise();
+    const {db} = connection;
+    const run = async () => {
+      const control = db.collection('driverAuditControl');
+      const [saved, stage, capacity, pointer, progress] = await Promise.all([
+        control.findOne({_id:'head'}), control.findOne({_id:'direct-stage'}),
+        control.findOne({_id:'capacity'},{projection:{limit:1}}),
+        json(path.join(work, 'current.private.json'),16*1024*1024),
+        json(path.join(work, 'status.private.json')),
+      ]);
+      const head = saved?.head;
+      if (stage || !head || !progress || ['building','validating'].includes(progress.status) ||
+          head.generation !== heartbeat.activeGeneration) throw Error('The stable active reporting bundle is required');
+      const accepted = await acceptedWorkspace(work, pointer, head);
+      if (!accepted || accepted.manifest.sha256 !== head.directImport.manifestSha256) throw Error('Active local bundle differs from MongoDB');
+      const replica = createDriverAuditReplica(db,{capacityBytes:capacity?.limit});
+      const descriptor = JSON.parse((await readManifestBytes(replica, head.descriptor, {maxBytes:8*1024*1024})).toString('utf8'));
+      if (descriptor.generation !== head.generation || descriptor.reportHash !== head.reportHash ||
+          descriptor.sourceManifestSha256 !== accepted.manifest.sha256 || !descriptor.files) throw Error('Active reporting descriptor differs');
+      const before = await fs.statfs(work);
+      const result = await reclaimReplicatedBundle({
+        bundle: accepted.seed.bundleRoot, receipts: path.join(root, 'archive-receipts'),
+        references: Object.values(descriptor.files), skip: new Set(head.descriptor.chunks.map(chunk => chunk.sha256+'.gz')),
+        replicaRead: (key, options) => replica.readObject(key, options), apply,
+      });
+      const after = await fs.statfs(work);
+      return { replicatedBundle: true, applied:apply, revision:head.directImport.collectorRevision, ...result,
+        beforeBytes: before.bavail*before.bsize, afterBytes: after.bavail*after.bsize };
+    };
+    return apply ? await withDriverAuditWriter(db, run) : await run();
+  } finally {
+    try { await lock?.release(); } finally { await connection.close(); }
   }
 }
 
