@@ -495,12 +495,13 @@ async function main() {
   const clearCaches = process.env.CLEAR_REPORTING_BUILD_CACHES === 'true';
   const reclaimMetadata = process.env.RECLAIM_REPORTING_METADATA === 'true';
   const reclaimArchived = process.env.RECLAIM_ARCHIVED_REPORTING_WORKSPACE;
+  const verifyRenderer = process.env.VERIFY_REPORTING_RENDERER === 'true';
   if (reclaimArchived && !['plan','apply','offload'].includes(reclaimArchived)) throw Error('Invalid archive reclamation mode');
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
   const pauseReporting = process.env.PAUSE_REPORTING_SYNC === 'true';
   const resumeReporting = process.env.RESUME_REPORTING_SYNC === 'true';
   const deployPhotoReads = process.env.DEPLOY_BOUNDED_PHOTO_READS;
-  if ([qualify, upgrade, clearCaches, reclaimMetadata, reclaimArchived, deployAccounting, pauseReporting, resumeReporting, deployPhotoReads].filter(Boolean).length > 1) throw Error('Select one audit operation');
+  if ([qualify, upgrade, clearCaches, reclaimMetadata, reclaimArchived, verifyRenderer, deployAccounting, pauseReporting, resumeReporting, deployPhotoReads].filter(Boolean).length > 1) throw Error('Select one audit operation');
 
   const pm2Home = process.env.PM2_HOME || path.join(os.homedir(), '.pm2');
   const socket = await stat(path.join(pm2Home, 'rpc.sock'));
@@ -551,6 +552,10 @@ async function main() {
     } finally {
       await lock.release();
     }
+    return;
+  }
+  if (verifyRenderer) {
+    console.log(JSON.stringify(await verifyReportingRenderer(appRoot, entry, expected)));
     return;
   }
   if (reclaimArchived) {
@@ -606,6 +611,59 @@ async function main() {
     const status = await readAuditSyncStatus({ appRoot, pm2Home, entry });
     const releases = entry ? await readRetentionInputs(appRoot) : null;
     console.log(JSON.stringify({ ...status, releases }));
+  }
+}
+
+async function verifyReportingRenderer(appRoot, entry, expected) {
+  if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0') {
+    throw Error('The reviewed production reporting renderer is required');
+  }
+  syncRoot(appRoot, entry);
+  const server = path.join(appRoot, 'server');
+  const load = name => import(pathToFileURL(path.join(server, name)).href);
+  await load('loadEnv.js');
+  const [integration, coordinator] = await Promise.all([
+    load('services/driverAuditIntegration.js'),
+    load('vendor/driver-audits/integration/cloud/automatic-hosted-preview.mjs'),
+  ]);
+  const mongoose = createRequire(path.join(server, 'package.json'))('mongoose');
+  const connection = mongoose.createConnection(process.env.MONGODB_URI, {
+    autoIndex: false, autoCreate: false, maxPoolSize: 2, serverSelectionTimeoutMS: 5000,
+  });
+  try {
+    await connection.asPromise();
+    const control = connection.db.collection('driverAuditControl');
+    const head = async () => (await control.findOne({_id:'head'}))?.head;
+    const before = await head();
+    let renderer;
+    const reporting = integration.createDriverAuditIntegration({
+      db: () => connection.db,
+      authenticateStaffToken: () => { throw Error('No staff sign-in in the renderer preflight'); },
+      dependencies: { createCoordinator(options) {
+        renderer = coordinator.createAutomaticHostedPreview(options);
+        return renderer;
+      }},
+    });
+    const initialized = await reporting.prewarm();
+    const result = renderer?.status();
+    const after = await head();
+    const known = new Set([
+      'Imported audit object unavailable', 'Imported audit object unavailable or corrupt',
+      'Preview package deferred file is absent', 'Preview head advanced during package preparation',
+      'Remote preview runtime core exceeds preload limit', 'Preview package generation mismatch',
+      'Review snapshot mismatch', 'Invalid private photo binding registry', 'Invalid GPS index',
+      'Preview file integrity failure', 'Invalid preview generation identity',
+    ]);
+    return {
+      rendererPreflight: initialized === true ? 'ready' : 'failed',
+      sourceRevision: number(before?.directImport?.collectorRevision),
+      sourceChanged: before?.generation !== after?.generation,
+      loadedCurrent: !!result?.active?.generation && result.active.generation === after?.generation,
+      rendererStatus: allowed(result?.status, ['ready','fallback','stale','loading']),
+      failure: known.has(result?.lastError) ? result.lastError : result?.lastError ? 'other' : null,
+    };
+  } finally {
+    await connection.close();
   }
 }
 
