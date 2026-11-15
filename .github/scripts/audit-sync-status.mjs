@@ -144,6 +144,43 @@ async function ownsDirectory(directory, privateOnly = true) {
     (!privateOnly || !(info.mode & 0o077)) && await fs.realpath(directory) === directory;
 }
 
+async function verifiedArchiveChunk(receipts, sha256, size) {
+  if (!manifest.test(sha256) || !Number.isSafeInteger(size) || size < 1 || size > 8 * 1024 * 1024) return false;
+  const key = sha256 + '.gz';
+  const saved = await json(path.join(receipts, key + '.json'));
+  return saved?.target === 'matter-report-archive' && saved.key === key && saved.sha256 === sha256 &&
+    saved.bytes === size && saved.verified === true;
+}
+
+// The caller holds the worker and replica writer locks. Only files in the
+// previous published package are eligible, with its manifest and source kept.
+export async function reclaimPreviousRuntimeCopies({ directory, receipts, files, manifestFiles, readFile, apply }) {
+  if (!await ownsDirectory(directory, false) || !await ownsDirectory(path.dirname(directory)) ||
+      !await ownsDirectory(receipts)) throw Error('Expected a private previous runtime directory');
+  const matches = [];
+  let allocatedBytes = 0;
+  for (const [name, reference] of Object.entries(files)) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,239}$/.test(name) || name === 'files.private.json' ||
+        reference?.domain !== 'previewRuntime' || reference.path !== name ||
+        !manifest.test(reference.sha256) || manifestFiles[name] !== reference.sha256 ||
+        !Number.isSafeInteger(reference.size) || reference.size < 1 || reference.size > 64 * 1024 * 1024 ||
+        !Array.isArray(reference.chunks) || !reference.chunks.length) continue;
+    const file = path.join(directory, name), info = await stat(file);
+    if (!info?.isFile() || info.uid !== process.getuid() || (info.mode & 0o022) ||
+        info.nlink !== 1 || !info.blocks || info.size !== reference.size) continue;
+    const verified = await Promise.all(reference.chunks.map(chunk => verifiedArchiveChunk(receipts, chunk.sha256, chunk.size)));
+    if (!verified.every(Boolean)) continue;
+    const body = await readTail(file, reference.size, false, true);
+    if (!body || body.length !== reference.size || digest(body) !== reference.sha256) throw Error('Local reporting runtime hash mismatch');
+    const saved = await readFile(reference);
+    if (!Buffer.isBuffer(saved) || !saved.equals(body)) throw Error('Reporting runtime replica readback mismatch');
+    matches.push(file);
+    allocatedBytes += info.blocks * 512;
+  }
+  if (apply) for (const file of matches) await fs.unlink(file);
+  return { removed: matches.length, allocatedBytes };
+}
+
 export async function reclaimReplicatedBundle({ bundle, receipts, references, skip, replicaRead, apply }) {
   if (!await ownsDirectory(bundle, false) || !await ownsDirectory(path.dirname(bundle)) ||
       !await ownsDirectory(receipts)) throw Error('Expected a private staged reporting cache');
@@ -167,10 +204,8 @@ export async function reclaimReplicatedBundle({ bundle, receipts, references, sk
     if (skip.has(key)) continue;
     const file = path.join(bundle, key), info = await stat(file);
     if (!info?.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) || info.nlink !== 1 || info.size !== size) continue;
-    const receipt = await json(path.join(receipts, key + '.json'));
     const sha256 = key.slice(0, -3);
-    if (receipt?.target !== 'matter-report-archive' || receipt.key !== key || receipt.sha256 !== sha256 ||
-        receipt.bytes !== size || receipt.verified !== true) continue;
+    if (!await verifiedArchiveChunk(receipts, sha256, size)) continue;
     const local = await readTail(file, size, true, true);
     if (!local || digest(local) !== sha256) throw Error('Local reporting bundle hash mismatch');
     const parts = [];
@@ -601,7 +636,8 @@ async function main() {
   const reclaimMetadata = process.env.RECLAIM_REPORTING_METADATA === 'true';
   const reclaimArchived = process.env.RECLAIM_ARCHIVED_REPORTING_WORKSPACE;
   const verifyRenderer = process.env.VERIFY_REPORTING_RENDERER === 'true';
-  if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload','bundle-plan','bundle-release'].includes(reclaimArchived)) throw Error('Invalid archive reclamation mode');
+  if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload','bundle-plan','bundle-release',
+    'bundle-previous-plan','bundle-previous-release'].includes(reclaimArchived)) throw Error('Invalid archive reclamation mode');
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
   const pauseReporting = process.env.PAUSE_REPORTING_SYNC === 'true';
   const resumeReporting = process.env.RESUME_REPORTING_SYNC === 'true';
@@ -722,7 +758,7 @@ async function main() {
 }
 
 async function reclaimActiveBundle(appRoot, entry, expected, mode) {
-  const apply = mode === 'bundle-release';
+  const apply = mode.endsWith('-release'), previous = mode.startsWith('bundle-previous-');
   if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' ||
       !entry || (apply && entry.pm2_env?.status !== 'stopped')) throw Error('The reviewed reporting worker is required');
   const root = syncRoot(appRoot, entry), work = path.join(root, 'work');
@@ -759,18 +795,34 @@ async function reclaimActiveBundle(appRoot, entry, expected, mode) {
           head.generation !== heartbeat.activeGeneration) throw Error('The stable active reporting bundle is required');
       const accepted = await acceptedWorkspace(work, pointer, head);
       if (!accepted || accepted.manifest.sha256 !== head.directImport.manifestSha256) throw Error('Active local bundle differs from MongoDB');
+      const selected = previous ? head.previous : head;
+      if (!selected || previous && (!pointer.previous || pointer.baselineRoot !== pointer.previous.privateRoot ||
+          pointer.previous.privateRoot === pointer.privateRoot || selected.generation === head.generation)) {
+        throw Error('A separate previous reporting package is required');
+      }
+      const local = previous ? await acceptedWorkspace(work, pointer.previous, selected) : accepted;
+      if (!local || local.manifest.sha256 !== selected.directImport.manifestSha256 ||
+          previous && local.seed.collectorRevision >= accepted.seed.collectorRevision) {
+        throw Error('The selected local reporting package differs from MongoDB');
+      }
       const replica = createDriverAuditReplica(db,{capacityBytes:capacity?.limit});
-      const descriptor = JSON.parse((await readManifestBytes(replica, head.descriptor, {maxBytes:8*1024*1024})).toString('utf8'));
-      if (descriptor.generation !== head.generation || descriptor.reportHash !== head.reportHash ||
-          descriptor.sourceManifestSha256 !== accepted.manifest.sha256 || !descriptor.files) throw Error('Active reporting descriptor differs');
+      const descriptor = JSON.parse((await readManifestBytes(replica, selected.descriptor, {maxBytes:8*1024*1024})).toString('utf8'));
+      if (descriptor.generation !== selected.generation || descriptor.reportHash !== selected.reportHash ||
+          descriptor.sourceManifestSha256 !== local.manifest.sha256 || !descriptor.files) throw Error('Selected reporting descriptor differs');
       const before = await fs.statfs(work);
-      const result = await reclaimReplicatedBundle({
-        bundle: accepted.seed.bundleRoot, receipts: path.join(root, 'archive-receipts'),
-        references: Object.values(descriptor.files), skip: new Set(head.descriptor.chunks.map(chunk => chunk.sha256+'.gz')),
-        replicaRead: (key, options) => replica.readObject(key, options), apply,
-      });
+      const receipts = path.join(root, 'archive-receipts');
+      const result = previous
+        ? await reclaimPreviousRuntimeCopies({
+          directory: local.accepted.privateRoot, receipts, files: descriptor.files, manifestFiles: local.manifest.files,
+          readFile: ref => readManifestBytes(replica, ref, {maxBytes:64*1024*1024}), apply,
+        })
+        : await reclaimReplicatedBundle({
+          bundle: local.seed.bundleRoot, receipts, references: Object.values(descriptor.files),
+          skip: new Set(selected.descriptor.chunks.map(chunk => chunk.sha256+'.gz')),
+          replicaRead: (key, options) => replica.readObject(key, options), apply,
+        });
       const after = await fs.statfs(work);
-      return { replicatedBundle: true, applied:apply, revision:head.directImport.collectorRevision, ...result,
+      return { replicatedBundle: true, previous, applied:apply, revision:selected.directImport.collectorRevision, ...result,
         beforeBytes: before.bavail*before.bsize, afterBytes: after.bavail*after.bsize };
     };
     return apply ? await withDriverAuditWriter(db, run) : await run();
