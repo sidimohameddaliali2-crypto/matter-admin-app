@@ -325,6 +325,9 @@ const KitchenList = () => {
   const [savingDayNoteKey, setSavingDayNoteKey] = useState('');
   const [snackOptionsByDate, setSnackOptionsByDate] = useState({});
   const [pdfDate, setPdfDate] = useState('');
+  const [partnerOnlyDate, setPartnerOnlyDate] = useState('');
+  const paperDate = partnerOnlyDate || pdfDate;
+  const paperScopeForDate = date => partnerOnlyDate ? `partner:${date}` : `${selectedMenuId}:${date}`;
   // Per-customer kitchen paper over a custom date range (PDF / Word).
   const [customerPaperSearch, setCustomerPaperSearch] = useState('');
   const [customerPaperEmail, setCustomerPaperEmail] = useState('');
@@ -363,6 +366,8 @@ const KitchenList = () => {
   const optionRequests = useRef({});
   const activeSelectionScope = useRef('');
   activeSelectionScope.current = `${selectedMenuId}:${missingCheckDate}`;
+  const activePaperScope = useRef('');
+  activePaperScope.current = partnerOnlyDate ? `partner:${partnerOnlyDate}` : activeSelectionScope.current;
   const [loadedSelectionScope, setLoadedSelectionScope] = useState('');
   const [dayRoster, setDayRoster] = useState(null);
   const [savingSnackOptions, setSavingSnackOptions] = useState(false);
@@ -411,6 +416,7 @@ const KitchenList = () => {
   // Both controls choose one preparation date. Selecting the current day is
   // a no-op: clearing its loaded scope without changing state strands the UI.
   const changeKitchenDate = (date) => {
+    setPartnerOnlyDate('');
     setPdfDate(date);
     setExportError('');
     if (date === missingCheckDate) return;
@@ -421,7 +427,7 @@ const KitchenList = () => {
 
   const automaticScope = useKitchenCurrentScope({ menus, menuId: selectedMenuId, date: missingCheckDate, lockMenu: true,
     onMenu: id => { selectionRequests.current.cancel(); setLoadedSelectionScope(''); setMissingCheckDate(''); setPdfDate(''); setSelectedMenuId(id); },
-    onDate: changeKitchenDate,
+    onDate: date => { if (!partnerOnlyDate) changeKitchenDate(date); },
   });
 
   const loadSelections = useCallback(async ({ refresh = false } = {}) => {
@@ -1558,32 +1564,34 @@ const KitchenList = () => {
   });
   const runKitchenExport = async (action) => {
     if (exportInFlight.current) return;
-    const scope = activeSelectionScope.current;
+    const scope = activePaperScope.current;
     exportInFlight.current = true;
     setExportBusy(true);
     setExportError('');
     try { await action(); }
-    catch (err) { if (activeSelectionScope.current === scope) setExportError(err.response?.data?.message || err.message || 'Download failed. Please retry.'); }
+    catch (err) { if (activePaperScope.current === scope) setExportError(err.response?.data?.message || err.message || 'Download failed. Please retry.'); }
     finally { exportInFlight.current = false; setExportBusy(false); }
   };
 
   const getDeliverableRows = async (dateKey, allowEmpty = false) => {
+    if (allowEmpty && partnerOnlyDate === dateKey) return [];
     const scope = `${selectedMenuId}:${missingCheckDate}`;
+    const current = () => activeSelectionScope.current === scope && (!allowEmpty || activePaperScope.current === paperScopeForDate(dateKey));
     if (loadingSelections || loadedSelectionScope !== scope || dateKey !== missingCheckDate) {
       setExportError('Load and finish preparing the selected date before exporting.'); return null;
     }
     try {
-      const snapshot = await loadKitchenSnapshot(api, selectedMenuId, [dateKey], () => activeSelectionScope.current === scope, applyKitchenOverrides, preparedSnapshot.current && { ...preparedSnapshot.current, selections: menuSelections, breakfastPreset, snackPreset });
+      const snapshot = await loadKitchenSnapshot(api, selectedMenuId, [dateKey], current, applyKitchenOverrides, preparedSnapshot.current && { ...preparedSnapshot.current, selections: menuSelections, breakfastPreset, snackPreset });
       const selectedKeys = new Set(customerRows.map((entry) => String(entry.email || entry.customerId)));
       const filteredView = search || showOnlyMissing || planFilter || showOnlyAttention;
       const rows = snapshot.entries.filter((entry) => (!filteredView || selectedKeys.has(String(entry.email || entry.customerId))) && (!paperPlan || entry.planName === paperPlan));
       if (!rows.length && !allowEmpty) throw new Error('No confirmed meals match this date and the current filters. Clear the search and plan filters, or choose a different date.');
       assertKitchenExportReady(rows);
-      if (activeSelectionScope.current !== scope) return null;
+      if (!current()) return null;
       setPaperExcluded({ dateKey, names: [] });
       return rows.map((entry) => ({ ...entry, mealsByDay: groupMealsByDay(entry.selectedMeals) }));
     } catch (err) {
-      if (activeSelectionScope.current === scope) setExportError(err.response?.data?.message || err.message || 'Kitchen export could not be verified.');
+      if (current()) setExportError(err.response?.data?.message || err.message || 'Kitchen export could not be verified.');
       return null;
     }
   };
@@ -1685,7 +1693,7 @@ const KitchenList = () => {
     if (!dateKey) return;
     const deliverableRows = await getDeliverableRows(dateKey, true);
     if (!deliverableRows) return;
-    const partnerData = await loadPartnerKitchenOrders(api, dateKey, () => activeSelectionScope.current === `${selectedMenuId}:${dateKey}`);
+    const partnerData = await loadPartnerKitchenOrders(api, dateKey, () => activePaperScope.current === paperScopeForDate(dateKey));
     const orderedEntries = buildKitchenPaperOrder(dateKey, deliverableRows);
     if (!orderedEntries.length && !partnerData.orders.length) return;
     const XLSX = await loadXLSX();
@@ -1733,8 +1741,8 @@ const KitchenList = () => {
     worksheet['!autofilter'] = { ref: worksheet['!ref'] };
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Paper');
-    if (activeSelectionScope.current !== `${selectedMenuId}:${dateKey}`) return;
-    XLSX.writeFile(workbook, `kitchen-paper-${dateKey}${planFileSuffix}.xlsx`);
+    if (activePaperScope.current !== paperScopeForDate(dateKey)) return;
+    XLSX.writeFile(workbook, `kitchen-paper-${dateKey}${partnerOnlyDate ? '' : planFileSuffix}.xlsx`);
   };
 
   // Owner (2026-10-12): kitchen paper for ONE customer over a custom date range
@@ -1803,7 +1811,7 @@ const KitchenList = () => {
 
     const deliverableRows = await getDeliverableRows(dateKey, true);
     if (!deliverableRows) return;
-    const partnerData = await loadPartnerKitchenOrders(api, dateKey, () => activeSelectionScope.current === `${selectedMenuId}:${dateKey}`);
+    const partnerData = await loadPartnerKitchenOrders(api, dateKey, () => activePaperScope.current === paperScopeForDate(dateKey));
     const entriesWithMeals = deliverableRows
       .filter((entry) => !paperPlan || entry.planName === paperPlan)
       .map((entry) => ({
@@ -1927,12 +1935,12 @@ ${body}${partnerPaperHtml(partnerData)}
 <div style="mso-element:footer" id="f1"><p class="MsoFooter" style="text-align:right">Kitchen Prep Sheet — ${esc(dayLabel)} &nbsp;|&nbsp; Page <span style="mso-field-code:' PAGE '"></span> of <span style="mso-field-code:' NUMPAGES '"></span></p></div>
 </body></html>`;
 
-    if (activeSelectionScope.current !== `${selectedMenuId}:${dateKey}`) return;
+    if (activePaperScope.current !== paperScopeForDate(dateKey)) return;
     const blob = new Blob(['\uFEFF', html], { type: 'application/msword' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `kitchen-paper-${dateKey}${planFileSuffix}.doc`;
+    link.download = `kitchen-paper-${dateKey}${partnerOnlyDate ? '' : planFileSuffix}.doc`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -2123,7 +2131,7 @@ ${body}${partnerPaperHtml(partnerData)}
 
       const deliverableRows = await getDeliverableRows(dateKey, true);
       if (!deliverableRows) return;
-      const partnerData = await loadPartnerKitchenOrders(api, dateKey, () => activeSelectionScope.current === `${selectedMenuId}:${dateKey}`);
+      const partnerData = await loadPartnerKitchenOrders(api, dateKey, () => activePaperScope.current === paperScopeForDate(dateKey));
       const entriesWithMeals = deliverableRows
         .filter((entry) => !paperPlan || entry.planName === paperPlan)
         .map((entry) => ({
@@ -2264,8 +2272,8 @@ ${body}${partnerPaperHtml(partnerData)}
         doc.setTextColor(0);
       }
 
-      if (activeSelectionScope.current !== `${selectedMenuId}:${dateKey}`) return;
-      doc.save(`kitchen-paper-${dateKey}${planFileSuffix}.pdf`);
+      if (activePaperScope.current !== paperScopeForDate(dateKey)) return;
+      doc.save(`kitchen-paper-${dateKey}${partnerOnlyDate ? '' : planFileSuffix}.pdf`);
     } finally {
       setGeneratingPdf(false);
     }
@@ -2293,21 +2301,21 @@ ${body}${partnerPaperHtml(partnerData)}
             </div></div>
           </div>
           <button type="button" title="Reload selections and re-fetch nutrition data from the website" className="kitchen-reload" disabled={!selectedMenuId || !missingCheckDate || loadingSelections} onClick={() => { nutritionCacheRef.current.clear(); setDeliveryCheck(null); loadSelections({ refresh: true }); }}><RefreshCw size={16} className={loadingSelections ? 'animate-spin' : ''} /></button>
-          <button type="button" className="kitchen-download-trigger" aria-expanded={downloadsOpen} aria-controls="kitchen-downloads" disabled={!menuDateKeys.length} onClick={() => setDownloadsOpen(open => !open)}><Download size={16} /> Kitchen Paper <ChevronDown size={14} /></button>
+          <button type="button" className="kitchen-download-trigger" aria-expanded={downloadsOpen} aria-controls="kitchen-downloads" onClick={() => setDownloadsOpen(open => !open)}><Download size={16} /> Kitchen Paper <ChevronDown size={14} /></button>
         </KitchenWorkspaceHeader>
         <p className="text-sm text-slate-600">{loadingMenus ? 'Loading active menu...' : automaticScope.message || (automaticScope.availableMenus.length > 1
           ? 'Choose the active menu or next week’s scheduled menu. Delivery-date assignment deadlines still apply.'
           : 'The active menu is selected automatically and locked. Next week’s scheduled menu opens Friday at 3 PM Dubai time.')}</p>
-        {menuDateKeys.length > 0 && <details id="kitchen-downloads" className="kitchen-export-panel kitchen-paper-section" open={downloadsOpen}>
+        <details id="kitchen-downloads" className="kitchen-export-panel kitchen-paper-section" open={downloadsOpen}>
           <summary onClick={event => { event.preventDefault(); setDownloadsOpen(open => !open); }}><FileText size={18} /> Kitchen Paper <span className="kitchen-export-formats">PDF · Word · Excel</span></summary>
           <button type="button" className="kitchen-download-close" onClick={() => setDownloadsOpen(false)}>Close downloads</button>
 
-          {menuDateKeys.length > 0 && (
+          {(
             <div className="mt-4 flex flex-wrap items-end gap-3 border-t border-white/10 pt-4">
               <div>
                 <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-300">Day kitchen paper</label>
                 <select
-                  value={pdfDate}
+                  value={partnerOnlyDate ? '' : pdfDate}
                   onChange={(e) => changeKitchenDate(e.target.value)}
                   className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white [&>option]:text-slate-900"
                 >
@@ -2318,9 +2326,16 @@ ${body}${partnerPaperHtml(partnerData)}
                 </select>
               </div>
               <div>
+                <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-300" htmlFor="partner-paper-date">Partner-only paper date</label>
+                <input id="partner-paper-date" aria-label="Partner-only paper date" type="date" value={partnerOnlyDate}
+                  onChange={e => {setPartnerOnlyDate(e.target.value); setExportError('');}}
+                  className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white" />
+              </div>
+              <div>
                 <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-slate-300">Meal plan</label>
                 <select
                   value={paperPlan}
+                  disabled={!!partnerOnlyDate}
                   onChange={(e) => setPaperPlan(e.target.value)}
                   title="Applies to the Day PDF, Day Excel and Customer List export"
                   className="rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm text-white [&>option]:text-slate-900"
@@ -2333,16 +2348,16 @@ ${body}${partnerPaperHtml(partnerData)}
               </div>
               <button
                 type="button"
-                onClick={() => runKitchenExport(() => downloadDayKitchenPaper(pdfDate))}
-                disabled={!pdfDate || exportBusy || generatingPdf || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
+                onClick={() => runKitchenExport(() => downloadDayKitchenPaper(paperDate))}
+                disabled={!paperDate || exportBusy || generatingPdf || (!partnerOnlyDate && (loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
                 <FileText size={16} className={generatingPdf ? 'animate-pulse' : ''} /> {generatingPdf ? 'Generating...' : 'Download Day PDF'}
               </button>
               <button
                 type="button"
-                onClick={() => runKitchenExport(() => downloadDayKitchenPaperWord(pdfDate))}
-                disabled={!pdfDate || exportBusy || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
+                onClick={() => runKitchenExport(() => downloadDayKitchenPaperWord(paperDate))}
+                disabled={!paperDate || exportBusy || (!partnerOnlyDate && (loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
                 title="Word version of the Day PDF — same sections, order and per-customer tables"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
@@ -2350,8 +2365,8 @@ ${body}${partnerPaperHtml(partnerData)}
               </button>
               <button
                 type="button"
-                onClick={() => runKitchenExport(() => exportDayKitchenPaperToExcel(pdfDate))}
-                disabled={!pdfDate || exportBusy || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
+                onClick={() => runKitchenExport(() => exportDayKitchenPaperToExcel(paperDate))}
+                disabled={!paperDate || exportBusy || (!partnerOnlyDate && (loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
                 title="Excel version of the Day PDF — one row per meal (emirate, delivery window, customer, plan, P/C/V weights, remark, day note), in the same order as the PDF"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
@@ -2360,7 +2375,7 @@ ${body}${partnerPaperHtml(partnerData)}
               <button
                 type="button"
                 onClick={() => runKitchenExport(() => exportCustomerMacrosToExcel(pdfDate))}
-                disabled={!pdfDate || exportBusy || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
+                disabled={!!partnerOnlyDate || !pdfDate || exportBusy || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
                 title="Export customer ID, name, CPF, meal plan, the customer's total daily C/P/F, meal name, and that meal's C/P/F/calories — one row per meal, in the same customer/meal order as the Day PDF above"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
@@ -2368,7 +2383,7 @@ ${body}${partnerPaperHtml(partnerData)}
               </button>
               {exportBusy && <p role="status" className="w-full text-sm text-amber-200">Verifying Matter data and generating your download?</p>}
               {exportError && <p role="alert" className="w-full rounded-lg bg-red-950/50 p-3 text-sm text-red-100">{exportError}</p>}
-              {paperExcluded && paperExcluded.dateKey === pdfDate && (
+              {!partnerOnlyDate && paperExcluded && paperExcluded.dateKey === pdfDate && (
                 <p
                   className="w-full text-xs text-amber-200"
                   title={paperExcluded.names.join(', ')}
@@ -2479,7 +2494,7 @@ ${body}${partnerPaperHtml(partnerData)}
               {mealRemarksUploadResult.failedCustomers > 0 && ` ${mealRemarksUploadResult.failedCustomers} customer(s) failed to save — try again.`}
             </p>
           )}
-        </details>}
+        </details>
 
 
 

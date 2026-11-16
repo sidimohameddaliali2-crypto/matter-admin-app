@@ -201,3 +201,30 @@ test('a date change while partner export verification is pending cannot download
   await act(async () => resolvePartner({data: {success: true, data: {date: A, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}}));
   expect(mockCountingSave).not.toHaveBeenCalled();
 });
+
+
+test.each([false, true])('independent partner dates outside customer menus stay visible and exportable (no menus=%s)', async noMenus => {
+  const outside = '2026-11-17';
+  const item = {itemId: 'po', name: 'Outside-menu bowl', mealType: 'bowl', quantity: 4};
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => {
+    if (path.startsWith('/menus?') && noMenus) return {data: {success: true, data: []}};
+    if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [{id: 'po', lines: [item]}], counts: [item], orderCount: 1, totalQuantity: 4}}};
+    return originalGet(path, config);
+  });
+  if (noMenus) {await act(async () => root.unmount()); root = createRoot(container); await act(async () => root.render(<KitchenCounting />));}
+  const writes = api.post.mock.calls.length;
+  await act(async () => {
+    const field = container.querySelector('[aria-label="Partner-only delivery date"]');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, outside);
+    field.dispatchEvent(new Event('change', {bubbles: true}));
+  });
+  expect(container.querySelector('[aria-label="Partner order"]').textContent).toContain('Outside-menu bowl');
+  expect(container.querySelector('.kitchen-count-groups')).toBeNull();
+  const button = [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel'));
+  expect(button.disabled).toBe(false);
+  await act(async () => button.click());
+  expect(mockCountingSave).toHaveBeenCalledWith(expect.anything(), `kitchen-counting-${outside}.xlsx`);
+  expect(mockCountingRows.mock.calls.at(-1)[0]).toEqual([expect.objectContaining({Category: 'Partner order', Count: 4})]);
+  expect(api.post).toHaveBeenCalledTimes(writes);
+});

@@ -85,6 +85,8 @@ test.each(['main', 'snack'])('open-date %s-only partial selection stays in Missi
 });
 
 beforeEach(async () => {
+  if (!URL.createObjectURL) URL.createObjectURL = jest.fn(() => 'blob:fixture');
+  if (!URL.revokeObjectURL) URL.revokeObjectURL = jest.fn();
   localStorage.clear();
   mockExcelRows.mockImplementation((rows) => rows);
   api.get.mockImplementation(async (path, config) => {
@@ -399,4 +401,57 @@ test('day paper blocks incomplete downloads when partner orders cannot be verifi
   await act(async () => downloadButton('Download Day Excel').click());
   expect(mockExcelSave).not.toHaveBeenCalled();
   expect(container.textContent).toContain('Partner verification failed');
+});
+
+
+const choosePartnerPaperDate = async date => act(async () => {
+  const field = container.querySelector('[aria-label="Partner-only paper date"]');
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, date);
+  field.dispatchEvent(new Event('change', {bubbles: true}));
+});
+
+test.each([false, true])('independent partner papers outside all menus support every format (no menus=%s)', async noMenus => {
+  const outside = '2026-11-17';
+  const item = {itemId: 'po', name: 'Outside-menu bowl', mealType: 'bowl', quantity: 4};
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => {
+    if (path.startsWith('/menus?') && noMenus) return {data: {success: true, data: []}};
+    if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [{id: 'po', partnerName: 'Cafe', reference: 'PO-5', lines: [item]}], counts: [item], orderCount: 1, totalQuantity: 4}}};
+    return originalGet(path, config);
+  });
+  if (noMenus) {await act(async () => root.unmount()); root = createRoot(container); await act(async () => root.render(<KitchenList />));}
+  const writes = api.post.mock.calls.length;
+  await choosePartnerPaperDate(outside);
+  expect(container.textContent).not.toContain('Outside-menu bowl');
+  expect(downloadButton('Download Day Excel').disabled).toBe(false);
+  await act(async () => downloadButton('Download Day Excel').click());
+  expect(mockExcelSave).toHaveBeenCalledWith(expect.anything(), `kitchen-paper-${outside}.xlsx`);
+  expect(mockExcelRows.mock.calls.at(-1)[0]).toHaveLength(1);
+  expect(mockExcelRows.mock.calls.at(-1)[0][0]).toMatchObject({Section: 'Partner', Meal: 'Outside-menu bowl', Quantity: 4});
+  await act(async () => downloadButton('Download Day PDF').click());
+  expect(mockPdfSave).toHaveBeenCalledWith(`kitchen-paper-${outside}.pdf`);
+  expect(mockPdfTable.mock.calls.at(-1)[0].body[0]).toContain('Outside-menu bowl');
+  const priorCreate = URL.createObjectURL, priorRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = jest.fn(() => 'blob:fixture'); URL.revokeObjectURL = jest.fn();
+  const click = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  try {
+    await act(async () => downloadButton('Download Day Word').click());
+    const blob = URL.createObjectURL.mock.calls.at(-1)[0];
+    const html = await new Promise(resolve => {const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(blob);});
+    expect(html).toContain('<h2>Partner</h2>'); expect(html).toContain('Outside-menu bowl');
+  } finally {click.mockRestore(); URL.createObjectURL = priorCreate; URL.revokeObjectURL = priorRevoke;}
+  expect(api.post).toHaveBeenCalledTimes(writes);
+});
+
+test('changing the independent partner paper date rejects an obsolete download', async () => {
+  const first = '2026-11-17', second = '2026-11-18';
+  let finish;
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation((path, config) => path === '/menus/kitchen-partner-orders'
+    ? new Promise(resolve => {finish = resolve;}) : originalGet(path, config));
+  await choosePartnerPaperDate(first);
+  await act(async () => downloadButton('Download Day Excel').click());
+  await choosePartnerPaperDate(second);
+  await act(async () => finish({data: {success: true, data: {date: first, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}}));
+  expect(mockExcelSave).not.toHaveBeenCalled();
 });
