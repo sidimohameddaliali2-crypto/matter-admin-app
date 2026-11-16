@@ -67,10 +67,13 @@ async function inspect(appRoot) {
       catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     };
     const pointer = await optional('work/current.private.json');
-    const safe = value => value ? { keys: Object.keys(value), collectorRevision: value.collectorRevision,
-      sourceRevision: value.sourceRevision, basis: value.basis, sourceBasis: value.sourceBasis,
-      manifestSha256: value.manifestSha256, privateRoot: value.privateRoot,
-      generation: value.generation, source: value.source ? { revision: value.source.revision } : undefined } : null;
+    const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
+    const revision = value => Number.isSafeInteger(value) && value > 0 ? value : undefined;
+    const safe = value => value ? { keys: Object.keys(value).slice(0, 40), collectorRevision: revision(value.collectorRevision),
+      sourceRevision: revision(value.sourceRevision), basis: digest(value.basis), sourceBasis: digest(value.sourceBasis),
+      manifestSha256: digest(value.manifestSha256), privateRoot: typeof value.privateRoot === 'string'
+        && value.privateRoot.startsWith(syncRoot + '/work/attempts/') ? value.privateRoot : undefined,
+      generation: digest(value.generation), source: value.source ? { revision: revision(value.source.revision) } : undefined } : null;
     const workspaces = [];
     const wanted = new Set([pointer?.privateRoot, pointer?.previous?.privateRoot].filter(Boolean));
     for (const directory of wanted) {
