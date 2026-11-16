@@ -36,6 +36,8 @@ import { withKitchenPreparation, preparationHasFailures, kitchenPreparationFailu
 import { matterSelectionIdentity, matterSelectionFilter, normalizeMatterEmail } from '../services/matterKitchenIdentity.js';
 import { resolveMenuAllergyProfile } from '../services/menuAllergyProfileService.js';
 import { validatedMenuSelections } from '../services/menuSelectionValidation.js';
+import { reconcileMenuSkippedDays, restoredMenuSkipDates } from '../services/menuSkipReconciliation.js';
+import { getMenuNonSelectors } from '../services/menuNonSelectors.js';
 import { getPartnerKitchenOrders } from '../services/partnerKitchenOrders.js';
 import { syncMenuSelectionMainMealsToPartnerMenu } from '../services/menuSelectionPartnerSync.js';
 import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, validateRequiredResumeDates, expandSaturdaySkips } from '../services/matterPauseResumeService.js';
@@ -445,6 +447,7 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
     const identity = matterSelectionIdentity(nutrition);
     const allergyProfile = await resolveMenuAllergyProfile(nutrition);
     const record = menuId ? await MenuSelectionRecord.findOne(matterSelectionFilter(menuId, nutrition)).lean() : null;
+    await reconcileMenuSkippedDays(record, nutrition);
     const consolidatedMeals = record?.selectedMeals || [];
     const savedSkippedDays = (record?.skippedDays || []).filter(day => !day.resumedAt);
     const foundMenuSelectionRecord = !!record;
@@ -473,6 +476,7 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
         partner: null,
         selectedMeals: consolidatedMeals,
         skippedDays: savedSkippedDays,
+        restoredSkipDates: restoredMenuSkipDates(record, nutrition),
         macros: matterMacros,
         currentWeekMenu: record ? menuId : null,
         hasSubmittedForRequestedMenu: foundMenuSelectionRecord,
@@ -1489,6 +1493,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
         throw new Error('Snack entitlement is unresolved. Retry kitchen preparation.');
       }
       const snacksPerDay = Number(nutrition.snacks_per_day);
+      await reconcileMenuSkippedDays(record, nutrition);
       if (snacksPerDay <= 0) {
         stats.skippedNoSnacksNeeded = 1;
         return stats;
@@ -1761,6 +1766,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     if (!email) continue;
 
     let existingRecord = await MenuSelectionRecord.findOne({ weeklyMenuId: menuId, email }).lean();
+    await reconcileMenuSkippedDays(existingRecord, customer.nutrition);
     if (await kitchenDateUnavailable(existingRecord, dateKey, customer.nutrition)) continue;
     existingRecord = await reconcileCoreBreakfast(existingRecord, dateKey, customer.nutrition);
     existingRecord = await reconcileCoreMainMeals(existingRecord, dateKey, customer.nutrition);
@@ -1979,7 +1985,7 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
   }
 
   const existingRecords = await MenuSelectionRecord.find({ weeklyMenuId: menuId })
-    .select('email legacyStorageEmail matterEmail matterCustomerId matterSubscriptionId selectedMeals skippedDays kitchenAutoHolds').lean();
+    .select('email legacyStorageEmail matterEmail matterCustomerId matterSubscriptionId selectedMeals skippedDays unpausedDays weeklyMenuId kitchenAutoHolds').lean();
   const matterInputs = subscriptions.map((sub) => sub.kitchen_inputs).filter(Boolean);
   const sourceOptions = { matterInputs };
   let alreadyCovered = 0;
@@ -1994,6 +2000,7 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
         || String(record.matterSubscriptionId || '') === identity.matterSubscriptionId);
     if (matches.length > 1) throw new Error('Multiple saved selections match the same Matter customer. Resolve the duplicate selection before production.');
     let record = matches[0];
+    await reconcileMenuSkippedDays(record, nutrition);
     if (record && (!record.matterCustomerId || record.matterEmail !== identity.matterEmail || record.matterSubscriptionId !== identity.matterSubscriptionId || normalizeMatterEmail(record.email) !== identity.matterEmail)) {
       const resolved = { ...identity, email: identity.matterEmail,
         ...(normalizeMatterEmail(record.email) !== identity.matterEmail ? { legacyStorageEmail: record.legacyStorageEmail || record.email } : {}) };
@@ -2415,6 +2422,7 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
       if (!email) continue;
 
       const existingRecord = await MenuSelectionRecord.findOne({ weeklyMenuId: menuId, email }).lean();
+      await reconcileMenuSkippedDays(existingRecord, customer.nutrition);
       if (await kitchenDateUnavailable(existingRecord, dateKey, customer.nutrition)) continue;
       const existingMainMealsCount = (existingRecord?.selectedMeals || []).filter(
         (m) => toDateKey(m.date) === dateKey && m.mealType === 'main'
@@ -2970,6 +2978,19 @@ router.get('/:id/kitchen-dates', protect, async (req, res) => {
   } catch (error) { return res.status(500).json({ success: false, message: error.message }); }
 });
 
+router.get('/:id/did-not-select', protect, (req, res, next) => {
+  if (!effectivePermissions(req.user).menus) return res.status(403).json({ success: false, message: 'Menu access is required.' });
+  next();
+}, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Select a valid menu.' });
+  try {
+    res.json({ success: true, data: await getMenuNonSelectors(req.params.id) });
+  } catch (error) {
+    res.status(error.statusCode || 502).json({ success: false, message: error.statusCode ? error.message : 'Could not check active deliveries with Matter. Please retry.' });
+  }
+});
+
 router.get('/:id/selections', protect, async (req, res) => {
   res.set('Cache-Control', 'no-store');
   try {
@@ -3163,6 +3184,8 @@ router.post('/customers/:email/skip-pause-preview', async (req, res) => {
     } catch (matterError) {
       console.error('skip-pause-preview: Matter lookup failed for', cleanEmail, '-', matterError.message);
     }
+    const record = req.body.weeklyMenuId && matterSub
+      ? await MenuSelectionRecord.findOne(matterSelectionFilter(req.body.weeklyMenuId, matterSub)).lean() : null;
     const preview = await previewSkipPauses({
       email: cleanEmail,
       // Match the exact Matter email used at sign-in. An internal match may
@@ -3170,6 +3193,7 @@ router.post('/customers/:email/skip-pause-preview', async (req, res) => {
       matterSubscriptionId: matterSub?.subscription_id || null,
       matterCustomerId: matterSub?.customer_id || null,
       skippedDateKeys: dates,
+      restoredSkipDates: restoredMenuSkipDates(record, matterSub),
       weekendEnabled: matterSub?.weekend_enabled === true
     });
 
@@ -3248,7 +3272,16 @@ router.post('/customers/:email/select-meals', async (req, res) => {
 
     // Require an explicit date for every new pause before saving anything.
     const prior = weeklyMenuId ? await MenuSelectionRecord.findOne(selectionFilter)
-      .select('skippedDays').lean() : null;
+      .select('skippedDays unpausedDays matterSubscriptionId weeklyMenuId').lean() : null;
+    await reconcileMenuSkippedDays(prior, matterSub);
+    const restoredDates = new Set(restoredMenuSkipDates(prior, matterSub));
+    // A stale tab still submits its old locked skips. Require a reload rather
+    // than silently restoring that skip or saving an empty day as complete.
+    const staleSkip = skippedDateKeys.find((date) => restoredDates.has(date)
+      && !(pauseDecisionByDate.get(date)?.action === 'pause'
+        && pauseDecisionByDate.get(date)?.alreadyPaused === false
+        && pauseDecisionByDate.get(date)?.resumeDate));
+    if (staleSkip) return res.status(409).json({ success: false, message: `Delivery on ${staleSkip} was unpaused in Matter. Reopen the menu to select your meals.` });
     const priorByDate = new Map((prior?.skippedDays || []).filter(day => !day.resumedAt).map((s) => [toDayKey(s.date), s]));
     skippedDateKeys = [...new Set([...priorByDate.keys(), ...skippedDateKeys])].sort();
     const alreadyPaused = new Set([...priorByDate].filter(([, p]) => ['success', 'already_paused'].includes(p.pauseStatus)).map(([date]) => date));
@@ -3258,6 +3291,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
       const ctx = await resolveSubscriptionContext({ email: cleanEmail, matterSubscriptionId: matterSub?.subscription_id || identity.matterSubscriptionId, matterCustomerId: matterSub?.customer_id || null });
       if (ctx.error) return res.status(502).json({ success: false, message: ctx.error });
       skippedDateKeys = expandSaturdaySkips(skippedDateKeys, new Set([...ctx.activeDeliveryDates, ...ctx.existingPaused]));
+      skippedDateKeys = skippedDateKeys.filter((date) => !restoredDates.has(date) || pauseDecisionByDate.has(date));
       claimedExisting.forEach((d) => {
         d.alreadyPaused = ctx.existingPaused.has(toDayKey(d.date));
         if (d.alreadyPaused) alreadyPaused.add(toDayKey(d.date));
