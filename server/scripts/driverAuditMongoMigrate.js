@@ -4,10 +4,10 @@ import { createReadStream } from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { createHash } from 'node:crypto';
-import { gunzipSync } from 'node:zlib';
 import { pathToFileURL } from 'node:url';
 import mongoose from 'mongoose';
 import { createDriverAuditMongoArchive } from '../services/driverAuditMongoArchive.js';
+import { createDriverAuditMongoTextReader } from '../services/driverAuditMongoText.js';
 import { createDriverAuditMongoRpc, initializeDriverAuditMongoRpc } from '../services/driverAuditMongoRpc.js';
 import { importDriverAuditMongoDocuments, importDriverAuditMongoHistorical,
   importDriverAuditMongoReceipts } from '../services/driverAuditMongoImport.js';
@@ -127,8 +127,7 @@ async function main() {
       if (saved.revision !== row.revision || saved.body !== row.body_text) throw Error('Original saved state differs');
     }
     let receiptCount = 0, historicalCount = 0;
-    const readText = async reference => gunzipSync(await archive.readBytes(reference,
-      { maxBytes: 33 * 1024 * 1024 }), { maxOutputLength: 32 * 1024 * 1024 }).toString();
+    const readText = createDriverAuditMongoTextReader(archive);
     for await (const row of verifiedRows(root, profile.receipts)) {
       const saved = await db.collection('driverAuditNativeReceipts').findOne({ key: row.key, revision: row.revision });
       if (!saved || saved.event_id !== row.event_id || saved.request_sha256 !== row.request_sha256

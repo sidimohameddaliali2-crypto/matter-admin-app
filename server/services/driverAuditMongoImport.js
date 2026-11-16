@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
+import { packDriverAuditMongoTexts } from './driverAuditMongoText.js';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const sha256 = /^[a-f0-9]{64}$/;
@@ -102,6 +103,7 @@ export async function importDriverAuditMongoReceipts({ db, client, objects, rece
         requireImport(authority?.status === 'staging' && authority.importSha256 === importSha256,
           'Native reporting import authority changed');
         await control.updateOne({ _id: 'authority' }, { $inc: { writeFence: 1 } }, { session });
+        const fresh = [];
         for (const row of batch) {
           const body_sha256 = hash(row.body_text);
           const event_sha256 = hash(row.event_text);
@@ -113,11 +115,17 @@ export async function importDriverAuditMongoReceipts({ db, client, objects, rece
             'An original receipt differs from its existing native copy');
             continue;
           }
-          const body_ref = await objects.putBytes(gzipSync(Buffer.from(row.body_text)), { session });
-          const event_ref = await objects.putBytes(gzipSync(Buffer.from(row.event_text)), { session });
-          await stored.insertOne({ key: row.key, revision: row.revision, event_id: row.event_id,
-            request_sha256: row.request_sha256, body_sha256, event_sha256, body_ref, event_ref,
-            created_at: row.created_at, importedBy: importSha256 }, { session });
+          fresh.push({ ...row, body_sha256, event_sha256 });
+        }
+        if (fresh.length) {
+          const references = await packDriverAuditMongoTexts({ objects, session,
+            texts: fresh.flatMap(row => [row.body_text, row.event_text]) });
+          await stored.insertMany(fresh.map((row, index) => ({
+            key: row.key, revision: row.revision, event_id: row.event_id, request_sha256: row.request_sha256,
+            body_sha256: row.body_sha256, event_sha256: row.event_sha256,
+            body_ref: references[index * 2], event_ref: references[index * 2 + 1],
+            created_at: row.created_at, importedBy: importSha256,
+          })), { session });
         }
       }, transactionOptions);
     } finally { await session.endSession(); }

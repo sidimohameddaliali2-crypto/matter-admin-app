@@ -1,5 +1,6 @@
 import {createHash} from 'node:crypto';
-import {gzipSync,gunzipSync} from 'node:zlib';
+import {gzipSync} from 'node:zlib';
+import {createDriverAuditMongoTextReader} from './driverAuditMongoText.js';
 
 const maxTextBytes=32*1024*1024;
 const archiveLimit=60_000_000_000;
@@ -98,6 +99,7 @@ export function createDriverAuditMongoRpc({db,client,objects}){
   const ledger=db.collection('driverAuditNativeArchiveLedger');
   const control=db.collection('driverAuditNativeArchiveControl');
   const roads=db.collection('driverAuditNativeRoadCache');
+  const readStoredText=createDriverAuditMongoTextReader(objects);
 
   async function transaction(operation){
     for(let attempt=0;attempt<3;attempt++){
@@ -125,8 +127,7 @@ export function createDriverAuditMongoRpc({db,client,objects}){
   async function readText(row,field,session){
     let text=row[field+'_text'];
     if(typeof text!=='string'){
-      const packed=await objects.readBytes(row[field+'_ref'],{maxBytes:maxTextBytes+1024*1024,session});
-      text=gunzipSync(packed,{maxOutputLength:maxTextBytes}).toString('utf8');
+      text=await readStoredText(row[field+'_ref'],{session});
     }
     jsonObject(text);
     if(row[field+'_sha256']&&hash(text)!==row[field+'_sha256'])throw Error('Native reporting text integrity failure');

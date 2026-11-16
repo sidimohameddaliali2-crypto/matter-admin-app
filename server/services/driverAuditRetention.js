@@ -12,6 +12,7 @@ const implementationFiles = [
   'services/driverAuditDataBackend.js',
   'services/driverAuditMongoArchive.js',
   'services/driverAuditMongoRpc.js',
+  'services/driverAuditMongoText.js',
   'services/driverAuditMongoImport.js',
   'services/driverAuditBuildRecipe.js',
   'services/driverAuditDirectImport.js',

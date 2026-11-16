@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { MongoClient } from 'mongodb';
 import { createDriverAuditMongoArchive } from './driverAuditMongoArchive.js';
 import { createDriverAuditMongoRpc, initializeDriverAuditMongoRpc } from './driverAuditMongoRpc.js';
 import { createDriverAuditDataBackend } from './driverAuditDataBackend.js';
-import { activateDriverAuditMongoAuthority, importDriverAuditMongoDocuments,
+import { activateDriverAuditMongoAuthority, importDriverAuditMongoDocuments, importDriverAuditMongoReceipts,
   verifyDriverAuditMongoAuthority } from './driverAuditMongoImport.js';
 
 const uri = process.env.MONGO_TEST_URI;
@@ -43,6 +43,33 @@ test('a staged final delta resumes an interrupted import and keeps original revi
     { revision: row.revision, body_text: row.body_text });
   await assert.rejects(importDriverAuditMongoDocuments({ ...f, documents: original, importSha256: nextHash }),
     /differs/);
+});
+
+test('packed original receipts preserve clocks and exact recovery bytes without repeating whole checkpoints', { skip: !uri }, async t => {
+  const f = await fixture(t);
+  await importDriverAuditMongoDocuments({ ...f, documents: original, importSha256: firstHash });
+  const digest = text => createHash('sha256').update(text).digest('hex');
+  const payload = randomBytes(256 * 1024).toString('hex');
+  const rows = Array.from({ length: 70 }, (_, index) => {
+    const body_text = JSON.stringify({ payload, revision: index + 1, originalText: 'دبي 😀' });
+    return { key: 'original-packed-history', revision: index + 1, event_id: 'original-receipt-' + index,
+      request_sha256: digest('original-request-' + index), body_sha256: digest(body_text), body_text,
+      event_text: JSON.stringify({ originalEvent: index }), created_at: '2026-11-16T10:22:54.899341+00:00' };
+  });
+  const input = { ...f, receipts: rows, importSha256: firstHash };
+  await importDriverAuditMongoReceipts(input);
+  const used = (await f.objects.status()).usedBytes;
+  assert.ok(used < 3 * 1024 * 1024, 'Repeated checkpoint history must fit the packed allowance');
+  for (const row of rows) {
+    const [saved] = await f.rpc('matter_hosted_state_receipts', { p_key: row.key, p_after: row.revision - 1, p_limit: 1 });
+    for (const field of ['body_text', 'event_text', 'body_sha256', 'request_sha256', 'created_at']) {
+      assert.equal(saved[field], row[field]);
+    }
+  }
+  await importDriverAuditMongoReceipts(input);
+  assert.equal((await f.objects.status()).usedBytes, used);
+  await assert.rejects(importDriverAuditMongoReceipts({ ...input,
+    receipts: [{ ...rows[0], created_at: '2026-11-16T10:22:54.899342+00:00' }] }), /differs/);
 });
 
 test('native activation requires exact preservation proof and a final fence for both review and collector writers',
