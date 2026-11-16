@@ -10,6 +10,8 @@ The replacement config holds retirement of unrecorded attempts unless the legacy
 
 Startup confirmation leaves live acceptance pending. Verify a real sync result, the archive closure, the active and previous restore markers, and an authenticated read that opens an original photo, dated address, GPS and saved review history. Compare source capture, build start, publication and staff read times. Record measured peak RSS, allocated workspace, archive bytes and replica size. Verify a new saved photo, GPS point and grade when the next source capture is available.
 
+Before removing older generated report files, verify the active and previous releases and the saved review history. A signed-in tab that requests an unavailable resource from outside the current, previous and serving releases receives HTTP 409 and can reload the report. Missing resources in the serving or retained releases remain availability errors.
+
 If the builder fails acceptance, run `audit-builder-rollback` with the same two hashes and deployed commit. Drain any staged import first. The rollback restores the original builder and exact configuration bytes. Check the same registration, active and previous report identities, pending stage and review history. Rollback keeps any newer verified report. A full audit rollback disables access and is a separate operation.
 
 Changes to the worker or retirement implementation require a fresh exact restore and rollback qualification receipt through the established retention workflow before builder replacement. The prior incident approval is scoped to its exact app release and receipt.

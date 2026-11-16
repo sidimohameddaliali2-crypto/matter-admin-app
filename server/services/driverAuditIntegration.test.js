@@ -4,7 +4,9 @@ import {createServer} from 'node:http';
 import {createHash} from 'node:crypto';
 import {gzipSync} from 'node:zlib';
 import {createDriverAuditIntegration} from './driverAuditIntegration.js';
+import {createCloudHttp} from '../vendor/driver-audits/integration/cloud/cloud-http.mjs';
 import {archiveBytes} from '../vendor/driver-audits/integration/cloud/repository.mjs';
+import {createSupabaseArchiveTransport} from '../vendor/driver-audits/integration/hosted/supabase-archive.mjs';
 
 test('startup preloads the direct report once and still denies unsigned requests',async()=>{
  const origin='https://app.example.invalid';
@@ -158,6 +160,76 @@ async function integrationOptions({store,archive,budget,state={}}){
  await handler({method:'GET',url:'/api/reporting/reviews',headers:{host:'app.example.invalid'}},{setHeader(){},end(){}},()=>assert.fail('Expected audit route'));
  return options;
 }
+
+test('unavailable historical audit resources request a reload while saved reports and reviews stay accessible',async t=>{
+ const current='a'.repeat(64),previous='b'.repeat(64),historical='c'.repeat(64);
+ const retainedFile='d'.repeat(64),missingFile='e'.repeat(64),transientFile='f'.repeat(64);
+ const missingSelector='1'.repeat(64);
+ let headReads=0,headFailure;
+ let head={generation:current,previous:{generation:previous},directImport:{version:1}};
+ const options=await integrationOptions({
+  store:{async head(){headReads++;if(headFailure)throw headFailure;return head;}},
+  archive:{readObject:async()=>assert.fail('Do not read a live archive')},
+ });
+ const runtime=options.createRuntime({packageOverride:{directSnapshot:true,generation:current}});
+ const unavailable=createSupabaseArchiveTransport({
+  secret:'fixture',
+  fetchImpl:async()=>new Response(null,{status:404}),
+ });
+ const filename=hash=>'report-data/query-'+hash+'.json';
+ let reader;
+ const server=createServer((req,res)=>reader(req,res));
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ t.after(()=>new Promise(resolve=>server.close(resolve)));
+ const origin='http://127.0.0.1:'+server.address().port;
+ reader=createCloudHttp({
+  origin,renderer:async()=>'',diagnostic:()=>{},staffReportFrame:true,localFontAssets:true,
+  isRetiredAuditGeneration:runtime.isRetiredAuditGeneration,
+  auth:{async authenticate(cookie){
+   if(cookie!=='staff')throw Object.assign(Error('Sign in'),{status:401});
+   return {actor:{role:'reviewer'},csrf:'fixture'};
+  }},
+  service:{
+   async resource(name){
+    if(name===filename(retainedFile))return {body:Buffer.from('[]')};
+    if(name===filename(missingSelector))throw Object.assign(Error('Selector absent'),{status:404});
+    if(name===filename(transientFile))throw Object.assign(Error('Archive offline'),{code:'storage_unavailable'});
+    return unavailable.readObject(missingFile+'.gz',{maxBytes:4096});
+   },
+   async reviews(){return {records:{reportingReviews:[{id:'saved-review'}]}};},
+  },
+ });
+ const read=async (hash,generation,cookie='staff')=>{
+  const response=await fetch(origin+'/'+filename(hash)+'?generation='+generation,{
+   headers:{Cookie:cookie},signal:AbortSignal.timeout(2000),
+  });
+  return {status:response.status,body:await response.json()};
+ };
+ const result=await read(missingFile,historical);
+ assert.equal(result.status,409);
+ assert.match(result.body.error,/report changed/i);
+ assert.equal((await read(missingSelector,historical)).status,409);
+ assert.equal((await read(missingFile,current)).status,503);
+ assert.equal((await read(missingFile,previous)).status,503);
+ assert.equal((await read(transientFile,historical)).status,503);
+ assert.equal((await read(retainedFile,current)).status,200);
+ assert.equal((await read(retainedFile,previous)).status,200);
+ assert.equal((await read(retainedFile,historical)).status,200);
+ assert.equal((await read(missingFile,historical,'unsigned')).status,401);
+ const review=await fetch(origin+'/api/reporting/reviews',{headers:{Cookie:'staff'}});
+ assert.equal(review.status,200);
+ assert.equal((await review.json()).state.records.reportingReviews[0].id,'saved-review');
+ assert.equal(headReads,4,'Only missing report resources check the authoritative generation pair');
+ const priorHead=head;
+ head={...head,generation:[current]};
+ assert.equal((await read(missingSelector,historical)).status,503);
+ head=priorHead;
+ headFailure=Error('Saved audit head unavailable');
+ assert.equal((await read(missingSelector,historical)).status,503);
+ headFailure=null;
+ head={...head,generation:previous,previous:{generation:historical}};
+ assert.equal((await read(missingFile,current)).status,503,'A package still serving staff is protected during refresh');
+});
 
 test('loading the Mongo audit package never admits or reads external storage',async()=>{
  const fixture=await retainedPackage();

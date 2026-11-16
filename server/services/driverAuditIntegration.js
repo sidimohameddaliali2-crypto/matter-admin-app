@@ -2,6 +2,7 @@ import {loadStaffAuditRenderer} from './driverAuditStaffRenderer.js';
 import {createDriverAuditAuth} from './driverAuditAuth.js';
 import {createDriverAuditReplica} from './driverAuditReplica.js';
 import {readDriverAuditSyncStatus} from './driverAuditSyncStatus.js';
+import {createDriverAuditDataBackend,driverAuditLocalReaderBudget} from './driverAuditDataBackend.js';
 import {createHostedRpc} from '../vendor/driver-audits/integration/cloud/rpc.mjs';
 import {createCloudState} from '../vendor/driver-audits/integration/cloud/cloud-state.mjs';
 import {createSupabaseArchiveTransport} from '../vendor/driver-audits/integration/hosted/supabase-archive.mjs';
@@ -17,6 +18,7 @@ import {readerTransferMicros,MAX_READER_BODY_BYTES,MAX_READER_REQUEST_BYTES} fro
 
 const reportApi='/api/reporting';
 const auditView=reportApi+'/view';
+const isGenerationDigest=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 const evidenceAlias=/^\/api\/reporting(\/report-data\/(?:detail|history|query|archive|snapshot)-[a-f0-9]{64}\.json|\/report-assets\/font-[a-f0-9]{64}\.(?:woff2?|ttf|otf))$/;
 
 export const auditRoute=pathname=>pathname==='/driver-audit-view'||pathname==='/api/driver-audits/session'||pathname==='/api/session'||pathname==='/api/session/refresh'||pathname.startsWith('/api/reporting/')||pathname.startsWith('/report-data/')||pathname.startsWith('/report-assets/');
@@ -32,11 +34,20 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    const verified=req&&verifiedRequests.get(req);
    return verified&&verified.cookie===cookie?verified.session:auth.authenticate(cookie);
   }};
-  const state=dependencies.state||createCloudState({rpc:createHostedRpc({secret:env.DRIVER_AUDIT_SUPABASE_SECRET})});
-  const rawArchive=dependencies.archive||createSupabaseArchiveTransport({secret:env.DRIVER_AUDIT_SUPABASE_SECRET});
+  const backend=env.DRIVER_AUDIT_DATA_STORE
+   ?await createDriverAuditDataBackend({db:db(),env}):null;
+  const state=dependencies.state||createCloudState({rpc:backend?.rpc||createHostedRpc({secret:env.DRIVER_AUDIT_SUPABASE_SECRET})});
+  const rawArchive=dependencies.archive||backend?.archive||createSupabaseArchiveTransport({secret:env.DRIVER_AUDIT_SUPABASE_SECRET});
   const store=dependencies.store||createDriverAuditReplica(db(),{capacityBytes:Number(env.DRIVER_AUDIT_CAPACITY_BYTES)});
+  async function isRetiredAuditGeneration(generation){
+   const active=await store.head();
+   if(active?.directImport?.version!==1||!isGenerationDigest(active.generation)||
+     (active.previous!=null&&!isGenerationDigest(active.previous.generation)))throw Error('Audit generation pair unavailable');
+   const servingGeneration=coordinator.status().active?.generation;
+   return generation!==servingGeneration&&generation!==active.generation&&generation!==active.previous?.generation;
+  }
   let budget=dependencies.budget;
-  const getBudget=()=>budget??=createReaderBudgetPool({stateStore:state,approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true,approvedNovemberOvernight:true});
+  const getBudget=()=>budget??=backend?.kind==='mongo'?driverAuditLocalReaderBudget:createReaderBudgetPool({stateStore:state,approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true,approvedNovemberOvernight:true});
   const archive=createBudgetedArchiveReader({transport:rawArchive,maxConcurrent:4,requestBytes:2048+2*Buffer.byteLength(env.DRIVER_AUDIT_SUPABASE_SECRET||''),budget:{
    reserve:options=>getBudget().reserve(options),
    settle:(reservation,measurement)=>getBudget().settle(reservation,measurement),
@@ -73,7 +84,9 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    return {...loaded,directSnapshot};
   },createRuntime:({packageOverride,automaticFeed})=>createRuntime({origin,publicPathPrefix:reportApi,packageOverride,automaticFeed,
    staffRenderer:packageOverride.directSnapshot?staffRenderer:undefined,auditImportStatus:health,auditSyncStatus:packageOverride.directSnapshot?()=>readDriverAuditSyncStatus(db(),packageOverride.generation,clock):undefined,
-   authOverride:requestAuth,staffReportFrame:true,stateOverride:state,transportOverride:archive,remoteReadsBudgeted:true,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
+   isRetiredAuditGeneration:packageOverride.directSnapshot?isRetiredAuditGeneration:undefined,
+   reviewContextOverride:backend?.reviewContexts?.attach,
+   authOverride:requestAuth,staffReportFrame:true,stateOverride:state,rpcOverride:backend?.rpc,transportOverride:archive,remoteReadsBudgeted:true,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
   function health(){const runtime=coordinator.status();return {status:runtime.status==='stale'?'failed':runtime.status==='refreshing'?'checking':env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'?'disabled':importStatus,checkedAt:attempt===null?null:new Date(attempt).toISOString(),servingGeneration:runtime.active?.generation||null};}
   function prewarm(){
    if(preload)return preload;

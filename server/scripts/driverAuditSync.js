@@ -7,6 +7,7 @@ import {runDriverAuditDirectImport} from '../services/driverAuditDirectImport.js
 import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollection.js';
 import {driverAuditReplicaRetentionStatus,driverAuditRetentionImplementation} from '../services/driverAuditRetention.js';
 import {withDriverAuditWriter} from '../services/driverAuditWriter.js';
+import {withDriverAuditHeavyWork} from '../services/driverAuditHeavyWork.js';
 import {compactActiveDriverAuditBuildFiles,compactPreviousDriverAuditInputs,compactRetiredDriverAuditInputs,hasDriverAuditBuildSpace,pruneDriverAuditWorkspace,reclaimDriverAuditBuildCache,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
 import {readDriverAuditBuildRecipe,saveDriverAuditBuildRecipe} from '../services/driverAuditBuildRecipe.js';
 import {acceptedWorkspace,prunePreviousDriverAuditCopies} from '../services/driverAuditWorkspaceRetirement.js';
@@ -16,8 +17,8 @@ import {prepareDirectAuditBundle,privateAuditDirectory,privateAuditJson,privateA
 import {checkVerifiedAuditPackageTransfer} from '../vendor/driver-audits/integration/cloud/remote-preview-package.mjs';
 import {createCloudState} from '../vendor/driver-audits/integration/cloud/cloud-state.mjs';
 import {createHostedRpc} from '../vendor/driver-audits/integration/cloud/rpc.mjs';
-import {createSupabaseArchiveTransport} from '../vendor/driver-audits/integration/hosted/supabase-archive.mjs';
 import {acquireWorkerLock} from '../vendor/driver-audits/integration/hosted/worker-lock.mjs';
+import {createDriverAuditDataBackend,driverAuditLocalReaderBudget} from '../services/driverAuditDataBackend.js';
 
 const interval=60_000;
 const budgetRetry=5*interval;
@@ -43,7 +44,9 @@ async function main(){
   load('scripts/run-automatic-report.mjs'),
  ]);
  const buildSpace={compact:compactDirectBuildVersion===1};
- const {MONGODB_URI:uri,DRIVER_AUDIT_SUPABASE_SECRET:secret}=process.env;
+ const {MONGODB_URI:uri}=process.env;
+ const native=process.env.DRIVER_AUDIT_DATA_STORE==='mongo';
+ const secret=process.env.DRIVER_AUDIT_SUPABASE_SECRET||(native?'sidi-native-reporting':undefined);
  const capacityBytes=Number(process.env.DRIVER_AUDIT_CAPACITY_BYTES);
  if(process.env.DRIVER_AUDIT_ENABLED!=='1'||process.env.DRIVER_AUDIT_IMPORT_ENABLED!=='0'||!uri||!secret||
     !Number.isSafeInteger(capacityBytes)||capacityBytes<1||capacityBytes>256*1024*1024)throw Error('Audit sync is not enabled with explicit bounds');
@@ -55,7 +58,8 @@ async function main(){
   const readHead=async()=>(await control.findOne({_id:'head'}))?.head;
   const seed=await readHead();
   if(seed?.directImport?.version!==1)throw Error('Verified direct audit seed required');
-  const rpc=createHostedRpc({secret}),state=createCloudState({rpc}),remote=createSupabaseArchiveTransport({secret});
+  const backend=await createDriverAuditDataBackend({db});
+  const rpc=backend.rpc,state=createCloudState({rpc}),remote=backend.archive;
   await remote.assertPrivate();
   const retentionRequested=process.env.DRIVER_AUDIT_REPLICA_GC_ENABLED==='1';
   const [retentionReceipt,implementationSha256]=retentionRequested?await Promise.all([
@@ -70,9 +74,10 @@ async function main(){
    return;
   }
   lock=await acquireWorkerLock(path.join(path.dirname(root),'sync-worker.lock'));
-  const reportingAllowances={approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true,approvedNovemberOvernight:true};
+  const reportingAllowances={approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true,approvedNovemberOvernight:true,
+   budgetOverride:backend.kind==='mongo'?driverAuditLocalReaderBudget:undefined};
   const archive=createBudgetedAuditArchive({rpc,state,remote,receiptRoot:path.join(root,'archive-receipts'),requestBytes:4096+2*Buffer.byteLength(secret),...reportingAllowances});
-  const boundedState=(responseLimit,select=cloud=>cloud)=>createBudgetedAuditState({state:select(createCloudState({rpc:createHostedRpc({secret,maxResponseBytes:responseLimit})})),
+  const boundedState=(responseLimit,select=cloud=>cloud)=>createBudgetedAuditState({state:select(createCloudState({rpc:native?rpc:createHostedRpc({secret,maxResponseBytes:responseLimit})})),
    budgetState:state,responseLimit,requestBytes:4096+2*Buffer.byteLength(secret),...reportingAllowances});
   const sourceState=boundedState(2*1024*1024),reviewState=boundedState(8*1024*1024);
   const sourceReceipts=boundedState(2*1024*1024,cloud=>({async read(revision){
@@ -198,7 +203,8 @@ async function main(){
   let next=Date.parse(scheduled?.nextCheckAt??'');
   if(!Number.isFinite(next)||next>Date.now()+budgetRetry)next=Date.now();
   let stopped=false,wake;
-  const stop=()=>{stopped=true;wake?.();};
+  const admissionStop=new AbortController();
+  const stop=()=>{stopped=true;admissionStop.abort();wake?.();};
   process.once('SIGTERM',stop);
   process.once('SIGINT',stop);
   async function status(value){
@@ -216,6 +222,15 @@ async function main(){
    if(stopped)break;
    next=Date.now()+interval;
    try{
+    let waitingReported=false;
+    await withDriverAuditHeavyWork({root:path.join(root,'../../driver-audit-heavy-work'),owner:'sync',signal:admissionStop.signal,
+     async onWaiting(){
+      if(waitingReported)return;
+      waitingReported=true;
+      const previous=await privateAuditJson(heartbeat).catch(()=>null);
+      await status({status:'pending',pending:true,errorCode:null,admission:'waiting',
+       latestCaptureAt:previous?.latestCaptureAt??null,visibleCutoffAt:previous?.visibleCutoffAt??null});
+     }},async()=>{
     await recoverStage();
     await runDriverAuditSyncTick({
      async readSource(){
@@ -253,7 +268,9 @@ async function main(){
      onMaintenanceError:()=>console.warn('Driver audit workspace maintenance deferred.'),
      status,
     });
+    });
    }catch(error){
+    if(error.code==='AUDIT_ADMISSION_CANCELLED'&&stopped)break;
     if(error.code==='AUDIT_BUDGET')next=Date.now()+budgetRetry;
     const failure=describeDriverAuditSyncFailure(error);
     const active=await readHead().catch(()=>null);

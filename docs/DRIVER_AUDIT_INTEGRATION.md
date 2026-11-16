@@ -1,10 +1,18 @@
 # Driver audits from the existing reporting system
 
-This is a disabled release candidate. Merging to `main` deploys production. Do not merge, enable imports, activate grading schedules or publish a report without separate release approval.
+The separate Sidi-owned source-worker migration and its private staging, verification, cutover and rollback controls are documented in [Driver Reports source worker](driver-audits/source-worker.md). Existing report sync remains its own process.
+
+This is an explicitly enabled integration. Merging to `main` deploys application code. Selecting a new reporting authority and starting source schedules also require the preservation and host checks below.
 
 ## What moves, and what stays authoritative
 
-The reporting system continues collecting and grading in its existing Supabase-backed workflow. This app imports the complete verified report package into three dedicated MongoDB collections: `driverAuditObjects`, `driverAuditReleases` and `driverAuditControl`. It does not modify operational deliveries, assignments, vehicles, users, KPIs, photos or timestamps.
+The existing mode uses the Supabase reporting workflow as its authority and imports verified report packages into `driverAuditObjects`, `driverAuditReleases` and `driverAuditControl`. That remains the default until the native migration is verified and activated.
+
+The native mode runs collection, grading and report generation on Sidi's DigitalOcean host and stores reporting state, review journals, original receipts and immutable evidence in the app's existing MongoDB database. Set `DRIVER_AUDIT_DATA_STORE=mongo` only after the final import, archive closure and writer handoff are verified. Operational delivery collections, assignments, users, KPIs and timestamps keep their existing contracts. See [native storage and migration](driver-audits/source-worker.md#native-mongodb-storage).
+
+The live import keeps driver evidence, every original report date, GPS, photographs, human reviews, household decisions and the recovery records they require. Historical technical bookkeeping stays in the verified backup. Current safety counters and unresolved attempts remain exact. Known technical updates use bounded recovery storage; they do not append full state bodies to the immutable report archive. Protected collector revisions remain readable through lossless shared text chunks.
+
+The backup-side exporter sends only selected compressed receipts to the app host. A native context index keeps older human reviews connected to their original report and photo evidence when newer report catalogs no longer list those paths. Original missing evidence stays recorded as missing. The index reuses archived image hashes.
 
 The imported package contains the current report, original findings, retained history references, GPS evidence, renderer and immutable file identities. Reports → Open driver audits opens the existing audit interface at `/api/reporting/view` on this app's own origin.
 
@@ -24,9 +32,9 @@ The offline worker excludes audit documents, sessions, API responses and evidenc
 
 The direct import uses an owner-approved private handoff and runs with the old publication importer off. The supervised sync worker reads saved source evidence once per minute, pins a coherent source revision for each build, and stages newer arrivals on a later run. The browser defers reload while a review has an unsaved draft, is being saved, or an export is running. Failed updates retain the prior report. The audit shows the latest observed delivery capture, the visible cutoff and any blocked update.
 
-Incoming evidence first passes through the existing Supabase-backed capture, recovery and grading pipeline. Any schedule change requires separate approval. The sync follows the saved feed and reports pending evidence and failures within the current allowances.
+Before native activation, incoming evidence passes through the existing Supabase-backed capture, recovery and grading pipeline. After activation, the source worker uses the same recovered rules through the native MongoDB adapter. The sync follows that saved feed and reports pending evidence and failures.
 
-Large original photographs and retained evidence remain in private Supabase storage and are read through the authenticated server using their verified hashes. This avoids duplicating the full archive into the limited MongoDB allowance. Review responses continue to append to the existing Supabase journal; there is one authoritative review history, not two independently editable copies. Model proposals remain separate from original accepted grades and incident tiers.
+In the existing mode, photographs and historical evidence are read from the private Supabase archive and review responses append to its journal. Native mode instead reads and writes the verified MongoDB archive and journals. Native reads have no fallback to Supabase. Both modes preserve the original accepted grades, incident tiers, evidence identities and review attribution. The final copy must include every review namespace and every required historical dependency before changing authority.
 
 ```mermaid
 flowchart LR
@@ -45,6 +53,8 @@ All configuration is server-only. No credentials belong in React configuration, 
 - `DRIVER_AUDIT_ENABLED=1`: explicitly enable the integration. Absent/off returns unavailable and makes no import calls.
 - `DRIVER_AUDIT_ORIGIN`: exact origin, HTTPS in a hosted environment. Loopback HTTP is accepted for local acceptance only.
 - `DRIVER_AUDIT_SUPABASE_SECRET`: existing reporting project server credential, supplied privately. The runtime is pinned to the existing reporting Supabase project.
+- `DRIVER_AUDIT_DATA_STORE`: absent/`supabase` retains the existing authority. `mongo` requires an activated native import and uses the existing server `MONGODB_URI`.
+- `DRIVER_AUDIT_NATIVE_CAPACITY_BYTES`: explicit native reporting allowance, independent of the serving replica below. Measure the required unique evidence, preserved receipts, MongoDB indexes and actual target headroom before selecting it. The app never chooses or raises it automatically.
 - `DRIVER_AUDIT_CAPACITY_BYTES`: explicit reporting-copy allowance, at most 256 MiB. Includes object bytes plus 1 KiB per object; MongoDB index and control-document overhead must also be included in deployment sizing. No value is silently created or raised.
 - `DRIVER_AUDIT_IMPORT_ENABLED=0` for a direct seed and supervised sync. The older publication-pointer mode uses a different revision sequence and requires a separate transition.
 - Existing `JWT_SECRET` and staff authentication are reused. Reports permission and active staff status are rechecked on every request. Drivers/partners/members do not inherit audit access. Viewer role cannot save findings.
@@ -53,13 +63,17 @@ The client build must target the same origin (`REACT_APP_API_URL=/api` for local
 
 ## Transfer and recovery
 
+Driver Reports takes delivery identity, status, timing, proof pointers and saved coordinates from the app's authenticated external delivery and GPS endpoints. The collector applies report rules and attaches the audited history, verified evidence and staff reviews. Production can run this same read contract from the app host with a persistent cache shared with the builder. The MongoDB replica holds the current and previous report packages. The original audit archive and review journal supply historical evidence and restore data. [Source worker controls](driver-audits/source-worker.md).
+
 The source pointer identifies one immutable release. Before activation, the importer verifies every transferred chunk and core or deferred file, verifies the report identity and reads the imported package back. Activation compares against the prior pointer. The direct sync keeps its collector revision separate from the older publication-pointer sequence.
 
 An interrupted import is resumable. A repeated identical revision is a no-op. Bad hashes, missing files, source errors, storage exhaustion and older/conflicting revisions leave the previous report selected. The response header `X-Audit-Import-Status` and authenticated status JSON (`auditImport`) distinguish checking, failure and success. Once a report is active, imports run without holding up the current report or review saves. Photo/asset reads and review writes do not initiate transfers. A failed or incomplete refresh retains the saved report and sets the existing status error, so the UI cannot treat it as a successful new refresh. First-load requests still wait for a verified package. An unresolved write keeps its storage reservation; do not reset capacity counters to hide an ambiguous write.
 
-The importer transfers at most 128 MiB per attempt. Photos are not part of the MongoDB replication. The compressed package limits are unchanged; the GPS index decoder alone permits up to 256 MiB, because the saved current index exceeds the previous 128 MiB decoded limit. Measure process memory with the complete dataset before enabling additional PM2 processes.
+The serving-package importer transfers at most 128 MiB per attempt. Photos are outside its 256 MiB serving-replica allowance. Native mode stores required immutable evidence separately under the explicit native quota. The compressed package limits are unchanged; the GPS index decoder alone permits up to 256 MiB, because the saved current index exceeds the previous 128 MiB decoded limit. Measure process memory with the complete dataset before enabling additional PM2 processes.
 
 Enabled imports reserve against the existing reporting reader allowance and meter transferred bytes before settlement. They do not create another financial pool or consume the collection allocation. Denied admission does not read source objects; uncertain failures retain the reservation. Internal estimates remain distinct from provider bills.
+
+Native MongoDB reads keep the same response bounds, integrity checks, concurrency and immutable read cache. They do not reserve against the Supabase reader ledger or append transfer-accounting receipts for local database reads. External API, model and source-worker policies remain in place. The physical native quota still governs new bytes.
 
 The renderer uses `/api/reporting/*` for the document, data and font requests, and the audit `/api/session` handshake. The existing proxy already forwards these requests. The renderer's package paths and hashes stay intact. All report responses remain authenticated, private and non-cacheable by shared caches.
 
