@@ -4,6 +4,7 @@ import { findRegisteredBag } from '../services/bagRecordLookup.js';
 import { moveBag } from '../services/bagMovementStore.js';
 import deliveryOrderRouter from './deliveryOrder.js';
 import express from 'express';
+import { structuredDeliveryAddress } from '../services/deliveryAddress.js';
 import mongoose from 'mongoose';
 import axios from 'axios';
 import { body, validationResult } from 'express-validator';
@@ -1597,6 +1598,16 @@ router.post('/', [
     }
 
     const deliveryData = req.body;
+    if (deliveryData.type !== 'Task' && deliveryData.type !== 'Collection' && deliveryData.addressDetails?.category) {
+      try {
+        const structured = structuredDeliveryAddress(deliveryData.addressDetails);
+        const link = deliveryData.gpsLocation?.link;
+        Object.assign(deliveryData, structured);
+        if (link) deliveryData.gpsLocation.link = link;
+      } catch (error) {
+        return res.status(400).json({ success: false, message: error.message });
+      }
+    }
 
     // Normalize scheduledTime to UTC using configured local offset
     const normalizedScheduled = normalizeScheduledTimeInput(deliveryData.scheduledTime);

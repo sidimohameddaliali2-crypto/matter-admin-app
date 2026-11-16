@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useSelector } from 'react-redux';
 import api from '../utils/api';
+import DeliveryAddressFields from '../components/DeliveryAddressFields';
 import * as XLSX from 'xlsx';
 import { parseGPSFromLink as enhancedParseGPSFromLink } from '../utils/gpsParsing';
 
@@ -328,6 +329,7 @@ const AddDelivery = () => {
     todoList: [], // For task tab
     requireProof: true, // For task tab
     address: '',
+    addressDetails: { category: '', area: '', street: '', building: '', floor: '', unit: '', additional_details: '', coordinates: { lat: '', lng: '' }, link: '' },
     zone: '',
     gpsLocation: {
       lat: '',
@@ -393,8 +395,19 @@ const AddDelivery = () => {
       };
 
       // Add gpsLocation if provided
+      if (activeTab === 'manual') {
+        const d = formData.addressDetails;
+        const villa = d.category === 'villa';
+        const coordinates = { lat: Number(d.coordinates.lat), lng: Number(d.coordinates.lng) };
+        deliveryData.addressDetails = { ...d, coordinates };
+        delete deliveryData.addressDetails.link;
+        deliveryData.zone = d.area;
+        deliveryData.address = [villa ? `Villa ${d.unit}` : d.building, !villa ? `Unit ${d.unit}` : null,
+          !villa && d.floor ? `Floor ${d.floor}` : null, d.street, d.area].filter(Boolean).join(', ');
+        deliveryData.gpsLocation = { ...coordinates, link: d.link || undefined };
+      }
       if (formData.gpsLocation?.lat && formData.gpsLocation?.lng) {
-        deliveryData.gpsLocation = formData.gpsLocation;
+        if (activeTab !== 'manual') deliveryData.gpsLocation = formData.gpsLocation;
       }
 
       // Add driver if selected
@@ -1186,49 +1199,12 @@ const AddDelivery = () => {
               hint="Enter time in your local timezone"
             />
 
-            <div>
-              <label className={fieldLabelCls}>Delivery Zone</label>
-              <input
-                type="text"
-                name="zone"
-                value={formData.zone}
-                onChange={handleChange}
-                className={inputCls}
-                placeholder="e.g., Dubai Marina"
-              />
-            </div>
-
-            <div>
-              <label className={fieldLabelCls}>GPS Location (Google Maps Link Recommended)</label>
-              <div className="relative">
-                <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-[18px]">location_on</span>
-                <input
-                  type="text"
-                  name="gpsLocation.link"
-                  value={formData.gpsLocation.link}
-                  onChange={handleNestedChange}
-                  className={`${inputCls} pl-10`}
-                  placeholder="https://maps.google.com/?q=40.7128,-74.0060"
-                  onBlur={e => {
-                    const link = e.target.value;
-                    if (link) {
-                      const coords = enhancedParseGPSFromLink(link);
-                      if (coords) {
-                        setFormData(prev => ({
-                          ...prev,
-                          gpsLocation: {
-                            ...prev.gpsLocation,
-                            lat: coords.lat,
-                            lng: coords.lng,
-                            link
-                          }
-                        }));
-                      }
-                    }
-                  }}
-                />
-              </div>
-            </div>
+            <DeliveryAddressFields
+              value={formData.addressDetails}
+              onChange={addressDetails => setFormData(prev => ({ ...prev, addressDetails }))}
+              inputCls={inputCls}
+              labelCls={fieldLabelCls}
+            />
 
             <div>
               <label className={fieldLabelCls}>Assign Driver (optional)</label>
@@ -1281,19 +1257,6 @@ const AddDelivery = () => {
                   className={`${inputCls} mt-2`}
                 />
               )}
-            </div>
-
-            <div className="md:col-span-2">
-              <label className={fieldLabelCls}>Address *</label>
-              <textarea
-                name="address"
-                value={formData.address}
-                onChange={handleChange}
-                rows={3}
-                required
-                className={`${inputCls} resize-none`}
-                placeholder="123 Main Street, City, State, ZIP Code"
-              />
             </div>
 
             <div className="md:col-span-2">
