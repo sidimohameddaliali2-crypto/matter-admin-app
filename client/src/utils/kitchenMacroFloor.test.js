@@ -41,3 +41,31 @@ test('missing inputs and unsupported Core combinations remain unresolved rather 
   expect(core.selectedMeals[0].flags.matterCoreLookupMissing).toBe(true);
   expect(core.selectedMeals[0].macros).toMatchObject({ C: 0, P: 0 });
 });
+
+test.each([0, 0.1, 0.4])('fat that rounds to zero defaults to 12g without resizing any food: %s', F => {
+  const entry = calculate({ C: 40, P: 40, F });
+  const reference = calculate({ C: 40, P: 40, F: 10 });
+  const meal = entry.selectedMeals[0], other = reference.selectedMeals[0];
+  expect(meal.macros.F).toBe(12);
+  expect(meal.macros.calories).toBe(meal.macros.C * 4 + meal.macros.P * 4 + 108);
+  expect([meal.proteinWeight, meal.carbWeight, meal.vegWeight, meal.weight])
+    .toEqual([other.proteinWeight, other.carbWeight, other.vegWeight, other.weight]);
+  expect(entry.totalWeight).toBe(reference.totalWeight);
+  expect(entry.totalCalories).toBe(meal.macros.calories);
+});
+
+test('exhausted fat after breakfast/snack deduction uses 12g per main; positive fat and presets keep their values', () => {
+  const breakfast = { date, mealType: 'breakfast', mealName: 'Test breakfast' };
+  const snack = { date, mealType: 'snack', mealName: 'Test snack' };
+  const entry = calculate({ C: 100, P: 100, F: 5 }, [{ ...main, quantity: 2 }, breakfast, snack], {
+    breakfastPreset: { presetsByName: { 'test breakfast': { breakfastName: 'Test breakfast', C: 20, P: 30, F: 0 } } },
+    snackPreset: { presetsByName: { 'test snack': { C: 15, P: 10, F: 6 } } },
+  });
+  expect(entry.selectedMeals.slice(0, 2).map(meal => meal.macros.F)).toEqual([12, 12]);
+  expect(entry.selectedMeals[2].macros.F).toBe(0);
+  expect(entry.selectedMeals[3].macros.F).toBe(6);
+  expect(calculate({ C: 40, P: 40, F: 1 }).selectedMeals[0].macros.F).toBe(1);
+  const unsupported = calculateKitchenListEntry({ customer: { planName: 'Matter Core', targetMacros: { C: 50, P: 50 } }, selectedMeals: [main] });
+  expect(unsupported.selectedMeals[0].macros.F).toBe(0);
+  expect(unsupported.selectedMeals[0].flags.matterCoreLookupMissing).toBe(true);
+});
