@@ -5,6 +5,7 @@ import Menu from '../models/WeeklyMenu.js';
 import Item from '../models/MenuItem.js';
 import Record from '../models/MenuSelectionRecord.js';
 import Log from '../models/KitchenMealEditLog.js';
+import Customer from '../models/Customer.js';
 import matter from './matterApiService.js';
 import { readMealEditContext, mealEditView, editKitchenMeals, mealEditToken } from './kitchenMealEdits.js';
 const date = '2026-11-16', menuId = '507f1f77bcf86cd799439011', itemId = '507f1f77bcf86cd799439012';
@@ -17,7 +18,10 @@ const fixture = t => {
   const row = { _id: 'record', matterCustomerId: '42', updatedAt: new Date(), selectedMeals: [{ _id: 'meal', date, mealType: 'main', mealName: 'Chosen chicken', quantity: 2 }], kitchenAutoHolds: [] };
   const nutrition = { customer_id: '42', customer_email: 'customer@example.invalid', customer_name: 'Customer', subscription_id: 'renewed',
     active_delivery_dates: [date], plan_name: 'Matter Core', meal_frequency: 3, double_delivery_dates: [], exclusions: [] };
-  t.mock.method(Menu, 'findById', () => query(menu));
+  t.mock.method(Menu, 'findById', () => ({ ...query(menu), populate() {
+    return query({ ...menu, meals: [{ date, mealType: 'main', items: [item] }] });
+  } }));
+  t.mock.method(Customer, 'find', () => ({ select() { return this; }, lean: async () => [] }));
   t.mock.method(Item, 'find', () => query([item])); t.mock.method(Item, 'findById', () => query(item));
   t.mock.method(Record, 'find', () => query([row]));
   t.mock.method(matter, 'getKitchenNutrition', async () => nutrition);
@@ -101,4 +105,37 @@ test('Core main additions cannot exceed dated entitlement and a first selection 
   await editKitchenMeals({ ...args, body: { ...args.body, token: 'missing' } });
   assert.equal(create.mock.calls[0].arguments[0][0].matterCustomerId, '42');
   assert.equal(create.mock.calls[0].arguments[0][0].email, 'customer@example.invalid');
+});
+
+for (const action of ['add', 'change']) {
+  test(`${action} rejects a stored peanut allergy with empty Matter exclusions before any selection/audit write`, async t => {
+    const f = fixture(t);
+    f.item.cycleMeal = { components: [{ id: 'portion', type: 'Protein', name: 'Chicken', exclusions: ['Peanuts'] }] };
+    const profile = { matterCustomerId: '42', allergies: ['Peanuts'] };
+    t.mock.method(Customer, 'find', () => ({ select() { return this; }, lean: async () => [profile] }));
+    assert.deepEqual(f.nutrition.exclusions, []);
+    const args = { menuId, customerId: '42', date, user,
+      body: { action, mealId: 'meal', menuItemId: itemId, quantity: 1, token: mealEditToken(f.row) } };
+    await assert.rejects(() => editKitchenMeals(args), { statusCode: 409 });
+    assert.equal(f.write.mock.callCount(), 0);
+    assert.equal(f.logs.mock.callCount(), 0);
+    assert.equal(f.committed.length, 0);
+    // The same dish and request succeeds when the stored profile confirms no
+    // peanut allergy, demonstrating that the rejection came from that profile.
+    profile.allergies = [];
+    await editKitchenMeals(args);
+    assert.equal(f.write.mock.callCount(), 1);
+    assert.equal(f.logs.mock.callCount(), 1);
+  });
+}
+
+test('stored allergy protection cannot be bypassed by browser flags and does not prevent deleting unsafe saved choices', async t => {
+  const f = fixture(t);
+  f.item.cycleMeal = { components: [{ id: 'sauce', type: 'Sauce', name: 'Peanut sauce', exclusions: ['Peanuts'] }] };
+  t.mock.method(Customer, 'find', () => ({ select() { return this; }, lean: async () => [{ matterCustomerId: '42', allergies: ['Peanuts'] }] }));
+  await assert.rejects(() => editKitchenMeals({ menuId, customerId: '42', date, user, body: { action: 'add', menuItemId: itemId,
+    quantity: 1, token: mealEditToken(f.row), allergies: [], exclusionAcknowledged: true, needsSauceChange: false } }), { statusCode: 409 });
+  assert.equal(f.write.mock.callCount(), 0);
+  await editKitchenMeals({ menuId, customerId: '42', date, user, body: { action: 'delete', mealId: 'meal', quantity: 1, token: mealEditToken(f.row) } });
+  assert.equal(f.write.mock.callCount(), 1);
 });

@@ -14,6 +14,7 @@ import { isDateKey, toBusinessDateKey } from '../utils/businessDate.js';
 import { toKitchenOption, kitchenConflictList } from './kitchenExclusions.js';
 import { assertAssignmentMacros, hasKitchenPreset } from './kitchenMacroValidation.js';
 import { isMatterCoreDoubleDay } from '../utils/matterCoreDelivery.js';
+import { validatedMenuSelections } from './menuSelectionValidation.js';
 
 const fail = (message, statusCode = 409) => { throw Object.assign(new Error(message), { statusCode }); };
 const onDate = (meal, date) => new Date(meal.date).toISOString().slice(0, 10) === date;
@@ -83,6 +84,12 @@ export const editKitchenMeals = async ({ menuId, customerId, date, body, user })
     if (conflicts.length) fail(`This dish conflicts with customer exclusions: ${conflicts.join(', ')}.`);
     replacement = { menuItemId: item._id, mealType: item.mealType, mealName: item.mealName };
     await assertAssignmentMacros([replacement]);
+    // The staff editor is also a selection write path. Reuse the canonical
+    // allergy/profile validation rather than trusting Matter exclusions alone.
+    // Validate only the newly added/replaced portions; existing unsafe choices
+    // must still be removable, and unrelated saved rows stay untouched.
+    [replacement] = await validatedMenuSelections({ menuId, nutrition: context.nutrition,
+      selections: [{ ...replacement, date, quantity: body.quantity ?? 1 }] });
   }
   let saved;
   await mongoose.connection.transaction(async session => {
