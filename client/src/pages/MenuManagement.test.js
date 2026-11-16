@@ -2,6 +2,8 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import api from '../utils/api';
 import MenuManagement from './MenuManagement';
+import { mealCreationStore } from '../utils/mealCreationStore';
+jest.mock('../utils/mealCreationStore',()=>({mealCreationStore:{flush:jest.fn(async()=>{}),getSnapshot:()=>({error:''}),load:jest.fn()}}));
 jest.mock('../utils/api',()=>({__esModule:true,default:{get:jest.fn(),post:jest.fn(),put:jest.fn(),delete:jest.fn()}}));
 jest.mock('../components/SupyRecipeSearch',()=>()=>null);
 jest.mock('../components/IngredientTagEditor',()=>()=>null);
@@ -219,6 +221,7 @@ test('Cycle import saves a new dated draft and reopening preserves its private s
   sessionStorage.setItem('matter-admin-v2:workbook-cycle-v2',JSON.stringify({meals,source:'Own.xlsx'}));
   sessionStorage.setItem('matter-admin-v2:weekly-board-v1',JSON.stringify({'Main menu:Week 1':board}));
   const before=[sessionStorage.getItem('matter-admin-v2:workbook-cycle-v2'),sessionStorage.getItem('matter-admin-v2:weekly-board-v1')];
+  mealCreationStore.load.mockResolvedValue({catalogue:{meals,source:'Own.xlsx'},boards:{'Main menu:Week 1':board},revision:1});
   let saved;
   api.get.mockImplementation(async url=>({data:{success:true,data:url==='/menus'?[]:saved}}));
   api.post.mockImplementation(async (_url,payload)=>{
@@ -266,6 +269,7 @@ test('Cycle import supplies a dated title when no title was entered',async()=>{
   const meal={id:'cycle',name:'Chicken',mealKind:'Main meal',mealType:'Chicken',components:[{id:'p',type:'Protein',name:'Chicken',exclusions:[]}]};
   const board=Array.from({length:7},()=>Array.from({length:4},()=>[]));board[0][1]=[{mealId:'cycle'}];
   sessionStorage.setItem('matter-admin-v2:workbook-cycle-v2',JSON.stringify({meals:[meal]}));sessionStorage.setItem('matter-admin-v2:weekly-board-v1',JSON.stringify({'Main menu:Week 1':board}));
+  mealCreationStore.load.mockResolvedValue({catalogue:{meals:[meal]},boards:{'Main menu:Week 1':board},revision:1});
   api.get.mockResolvedValue({data:{success:true,data:[]}});
   const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
   const click=async text=>act(async()=>[...node.querySelectorAll('button')].find(button=>button.textContent.trim()===text).click());

@@ -8,7 +8,8 @@ import api from '../utils/api';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
 import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
 import { copyManagedMenuItem, managedMenuPayload } from '../utils/managedMenuItems';
-import { importSavedCycleMenu } from '../utils/cycleMenuImport';
+import { importCycleMenu } from '../utils/cycleMenuImport';
+import { mealCreationStore } from '../utils/mealCreationStore';
 import { MENU_EXCEL_HEADERS, parseCorePlanFlag, corePlanExcelValue } from '../utils/menuExcelCore';
 import SupyRecipeSearch from '../components/SupyRecipeSearch';
 import IngredientTagEditor from '../components/IngredientTagEditor';
@@ -684,14 +685,23 @@ const MenuManagement = () => {
     setWeeklyItems([]);
   };
 
-  const handleImportCycleMenu = () => {
+  const cycleImportScope = useRef('');
+  cycleImportScope.current = `${showCreateForm}:${editingMenuId}:${cycleWeek}:${formData.startDate}:${formData.endDate}`;
+  const cycleImportRequest = useRef(0);
+  const handleImportCycleMenu = async () => {
     if (editingMenuId) return;
+    const request = ++cycleImportRequest.current, scope = cycleImportScope.current;
+    const current = () => request === cycleImportRequest.current && scope === cycleImportScope.current;
     try {
-      const days = importSavedCycleMenu({ storage: sessionStorage, week: cycleWeek, startDate: formData.startDate, endDate: formData.endDate });
+      await mealCreationStore.flush();
+      if (mealCreationStore.getSnapshot().error) throw new Error(mealCreationStore.getSnapshot().error);
+      const saved = await mealCreationStore.load();
+      if (!current()) return;
+      const days = importCycleMenu({ catalogue: saved.catalogue, boards: saved.boards, week: cycleWeek, startDate: formData.startDate, endDate: formData.endDate });
       if (weeklyItems.some(day => day.items?.length) && !window.confirm('Replace the meals in this unsaved menu draft?')) return;
       setWeeklyItems(days); setEditingSlot(null); setUploadError(null);
       setFormData(current => ({ ...current, title: current.title.trim() ? current.title : `${cycleWeek} · ${current.startDate} – ${current.endDate}` }));
-    } catch (err) { setUploadError(err.message); }
+    } catch (err) { if (current()) setUploadError(err.message); }
   };
 
   // publish=false → save/update as a draft (matches the design's "Save draft").
@@ -1742,7 +1752,7 @@ const MenuManagement = () => {
 
               {!editingMenuId && <div className="border border-dashed border-matter-neutral-300 rounded-lg p-4 bg-matter-neutral-100">
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                  <div><p className="font-semibold text-matter-navy">Create from Cycle Menu</p><p className="text-xs text-matter-neutral-600">Copy a saved cycle week from this browser tab into a new Monday–Sunday menu draft.</p></div>
+                  <div><p className="font-semibold text-matter-navy">Create from Cycle Menu</p><p className="text-xs text-matter-neutral-600">Copy a saved cycle week into a new Monday–Sunday menu draft. The library and cycle remain unchanged.</p></div>
                   <div className="flex gap-2"><select aria-label="Cycle week" value={cycleWeek} onChange={event => setCycleWeek(event.target.value)} className="px-3 py-2 text-sm bg-white border border-matter-neutral-300 rounded-lg"><option>Week 1</option><option>Week 2</option></select><button type="button" onClick={handleImportCycleMenu} className="px-3 py-2 text-sm bg-matter-navy text-white rounded-lg hover:bg-matter-blueblack">Create from Cycle Menu</button></div>
                 </div>
               </div>}
