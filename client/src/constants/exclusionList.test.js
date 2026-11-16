@@ -30,3 +30,14 @@ test('allergy matching handles full ingredient names, plurals and declared categ
 test('a free claim never suppresses an explicit matching allergen', () => {
   expect(allergenMatchesAny('Gluten', ['Gluten Free Flour', 'Gluten'])).toBe(true);
 });
+
+test('Raw Onion requires the full phrase while Onion remains a general exclusion', () => {
+  for (const term of ['Onion', 'Cooked Onion', 'Caramelized Onion', 'Onion Sauce']) {
+    expect(exclusionMatchesAny('Raw Onion', [term])).toBe(false);
+  }
+  for (const term of ['Raw Onion', 'RAW ONION', 'Salad with Raw Onion']) {
+    expect(exclusionMatchesAny('Raw Onion', [term])).toBe(true);
+  }
+  expect(exclusionMatchesAny('Onion', ['Raw Onion'])).toBe(true);
+  expect(allergenMatchesAny('Onion', ['Raw Onion'])).toBe(true);
+});
