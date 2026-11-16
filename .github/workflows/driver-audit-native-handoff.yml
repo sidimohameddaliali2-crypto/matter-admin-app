@@ -8,6 +8,8 @@ on:
         type: choice
         options:
           - inspect
+          - pause-builder
+          - resume-builder
         default: inspect
       expected_deployed_sha:
         description: Exact current application commit on the host
@@ -36,7 +38,7 @@ jobs:
           set -euo pipefail
           [[ "$EXPECTED_DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ ]]
           printf 'code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-handoff.mjs)" >> "$GITHUB_OUTPUT"
-      - name: Inspect actual target and collector roots
+      - name: Run reviewed handoff operation
         uses: appleboy/ssh-action@v1.2.0
         env:
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
