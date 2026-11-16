@@ -119,6 +119,22 @@ test('sync only permits reclamation while its current implementation matches the
   assert.equal(driverAuditReplicaRetentionStatus(true, null, digest('6')), 'proof-required');
 });
 
+test('changing heavy-work admission invalidates the saved retention qualification', async t => {
+  const { driverAuditRetentionImplementation, driverAuditReplicaRetentionStatus } = await import('./driverAuditRetention.js');
+  const { root } = await fixture(t);
+  const source = fileURLToPath(new URL('../', import.meta.url));
+  await Promise.all(['services', 'scripts', 'vendor'].map(directory =>
+    fs.cp(path.join(source, directory), path.join(root, directory), { recursive: true })));
+  const before = await driverAuditRetentionImplementation(root);
+  const receipt = { replicaGcEnabled: true, gcRestoreReceiptSha256: digest('5'), gcImplementationSha256: before };
+  assert.equal(driverAuditReplicaRetentionStatus(true, receipt, before), 'qualified');
+
+  await fs.appendFile(path.join(root, 'services/driverAuditHeavyWork.js'), '\n// Changed admission implementation.\n');
+  const after = await driverAuditRetentionImplementation(root);
+  assert.notEqual(after, before);
+  assert.equal(driverAuditReplicaRetentionStatus(true, receipt, after), 'proof-stale');
+});
+
 function proofFixture() {
   return {
     version: 1, scope: 'isolated-loopback-Mongo-only', implementationSha256: digest('5'),
