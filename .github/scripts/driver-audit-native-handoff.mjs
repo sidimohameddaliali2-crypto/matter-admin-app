@@ -60,6 +60,39 @@ async function inspect(appRoot) {
     const source = createCloudState({ rpc: createHostedRpc({ secret }) });
     phase = 'source-head';
     const collector = await source.read('collector-state');
+    phase = 'target-metadata';
+    const control = await connection.db.collection('driverAuditControl').findOne({ _id: 'head' });
+    const optional = async relative => {
+      try { return JSON.parse(await readPrivateDriverAuditSource(path.join(syncRoot, relative), 1024 * 1024)); }
+      catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    };
+    const pointer = await optional('work/current.private.json');
+    const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
+    const revision = value => Number.isSafeInteger(value) && value > 0 ? value : undefined;
+    const safe = value => value ? { keys: Object.keys(value).filter(key => /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)).slice(0, 40), collectorRevision: revision(value.collectorRevision),
+      sourceRevision: revision(value.sourceRevision), basis: digest(value.basis), sourceBasis: digest(value.sourceBasis),
+      manifestSha256: digest(value.manifestSha256), privateRoot: typeof value.privateRoot === 'string'
+        && value.privateRoot.startsWith(syncRoot + '/work/attempts/') ? value.privateRoot : undefined,
+      generation: digest(value.generation), source: value.source ? { revision: revision(value.source.revision) } : undefined } : null;
+    const workspaces = [];
+    const wanted = new Set([pointer?.privateRoot, pointer?.previous?.privateRoot].filter(Boolean));
+    for (const directory of wanted) {
+      const relative = path.relative(syncRoot, path.dirname(directory));
+      if (!/^work\/attempts\/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(relative)) {
+        throw Error('Unexpected candidate metadata path');
+      }
+      workspaces.push({ relative, accepted: safe(await optional(relative + '/accepted.private.json')),
+        directSeed: safe(await optional(relative + '/direct-seed.private.json')),
+        retired: safe(await optional(relative + '/retired-workspace.private.json')) });
+    }
+    const code = await readPrivateDriverAuditSource(path.join(config.codeRoot, 'integration/cloud/automatic-release.mjs'), 1024 * 1024);
+    console.log(JSON.stringify({ status: 'target-metadata', sourceRevision: collector.revision,
+      targetDatabase: connection.db.databaseName, mongo: await readDriverAuditDataCapacity(connection.db),
+      mongoLocation: mongoLocation(process.env.MONGODB_URI, new Set(['localhost', '127.0.0.1', '::1', os.hostname(),
+        ...Object.values(os.networkInterfaces()).flatMap(rows => (rows || []).map(row => row.address))])),
+      serving: { current: safe(control?.head), previous: safe(control?.head?.previous),
+        currentManifest: digest(control?.head?.directImport?.manifestSha256), previousManifest: digest(control?.head?.previous?.directImport?.manifestSha256) },
+      pointer: safe(pointer), previousPointer: safe(pointer?.previous), workspaces, builderModuleSha256: hash(code) }));
     phase = 'collector-census';
     const census = await collectDriverAuditReceiptRoots({ db: connection.db,
       documents: [{ key: 'collector-state', revision: collector.revision, body_text: collector.body }], syncRoot });
