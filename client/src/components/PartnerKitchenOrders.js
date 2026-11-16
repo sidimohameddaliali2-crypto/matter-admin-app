@@ -1,6 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
-import api from '../utils/api';
-import { useSocket } from '../contexts/SocketContext';
+import React, { useState } from 'react';
+import usePartnerKitchenOrders from '../lib/usePartnerKitchenOrders';
 
 const LABELS = { main: 'Main', snack: 'Snack', bowl: 'Bowl', 'wraps-buns': 'Wraps/Buns', oats: 'Oats' };
 const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Dubai' });
@@ -15,35 +14,9 @@ export const partnerKitchenCsv = (data, counting) => {
 // Both kitchen pages read the same date-scoped production feed. No copying
 // partner quantities into customer selections or applying customer macros.
 export default function PartnerKitchenOrders({ date, counting = false }) {
-  const { socket } = useSocket();
   const [localDate, setLocalDate] = useState(today);
   const selectedDate = date || localDate;
-  const [state, setState] = useState({ date: '', data: null, loading: true, error: '' });
-  const refreshRef = useRef(() => {});
-  useEffect(() => {
-    let alive = true, version = 0;
-    const load = async () => {
-      const current = ++version;
-      setState({ date: selectedDate, data: null, loading: true, error: '' });
-      try {
-        const result = await api.get('/menus/kitchen-partner-orders', { params: { date: selectedDate } });
-        const data = result.data?.data;
-        if (!result.data?.success || data?.date !== selectedDate || !Array.isArray(data.orders) || !Array.isArray(data.counts)) throw new Error('Partner kitchen orders could not be verified.');
-        if (alive && current === version) setState({ date: selectedDate, data, loading: false, error: '' });
-      } catch (error) {
-        if (alive && current === version) setState({ date: selectedDate, data: null, loading: false, error: error.response?.data?.message || error.message || 'Could not load partner orders.' });
-      }
-    };
-    const changed = event => { if (!event?.date || event.date === selectedDate) load(); };
-    refreshRef.current = load;
-    load();
-    socket?.on('partner:ordersChanged', changed);
-    socket?.on('connect', load);
-    const timer = setInterval(load, 30000); // Recover missed events or a disconnected socket.
-    return () => { alive = false; clearInterval(timer); socket?.off('partner:ordersChanged', changed); socket?.off('connect', load); };
-  }, [selectedDate, socket]);
-
-  const data = state.date === selectedDate ? state.data : null;
+  const { data, refresh, ...state } = usePartnerKitchenOrders(selectedDate);
   const exportCsv = () => {
     if (!data || state.loading || state.error) return;
     const url = URL.createObjectURL(new Blob(['\ufeff', partnerKitchenCsv(data, counting)], { type: 'text/csv;charset=utf-8;' }));
@@ -60,7 +33,7 @@ export default function PartnerKitchenOrders({ date, counting = false }) {
         </div>
         <div className="flex flex-wrap gap-2">
           {!date && <label className="text-sm text-slate-700">Partner delivery date <input type="date" aria-label="Partner delivery date" value={localDate} onChange={e => { if (e.target.value) setLocalDate(e.target.value); }} className="rounded-lg border p-2" /></label>}
-          <button type="button" onClick={() => refreshRef.current()} className="rounded-lg border px-3 py-2 text-sm">Refresh partner orders</button>
+          <button type="button" onClick={refresh} className="rounded-lg border px-3 py-2 text-sm">Refresh partner orders</button>
           <button type="button" disabled={!data?.orderCount || state.loading || !!state.error} onClick={exportCsv} className="rounded-lg bg-lime-200 px-3 py-2 text-sm font-semibold disabled:opacity-50">Export partner {counting ? 'counts' : 'list'} CSV</button>
         </div>
       </div>
@@ -81,4 +54,18 @@ export default function PartnerKitchenOrders({ date, counting = false }) {
       </article>)}</div>}
     </section>
   );
+}
+
+
+export function PartnerKitchenCounts({ state }) {
+  const { data, loading, error } = state;
+  return <section aria-label="Partner order" className="kitchen-count-group mt-5">
+    <div className="kitchen-group-heading" style={{gridTemplateColumns: '1fr'}}><div><h3>Partner order</h3><strong>{data?.totalQuantity || 0}</strong><span>portions</span></div></div>
+    {loading && <p role="status" className="p-5 text-sm">Loading partner orders…</p>}
+    {error && <p role="alert" className="p-5 text-sm text-red-700">{error}</p>}
+    {data && !data.counts.length && <p className="p-5 text-sm">No submitted partner orders for this date.</p>}
+    {data?.counts.map(item => <div key={item.itemId} className="grid grid-cols-[80px_1fr] items-center gap-4 border-b p-5">
+      <strong className="kitchen-portion-number">{item.quantity}</strong><div className="kitchen-count-dish">{item.name}<div className="text-xs text-slate-500">{LABELS[item.mealType] || item.mealType}</div></div>
+    </div>)}
+  </section>;
 }

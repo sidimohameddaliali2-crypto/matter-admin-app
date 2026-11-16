@@ -16,7 +16,9 @@ const loadXLSX = () => {
   return xlsxModulePromise;
 };
 import api from '../utils/api';
-import PartnerKitchenOrders from '../components/PartnerKitchenOrders';
+import { PartnerKitchenCounts } from '../components/PartnerKitchenOrders';
+import usePartnerKitchenOrders from '../lib/usePartnerKitchenOrders';
+import { loadPartnerKitchenOrders, partnerCountingRows } from '../lib/partnerKitchenData';
 import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
 import {
@@ -47,6 +49,12 @@ const KitchenCounting = () => {
   const [loadingMenus, setLoadingMenus] = useState(false);
   const [selectedMenuId, setSelectedMenuId] = useState('');
   const [selectedDate, setSelectedDate] = useState('');
+  const [partnerOnlyDate, setPartnerOnlyDate] = useState('');
+  const productionDate = partnerOnlyDate || selectedDate;
+  const partnerOrders = usePartnerKitchenOrders(productionDate);
+  const [exportError, setExportError] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const exportInFlight = useRef(false);
   const [loading, setLoading] = useState(false);
   const [loadProgress, setLoadProgress] = useState({ done: 0, total: 0 });
   const [error, setError] = useState('');
@@ -54,7 +62,7 @@ const KitchenCounting = () => {
   const nutritionCacheRef = useRef(new Map());
   const requestGuard = useRef(createKitchenRequestGuard());
   const activeScope = useRef('');
-  activeScope.current = `${selectedMenuId}:${selectedDate}`;
+  activeScope.current = partnerOnlyDate ? `partner:${productionDate}` : `${selectedMenuId}:${productionDate}`;
   const [loadedScope, setLoadedScope] = useState('');
 
   useEffect(() => {
@@ -83,15 +91,17 @@ const KitchenCounting = () => {
   }, [selectedMenuId]);
 
   const changeKitchenDate = date => {
+    setPartnerOnlyDate('');
     if (date === selectedDate) return;
     requestGuard.current.cancel();
     setLoadedScope('');
     setSelectedDate(date);
+    setExportError('');
   };
 
   const automaticScope = useKitchenCurrentScope({ menus, menuId: selectedMenuId, date: selectedDate,
     onMenu: id => { requestGuard.current.cancel(); setLoadedScope(''); setSelectedDate(''); setSelectedMenuId(id); },
-    onDate: changeKitchenDate,
+    onDate: date => { if (!partnerOnlyDate) changeKitchenDate(date); },
   });
 
   const selectedMenu = useMemo(
@@ -306,28 +316,30 @@ const KitchenCounting = () => {
   };
 
   const exportToExcel = async () => {
-    if (loading || error || loadedScope !== `${selectedMenuId}:${selectedDate}`) return;
-    assertKitchenExportReady(customerEntries);
-    if (countRows.length === 0) return;
-    const rows = countRows.map((r) => ({
-      Category: CATEGORY_LABEL[r.category] || r.category,
-      'Meal Name': r.mealName,
-      Count: r.count,
-      'Total Protein Weight (g)': Math.round(r.totalProteinWeight),
-      'Total Carb Weight (g)': Math.round(r.totalCarbWeight),
-      'Total Veg Weight (g)': Math.round(r.totalVegWeight)
-    }));
-    const XLSX = await loadXLSX();
-    const worksheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Counting');
-    XLSX.writeFile(workbook, `kitchen-counting-${selectedDate || 'export'}.xlsx`);
+    if (exportInFlight.current || !productionDate || (!partnerOnlyDate && (loading || error || loadedScope !== `${selectedMenuId}:${selectedDate}`))) return;
+    const scope = partnerOnlyDate ? `partner:${productionDate}` : `${selectedMenuId}:${productionDate}`;
+    exportInFlight.current = true; setExporting(true); setExportError('');
+    try {
+      if (!partnerOnlyDate) assertKitchenExportReady(customerEntries);
+      const partnerData = await loadPartnerKitchenOrders(api, productionDate, () => activeScope.current === scope);
+      const rows = (partnerOnlyDate ? [] : countRows).map(r => ({Category: CATEGORY_LABEL[r.category] || r.category, 'Meal Name': r.mealName, Count: r.count,
+        'Total Protein Weight (g)': Math.round(r.totalProteinWeight), 'Total Carb Weight (g)': Math.round(r.totalCarbWeight), 'Total Veg Weight (g)': Math.round(r.totalVegWeight)}));
+      rows.push(...partnerCountingRows(partnerData));
+      if (!rows.length) return;
+      const XLSX = await loadXLSX();
+      if (activeScope.current !== scope) return;
+      const worksheet = XLSX.utils.json_to_sheet(rows);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Counting');
+      XLSX.writeFile(workbook, `kitchen-counting-${productionDate}.xlsx`);
+    } catch (err) { if (activeScope.current === scope) setExportError(err.response?.data?.message || err.message || 'Download failed. Please retry.'); }
+    finally { exportInFlight.current = false; setExporting(false); }
   };
 
   return (
     <div className="kitchen-workspace">
       <div className="kitchen-workspace-inner">
-        <KitchenWorkspaceHeader counting dateLabel={formatKitchenDay(selectedDate)}>
+        <KitchenWorkspaceHeader counting dateLabel={formatKitchenDay(productionDate)}>
           <div className="kitchen-count-controls">
           <div className="kitchen-step">
             <label htmlFor="kitchen-count-menu" className="mb-2 block text-sm font-semibold text-slate-700">Menu</label>
@@ -362,7 +374,7 @@ const KitchenCounting = () => {
               </select>
               <button
                 type="button"
-                onClick={() => { nutritionCacheRef.current.clear(); loadCounts(); }}
+                onClick={() => { nutritionCacheRef.current.clear(); loadCounts(); partnerOrders.refresh(); }}
                 disabled={!selectedMenuId || !selectedDate}
                 title="Reload counts"
                 className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
@@ -371,12 +383,18 @@ const KitchenCounting = () => {
               </button>
             </div>
           </div>
+          <div className="kitchen-step">
+            <label htmlFor="partner-count-date" className="mb-2 block text-sm font-semibold text-slate-700">Partner-only delivery date</label>
+            <input id="partner-count-date" aria-label="Partner-only delivery date" type="date" value={partnerOnlyDate}
+              onChange={e => {requestGuard.current.cancel(); setPartnerOnlyDate(e.target.value); setSelectedDate(''); setLoadedScope(''); setCustomerEntries([]); setError(''); setExportError('');}}
+              className="w-full rounded-xl border border-slate-300 px-3 py-3 text-sm" />
+          </div>
         </div>
         </KitchenWorkspaceHeader>
         <KitchenAutoScopeControl enabled={automaticScope.enabled} onChange={automaticScope.setEnabled} message={automaticScope.message} />
 
 
-        {!selectedDate && <KitchenEmptyState counting hasMenu={!!selectedMenuId} />}
+        {!productionDate && <KitchenEmptyState counting hasMenu={!!selectedMenuId} />}
         {selectedMenu && selectedDate && !selectionWindow.canAutoAssign && <p role="status" className="rounded-xl bg-amber-50 p-4 text-sm text-amber-900">{selectionWindow.message} Counts can only be confirmed once every active customer has meals.</p>}
         <div className="kitchen-date-chips" aria-label="Delivery dates">{menuDateKeys.map(date => <button type="button" key={date} aria-pressed={selectedDate === date} onClick={() => changeKitchenDate(date)}>{formatDateLabel(date)}</button>)}</div>
 
@@ -392,34 +410,35 @@ const KitchenCounting = () => {
           </div>
         )}
 
-        {!loading && selectedDate && (
+        {(!loading || partnerOnlyDate) && productionDate && (
           <div className="kitchen-count-body">
             <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
               <div>
                 <h2 className="kitchen-section-heading">
-                  Cook counts — {formatDateLabel(selectedDate)}
+                  {partnerOnlyDate ? 'Partner orders' : 'Cook counts'} — {formatDateLabel(productionDate)}
                 </h2>
-                <p className="text-xs text-slate-400 mt-1">{totalMealCount} main meal(s) total, matching Kitchen List.</p>
+                {!partnerOnlyDate && <p className="text-xs text-slate-400 mt-1">{totalMealCount} main meal(s) total, matching Kitchen List.</p>}
               </div>
               <button
                 type="button"
                 onClick={exportToExcel}
-                disabled={loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}` || countRows.length === 0}
+                disabled={exporting || (!partnerOnlyDate && (loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}`)) || (!(partnerOnlyDate ? 0 : countRows.length) && !partnerOrders.data?.counts.length)}
                 className="kitchen-button-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold disabled:opacity-50"
               >
                 <Download size={16} /> Export Excel
               </button>
             </div>
 
-            {countRows.length === 0 ? (
+            {!partnerOnlyDate && (countRows.length === 0 ? (
               <p className="text-sm text-slate-400">{loading ? 'Preparing kitchen counts...' : error ? 'Counts are unavailable until preparation succeeds.' : 'No meals assigned for this date yet.'}</p>
             ) : (
               <KitchenCountingGroups rows={countRows} onDownload={downloadMealCustomerList} />
-            )}
+            ))}
+            <PartnerKitchenCounts state={partnerOrders} />
+            {exportError && <p role="alert" className="text-sm text-red-700">{exportError}</p>}
             <p className="kitchen-table-note">Weights are displayed in kg; Excel exports retain grams. Bars show each dish’s share of its category total. Large breakfasts have their own row.</p>
           </div>
         )}
-        <details className="kitchen-paper-section kitchen-count-paper"><summary>Kitchen Paper</summary><p className="kitchen-table-note">Customer PDF, Word and Excel papers are available in <a href="/kitchen-list">Kitchen List</a>.</p><PartnerKitchenOrders date={selectedDate} counting /></details>
       </div>
     </div>
   );
