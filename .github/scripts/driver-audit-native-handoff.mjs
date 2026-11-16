@@ -96,7 +96,7 @@ async function main() {
       cwd: appRoot, env: { ...process.env, DRIVER_AUDIT_DEPLOY_SHA: expected }, timeout: 240_000, maxBuffer: 65536,
     });
     const status = result.trim();
-    if (!['paused', 'resumed', 'not-registered'].includes(status)) throw Error('Unexpected builder transition');
+    if (!['paused', 'resumed', 'inactive'].includes(status)) throw Error('Unexpected builder transition');
     console.log(JSON.stringify({ status, operation, applicationCommit: expected, dataStoreChanged: false }));
     return;
   }
