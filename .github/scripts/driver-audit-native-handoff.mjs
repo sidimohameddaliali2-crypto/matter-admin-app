@@ -69,7 +69,7 @@ async function inspect(appRoot) {
     const pointer = await optional('work/current.private.json');
     const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : undefined;
     const revision = value => Number.isSafeInteger(value) && value > 0 ? value : undefined;
-    const safe = value => value ? { keys: Object.keys(value).slice(0, 40), collectorRevision: revision(value.collectorRevision),
+    const safe = value => value ? { keys: Object.keys(value).filter(key => /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(key)).slice(0, 40), collectorRevision: revision(value.collectorRevision),
       sourceRevision: revision(value.sourceRevision), basis: digest(value.basis), sourceBasis: digest(value.sourceBasis),
       manifestSha256: digest(value.manifestSha256), privateRoot: typeof value.privateRoot === 'string'
         && value.privateRoot.startsWith(syncRoot + '/work/attempts/') ? value.privateRoot : undefined,
@@ -91,7 +91,7 @@ async function inspect(appRoot) {
       mongoLocation: mongoLocation(process.env.MONGODB_URI, new Set(['localhost', '127.0.0.1', '::1', os.hostname(),
         ...Object.values(os.networkInterfaces()).flatMap(rows => (rows || []).map(row => row.address))])),
       serving: { current: safe(control?.head), previous: safe(control?.head?.previous),
-        currentManifest: control?.head?.directImport?.manifestSha256, previousManifest: control?.head?.previous?.directImport?.manifestSha256 },
+        currentManifest: digest(control?.head?.directImport?.manifestSha256), previousManifest: digest(control?.head?.previous?.directImport?.manifestSha256) },
       pointer: safe(pointer), previousPointer: safe(pointer?.previous), workspaces, builderModuleSha256: hash(code) }));
     phase = 'collector-census';
     const census = await collectDriverAuditReceiptRoots({ db: connection.db,
