@@ -3,7 +3,18 @@ const legacyBoardShape = days => Array.isArray(days) && days.length === 7 && day
 
 export const readLegacyMealDraft = () => {
   try {
-    const catalogue = JSON.parse(sessionStorage.getItem('matter-admin-v2:workbook-cycle-v2'));
+    const read = key => { try { return JSON.parse(sessionStorage.getItem(key)); } catch { return null; } };
+    let catalogue = read('matter-admin-v2:workbook-cycle-v2');
+    const obsoleteSamples = new Set();
+    if (!Array.isArray(catalogue?.meals)) {
+      catalogue = read('matter-admin-v2:workbook-cycle-v1');
+      // The v1 April seed was bundled demo data. Custom meals added alongside
+      // it survive; real later imports (including v2 April files) are retained.
+      if (catalogue?.source === 'April_Cycle_1_Meals_and_Exclusions.xlsx' && Array.isArray(catalogue.meals)) {
+        catalogue.meals.forEach(meal => { if (/^APR1-/.test(meal?.id)) obsoleteSamples.add(meal.id); });
+        catalogue = { ...catalogue, meals: catalogue.meals.filter(meal => !obsoleteSamples.has(meal?.id)), source: '' };
+      }
+    }
     if (!Array.isArray(catalogue?.meals) || !catalogue.meals.length) return undefined;
     let saved;
     try { saved = JSON.parse(sessionStorage.getItem('matter-admin-v2:weekly-board-v1') || '{}') || {}; }
@@ -11,7 +22,7 @@ export const readLegacyMealDraft = () => {
     const boards = {};
     for (const [key, days] of Object.entries(saved)) if (key.startsWith('Main menu:')) {
       if (!legacyBoardShape(days)) continue;
-      try { boards[key] = days.map(groups => groups.map(entries => entries.map(({ mealId, isMatterCore }) => ({ mealId, isMatterCore: !!isMatterCore })))); }
+      try { boards[key] = days.map(groups => groups.map(entries => entries.filter(entry => !obsoleteSamples.has(entry.mealId)).map(({ mealId, isMatterCore }) => ({ mealId, isMatterCore: !!isMatterCore })))); }
       catch { /* A damaged board must not prevent migration of valid meals. */ }
     }
     for (const [key, days] of Object.entries(saved)) if (key.startsWith('Matter Core menu:')) {
@@ -19,6 +30,7 @@ export const readLegacyMealDraft = () => {
       const target = key.replace('Matter Core menu:', 'Main menu:');
       boards[target] ||= Array.from({ length: 7 }, () => Array.from({ length: 4 }, () => []));
       days.forEach((groups, day) => groups.forEach((entries, slot) => entries.forEach(({ mealId }) => {
+        if (obsoleteSamples.has(mealId)) return;
         const existing = boards[target][day][slot].find(entry => entry.mealId === mealId);
         if (existing) existing.isMatterCore = true;
         else boards[target][day][slot].push({ mealId, isMatterCore: true });

@@ -10,8 +10,39 @@ jest.mock('../components/IngredientTagEditor',()=>()=>null);
 jest.mock('html2canvas',()=>jest.fn());
 jest.mock('jspdf',()=>jest.fn());
 const mockExcelRows = jest.fn();
-jest.mock('xlsx-js-style',()=>({utils:{ book_new: () => ({}), aoa_to_sheet: rows => { mockExcelRows(rows); return {}; }, book_append_sheet: () => {} }, writeFile: jest.fn()}));
+const mockUploadRows = jest.fn();
+jest.mock('xlsx-js-style',()=>({read:()=>({Sheets:{Meals:{}},SheetNames:['Meals']}),utils:{sheet_to_json:()=>mockUploadRows(),book_new: () => ({}), aoa_to_sheet: rows => { mockExcelRows(rows); return {}; }, book_append_sheet: () => {} }, writeFile: jest.fn()}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
+
+test.each([false,true])('pending cycle import checks newly uploaded draft and respects replacement confirmation=%s',async replace=>{
+  let releaseCycle,releaseUpload;
+  const confirm=jest.spyOn(window,'confirm').mockReturnValue(replace);
+  const meal={id:'cycle',name:'Cycle dish',mealKind:'Main meal',mealType:'Chicken',components:[{id:'p',type:'Protein',name:'Roast',exclusions:[]}]};
+  const board=Array.from({length:7},()=>Array.from({length:4},()=>[]));board[0][1]=[{mealId:'cycle',isMatterCore:false}];
+  mealCreationStore.load.mockImplementationOnce(()=>new Promise(resolve=>{releaseCycle=()=>resolve({catalogue:{meals:[meal]},boards:{'Main menu:Week 1':board},revision:1});}));
+  api.get.mockResolvedValue({data:{success:true,data:[]}});
+  api.post.mockImplementation(async(url,payload)=>({data:{success:true,data:{_id:'saved',...payload}}}));
+  mockUploadRows.mockReturnValue([['MEAL TYPE','INTOLERANCES','DAY','MEAL NAME','CARB','VEG'],['Main','Dairy',1,'Uploaded while loading','Rice','Slaw']]);
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const click=async text=>act(async()=>[...node.querySelectorAll('button')].find(b=>b.textContent.trim()===text).click());
+  const fill=async(input,value)=>act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});
+  try{
+    await act(async()=>root.render(<MenuManagement/>));await click('New menu');
+    await fill(node.querySelector('input[placeholder="Menu Title"]'),'Race test');
+    await fill(node.querySelector('input[aria-label="Menu start date"]'),'2026-11-16');await fill(node.querySelector('input[aria-label="Menu end date"]'),'2026-11-22');
+    await click('Create from Cycle Menu');expect(releaseCycle).toBeDefined();expect(confirm).not.toHaveBeenCalled();
+    const file=node.querySelector('input[type=file]');Object.defineProperty(file,'files',{value:[{arrayBuffer:()=>new Promise(resolve=>{releaseUpload=resolve;})}]});
+    await act(async()=>file.dispatchEvent(new Event('change',{bubbles:true})));
+    // Both operations complete in one batch: the import must see even a draft
+    // update which React has not rendered yet.
+    await act(async()=>{releaseUpload(new ArrayBuffer(0));releaseCycle();});
+    expect(confirm).toHaveBeenCalledTimes(1);expect(confirm).toHaveBeenCalledWith('Replace the meals in this unsaved menu draft?');
+    await click('Save draft');
+    const items=api.post.mock.calls.at(-1)[1].days.flatMap(day=>day.items);
+    expect(items.map(item=>item.mealName)).toEqual([replace?'Cycle dish':'Uploaded while loading']);
+    if(!replace)expect(items[0].intolerances).toBe('Dairy');
+  }finally{await act(async()=>root.unmount());node.remove();confirm.mockRestore();jest.clearAllMocks();}
+});
 
 test('each menu has a whole-menu non-selector button that checks only the clicked menu', async () => {
   api.get.mockImplementation(async url => ({ data: { success: true, data: url === '/menus'

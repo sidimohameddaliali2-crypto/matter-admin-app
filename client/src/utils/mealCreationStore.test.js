@@ -3,6 +3,34 @@ jest.mock('./api',()=>({post:jest.fn(),put:jest.fn()}));
 const initial = () => ({ catalogue: { meals: [], source: '' }, boards: {}, revision: 0 });
 const response = data => ({ data: { success: true, data } });
 
+test('v1 custom meals and both weeks migrate, excluding obsolete April seed meals and their placements only',async()=>{
+  const sample={id:'APR1-001',name:'Bundled sample',components:[]};
+  const custom={id:'PREVIEW-own',name:'Custom meal',components:[{id:'own-p',type:'Protein',name:'Roast',exclusions:['DAIRY'],notes:'Keep this note'}]};
+  const week=()=>Array.from({length:7},()=>Array.from({length:4},()=>[]));
+  const main=week(),core=week(),second=week();main[0][1]=[{mealId:sample.id},{mealId:custom.id}];core[0][1]=[{mealId:sample.id},{mealId:custom.id}];second[4][2]=[{mealId:custom.id,isMatterCore:true}];
+  const catalogue=JSON.stringify({meals:[sample,custom],source:'April_Cycle_1_Meals_and_Exclusions.xlsx'}),boards=JSON.stringify({'Main menu:Week 1':main,'Matter Core menu:Week 1':core,'Main menu:Week 2':second});
+  sessionStorage.clear();sessionStorage.setItem('matter-admin-v2:workbook-cycle-v1',catalogue);sessionStorage.setItem('matter-admin-v2:weekly-board-v1',boards);
+  try{
+    const client={post:jest.fn(async()=>response(initial()))};await createMealCreationStore(client,readLegacyMealDraft).load();
+    const legacy=client.post.mock.calls[0][1].legacy;
+    expect(legacy.catalogue).toEqual({meals:[custom],source:''});
+    expect(legacy.boards['Main menu:Week 1'][0][1]).toEqual([{mealId:custom.id,isMatterCore:true}]);expect(legacy.boards['Main menu:Week 2'][4][2]).toEqual([{mealId:custom.id,isMatterCore:true}]);
+    expect(sessionStorage.getItem('matter-admin-v2:workbook-cycle-v1')).toBe(catalogue);expect(sessionStorage.getItem('matter-admin-v2:weekly-board-v1')).toBe(boards);
+  }finally{sessionStorage.clear();}
+});
+
+test.each([null,'{bad'])('missing or unreadable v2 data falls back to real v1 imports without sample filtering (%s)',v2=>{
+  const catalogue={meals:[{id:'APR1-own',name:'A real imported meal',components:[]}],source:'Own.xlsx'};
+  sessionStorage.clear();sessionStorage.setItem('matter-admin-v2:workbook-cycle-v1',JSON.stringify(catalogue));if(v2!==null)sessionStorage.setItem('matter-admin-v2:workbook-cycle-v2',v2);
+  try{expect(readLegacyMealDraft().catalogue).toEqual(catalogue);}finally{sessionStorage.clear();}
+});
+
+test.each([[[]],[[{id:'APR1-user-import',name:'Actual v2 April import',components:[]}]]])('valid v2 stays authoritative over v1, including an intentionally empty v2 (%s)',meals=>{
+  const v2={meals,source:'April_Cycle_1_Meals_and_Exclusions.xlsx'};
+  sessionStorage.clear();sessionStorage.setItem('matter-admin-v2:workbook-cycle-v1',JSON.stringify({meals:[{id:'old-v1'}],source:'Old.xlsx'}));sessionStorage.setItem('matter-admin-v2:workbook-cycle-v2',JSON.stringify(v2));
+  try{if(meals.length)expect(readLegacyMealDraft().catalogue).toEqual(v2);else expect(readLegacyMealDraft()).toBeUndefined();}finally{sessionStorage.clear();}
+});
+
 test('serializes pending saves across navigation and uses accepted revisions', async () => {
   let release;
   const state=initial();

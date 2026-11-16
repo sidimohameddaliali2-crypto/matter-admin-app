@@ -124,7 +124,14 @@ const MenuManagement = () => {
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [selectedMenu, setSelectedMenu] = useState(null);
   const [copiedLink, setCopiedLink] = useState(null);
-  const [weeklyItems, setWeeklyItems] = useState([]);
+  const [weeklyItems, setWeeklyItemsState] = useState([]);
+  const weeklyItemsRef = useRef([]);
+  // Async imports must see edits queued while the catalogue request is pending.
+  const setWeeklyItems = useCallback(update => {
+    const next = typeof update === 'function' ? update(weeklyItemsRef.current) : update;
+    weeklyItemsRef.current = next;
+    setWeeklyItemsState(next);
+  }, []);
   const [cycleWeek, setCycleWeek] = useState('Week 1');
   const [selectionMenuId, setSelectionMenuId] = useState(null);
   const [menuSelections, setMenuSelections] = useState([]);
@@ -698,7 +705,7 @@ const MenuManagement = () => {
       const saved = await mealCreationStore.load();
       if (!current()) return;
       const days = importCycleMenu({ catalogue: saved.catalogue, boards: saved.boards, week: cycleWeek, startDate: formData.startDate, endDate: formData.endDate });
-      if (weeklyItems.some(day => day.items?.length) && !window.confirm('Replace the meals in this unsaved menu draft?')) return;
+      if (weeklyItemsRef.current.some(day => day.items?.length) && !window.confirm('Replace the meals in this unsaved menu draft?')) return;
       setWeeklyItems(days); setEditingSlot(null); setUploadError(null);
       setFormData(current => ({ ...current, title: current.title.trim() ? current.title : `${cycleWeek} · ${current.startDate} – ${current.endDate}` }));
     } catch (err) { if (current()) setUploadError(err.message); }
