@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { driverAuditNativeBackendSymbol, openDriverAuditDataBackend } from '../services/driverAuditDataBackend.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createDriverAuditSourceScheduler,
@@ -21,6 +22,8 @@ async function childMain(config) {
   if (message?.version !== 1 || message.configSha256 !== config.configSha256) throw new Error('Source child configuration changed.');
   const entrypoint = config.runtime.entrypoints.find(entry => entry.id === message.id);
   if (!entrypoint) throw new Error('Source child schedule is unavailable.');
+  const appDataStore = process.env.DRIVER_AUDIT_DATA_STORE || 'supabase';
+  if (!message.probe && appDataStore !== config.dataStore) throw Error('App and source reporting stores differ.');
   Object.assign(process.env, config.environment);
   const load = async () => {
     const module = await import(pathToFileURL(path.join(config.runtimeRoot, entrypoint.module)).href);
@@ -42,11 +45,20 @@ async function childMain(config) {
       process.send({ version: 1, admitted: true });
       const permit = await run;
       if (permit?.version !== 1 || permit.run !== true) throw new Error('Source execution permit is invalid.');
-      const result = await invokeDriverAuditSourceHandler(await load(), {
-        entrypoint, environment: config.environment,
-        gatewayCredential: new URL(entrypoint.path, 'https://source.invalid').searchParams.get('task') === 'photo-grade'
-          ? config.gatewayCredential : null,
-      });
+      let backend;
+      let result;
+      try {
+        if (config.environment.DRIVER_AUDIT_DATA_STORE === 'mongo') {
+          backend = await openDriverAuditDataBackend();
+          globalThis[driverAuditNativeBackendSymbol] = backend;
+          Object.assign(process.env, config.environment);
+        }
+        result = await invokeDriverAuditSourceHandler(await load(), {
+          entrypoint, environment: config.environment,
+          gatewayCredential: new URL(entrypoint.path, 'https://source.invalid').searchParams.get('task') === 'photo-grade'
+            ? config.gatewayCredential : null,
+        });
+      } finally { await backend?.close(); }
       await send(result);
       // Keep the OS lock until this memory-heavy child has exited.
       process.exit(0);
@@ -117,7 +129,11 @@ async function main() {
   const [flag, file, mode] = process.argv.slice(2);
   if (flag !== '--config' || !path.isAbsolute(file ?? '') || ![undefined, '--check', '--child'].includes(mode)
     || process.argv.length > 5) throw new Error('Invalid source worker arguments.');
+  await import('../loadEnv.js');
   const config = await readDriverAuditSourceConfig(file);
+  if (mode === undefined && (process.env.DRIVER_AUDIT_DATA_STORE || 'supabase') !== config.dataStore) {
+    throw Error('App and source reporting stores differ.');
+  }
   if (mode === '--child') await childMain(config);
   else if (mode === '--check') console.log(JSON.stringify(await checkDriverAuditSource(config)));
   else await runDriverAuditSource(config);

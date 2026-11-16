@@ -1,8 +1,38 @@
 # Driver Reports source worker
 
-The Sidi source worker runs the recovered collector, morning GPS and private-validation handlers in a separate PM2 process named `matter-driver-audit-source`. The existing report builder remains `matter-driver-audit-sync`. Both use the existing source database, archive, journals, budgets and publication rules.
+The Sidi source worker runs the recovered collector, morning GPS and private-validation handlers in a separate PM2 process named `matter-driver-audit-source`. The existing report builder remains `matter-driver-audit-sync`. Both preserve the recovered collection, grading and publication rules. The default storage remains the existing Supabase authority. Native mode moves reporting state and evidence into Sidi's existing MongoDB after a verified handoff.
 
 The source runtime and credentials live under `server/.private/driver-audit-source/<manifest SHA-256>/`. Keep this directory owner-only, with directory mode `0700` and file mode `0600`. The application repository contains the supervisor and its tests. The recovered source, source environment, saved checkpoints and evidence receipts stay private.
+
+## Native MongoDB storage
+
+Use the app's existing `MONGODB_URI`. The source environment declares `DRIVER_AUDIT_DATA_STORE=mongo` and must contain the matching native adapter in its pinned inventory. Keep `MONGODB_URI` and `DRIVER_AUDIT_NATIVE_CAPACITY_BYTES` in the app's server environment. Source staging rejects either setting in the recovered environment, and invocation rejects disagreement between the app and source storage selection.
+
+Native storage requires a transaction-capable replica set or sharded MongoDB deployment. `audit-source-host-check` reports transaction support, database/index allocation, filesystem headroom when available, and the native quota without changing collections. A standalone MongoDB server is not sufficient. The replica-set requirement must be verified on the actual target.
+
+The collections are separate from operational deliveries and from the serving replica. `driverAuditNativeDocuments` preserves exact state keys and revisions. `driverAuditNativeReceipts` retains original event IDs, PostgreSQL request hashes, text and creation clocks. `driverAuditNativeHistorical` preserves original reporting rows and private review responses. `driverAuditNativeFiles` and `driverAuditNativeChunks` hold immutable bytes by content hash. Native control, leases, reservations and archive accounting use dedicated `driverAuditNative*` collections.
+
+Blobs are losslessly compressed and split into 4 MiB chunks, allowing state above MongoDB's document-size limit. Existing matching chunks are verified and reused. Retries cannot overwrite different bytes under the same hash. An explicit `DRIVER_AUDIT_NATIVE_CAPACITY_BYTES` bounds new chunks, including a per-chunk allowance. MongoDB index and collection overhead also needs actual database headroom. The setting is independent of `DRIVER_AUDIT_CAPACITY_BYTES`, which still caps the disposable serving replica at 256 MiB. No quota is silently increased.
+
+The app, source worker and builder use native state and archive reads after activation. Missing native objects fail visibly instead of fetching from Supabase. The source and builder continue sharing the bounded 512 MiB disk cache. Immutable reads and unchanged report sections are reused. Native app/builder reads retain byte and concurrency limits without writing Supabase reader-budget receipts. External API/model policies and native storage reservations remain enforced.
+
+### Stage and compare the original data
+
+`server/scripts/driverAuditMongoMigrate.js` accepts `plan`, `stage` and `verify`, followed by an absolute owner-private profile path and its SHA-256. The profile is version 1 with `targetDatabase`, `capacityBytes` and the four references `documents`, `receipts`, `historical`, `objects`. Each reference is `{ "file": "<private basename>.jsonl", "sha256": "<exact file hash>" }`. Verification also requires the pinned `runtimeRoot` and `runtimeSha256`. Inputs and archive files must be owner-private regular files in the profile directory.
+
+Document rows use the original `{key, revision, body_text}`. Receipt rows preserve all original fields, including `created_at` as its original string so microseconds are retained. Historical rows use `{namespace, body_text}` and allow only `reporting.delivery`, `reporting.issue`, `reporting.retained_row`, `reporting.run`, and `review_private.response`. Archive rows use `{key, bytes}` with original `<SHA-256>.gz` or `<SHA-256>.json` keys. Stage the verified source bytes under those exact basenames.
+
+`plan` reads target metadata and reports missing immutable objects and declared bytes. `stage` imports exact documents, receipts and historical rows and copies only missing archive hashes. It never selects the native authority. An interrupted stage can resume with the same pinned inputs. A final source snapshot may advance an untouched staged head using `previousImportSha256`. This refuses overwriting native edits and supports retry after interruption.
+
+`verify` compares every supplied state document, receipt and historical row, checks collection totals, reads back the declared archive objects, and compares the loaded report and GPS queries. Its result is `staged-data-verified` with `activationPending` and `archiveClosurePending`. This is deliberately a partial check. A supplied object list cannot establish that it includes every historical photo, GPS window, grading receipt and review-linked snapshot. The command never creates an activation parity receipt. Complete closure and the normal staff, grader and saved-source journeys must be independently established from the preserved roots before calling `verifyDriverAuditMongoAuthority`.
+
+### Final authority handoff
+
+Leave the existing authority serving throughout staging. Before the final delta, stop and drain the old collector/grader schedules **and all old review-write endpoints**. Review saves do not use the collector lease. Take and restore-check a fresh final backup after stopping those writers. Import the final snapshot and receipts, verify complete archive closure and compare all results, photos, GPS and every review namespace. Check read/save/retry/reload through the app and qualify the exact Linux host.
+
+`activateDriverAuditMongoAuthority` requires the exact import and parity hashes, no intervening native writes, both old writer fences, drained leases and a final-backup clock within a fresh window of at most 30 minutes. Production native initialization refuses a staged or unverified authority. Set both the app and recovered source to `mongo` only for this verified handoff. Restart the app/sync under the same settings and use the existing source start controls and proofs below. Observe an actual new delivery, photo, GPS update, completed grade and saved review through the app before declaring the migration live.
+
+Stopping the new source worker preserves native state and history. If native writes have occurred, rollback must retain native authority until those new reviews, grades and collector changes have been reconciled and verified into the prior authority. Changing the environment back alone would expose an older journal. Keep the encrypted original backup and avoid archive deletion while final ownership, restoration or required historical links remain unresolved.
 
 ## Host and staging
 

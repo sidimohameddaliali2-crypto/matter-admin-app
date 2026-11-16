@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { stageDriverAuditSource, stageDriverAuditSourceProof } from '../scripts/driverAuditSourceStage.js';
-import { readDriverAuditSourceConfig } from './driverAuditSource.js';
+import { driverAuditSourceDataStore, readDriverAuditSourceConfig } from './driverAuditSource.js';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 
@@ -115,4 +115,15 @@ test('proof staging refuses paths that could change source code or runtime contr
     const compressed = gzipSync(JSON.stringify({ version: 1, files: [{ path: file, sha256: hash(bytes), dataBase64: bytes.toString('base64') }] }));
     await assert.rejects(stageDriverAuditSourceProof({ root: path.dirname(source.configFile), compressed, expectedSha256: hash(compressed) }), /path/i);
   }
+});
+
+test('native source selection requires its adapter and reuses the app connection', () => {
+  const files = [{ path: 'source/integration/hosted/native-backend.mjs' }];
+  assert.equal(driverAuditSourceDataStore(files, {}), 'supabase');
+  assert.equal(driverAuditSourceDataStore(files, { DRIVER_AUDIT_DATA_STORE: 'mongo' }), 'mongo');
+  assert.throws(() => driverAuditSourceDataStore([], { DRIVER_AUDIT_DATA_STORE: 'mongo' }), /does not support/);
+  assert.throws(() => driverAuditSourceDataStore(files, { DRIVER_AUDIT_DATA_STORE: 'other' }), /Unknown/);
+  assert.throws(() => driverAuditSourceDataStore(files, {
+    DRIVER_AUDIT_DATA_STORE: 'mongo', MONGODB_URI: 'another-connection',
+  }), /app database/);
 });

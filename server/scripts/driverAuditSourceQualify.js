@@ -12,6 +12,7 @@ import { verifyAuditBuilder } from '../vendor/driver-audits/integration/cloud/dr
 import { createCloudState } from '../vendor/driver-audits/integration/cloud/cloud-state.mjs';
 import { createHostedRpc } from '../vendor/driver-audits/integration/cloud/rpc.mjs';
 import { createSupabaseArchiveTransport } from '../vendor/driver-audits/integration/hosted/supabase-archive.mjs';
+import { openDriverAuditDataBackend, driverAuditLocalReaderBudget } from '../services/driverAuditDataBackend.js';
 
 const MiB = 1024 * 1024;
 const hashPattern = /^[a-f0-9]{64}$/;
@@ -351,125 +352,132 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
   const entrypoint = config.runtime.entrypoints.find(entry => entry.path === '/api/collector?task=delivery');
   requireQualification(entrypoint, 'Saved source collector schedule is unavailable.');
   const secret = config.environment.MATTER_SUPABASE_SECRET;
-  const rpc = createHostedRpc({ secret });
-  const remote = createSupabaseArchiveTransport({ secret });
-  await remote.assertPrivate();
-  const { readBounded } = createBudgetedAuditArchive({ rpc, state: createCloudState({ rpc }), remote, receiptRoot: config.root,
-    requestBytes: 4096 + 2 * Buffer.byteLength(secret), approvedNovemberRelease: true,
-    approvedNovemberSync: true, approvedNovemberRecovery: true, approvedNovemberOvernight: true });
-  const archive = { readObject: readBounded };
-  const directory = await fs.mkdtemp(path.join(config.root, 'host-qualification-'));
-  const privateRoot = path.dirname(path.dirname(config.root));
-  const { observations, measure } = meter({ apiPid: api.pid, syncPid: sync.pid, directory });
-  const receipt = { version: 1, verified: false, status: 'partial', commit, configSha256: config.configSha256,
-    manifestSha256: config.manifestSha256, environmentSha256: config.environmentReference.sha256,
-    fixtureSha256, nodeExecutable: config.nodeExecutable, nodeVersion: config.nodeVersion,
-    source: null, builder: null, sourceAfterBuilder: null, measurements: observations };
-  const controller = new AbortController();
-  const { signal } = controller;
-  const interrupt = () => controller.abort(Object.assign(new Error('Host qualification interrupted.'), { code: 'interrupted' }));
-  const interrupts = ['SIGTERM', 'SIGINT', 'SIGHUP'];
-  for (const event of interrupts) process.once(event, interrupt);
+  const native = config.environment.DRIVER_AUDIT_DATA_STORE === 'mongo';
+  const backend = native ? await openDriverAuditDataBackend({
+    env: { ...process.env, DRIVER_AUDIT_DATA_STORE: 'mongo' }, staging: true,
+  }) : null;
   try {
-    let archiveCacheDirectory;
-    if (config.archiveCacheDirectory) {
-      if (!hasDriverAuditBuildSpace(await freeDisk(directory), { compact: true })) {
-        throw Object.assign(new Error('Qualification workspace reserve unavailable.'), { code: 'disk' });
+    const rpc = backend?.rpc || createHostedRpc({ secret });
+    const remote = backend?.archive || createSupabaseArchiveTransport({ secret });
+    await remote.assertPrivate();
+    const { readBounded } = createBudgetedAuditArchive({ rpc, state: createCloudState({ rpc }), remote, receiptRoot: config.root,
+      requestBytes: 4096 + 2 * Buffer.byteLength(secret || ''), approvedNovemberRelease: true,
+      approvedNovemberSync: true, approvedNovemberRecovery: true, approvedNovemberOvernight: true,
+      budgetOverride: native ? driverAuditLocalReaderBudget : undefined });
+    const archive = { readObject: readBounded };
+    const directory = await fs.mkdtemp(path.join(config.root, 'host-qualification-'));
+    const privateRoot = path.dirname(path.dirname(config.root));
+    const { observations, measure } = meter({ apiPid: api.pid, syncPid: sync.pid, directory });
+    const receipt = { version: 1, verified: false, status: 'partial', commit, configSha256: config.configSha256,
+      manifestSha256: config.manifestSha256, environmentSha256: config.environmentReference.sha256,
+      fixtureSha256, nodeExecutable: config.nodeExecutable, nodeVersion: config.nodeVersion,
+      source: null, builder: null, sourceAfterBuilder: null, measurements: observations };
+    const controller = new AbortController();
+    const { signal } = controller;
+    const interrupt = () => controller.abort(Object.assign(new Error('Host qualification interrupted.'), { code: 'interrupted' }));
+    const interrupts = ['SIGTERM', 'SIGINT', 'SIGHUP'];
+    for (const event of interrupts) process.once(event, interrupt);
+    try {
+      let archiveCacheDirectory;
+      if (config.archiveCacheDirectory) {
+        if (!hasDriverAuditBuildSpace(await freeDisk(directory), { compact: true })) {
+          throw Object.assign(new Error('Qualification workspace reserve unavailable.'), { code: 'disk' });
+        }
+        archiveCacheDirectory = path.join(directory, 'source-archive-cache');
+        await fs.mkdir(archiveCacheDirectory, { mode: 0o700 });
+        receipt.sourceArchiveCacheDirectory = config.archiveCacheDirectory;
       }
-      archiveCacheDirectory = path.join(directory, 'source-archive-cache');
-      await fs.mkdir(archiveCacheDirectory, { mode: 0o700 });
-      receipt.sourceArchiveCacheDirectory = config.archiveCacheDirectory;
-    }
-    const saved = await stageDriverAuditQualification({ root: directory, fixtureSha256,
-      runtimeManifestSha256: config.manifestSha256, archive, signal });
-    receipt.savedStateSha256 = saved.savedStateSha256;
-    receipt.fixtureArchive = { objects: saved.objects, bytes: saved.objectBytes };
-    async function runSource(phase, retained = [], failPublication = false, measuredPeak = priorSourcePeak) {
+      const saved = await stageDriverAuditQualification({ root: directory, fixtureSha256,
+        runtimeManifestSha256: config.manifestSha256, archive, signal });
+      receipt.savedStateSha256 = saved.savedStateSha256;
+      receipt.fixtureArchive = { objects: saved.objects, bytes: saved.objectBytes };
+      async function runSource(phase, retained = [], failPublication = false, measuredPeak = priorSourcePeak) {
+        signal.throwIfAborted();
+        await measure(phase, retained);
+        if (await memoryAvailable() < measuredPeak + memorySafetyReserve) {
+          throw Object.assign(new Error('Measured source replay exceeds current headroom.'), { code: 'memory' });
+        }
+        const root = path.join(directory, phase);
+        await fs.mkdir(root, { mode: 0o700 });
+        const inputFile = path.join(root, 'input.private.json');
+        await writeDriverAuditSourceState(inputFile, { root, ...saved, runtimeRoot: config.runtimeRoot, entrypoint, failPublication, archiveCacheDirectory });
+        const child = await measureChild({ phase, retained, measure, signal, specification: { mode: 'source', root, inputFile,
+          executable: process.execPath, args: ['--max-old-space-size=3072'], readRoots: [directory, config.runtimeRoot],
+          timeoutMs: entrypoint.maxDurationSeconds * 1000, archiveCacheDirectory } });
+        try {
+          requireQualification(child.result.nodeVersion === config.nodeVersion, 'Qualified source Node version changed.');
+          return { root, result: child.result };
+        } finally { await child.stop(); }
+      }
+      await withDriverAuditHeavyWork({ root: path.join(privateRoot, 'driver-audit-heavy-work'), owner: 'source',
+        signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]) }, async () => {
+        const source = await runSource('source', [], true);
+        receipt.source = source.result;
+        const available = await freeDisk(directory);
+        if (!hasDriverAuditBuildSpace(available, { compact: true })) {
+          receipt.blocked = { phase: 'builder', reason: 'disk', availableBytes: available, requiredBytes: MiB * 1024 };
+          return;
+        }
+        let builderConfiguration;
+        try { builderConfiguration = await builderInputs(sync); }
+        catch { receipt.blocked = { phase: 'builder', reason: 'configuration' }; return; }
+        const { builder, compact, executable, nodeVersion, args } = builderConfiguration;
+        const diskReserve = { start: (compact ? 1024 : 2560) * MiB, inProgress: (compact ? 256 : 2560) * MiB };
+        if (!hasDriverAuditBuildSpace(available, { compact })) {
+          receipt.blocked = { phase: 'builder', reason: 'disk', availableBytes: available, requiredBytes: diskReserve.start };
+          return;
+        }
+        if (await memoryAvailable() < priorSourcePeak + memorySafetyReserve) {
+          receipt.blocked = { phase: 'builder', reason: 'memory' };
+          return;
+        }
+        const root = path.join(directory, 'builder');
+        await fs.mkdir(root, { mode: 0o700 });
+        const inputFile = path.join(root, 'input.private.json');
+        const loader = archiveForBuilder({ archive, root, signal });
+        let builderChild;
+        try {
+          const workingBaseline = path.join(root, 'baseline');
+          await stageBuilderBaseline(builder.baselineRoot, workingBaseline, builder.baselineManifestSha256, diskReserve.start, signal);
+          await writeDriverAuditSourceState(inputFile, { root, objectsRoot: saved.objectsRoot, sourceRoot: source.root,
+            builder: { ...builder, baselineRoot: workingBaseline, archiveBaseline: builder.baselineRoot }, diskReserve });
+          builderChild = await measureChild({ phase: 'builder', measure, signal, specification: { mode: 'builder', root, inputFile, executable, args,
+            readRoots: [directory, builder.codeRoot, builder.baselineRoot, builder.cacheRoot, builder.initialBaseline, builder.journals.path],
+            timeoutMs: 35 * 60_000, readArchive: loader.read } });
+          requireQualification(builderChild.result.nodeVersion === nodeVersion, 'Managed builder Node version changed.');
+          receipt.builder = { ...builderChild.result, nodeExecutable: executable, nodeArgs: args,
+            rendererSha256: builder.rendererBuild.sha256, journalsSha256: builder.journals.sha256, downloadedArchive: loader.stats() };
+          receipt.sourceAfterBuilder = (await runSource('source-after-builder', [['builder', builderChild.pid]], false, source.result.peakRssBytes)).result;
+          requireQualification(await memoryForProcess(builderChild.pid), 'Builder exited before retained-memory qualification.');
+          requireSharedArchiveCache(config, builder, receipt);
+          receipt.verified = true;
+          receipt.status = 'verified';
+        } catch (error) {
+          receipt.blocked = { phase: receipt.builder ? 'source-after-builder' : 'builder',
+            reason: ['disk', 'memory', 'budget', 'timeout', 'interrupted'].includes(error.code) ? error.code : 'replay' };
+        } finally { await builderChild?.stop(); }
+      });
       signal.throwIfAborted();
-      await measure(phase, retained);
-      if (await memoryAvailable() < measuredPeak + memorySafetyReserve) {
-        throw Object.assign(new Error('Measured source replay exceeds current headroom.'), { code: 'memory' });
-      }
-      const root = path.join(directory, phase);
-      await fs.mkdir(root, { mode: 0o700 });
-      const inputFile = path.join(root, 'input.private.json');
-      await writeDriverAuditSourceState(inputFile, { root, ...saved, runtimeRoot: config.runtimeRoot, entrypoint, failPublication, archiveCacheDirectory });
-      const child = await measureChild({ phase, retained, measure, signal, specification: { mode: 'source', root, inputFile,
-        executable: process.execPath, args: ['--max-old-space-size=3072'], readRoots: [directory, config.runtimeRoot],
-        timeoutMs: entrypoint.maxDurationSeconds * 1000, archiveCacheDirectory } });
-      try {
-        requireQualification(child.result.nodeVersion === config.nodeVersion, 'Qualified source Node version changed.');
-        return { root, result: child.result };
-      } finally { await child.stop(); }
+      const after = await supervisor();
+      noSourceActive(after);
+      const workers = checkedWorkers(after);
+      requireQualification([api, sync].every((row, i) => workers[i].pid === row.pid
+        && workers[i].pm2_env.pm_uptime === row.pm2_env.pm_uptime), 'Managed API or audit sync changed during qualification.');
+    } catch (error) {
+      receipt.verified = false;
+      receipt.status = 'partial';
+      receipt.blocked = { phase: receipt.source ? 'host-readback' : 'source',
+        reason: error.code === 'AUDIT_BUDGET' ? 'budget' : ['disk', 'memory', 'timeout', 'interrupted', 'AUDIT_ADMISSION_CANCELLED'].includes(error.code) ? error.code : 'replay',
+        ...(Number.isSafeInteger(error.line) ? { line: error.line } : {}), ...(error.phase ? { workerPhase: error.phase } : {}) };
+    } finally {
+      for (const event of interrupts) process.off(event, interrupt);
+      await fs.rm(directory, { recursive: true, force: true });
     }
-    await withDriverAuditHeavyWork({ root: path.join(privateRoot, 'driver-audit-heavy-work'), owner: 'source',
-      signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]) }, async () => {
-      const source = await runSource('source', [], true);
-      receipt.source = source.result;
-      const available = await freeDisk(directory);
-      if (!hasDriverAuditBuildSpace(available, { compact: true })) {
-        receipt.blocked = { phase: 'builder', reason: 'disk', availableBytes: available, requiredBytes: MiB * 1024 };
-        return;
-      }
-      let builderConfiguration;
-      try { builderConfiguration = await builderInputs(sync); }
-      catch { receipt.blocked = { phase: 'builder', reason: 'configuration' }; return; }
-      const { builder, compact, executable, nodeVersion, args } = builderConfiguration;
-      const diskReserve = { start: (compact ? 1024 : 2560) * MiB, inProgress: (compact ? 256 : 2560) * MiB };
-      if (!hasDriverAuditBuildSpace(available, { compact })) {
-        receipt.blocked = { phase: 'builder', reason: 'disk', availableBytes: available, requiredBytes: diskReserve.start };
-        return;
-      }
-      if (await memoryAvailable() < priorSourcePeak + memorySafetyReserve) {
-        receipt.blocked = { phase: 'builder', reason: 'memory' };
-        return;
-      }
-      const root = path.join(directory, 'builder');
-      await fs.mkdir(root, { mode: 0o700 });
-      const inputFile = path.join(root, 'input.private.json');
-      const loader = archiveForBuilder({ archive, root, signal });
-      let builderChild;
-      try {
-        const workingBaseline = path.join(root, 'baseline');
-        await stageBuilderBaseline(builder.baselineRoot, workingBaseline, builder.baselineManifestSha256, diskReserve.start, signal);
-        await writeDriverAuditSourceState(inputFile, { root, objectsRoot: saved.objectsRoot, sourceRoot: source.root,
-          builder: { ...builder, baselineRoot: workingBaseline, archiveBaseline: builder.baselineRoot }, diskReserve });
-        builderChild = await measureChild({ phase: 'builder', measure, signal, specification: { mode: 'builder', root, inputFile, executable, args,
-          readRoots: [directory, builder.codeRoot, builder.baselineRoot, builder.cacheRoot, builder.initialBaseline, builder.journals.path],
-          timeoutMs: 35 * 60_000, readArchive: loader.read } });
-        requireQualification(builderChild.result.nodeVersion === nodeVersion, 'Managed builder Node version changed.');
-        receipt.builder = { ...builderChild.result, nodeExecutable: executable, nodeArgs: args,
-          rendererSha256: builder.rendererBuild.sha256, journalsSha256: builder.journals.sha256, downloadedArchive: loader.stats() };
-        receipt.sourceAfterBuilder = (await runSource('source-after-builder', [['builder', builderChild.pid]], false, source.result.peakRssBytes)).result;
-        requireQualification(await memoryForProcess(builderChild.pid), 'Builder exited before retained-memory qualification.');
-        requireSharedArchiveCache(config, builder, receipt);
-        receipt.verified = true;
-        receipt.status = 'verified';
-      } catch (error) {
-        receipt.blocked = { phase: receipt.builder ? 'source-after-builder' : 'builder',
-          reason: ['disk', 'memory', 'budget', 'timeout', 'interrupted'].includes(error.code) ? error.code : 'replay' };
-      } finally { await builderChild?.stop(); }
-    });
-    signal.throwIfAborted();
-    const after = await supervisor();
-    noSourceActive(after);
-    const workers = checkedWorkers(after);
-    requireQualification([api, sync].every((row, i) => workers[i].pid === row.pid
-      && workers[i].pm2_env.pm_uptime === row.pm2_env.pm_uptime), 'Managed API or audit sync changed during qualification.');
-  } catch (error) {
-    receipt.verified = false;
-    receipt.status = 'partial';
-    receipt.blocked = { phase: receipt.source ? 'host-readback' : 'source',
-      reason: error.code === 'AUDIT_BUDGET' ? 'budget' : ['disk', 'memory', 'timeout', 'interrupted', 'AUDIT_ADMISSION_CANCELLED'].includes(error.code) ? error.code : 'replay',
-      ...(Number.isSafeInteger(error.line) ? { line: error.line } : {}), ...(error.phase ? { workerPhase: error.phase } : {}) };
-  } finally {
-    for (const event of interrupts) process.off(event, interrupt);
-    await fs.rm(directory, { recursive: true, force: true });
-  }
-  receipt.checkedAt = new Date().toISOString();
-  const receiptFile = path.join(config.root, 'qualification-' + fixtureSha256 + '.private.json');
-  await writeDriverAuditSourceState(receiptFile, receipt);
-  return { ...receipt, receiptSha256: driverAuditSourceHash(await readPrivateDriverAuditSource(receiptFile)) };
+    receipt.checkedAt = new Date().toISOString();
+    const receiptFile = path.join(config.root, 'qualification-' + fixtureSha256 + '.private.json');
+    await writeDriverAuditSourceState(receiptFile, receipt);
+    return { ...receipt, receiptSha256: driverAuditSourceHash(await readPrivateDriverAuditSource(receiptFile)) };
+  } finally { await backend?.close(); }
 }
 
 function requireSharedArchiveCache(config, builder, receipt) {

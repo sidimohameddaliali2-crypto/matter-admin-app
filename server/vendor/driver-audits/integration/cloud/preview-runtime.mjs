@@ -30,11 +30,12 @@ export function createImportedAuditRuntime(options){
  const url=new URL(options.origin);if(url.origin!==options.origin||!(url.protocol==='https:'||url.hostname==='127.0.0.1'&&url.protocol==='http:'))throw Error('Invalid audit integration origin');
  return buildPreviewRuntime({...options,roadsKey:null},true);
 }
-async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allowedEmail,additionalAllowedEmails=[],privateRoot,packageOverride,authOverride,stateOverride,transportOverride,roadsKey=process.env.MATTER_PREVIEW_ROADS_KEY,local=false,reviewNamespace=PREVIEW_NAMESPACE,afterResponse,automaticFeed=false,automaticRefresh=false,onAuthenticatedRequest,auditImportStatus,auditSyncStatus,publicPathPrefix='',staffRenderer,remoteReadsBudgeted=false,staffReportFrame=false,isRetiredAuditGeneration},staffIntegration){
+async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allowedEmail,additionalAllowedEmails=[],privateRoot,packageOverride,authOverride,stateOverride,rpcOverride,transportOverride,roadsKey=process.env.MATTER_PREVIEW_ROADS_KEY,local=false,reviewNamespace=PREVIEW_NAMESPACE,afterResponse,automaticFeed=false,automaticRefresh=false,onAuthenticatedRequest,auditImportStatus,auditSyncStatus,publicPathPrefix='',staffRenderer,remoteReadsBudgeted=false,staffReportFrame=false,isRetiredAuditGeneration},staffIntegration){
  if(typeof staffReportFrame!=='boolean'||staffReportFrame&&(!staffIntegration||publicPathPrefix!=='/api/reporting'))throw Error('Trusted staff report frame required');
  if(typeof remoteReadsBudgeted!=='boolean'||remoteReadsBudgeted&&!staffIntegration)throw Error('Trusted remote archive accounting required');
  if(auditImportStatus!==undefined&&(!staffIntegration||typeof auditImportStatus!=='function'))throw Error('Trusted audit import status required');
  if(auditSyncStatus!==undefined&&(!staffIntegration||typeof auditSyncStatus!=='function'))throw Error('Trusted audit sync status required');
+ if(rpcOverride!==undefined&&(!staffIntegration||typeof rpcOverride!=='function'))throw Error('Trusted audit data transport required');
  if(publicPathPrefix!==''&&(!staffIntegration||publicPathPrefix!=='/api/reporting'))throw Error('Trusted audit route prefix required');
  if(automaticFeed&&!local&&!packageOverride)throw Error('Automatic hosted feed requires a verified package');
  if(local&&!/^http:\/\/127\.0\.0\.1:\d+$/.test(origin))throw Error('Local test must stay loopback-only');
@@ -48,7 +49,7 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
  const readAsync=async name=>{if(!has(name)||!Object.hasOwn(manifest,name))throw Error('File outside preview manifest');const bytes=packageOverride?await packageOverride.readAsync(name):read(name);if(!Buffer.isBuffer(bytes)||sha(bytes)!==manifest[name])throw Error('Preview file integrity failure');return bytes;};
  const json=name=>JSON.parse(read(name)),publication=json('publication.private.json'),identity=json('identities.private.json'),index=JSON.parse(gunzipSync(read('gps-index.private.json.gz'))),maps=json('maps.private.json');
  if(packageOverride&&(packageOverride.generation&&packageOverride.generation!==publication.head.manifest.sha256||packageOverride.reportHash&&packageOverride.reportHash!==publication.head.reportHash))throw Error('Preview package head mismatch');
- const rpc=createHostedRpc({secret}),rawState=stateOverride||createCloudState({rpc}),state=namespaceState(rawState,reviewNamespace),transport=previewArchiveTransport({remote:transportOverride||createSupabaseArchiveTransport({secret}),has,read,readAsync});
+ const rpc=rpcOverride||createHostedRpc({secret}),rawState=stateOverride||createCloudState({rpc}),state=namespaceState(rawState,reviewNamespace),transport=previewArchiveTransport({remote:transportOverride||createSupabaseArchiveTransport({secret}),has,read,readAsync});
  const repository=await createCloudRepository({stateStore:{read:async()=>({revision:publication.revision||0,body:JSON.stringify(publication)})},transport,key:'frozen-preview',cacheBytes:96*1024*1024}).pin(),head=await repository.getHead();
  const access=createHostedAccess({rpc}),auth=authOverride||createHostedAuth({supabaseUrl:'https://trhhjfgfmxofxhnzocks.supabase.co',publishableKey,cookieKey,membership:access.membership,sessionActive:access.sessionActive,cookieName:'__Host-matter_preview'});
  const login=createPasswordLogin({supabaseUrl:'https://trhhjfgfmxofxhnzocks.supabase.co',publishableKey,allowedEmail,additionalAllowedEmails,throttle:createLoginThrottle({stateStore:state})});

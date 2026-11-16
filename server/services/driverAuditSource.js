@@ -145,6 +145,18 @@ async function readPinnedJson(reference, label) {
 
 export const DRIVER_AUDIT_SOURCE_CACHE_ENV = 'MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY';
 
+export function driverAuditSourceDataStore(files, environment) {
+  const kind = environment.DRIVER_AUDIT_DATA_STORE || 'supabase';
+  requireSource(['supabase', 'mongo'].includes(kind), 'Unknown source reporting data store.');
+  if (kind === 'mongo') {
+    requireSource(files.some(file => file.path === 'source/integration/hosted/native-backend.mjs'),
+      'The source runtime does not support the app native data store.');
+    requireSource(environment.MONGODB_URI === undefined && environment.DRIVER_AUDIT_NATIVE_CAPACITY_BYTES === undefined,
+      'Native source jobs use the app database connection and storage allowance.');
+  }
+  return kind;
+}
+
 export function driverAuditSourceArchiveCacheDirectory(root, files, environment) {
   const directory = environment[DRIVER_AUDIT_SOURCE_CACHE_ENV];
   const supportsCache = files.some(file => file.path === 'source/integration/hosted/archive-read-cache.mjs');
@@ -177,6 +189,7 @@ export async function readDriverAuditSourceConfig(file) {
       && typeof value === 'string' && value.length <= 16384 && !value.includes('\0')),
   'Invalid source environment.');
   const archiveCacheDirectory = driverAuditSourceArchiveCacheDirectory(config.root, runtime.files, environment);
+  const dataStore = driverAuditSourceDataStore(runtime.files, environment);
   // Runtime configuration contains source credentials only. Node loader and
   // process options remain controlled by the app's supervised runner.
   requireSource(!Object.keys(environment).some(key => ['NODE_OPTIONS', 'NODE_PATH', 'PATH', 'HOME', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES'].includes(key)),
@@ -200,7 +213,7 @@ export async function readDriverAuditSourceConfig(file) {
   requireSource(environment.MATTER_PHOTO_GRADE_ENABLED !== '1' || gatewayCredential,
     'Enabled photo grading requires a qualified Gateway credential.');
   return { ...config, file, configSha256: driverAuditSourceHash(bytes), runtime,
-    environmentReference: config.environment, environment, gatewayCredential, archiveCacheDirectory };
+    environmentReference: config.environment, environment, gatewayCredential, archiveCacheDirectory, dataStore };
 }
 
 export async function verifyDriverAuditSourceRelease(config, reference, now = new Date()) {

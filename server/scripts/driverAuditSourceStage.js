@@ -5,6 +5,7 @@ import { gunzipSync } from 'node:zlib';
 import {
   driverAuditSourceHash,
   driverAuditSourceArchiveCacheDirectory,
+  driverAuditSourceDataStore,
   readPrivateDriverAuditSource,
   requirePrivateDriverAuditSourceDirectory,
   verifyDriverAuditSource,
@@ -76,6 +77,7 @@ export async function stageDriverAuditSource({ sourceRoot, compressed, expectedB
   await requirePrivateDriverAuditSourceDirectory(sourceRoot);
   const target = path.join(sourceRoot, expectedManifestSha256);
   driverAuditSourceArchiveCacheDirectory(target, manifest.files, environment);
+  driverAuditSourceDataStore(manifest.files, environment);
   const staging = path.join(sourceRoot, '.staging-' + expectedBundleSha256);
   const environmentSha256 = driverAuditSourceHash(environmentBytes);
   const expectedReceipt = { version: 1, bundleSha256: expectedBundleSha256, manifestSha256: expectedManifestSha256,

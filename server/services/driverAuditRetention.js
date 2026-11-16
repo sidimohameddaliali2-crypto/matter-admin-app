@@ -9,6 +9,10 @@ const digest = value => createHash('sha256').update(value).digest('hex');
 const implementationFiles = [
   'services/driverAuditGarbageCollection.js',
   'services/driverAuditHeavyWork.js',
+  'services/driverAuditDataBackend.js',
+  'services/driverAuditMongoArchive.js',
+  'services/driverAuditMongoRpc.js',
+  'services/driverAuditMongoImport.js',
   'services/driverAuditBuildRecipe.js',
   'services/driverAuditDirectImport.js',
   'services/driverAuditReplica.js',

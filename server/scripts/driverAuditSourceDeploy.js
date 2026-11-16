@@ -14,6 +14,7 @@ import {
 } from '../services/driverAuditSource.js';
 import { checkDriverAuditSource } from './driverAuditSource.js';
 import { stageDriverAuditSource, stageDriverAuditSourceProof } from './driverAuditSourceStage.js';
+import { readDriverAuditDataCapacity } from '../services/driverAuditDataBackend.js';
 
 const exec = promisify(execFile);
 const serverRoot = path.resolve(fileURLToPath(new URL('../', import.meta.url)));
@@ -146,7 +147,21 @@ async function inspectHost(shell, commit) {
   const disk = await fs.statfs(appRoot);
   const memory = await fs.readFile('/proc/meminfo', 'utf8').catch(() => '');
   const available = /^MemAvailable:\s+(\d+) kB$/m.exec(memory);
-  return { status: 'host-checked', deployedSha: commit, platform: process.platform, architecture: process.arch, nodes, processes, archiveCacheDirectory,
+  let mongo = { configured: false };
+  await import('../loadEnv.js');
+  const uri = shell.MONGODB_URI || process.env.MONGODB_URI;
+  if (uri) {
+    const { default: mongoose } = await import('mongoose');
+    const connection = mongoose.createConnection(uri, {
+      autoCreate: false, autoIndex: false, maxPoolSize: 1, serverSelectionTimeoutMS: 10000,
+    });
+    try {
+      await connection.asPromise();
+      mongo = { configured: true, ...await readDriverAuditDataCapacity(connection.db) };
+    } catch { mongo = { configured: true, available: false }; }
+    finally { await connection.close(); }
+  }
+  return { status: 'host-checked', deployedSha: commit, platform: process.platform, architecture: process.arch, nodes, processes, archiveCacheDirectory, mongo,
     freeDiskBytes: disk.bavail * disk.bsize, freeMemoryBytes: available ? Number(available[1]) * 1024 : os.freemem() };
 }
 

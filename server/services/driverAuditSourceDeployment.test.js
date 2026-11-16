@@ -94,6 +94,16 @@ test('source host check runs read-only and an ordinary deployment keeps an absen
     await fs.copyFile(fileURLToPath(new URL('../scripts/' + file, import.meta.url)), path.join(server, 'scripts', file));
   }
   await fs.copyFile(fileURLToPath(new URL('./driverAuditSource.js', import.meta.url)), path.join(server, 'services/driverAuditSource.js'));
+  for (const name of ['driverAuditDataBackend.js', 'driverAuditMongoArchive.js', 'driverAuditMongoRpc.js']) {
+    await fs.copyFile(fileURLToPath(new URL('./' + name, import.meta.url)), path.join(server, 'services', name));
+  }
+  for (const name of ['cloud/rpc.mjs', 'hosted/supabase-archive.mjs']) {
+    const target = path.join(server, 'vendor/driver-audits/integration', name);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.copyFile(fileURLToPath(new URL('../vendor/driver-audits/integration/' + name, import.meta.url)), target);
+  }
+  await fs.copyFile(fileURLToPath(new URL('../loadEnv.js', import.meta.url)), path.join(server, 'loadEnv.js'));
+  await fs.symlink(fileURLToPath(new URL('../node_modules', import.meta.url)), path.join(server, 'node_modules'));
   const bin = path.join(root, 'bin');
   await fs.mkdir(bin);
   const commit = 'a'.repeat(40);
