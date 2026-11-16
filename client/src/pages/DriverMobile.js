@@ -46,6 +46,7 @@ import { syncOfflineData, setupAutoSync, setupAutoRetry, onSyncStatusChange, ret
 import { useSyncStatus, getSyncStatusIndicator } from '../hooks/useSyncStatus';
 import api from '../utils/api';
 import HandoffCard from '../components/driver/HandoffCard';
+import DeliveryAddressDetails from '../components/driver/DeliveryAddressDetails';
 import BagHandoverPanel from '../components/driver/BagHandoverPanel';
 import DriverSyncSummary from '../components/driver/DriverSyncSummary';
 import { motion } from 'framer-motion';
@@ -4225,6 +4226,7 @@ const DriverMobile = () => {
                 <div>
                   <p className="text-gray-900 font-bold text-lg">Address</p>
                   <p className="text-gray-900 font-bold text-lg">{currentDelivery.address}</p>
+                  <DeliveryAddressDetails delivery={currentDelivery} />
                 </div>
               </div>
 
@@ -5013,6 +5015,8 @@ const DriverMobile = () => {
                         {delivery.address}
                       </p>
 
+                      <DeliveryAddressDetails delivery={delivery} />
+
                       {delivery.combinedSunday && (
                         <div className="bg-indigo-50 border border-indigo-300 rounded-lg p-2 mb-3">
                           <p className="text-xs text-indigo-900 font-semibold">📦 Sunday's delivery included — bring 2 days' worth.</p>
@@ -5127,6 +5131,8 @@ const DriverMobile = () => {
                           {delivery.address}
                         </p>
                       )}
+
+                      <DeliveryAddressDetails delivery={delivery} />
 
                       {delivery.combinedSunday && (
                         <div className="bg-indigo-50 border border-indigo-300 rounded-lg p-2 mb-3">

@@ -111,6 +111,10 @@ export function buildMatterDeliverySnapshot(sub, dateKey, customer = null) {
       street: useAddr.street ?? null,
       additionalDetails: useAddr.additional_details ?? null,
       sourceCategory: useAddr.category ?? null,
+      category: useAddr.category ?? null,
+      unit: useAddr.unit ?? null,
+      additional_details: useAddr.additional_details ?? null,
+      coordinates: useAddr.coordinates ?? undefined,
       locationType: ['villa', 'apartment'].includes(String(useAddr.category || '').toLowerCase())
         ? (String(useAddr.category).toLowerCase() === 'villa' ? 'Villa' : 'Apartment') : null,
       building: useAddr.building ?? null,
