@@ -1,6 +1,7 @@
 import { matchesMatterSubscription, enrichSelectionsWithNutrition, fetchBreakfastPresets, fetchSnackPresets, toBreakfastPresetState, toSnackPresetState, getCustomerName, getDateKey } from './kitchenData';
 import { calculateKitchenListEntry, isMatterCoreDoubleDay } from '../utils/kitchenListCalculations';
 import { assertKitchenExportReady, prepareKitchenSelections } from '../utils/kitchenIntegrity';
+import { applyKitchenSnackRules, fetchKitchenSnackRules } from './kitchenSnackRules';
 
 export const verifiedKitchenRoster = (response) => {
   if (response?.success !== true || response.complete === false || !Array.isArray(response.data)) {
@@ -74,9 +75,11 @@ export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => 
   const breakfastPreset = toBreakfastPresetState(rawBreakfastPreset);
   const snackPreset = toSnackPresetState(rawSnackPreset);
   const single = dayKeys.length === 1 ? preparations.get(dayKeys[0]) : null;
-  const selections = await enrichSelectionsWithNutrition(api, response.data.data || [], { current: new Map() }, { extended: true, matterInputs: [...preparations.values()].flatMap((result) => result.cached ? [] : result.data?.kitchenInputs || []),
+  const enrichedSelections = await enrichSelectionsWithNutrition(api, response.data.data || [], { current: new Map() }, { extended: true, matterInputs: [...preparations.values()].flatMap((result) => result.cached ? [] : result.data?.kitchenInputs || []),
     productionScope: single && !single.cached && single.data?.rosterComplete === true
       ? { complete: true, date: dayKeys[0], roster: single.data.kitchenRoster } : null });
+  const rules = await fetchKitchenSnackRules(api, single?.data?.kitchenSnackRules);
+  const selections = applyKitchenSnackRules(enrichedSelections, rules, snackPreset.presetsByName);
   const rosters = new Map();
   for (const date of dayKeys) {
     const preparation = preparations.get(date);

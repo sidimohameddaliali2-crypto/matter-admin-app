@@ -65,6 +65,8 @@ export const kitchenPreparationFailure = (summary, dateKey) => {
     const result = summary[key];
     if (!result) continue;
     if (result.error) failures.push({ stage: label, reason: String(result.error) });
+    for (const failure of result.snackRuleFailures || []) failures.push({ stage: label, mealType: 'snack', count: 1,
+      reason: `${failure.name || 'Customer'} (Matter customer ID ${failure.customerId || 'unresolved'}): ${failure.reason}` });
     for (const [counter, mealType] of Object.entries({ skippedNoOption: 'main', skippedNoOptions: 'snack', skippedBreakfastNoOption: 'breakfast', skippedSnackNoOption: 'snack' })) {
       const count = Number(result[counter]) || 0;
       if (count > 0) failures.push({ stage: label, mealType, count,

@@ -5,6 +5,7 @@ import MenuItem from '../models/MenuItem.js';
 import Customer from '../models/Customer.js';
 import Record from '../models/MenuSelectionRecord.js';
 import Snack from '../models/KitchenSnackPreset.js';
+import SnackRule from '../models/KitchenSnackRule.js';
 import matter from '../services/matterApiService.js';
 import { runAssignMainMeals, runAssignSnacks, runAssignMatterCoreMeals } from './menus.js';
 import { preparationHasFailures } from '../services/kitchenPreparation.js';
@@ -80,6 +81,7 @@ for (const date of ['2026-10-31', '2026-11-01']) {
     } }));
     t.mock.method(Record, 'find', async () => records);
     t.mock.method(Snack, 'findOne', () => query({ presetsByName: { 'safe bite': { C: 15, P: 10, F: 6 } } }));
+    t.mock.method(SnackRule, 'find', () => query([]));
     t.mock.method(matter, 'getKitchenNutrition', () => assert.fail('Use supplied fixture nutrition; no network'));
     const makeQuery = MenuItem.find.bind(MenuItem);
     let executions = 0, reads = 0;
@@ -142,7 +144,9 @@ test('assignment fills only missing quantities, respects skips, and queries only
   }
 });
 
-test('a saved quantity-two snack already covers a two-snack entitlement', async () => {
+test('a saved quantity-two snack already covers a two-snack entitlement', async t => {
+  t.mock.method(SnackRule, 'find', () => ({ lean: async () => [] }));
+  t.mock.method(Snack, 'findOne', () => ({ lean: async () => null }));
   const original = { menu: WeeklyMenu.findById, records: Record.find, customers: Customer.find, nutrition: matter.getKitchenNutrition };
   const date = '2026-10-20';
   WeeklyMenu.findById = () => ({ select() { return this; }, lean: async () => ({ snackOptionsByDate: {} }) });

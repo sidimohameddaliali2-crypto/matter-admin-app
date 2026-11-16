@@ -27,6 +27,7 @@ beforeEach(async () => {
   pending = {}; fail = false;
   api.post.mockImplementation(async () => ({ data: { success: true, preparation: 'completed' } }));
   api.get.mockImplementation(async (path, config) => {
+    if (path === '/menus/kitchen-snack-rules') return { data: { success: true, data: { rules: [] } } };
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', startDate: A, endDate: B }] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [entry] } };
     if (path.includes('kitchen-inputs')) return { data: { data: { plan_name: 'Custom', macros: { carbohydrates: 60, protein: 60, fat: 20 }, active_delivery_dates: [A, B] } } };

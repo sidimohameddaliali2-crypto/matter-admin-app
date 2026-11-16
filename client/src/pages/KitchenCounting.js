@@ -1,4 +1,5 @@
 import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady } from '../utils/kitchenIntegrity';
+import { applyKitchenSnackRules, fetchKitchenSnackRules } from '../lib/kitchenSnackRules';
 import useKitchenSelectionWindow from '../lib/useKitchenSelectionWindow';
 import { assertKitchenRosterCovered, verifiedKitchenRoster, hasKitchenDeliveryOnDate } from '../lib/kitchenSnapshot';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
@@ -159,6 +160,8 @@ const KitchenCounting = () => {
           ? { complete: true, date: selectedDate, roster: preparation.data.kitchenRoster } : null,
         onEach: () => { completed++; if (current() && (completed === rawSelections.length || Date.now() - progressAt >= 100)) { progressAt = Date.now(); setLoadProgress({ done: completed, total: rawSelections.length }); } }
       });
+      const rules = await fetchKitchenSnackRules(api, preparation.data?.kitchenSnackRules);
+      const ruledSelections = applyKitchenSnackRules(enrichedSelections, rules, snackState.presetsByName);
 
       // Owner (2026-10-09): a customer with a saved selection but no active
       // Matter delivery on this date (paused / skipped / not started / ended)
@@ -171,10 +174,10 @@ const KitchenCounting = () => {
         ? { data: { success: true, data: source.kitchenRoster } }
         : await api.get('/matter/subscriptions/delivery-on-date', { params: { date: selectedDate }, timeout: 180000 });
       const deliverySubs = verifiedKitchenRoster(deliveryRes.data);
-      assertKitchenRosterCovered(enrichedSelections, deliverySubs, selectedDate);
+      assertKitchenRosterCovered(ruledSelections, deliverySubs, selectedDate);
       const hasDelivery = (entry) => hasKitchenDeliveryOnDate(entry, deliverySubs, selectedDate);
 
-      const computed = enrichedSelections.filter(hasDelivery).map((entry) => {
+      const computed = ruledSelections.filter(hasDelivery).map((entry) => {
         const mealCount = Array.isArray(entry.selectedMeals)
           ? entry.selectedMeals.filter((m) => String(m.mealType || '').toLowerCase() !== 'breakfast').length
           : 0;

@@ -90,6 +90,7 @@ test('paper snapshot waits for preparation and uses the same calculator as kitch
   const api = {
     post: async () => { calls.push('prepared'); return { data: { success: true, preparation: 'completed' } }; },
     get: async (path) => {
+      if (path === '/menus/kitchen-snack-rules') return { data: { success: true, data: { rules: [] } } };
       calls.push(path);
       if (path.endsWith('/selections')) return { data: { success: true, data: [{ ...customer, selectedMeals: [meal] }] } };
       if (path.includes('kitchen-inputs')) return { data: { data: nutrition } };
@@ -189,6 +190,7 @@ test('paper snapshot retains meals only on dates with an active Matter delivery'
   const api = {
     post: async () => ({ data: { success: true, preparation: 'completed' } }),
     get: async (path, options) => {
+      if (path === '/menus/kitchen-snack-rules') return { data: { success: true, data: { rules: [] } } };
       if (path.endsWith('/selections')) return { data: { success: true, data: [{ ...customer, selectedMeals: [{ ...meal, date: day1 }, { ...meal, date: day2 }] }] } };
       if (path.includes('kitchen-inputs')) return { data: { success: true, data: { plan_name: 'Custom', macros: { carbohydrates: 38, protein: 32, fat: 10 }, active_delivery_dates: [day2] } } };
       if (path.includes('delivery-on-date')) return { data: { success: true, data: options.params.date === day2 ? [{ email: customer.email, meal_frequency: 1 }] : [] } };
@@ -215,6 +217,7 @@ test('export reuses its fresh preparation roster instead of running a second Mat
   const api = {
     post: async () => ({ data: { success: true, preparation: 'completed', data: { kitchenInputs: [nutrition], kitchenRoster: [{ subscription_id: 'source-fixture', email: customer.email, meal_frequency: 1 }], rosterComplete: true } } }),
     get: jest.fn(async (path) => {
+      if (path === '/menus/kitchen-snack-rules') return { data: { success: true, data: { rules: [] } } };
       if (path.endsWith('/selections')) return { data: { success: true, data: [{ ...customer, selectedMeals: [meal] }] } };
       if (path.includes('/matter/')) throw new Error('Duplicate Matter read');
       return { data: { success: true, data: {} } };

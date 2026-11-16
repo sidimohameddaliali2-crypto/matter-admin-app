@@ -1036,6 +1036,7 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
 
   return {
     customerId: customer?.customerId,
+    snackRule: customer?.snackRule,
     calculationStatus: 'complete', inputErrors: [], formulaVersion: KITCHEN_FORMULA_VERSION,
     nutritionResolvedAt: customer?.nutritionResolvedAt || null,
     matterSourceUpdatedAt: customer?.matterSourceUpdatedAt ?? null,

@@ -6,6 +6,7 @@ import Record from '../models/MenuSelectionRecord.js';
 import Snapshot from '../models/KitchenProductionSnapshot.js';
 import Breakfast from '../models/KitchenBreakfastPreset.js';
 import Snack from '../models/KitchenSnackPreset.js';
+import SnackRule from '../models/KitchenSnackRule.js';
 import Archive from '../models/MenuSelectionArchive.js';
 import matter from './matterApiService.js';
 import { beginKitchenState } from './kitchenProductionSnapshot.js';
@@ -62,6 +63,7 @@ test('open preview preserves saved choices, adds transient missing rows, and nev
   t.mock.method(Archive, 'find', () => query([]));
   t.mock.method(Breakfast, 'findOne', () => query(null));
   t.mock.method(Snack, 'findOne', () => query(null));
+  t.mock.method(SnackRule, 'find', () => query([]));
   t.mock.method(matter, 'findSubscriptionsWithDeliveryOnDate', async () => [
     { customer_id: '42', subscription_id: 'renewed', email: saved.email },
     { customer_id: '43', subscription_id: 'missing', email: 'missing@example.invalid', name: 'Missing customer' },
