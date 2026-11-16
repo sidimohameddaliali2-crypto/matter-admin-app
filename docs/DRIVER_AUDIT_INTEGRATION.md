@@ -1,5 +1,7 @@
 # Driver audits from the existing reporting system
 
+The separate Sidi-owned source-worker migration and its private staging, verification, cutover and rollback controls are documented in [Driver Reports source worker](driver-audits/source-worker.md). Existing report sync remains its own process.
+
 This is a disabled release candidate. Merging to `main` deploys production. Do not merge, enable imports, activate grading schedules or publish a report without separate release approval.
 
 ## What moves, and what stays authoritative

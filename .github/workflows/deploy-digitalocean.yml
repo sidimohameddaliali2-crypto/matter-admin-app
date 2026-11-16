@@ -16,6 +16,32 @@ on:
           - audit-rollback
           - audit-builder-upgrade
           - audit-builder-rollback
+          - audit-source-check
+          - audit-source-host-check
+          - audit-source-stage
+          - audit-source-proof-stage
+          - audit-source-start
+          - audit-source-pause
+          - audit-source-resume
+          - audit-source-rollback
+      audit_source_manifest_sha256:
+        description: SHA-256 of the reviewed private source runtime manifest
+        type: string
+      audit_source_bundle_sha256:
+        description: SHA-256 of the compressed private source staging bundle
+        type: string
+      audit_source_proof_sha256:
+        description: SHA-256 of the compressed private proof envelope
+        type: string
+      source_node_executable:
+        description: Absolute host path of the qualified source Node executable
+        type: string
+      audit_source_release_file:
+        description: Owner-private host path to the source cutover receipt
+        type: string
+      audit_source_release_sha256:
+        description: SHA-256 of the source cutover receipt
+        type: string
       audit_builder_from:
         description: SHA-256 of the previously active builder
         type: string
@@ -110,6 +136,12 @@ jobs:
           RETAINED_GENERATIONS: ${{ inputs.audit_retained_generations }}
           SYNC_MEMORY: ${{ inputs.sync_min_free_memory_bytes }}
           SYNC_DISK: ${{ inputs.sync_min_free_disk_bytes }}
+          SOURCE_MANIFEST: ${{ inputs.audit_source_manifest_sha256 }}
+          SOURCE_RELEASE_FILE: ${{ inputs.audit_source_release_file }}
+          SOURCE_RELEASE_SHA: ${{ inputs.audit_source_release_sha256 }}
+          SOURCE_NODE: ${{ inputs.source_node_executable }}
+          SOURCE_BUNDLE_SHA: ${{ inputs.audit_source_bundle_sha256 }}
+          SOURCE_PROOF_SHA: ${{ inputs.audit_source_proof_sha256 }}
           REPORTING_SECRET: ${{ inputs.operation != 'audit-rollback' && secrets.DRIVER_AUDIT_SUPABASE_SECRET || '' }}
         run: |
           set -euo pipefail
@@ -126,6 +158,29 @@ jobs:
             exit 1
           fi
           case "$OPERATION" in
+            audit-source-host-check) exit 0 ;;
+            audit-source-*)
+              if [[ ! "$SOURCE_MANIFEST" =~ ^[a-f0-9]{64}$ ]]; then
+                echo "The reviewed source manifest is required."
+                exit 1
+              fi
+              if [ "$OPERATION" != audit-source-proof-stage ] && [[ "$SOURCE_NODE" != /* ]]; then
+                echo "The qualified source Node executable path is required."
+                exit 1
+              fi
+              if [ "$OPERATION" = audit-source-stage ] && [[ ! "$SOURCE_BUNDLE_SHA" =~ ^[a-f0-9]{64}$ ]]; then
+                echo "The private compressed source bundle hash is required."
+                exit 1
+              fi
+              if [ "$OPERATION" = audit-source-proof-stage ] && [[ ! "$SOURCE_PROOF_SHA" =~ ^[a-f0-9]{64}$ ]]; then
+                echo "The private proof envelope hash is required."
+                exit 1
+              fi
+              if [ "$OPERATION" = audit-source-start ] && [[ ! "$SOURCE_RELEASE_SHA" =~ ^[a-f0-9]{64}$ || "$SOURCE_RELEASE_FILE" != /* ]]; then
+                echo "The private source cutover receipt path and hash are required."
+                exit 1
+              fi
+              exit 0 ;;
             audit-rollback) exit 0 ;;
             audit-builder-upgrade|audit-builder-rollback)
               if [[ ! "$BUILDER_FROM" =~ ^[a-f0-9]{64}$ || ! "$BUILDER_TO" =~ ^[a-f0-9]{64}$ || "$BUILDER_FROM" = "$BUILDER_TO" ]]; then
@@ -178,7 +233,12 @@ jobs:
             fi
 
             sync_paused=0
-            trap 'if [ "$sync_paused" = 1 ]; then echo "The previously supervised audit worker remains paused because deployment or recovery failed."; fi' EXIT
+            source_paused=0
+            trap 'if [ "$sync_paused" = 1 ] || [ "$source_paused" = 1 ]; then echo "A previously supervised audit worker remains paused because deployment or recovery failed."; fi' EXIT
+            if [ -f server/scripts/driverAuditSourceDeploy.js ]; then
+              source_state=$(DRIVER_AUDIT_DEPLOY_SHA="$(git rev-parse HEAD)" node server/scripts/driverAuditSourceDeploy.js deploy-source-pause)
+              if [ "$(printf '%s' "$source_state" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>console.log(JSON.parse(s).status))')" = paused ]; then source_paused=1; fi
+            fi
             if [ -f server/scripts/driverAuditDeploy.js ]; then
               worker_state=$(DRIVER_AUDIT_DEPLOY_SHA="$(git rev-parse HEAD)" node server/scripts/driverAuditDeploy.js deploy-worker-pause)
               if [ "$worker_state" = paused ]; then sync_paused=1; fi
@@ -216,6 +276,95 @@ jobs:
               DRIVER_AUDIT_DEPLOY_SHA="$DEPLOY_SHA" node server/scripts/driverAuditDeploy.js deploy-worker-resume
               sync_paused=0
             fi
+            if [ "$source_paused" = 1 ]; then
+              DRIVER_AUDIT_DEPLOY_SHA="$DEPLOY_SHA" node server/scripts/driverAuditSourceDeploy.js deploy-source-resume
+              source_paused=0
+            fi
+
+      - name: Prepare private source transfer
+        id: source-transfer
+        if: github.event_name == 'workflow_dispatch' && inputs.operation == 'audit-source-stage'
+        shell: bash
+        env:
+          SOURCE_BUNDLE_SHA: ${{ inputs.audit_source_bundle_sha256 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_01: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_01 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_02: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_02 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_03: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_03 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_04: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_04 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_05: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_05 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_06: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_06 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_07: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_07 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_08: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_08 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_09: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_09 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_10: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_10 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_11: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_11 }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_12: ${{ secrets.DRIVER_AUDIT_SOURCE_BUNDLE_12 }}
+          DRIVER_AUDIT_SOURCE_ENVIRONMENT_B64: ${{ secrets.DRIVER_AUDIT_SOURCE_ENVIRONMENT_B64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs/promises';
+          import { createHash, randomUUID } from 'node:crypto';
+          const chunks = Array.from({length: 12}, (_, i) => process.env['DRIVER_AUDIT_SOURCE_BUNDLE_' + String(i + 1).padStart(2, '0')] || '');
+          if (!chunks.every(x => x.length <= 48 * 1024 && /^[A-Za-z0-9+/=]*$/.test(x))) throw Error('Invalid source transfer chunks');
+          const encoded = chunks.join('');
+          const bundle = Buffer.from(encoded, 'base64');
+          if (!encoded || bundle.toString('base64') !== encoded || createHash('sha256').update(bundle).digest('hex') !== process.env.SOURCE_BUNDLE_SHA) throw Error('Source transfer integrity failure');
+          const envEncoded = process.env.DRIVER_AUDIT_SOURCE_ENVIRONMENT_B64 || '';
+          const environment = Buffer.from(envEncoded, 'base64');
+          if (!envEncoded || envEncoded.length > 48 * 1024 || environment.toString('base64') !== envEncoded) throw Error('Invalid source environment transfer');
+          JSON.parse(environment);
+          const token = randomUUID();
+          const dir = '.source-transfer-' + token;
+          await fs.mkdir(dir, {mode: 0o700});
+          await fs.writeFile(dir + '/bundle.private.gz', bundle, {mode: 0o600});
+          await fs.writeFile(dir + '/environment.private.json', environment, {mode: 0o600});
+          await fs.appendFile(process.env.GITHUB_OUTPUT, 'token=' + token + '\ndirectory=' + dir + '\n');
+          NODE
+
+      - name: Prepare private host transfer directory
+        if: github.event_name == 'workflow_dispatch' && inputs.operation == 'audit-source-stage'
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
+          SOURCE_STAGE_TOKEN: ${{ steps.source-transfer.outputs.token }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          envs: DO_APP_PATH,SOURCE_STAGE_TOKEN
+          script: |
+            set -e
+            cd -- "$DO_APP_PATH"
+            node --input-type=module <<'NODE'
+            import fs from 'node:fs/promises';
+            import path from 'node:path';
+            const token = process.env.SOURCE_STAGE_TOKEN;
+            if (!/^[a-f0-9-]{36}$/.test(token || '')) throw Error('Invalid source transfer identity');
+            let root = path.resolve('server');
+            for (const name of ['.private', 'driver-audit-source', 'incoming', token]) {
+              root = path.join(root, name);
+              await fs.mkdir(root, {mode: 0o700}).catch(e => {if (e.code !== 'EEXIST') throw e});
+              const stat = await fs.lstat(root);
+              if (!stat.isDirectory() || stat.mode & 0o077 || stat.uid !== process.getuid() || await fs.realpath(root) !== root) throw Error('Private source transfer directory is unsafe');
+            }
+            NODE
+
+      - name: Transfer private source files
+        if: github.event_name == 'workflow_dispatch' && inputs.operation == 'audit-source-stage'
+        uses: appleboy/scp-action@ff85246acaad7bdce478db94a363cd2bf7c90345 # v1.0.0
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          version: '1.8.0'
+          source: '${{ steps.source-transfer.outputs.directory }}/bundle.private.gz,${{ steps.source-transfer.outputs.directory }}/environment.private.json'
+          target: '${{ secrets.DO_APP_PATH }}/server/.private/driver-audit-source/incoming/${{ steps.source-transfer.outputs.token }}'
+          tar_tmp_path: '${{ secrets.DO_APP_PATH }}/server/.private/driver-audit-source/incoming/${{ steps.source-transfer.outputs.token }}/'
+          strip_components: 1
 
       - name: Run reviewed driver audit operation
         if: github.event_name == 'workflow_dispatch' && inputs.operation != 'deploy'
@@ -235,13 +384,21 @@ jobs:
           DRIVER_AUDIT_RETAINED_GENERATIONS: ${{ inputs.audit_retained_generations }}
           DRIVER_AUDIT_SYNC_MIN_MEMORY: ${{ inputs.sync_min_free_memory_bytes }}
           DRIVER_AUDIT_SYNC_MIN_DISK: ${{ inputs.sync_min_free_disk_bytes }}
+          DRIVER_AUDIT_SOURCE_MANIFEST: ${{ inputs.audit_source_manifest_sha256 }}
+          DRIVER_AUDIT_SOURCE_RELEASE_FILE: ${{ inputs.audit_source_release_file }}
+          DRIVER_AUDIT_SOURCE_RELEASE_SHA256: ${{ inputs.audit_source_release_sha256 }}
+          DRIVER_AUDIT_SOURCE_NODE: ${{ inputs.source_node_executable }}
+          DRIVER_AUDIT_SOURCE_BUNDLE_SHA256: ${{ inputs.audit_source_bundle_sha256 }}
+          DRIVER_AUDIT_SOURCE_STAGE_TOKEN: ${{ steps.source-transfer.outputs.token }}
+          DRIVER_AUDIT_SOURCE_PROOF_SHA256: ${{ inputs.audit_source_proof_sha256 }}
+          DRIVER_AUDIT_SOURCE_PROOF_B64: ${{ inputs.operation == 'audit-source-proof-stage' && secrets.DRIVER_AUDIT_SOURCE_PROOF_B64 || '' }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 20m
-          envs: DO_APP_PATH,AUDIT_OPERATION,DRIVER_AUDIT_BUILDER_FROM,DRIVER_AUDIT_BUILDER_TO,DRIVER_AUDIT_DEPLOY_SHA,DRIVER_AUDIT_DEPLOY_MANIFEST,DRIVER_AUDIT_DEPLOY_CAPACITY_BYTES,DRIVER_AUDIT_DEPLOY_SECRET,DRIVER_AUDIT_STAFF_GENERATION,DRIVER_AUDIT_STAFF_VERIFICATION,DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256,DRIVER_AUDIT_RETAINED_GENERATIONS,DRIVER_AUDIT_SYNC_MIN_MEMORY,DRIVER_AUDIT_SYNC_MIN_DISK
+          envs: DO_APP_PATH,AUDIT_OPERATION,DRIVER_AUDIT_BUILDER_FROM,DRIVER_AUDIT_BUILDER_TO,DRIVER_AUDIT_DEPLOY_SHA,DRIVER_AUDIT_DEPLOY_MANIFEST,DRIVER_AUDIT_DEPLOY_CAPACITY_BYTES,DRIVER_AUDIT_DEPLOY_SECRET,DRIVER_AUDIT_STAFF_GENERATION,DRIVER_AUDIT_STAFF_VERIFICATION,DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256,DRIVER_AUDIT_RETAINED_GENERATIONS,DRIVER_AUDIT_SYNC_MIN_MEMORY,DRIVER_AUDIT_SYNC_MIN_DISK,DRIVER_AUDIT_SOURCE_MANIFEST,DRIVER_AUDIT_SOURCE_RELEASE_FILE,DRIVER_AUDIT_SOURCE_RELEASE_SHA256,DRIVER_AUDIT_SOURCE_NODE,DRIVER_AUDIT_SOURCE_BUNDLE_SHA256,DRIVER_AUDIT_SOURCE_STAGE_TOKEN,DRIVER_AUDIT_SOURCE_PROOF_SHA256,DRIVER_AUDIT_SOURCE_PROOF_B64
           script: |
             set -e
             cd -- "$DO_APP_PATH"
@@ -250,4 +407,20 @@ jobs:
               echo "Deploy the exact reviewed current commit before running this audit operation."
               exit 1
             fi
-            node server/scripts/driverAuditDeploy.js "$AUDIT_OPERATION"
+            case "$AUDIT_OPERATION" in
+              audit-source-*) node server/scripts/driverAuditSourceDeploy.js "$AUDIT_OPERATION" ;;
+              *) node server/scripts/driverAuditDeploy.js "$AUDIT_OPERATION" ;;
+            esac
+
+      - name: Remove runner source transfer files
+        if: always() && steps.source-transfer.outputs.directory != ''
+        shell: bash
+        env:
+          SOURCE_TRANSFER_DIR: ${{ steps.source-transfer.outputs.directory }}
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs/promises';
+          const dir = process.env.SOURCE_TRANSFER_DIR;
+          if (!/^\.source-transfer-[a-f0-9-]{36}$/.test(dir || '')) throw Error('Invalid cleanup path');
+          await fs.rm(dir, {recursive: true, force: true});
+          NODE
