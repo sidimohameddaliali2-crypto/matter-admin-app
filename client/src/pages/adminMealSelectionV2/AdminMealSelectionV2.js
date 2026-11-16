@@ -5,47 +5,35 @@ import { MealLibrary, MealComposer, CyclePlanner, ComponentLibrary } from './Wor
 import { Panel, SearchBox, DataTable, Notice } from './components';
 import '../../styles/matterChrome.css';
 import './adminMealSelectionV2.css';
+import useMealCreationState from './useMealCreationState';
+import { mealCreationStore } from '../../utils/mealCreationStore';
 const BASE = '/admin/meal-selection-v2';
-const STORAGE = 'matter-admin-v2:workbook-cycle-v2';
-const EMPTY_CYCLE = { meals: [], source: '' };
-
-// Owner: remove the bundled catalogue, retaining locally created meals and
-// imports from other workbooks when upgrading an existing preview session.
-function readCycle() {
-  try {
-    const saved = JSON.parse(sessionStorage.getItem(STORAGE));
-    if (Array.isArray(saved?.meals)) return saved;
-    const previous = JSON.parse(sessionStorage.getItem('matter-admin-v2:workbook-cycle-v1'));
-    if (!Array.isArray(previous?.meals)) return EMPTY_CYCLE;
-    if (previous.source !== 'April_Cycle_1_Meals_and_Exclusions.xlsx') return previous;
-    return { meals: previous.meals.filter(meal => !/^APR1-/.test(meal.id)), source: '' };
-  } catch { return EMPTY_CYCLE; }
-}
 
 export default function AdminMealSelectionV2() {
   const location = useLocation(), navigate = useNavigate();
   const contentRef = useRef(null);
-  const [cycle, setCycle] = useState(readCycle);
+  const alive = useRef(true), view = useRef({ path: location.pathname, version: 0 });
+  if (view.current.path !== location.pathname) view.current = { path: location.pathname, version: view.current.version + 1 };
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const saved = useMealCreationState();
+  const cycle = saved.data?.catalogue;
   const [message, setMessage] = useState('');
   useEffect(() => { contentRef.current?.closest('main')?.scrollTo(0, 0); }, [location.pathname]);
-  useEffect(() => {
-    try {
-      sessionStorage.setItem(STORAGE, JSON.stringify(cycle));
-      // Obsolete sample-only state is no longer used by these pages.
-      ['workbook-cycle-v1', 'ingredients', 'diet', 'picks', 'kitchen-locked'].forEach(key => sessionStorage.removeItem(`matter-admin-v2:${key}`));
-    } catch { /* In-memory editing remains available. */ }
-  }, [cycle]);
+  const importMeals = async catalogue => { await mealCreationStore.save({ catalogue }); setMessage('Meals saved to the library. Existing meals and cycle placements retained.'); };
   const route = location.pathname.slice(BASE.length).split('/').filter(Boolean);
   const page = route[0] || 'meals';
+  if (!cycle || saved.status === 'loading' || saved.status === 'idle') return <div className="av2 av2-integrated"><div className="av2-page-body">{saved.error ? <Notice tone="red">{saved.error}<button onClick={() => mealCreationStore.load().catch(() => {})}>Retry loading meals</button></Notice> : <p role="status">Loading saved meals and cycles…</p>}</div></div>;
   if (!['ingredients', 'recipes', 'components', 'meals', 'weekly-menu', 'kitchen', 'subscriptions'].includes(page)) return <Navigate to={`${BASE}/meals`} replace />;
   return <div className="av2 av2-integrated" ref={contentRef}><div className="av2-page-body">
-    {message && <div className="av2-feedback" role="status">{message}<button aria-label="Dismiss message" onClick={() => setMessage('')}><X size={16} /></button></div>}
-    {page === 'meals' && (route[1] ? <MealComposer key={route[1]} meal={cycle.meals.find(m => m.id === route[1])} isNew={route[1] === 'new'} onSave={meal => {
-      setCycle(current => ({ ...current, meals: current.meals.some(m => m.id === meal.id) ? current.meals.map(m => m.id === meal.id ? meal : m) : [...current.meals, meal] }));
-      setMessage('Meal and component rules saved in this preview session.');
+    {(saved.error || message) && <div className="av2-feedback" role="status">{saved.error || message}<button aria-label="Dismiss message" onClick={() => setMessage('')}><X size={16} /></button></div>}
+    {page === 'meals' && (route[1] ? <MealComposer key={route[1]} meal={cycle.meals.find(m => m.id === route[1])} isNew={route[1] === 'new'} onSave={async meal => {
+      const version = view.current.version;
+      await mealCreationStore.save({ catalogue: { meals: [meal] } });
+      if (!alive.current || version !== view.current.version) return;
+      setMessage('Meal and component rules saved to the library.');
       navigate(`${BASE}/meals`);
-    }} /> : <MealLibrary meals={cycle.meals} source={cycle.source} onImport={setCycle} />)}
-    {page === 'weekly-menu' && <CyclePlanner meals={cycle.meals} source={cycle.source} onImport={setCycle} />}
+    }} /> : <MealLibrary meals={cycle.meals} source={cycle.source} onImport={importMeals} />)}
+    {page === 'weekly-menu' && <CyclePlanner meals={cycle.meals} source={cycle.source} onImport={importMeals} boards={saved.data.boards} revision={saved.data.revision} onSaveBoards={boards => mealCreationStore.save({ boards })} />}
     {page === 'recipes' && <Navigate to={`${BASE}/components`} replace />}
     {page === 'components' && <ComponentLibrary meals={cycle.meals} />}
     {page === 'ingredients' && <EmptyRecords title="Ingredients Management" description="Ingredients from Supy will appear here when connected." headers={['Ingredient Name', 'Category', 'Cost per Gram', 'Allergens', 'Exclusions']} />}

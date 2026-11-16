@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Save, Check, Upload, Copy, History, Eye, X, GripVertical } from 'lucide-react';
 import { Action, Badge, Tabs, SearchBox, Modal, Notice } from './components';
@@ -6,7 +6,6 @@ import { componentName, mealType, mealFormat, cycleSlots } from './workbookMeals
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const GROUPS = ['Breakfast', 'Main', 'Sub', 'Snack'];
-const STORAGE = 'matter-admin-v2:weekly-board-v1';
 const emptyBoard = () => DAYS.map(() => GROUPS.map(() => []));
 const slotFor = meal => mealFormat(meal) === 'Breakfast' ? 0 : mealFormat(meal) === 'Snack' ? 3 : 1;
 function seedBoard(meals) {
@@ -17,9 +16,8 @@ function seedBoard(meals) {
   });
   return board;
 }
-function readDrafts(meals) {
+function readDrafts(meals, saved = {}) {
   try {
-    const saved = JSON.parse(sessionStorage.getItem(STORAGE)) || {};
     const ids = new Set(meals.map(meal => meal.id));
     const boards = {};
     // Fold older separate Core boards into the weekly menu without losing picks.
@@ -40,10 +38,17 @@ function readDrafts(meals) {
   } catch { return {}; }
 }
 
-export default function WeeklyCycleBoard({ meals, source, onImport, importDialog }) {
+export default function WeeklyCycleBoard({ meals, source, onImport, importDialog, initialBoards = {}, revision = 0, onSaveBoards }) {
   const menu = 'Main menu';
   const [week, setWeek] = useState('Week 1');
-  const [boards, setBoards] = useState(() => readDrafts(meals));
+  const [boards, setBoards] = useState(() => readDrafts(meals, initialBoards));
+  const pending = useRef(0), acceptedRevision = useRef(revision);
+  useEffect(() => {
+    if (!pending.current && revision >= acceptedRevision.current) {
+      acceptedRevision.current = revision;
+      setBoards(readDrafts(meals, initialBoards));
+    }
+  }, [initialBoards, meals, revision]);
   const [query, setQuery] = useState(''), [protein, setProtein] = useState(''), [slot, setSlot] = useState('');
   const [showWeekend, setShowWeekend] = useState(false), [importing, setImporting] = useState(false), [history, setHistory] = useState(false);
   const [selected, setSelected] = useState(null), [targetDay, setTargetDay] = useState('0'), [targetSlot, setTargetSlot] = useState('1');
@@ -52,8 +57,21 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
   const key = `${menu}:${week}`;
   const board = boards[key] || (menu === 'Main menu' && week === 'Week 1' ? seedBoard(meals) : emptyBoard());
   const byId = new Map(meals.map(meal => [meal.id, meal]));
-  useEffect(() => { try { sessionStorage.setItem(STORAGE, JSON.stringify(boards)); } catch { /* In-memory preview remains usable. */ } }, [boards]);
-  const changeBoard = update => setBoards(current => ({ ...current, [key]: update(current[key] || (menu === 'Main menu' && week === 'Week 1' ? seedBoard(meals) : emptyBoard())) }));
+  const persistBoards = async updates => {
+    pending.current++;
+    setBoards(current => ({ ...current, ...updates }));
+    try {
+      const saved = await onSaveBoards?.(updates);
+      if (saved?.boards && pending.current === 1) {
+        acceptedRevision.current = saved.revision;
+        setBoards(readDrafts(saved.catalogue.meals, saved.boards));
+      }
+      return true;
+    }
+    catch (error) { setMessage(error.response?.data?.message || error.message || 'Cycle could not be saved.'); return false; }
+    finally { pending.current--; }
+  };
+  const changeBoard = update => persistBoards({ [key]: update(board) });
   const entryCount = board.reduce((total, day) => total + day.flat().filter(entry => byId.has(entry.mealId)).length, 0);
   const library = meals.filter(meal => meal.name.toLowerCase().includes(query.toLowerCase()) && (!protein || mealType(meal) === protein) && (!slot || cycleSlots(meal).includes(Number(slot))));
   const addMeal = (meal, dayIndex, groupIndex) => {
@@ -85,15 +103,15 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
   return <div className="av2-weekly-board">
     <div className="av2-page-heading"><div><h1>Cycle Menu Planner</h1><p>One menu per group of plans. Add meals to each day and tag Matter Core meals.</p></div><Badge>Draft</Badge></div>
     <div className="av2-actions av2-toolbar">
-      <Action icon={Save} onClick={() => { changeBoard(current => current); setMessage('Draft saved in this preview session.'); }}>Save draft</Action>
+      <Action icon={Save} onClick={() => changeBoard(current => current).then(ok => { if (ok) setMessage('Cycle draft saved.'); })}>Save draft</Action>
       <Action primary icon={Check} disabled title="Publishing requires verified live recipe links">Publish</Action>
       <Action icon={Upload} onClick={() => setImporting(true)}>Import meal names</Action>
-      <Action icon={Copy} onClick={() => { const other = week === 'Week 1' ? 'Week 2' : 'Week 1'; setBoards(current => ({ ...current, [`${menu}:${other}`]: JSON.parse(JSON.stringify(board)) })); setWeek(other); setMessage(`Copied draft to ${other}.`); }}>Duplicate week</Action>
+      <Action icon={Copy} onClick={() => { const other = week === 'Week 1' ? 'Week 2' : 'Week 1'; persistBoards({ [`${menu}:${other}`]: JSON.parse(JSON.stringify(board)) }); setWeek(other); setMessage(`Copied draft to ${other}.`); }}>Duplicate week</Action>
       <Action icon={History} onClick={() => setHistory(true)}>History</Action>
       <Link className="av2-action" to="/menu-select-v2"><Eye size={14}/>Preview as customer</Link>
     </div>
     <div className="av2-section-bar"><Tabs values={['Week 1', 'Week 2']} value={week} onChange={setWeek}/><label className="av2-weekend-toggle"><input type="checkbox" checked={showWeekend} onChange={event => setShowWeekend(event.target.checked)}/>Show weekend</label></div>
-    <Notice tone="amber"><strong>Recipe links need review</strong><p>{source ? `This is a local draft from ${source}.` : 'Create or import meals to start planning your menu.'} Publishing is unavailable until live Supy recipe links and dietary data are verified.</p></Notice>
+    <Notice tone="amber"><strong>Recipe links need review</strong><p>{source ? `Saved library: ${source}.` : 'Create or import meals to start planning your menu.'} Publishing is unavailable until live Supy recipe links and dietary data are verified.</p></Notice>
     {message && <div className="av2-feedback" role="status">{message}<button aria-label="Dismiss board message" onClick={() => setMessage('')}><X size={15}/></button></div>}
     <div className={`av2-board-layout ${dragMealId ? 'av2-drag-active' : ''}`}><div className={`av2-board ${showWeekend ? 'av2-full-week' : ''}`}>
       {board.slice(0, showWeekend ? 7 : 5).map((day, di) => <section className={`av2-day ${dropTarget?.day === di && dropTarget.group === null ? 'av2-day-drop-target' : ''}`} key={DAYS[di]} aria-label={`${DAYS[di]} meal drop area`} onDragOver={event => dragOver(event, di)} onDrop={event => drop(event, di)} onDragLeave={dragLeave}>
@@ -122,9 +140,9 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
       {library.map(meal => <button type="button" className={`av2-library-card ${dragMealId === meal.id ? 'av2-library-card-dragging' : ''}`} key={meal.id} draggable onDragStart={event => { event.dataTransfer.setData('application/x-matter-meal', meal.id); event.dataTransfer.effectAllowed = 'copy'; setDragMealId(meal.id); }} onDragEnd={clearDrag} onClick={() => { setSelected(meal); setTargetSlot(String(slotFor(meal))); }}><span className="av2-library-card-title"><GripVertical size={15} aria-hidden="true"/><strong>{meal.name}</strong></span><span><Badge tone="outline">{mealFormat(meal) === 'Main' ? 'Main / Sub' : mealFormat(meal)}</Badge>{mealType(meal) && <Badge>{mealType(meal)}</Badge>}</span><small>{componentName(meal, 'Carb')}</small><small>Drag to a day +</small></button>)}
       {!library.length && <small>No meals match these filters.</small>}
     </aside></div>
-    <p className="av2-table-hint">{entryCount} meal assignments · {menu} · {week} · local preview</p>
+    <p className="av2-table-hint">{entryCount} meal assignments · {menu} · {week} · saved cycle</p>
     {selected && <Modal title={`Add ${selected.name}`} onClose={() => setSelected(null)} footer={<><Action onClick={() => setSelected(null)}>Cancel</Action><Action primary onClick={add}>Add to draft</Action></>}><div className="av2-form-grid"><label>Delivery day<select aria-label="Delivery day" value={targetDay} onChange={event => setTargetDay(event.target.value)}>{DAYS.map((value, index) => <option key={value} value={index}>{value}</option>)}</select></label><label>Meal slot<select aria-label="Meal slot" value={targetSlot} onChange={event => setTargetSlot(event.target.value)}>{cycleSlots(selected).map(index => <option key={index} value={index}>{GROUPS[index]}</option>)}</select></label></div></Modal>}
-    {history && <Modal title="Menu history" onClose={() => setHistory(false)} footer={<Action onClick={() => setHistory(false)}>Close</Action>}><p>{menu} · {week}</p><Notice>No published versions in this local preview. Use Save draft to retain your board changes for this session.</Notice></Modal>}
-    {importing && importDialog(() => setImporting(false), data => { onImport(data); setBoards({}); setWeek('Week 1'); setMessage('Imported meal cycle into the draft board.'); })}
+    {history && <Modal title="Menu history" onClose={() => setHistory(false)} footer={<Action onClick={() => setHistory(false)}>Close</Action>}><p>{menu} · {week}</p><Notice>Cycle drafts are saved. Published weekly menus remain available in Menus.</Notice></Modal>}
+    {importing && importDialog(() => setImporting(false), async data => { await onImport(data); setMessage('Imported meals saved. Existing cycle placements retained.'); })}
   </div>;
 }
