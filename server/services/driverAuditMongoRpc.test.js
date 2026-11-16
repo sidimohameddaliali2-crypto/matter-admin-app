@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createHash,randomUUID} from 'node:crypto';
 import {after,before,test} from 'node:test';
-import {MongoClient} from 'mongodb';
+import {BSON,MongoClient} from 'mongodb';
 import {createDriverAuditMongoArchive} from './driverAuditMongoArchive.js';
 import {verifyDriverAuditMongoAuthority} from './driverAuditMongoImport.js';
 import {createDriverAuditMongoRpc,initializeDriverAuditMongoRpc} from './driverAuditMongoRpc.js';
@@ -176,7 +176,9 @@ test('state payloads above the BSON limit round trip through immutable byte refe
   const row=await db.collection('driverAuditNativeDocuments').findOne({_id:'large-state'});
   assert.equal(typeof row.body_text,'undefined');
   assert.equal(row.body_sha256,hash(body));
-  assert(row.body_ref.size<Buffer.byteLength(body));
+  assert(BSON.calculateObjectSize(row)<16*1024*1024);
+  assert.equal(row.body_ref.plainBytes,Buffer.byteLength(body));
+  assert.equal(row.body_ref.sha256,hash(body));
 });
 
 test('a failed immutable event write rolls back its state, receipt and chunk allocation',{skip},async t=>{
@@ -272,4 +274,82 @@ test('road geometry claims preserve owners, cache hits and expiry without touchi
   assert.deepEqual(await rpc('matter_hosted_preview_road_cache',{...missing,p_action:'release'}),{state:'released'});
   assert.deepEqual(await rpc('matter_hosted_preview_road_cache',{...missing,p_action:'save',p_value:null}),{state:'stale'});
   assert.equal(await db.collection('driverAuditNativeRoadCache').countDocuments({_id:missing.p_key}),0);
+});
+
+test('technical recovery expires old versions without growing immutable evidence or resetting current state', {skip}, async t=>{
+  const {rpc,db,objects}=await fixture(t);
+  const key='photo-grading-budget';
+  const original={attempts:{original:{reservedMicros:1000,status:'reserved'}}};
+  let body,latest;
+  for(let i=0;i<40;i++){
+    body=JSON.stringify({...original,counter:i});
+    latest=stateArgs(key,{expected:i,body});
+    await rpc('matter_hosted_state_cas',latest);
+    await db.collection('driverAuditNativeTechnicalRecords').updateMany({key},{$set:{expires_at:new Date(0)}});
+  }
+  assert.equal((await rpc('matter_hosted_state_read',{p_key:key})).body_text,body);
+  assert.equal(await db.collection('driverAuditNativeChunks').countDocuments(),0);
+  assert.equal(await db.collection('driverAuditNativeReceipts').countDocuments({key}),1);
+  assert.equal(await db.collection('driverAuditNativeTechnicalRecords').countDocuments({key}),1);
+  const usage=await objects.status();
+  assert.ok(usage.usedBytes<16384);
+  const replay=await rpc('matter_hosted_state_cas',latest);
+  assert.equal(replay.replayed,true);
+  assert.equal(replay.body_text,body);
+  await assert.rejects(rpc('matter_hosted_state_cas',stateArgs(key,{expected:0,body:'{"counter":"stale"}'})),e=>e.status===409);
+});
+
+test('a technical read keeps its snapshot while an expired retry payload is reclaimed', {skip}, async t=>{
+  const {rpc,db,objects}=await fixture(t);
+  const key='worker-budget';
+  await rpc('matter_hosted_state_cas',stateArgs(key,{body:'{"originalAttempt":true}'}));
+  await db.collection('driverAuditNativeTechnicalRecords').updateMany({key},{$set:{expires_at:new Date(0)}});
+  let acknowledge,release,paused=false;
+  const observed=new Promise(resolve=>{acknowledge=resolve;});
+  const resume=new Promise(resolve=>{release=resolve;});
+  const collection=db.collection('driverAuditNativeTechnicalChunks');
+  const wrapped=new Proxy(collection,{get(target,field){
+    if(field==='findOne')return async(query,options)=>{
+      if(!paused&&options?.session){paused=true;acknowledge();await resume;}
+      return target.findOne(query,options);
+    };
+    const value=target[field];return typeof value==='function'?value.bind(target):value;
+  }});
+  const reader=createDriverAuditMongoRpc({db:{collection:name=>name==='driverAuditNativeTechnicalChunks'?wrapped:db.collection(name)},client,objects});
+  const pending=reader('matter_hosted_state_read',{p_key:key});
+  await observed;
+  try{await rpc('matter_hosted_state_cas',stateArgs(key,{expected:1,body:'{"originalAttempt":true,"next":true}'}));}
+  finally{release();}
+  assert.equal((await pending).body_text,'{"originalAttempt":true}');
+  assert.equal(await db.collection('driverAuditNativeTechnicalRecords').countDocuments({key}),1);
+  assert.equal((await rpc('matter_hosted_state_read',{p_key:key})).revision,2);
+});
+
+test('only released archive bookkeeping receives expiry and evidence accounting stays durable', {skip}, async t=>{
+  const {rpc,db}=await fixture(t),id=owner(),operation=owner(),key='d'.repeat(64)+'.gz';
+  await rpc('matter_hosted_archive_reserve',{p_id:id,p_reserved_bytes:2048});
+  await rpc('matter_hosted_archive_consume',{p_id:id,p_operation_id:operation,p_bytes:100,p_object_key:key});
+  assert.equal((await db.collection('driverAuditNativeReservations').findOne({_id:id})).expires_at,undefined);
+  assert.equal((await db.collection('driverAuditNativeConsumption').findOne({reservation_id:id})).expires_at,undefined);
+  await rpc('matter_hosted_archive_release',{p_id:id});
+  const saved=await db.collection('driverAuditNativeReservations').findOne({_id:id});
+  assert.ok(saved.expires_at>saved.released_at);
+  assert.equal((await db.collection('driverAuditNativeConsumption').findOne({reservation_id:id})).expires_at.getTime(),saved.expires_at.getTime());
+  assert.equal((await db.collection('driverAuditNativeArchiveControl').findOne({_id:'total'})).used_bytes,100);
+  assert.equal(await db.collection('driverAuditNativeArchiveLedger').countDocuments({_id:key}),1);
+});
+
+test('corrupt native quota counters cannot admit another technical write', {skip}, async t=>{
+  const {rpc,db}=await fixture(t),key='worker-budget';
+  await rpc('matter_hosted_state_cas',stateArgs(key,{body:'{"reserved":true}'}));
+  const control=db.collection('driverAuditNativeControl');
+  const healthy=await control.findOne({_id:'capacity'});
+  const receipts=await db.collection('driverAuditNativeReceipts').countDocuments();
+  for(const patch of [{technicalBytes:-1},{usedBytes:-1},{technicalBytes:healthy.usedBytes+1},{technicalBytes:null}]){
+    await control.replaceOne({_id:'capacity'},{...healthy,...patch});
+    await assert.rejects(rpc('matter_hosted_state_cas',stateArgs(key,{expected:1,body:'{"reserved":false}'})),/allowance|allocation/);
+    assert.equal((await rpc('matter_hosted_state_read',{p_key:key})).body_text,'{"reserved":true}');
+    assert.equal(await db.collection('driverAuditNativeReceipts').countDocuments(),receipts);
+    assert.deepEqual(await control.findOne({_id:'capacity'}),{...healthy,...patch});
+  }
 });

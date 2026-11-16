@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { packDriverAuditMongoTexts } from './driverAuditMongoText.js';
+import { isDriverAuditTechnicalKey } from './driverAuditLiveImport.js';
+import { createDriverAuditTechnicalState } from './driverAuditTechnicalState.js';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const sha256 = /^[a-f0-9]{64}$/;
@@ -25,6 +27,7 @@ export async function importDriverAuditMongoDocuments({ db, client, objects, doc
   requireImport(sha256.test(importSha256 || ''), 'A pinned reporting import is required');
   const control = db.collection('driverAuditNativeControl');
   const heads = db.collection('driverAuditNativeDocuments');
+  const technical = createDriverAuditTechnicalState({ db, objects });
   const previous = await control.findOne({ _id: 'authority' });
   const advance = previous?.status === 'staging' && sha256.test(previousImportSha256 || '')
     && previous.importSha256 === previousImportSha256 && previousImportSha256 !== importSha256;
@@ -72,16 +75,24 @@ export async function importDriverAuditMongoDocuments({ db, client, objects, doc
             && prior.importedRevision === prior.revision && prior.importedBodySha256 === prior.body_sha256,
           'The native reporting document differs from the pinned original');
         }
-        const body_ref = await objects.putBytes(gzipSync(Buffer.from(row.body_text)), { session });
-        const replacement = { revision: row.revision, body_sha256: bodySha256, body_ref,
+        const recovery = isDriverAuditTechnicalKey(row.key)
+          ? technical.prepare({ key: row.key, revision: row.revision, body: row.body_text }) : null;
+        const payload = recovery ? { body_control: recovery.references.body }
+          : { body_ref: await objects.putBytes(gzipSync(Buffer.from(row.body_text)), { session }) };
+        const replacement = { revision: row.revision, body_sha256: bodySha256, ...payload,
           importedBy: importSha256, importedRevision: row.revision, importedBodySha256: bodySha256 };
-        if (prior) await heads.updateOne({ _id: row.key, revision: prior.revision }, { $set: replacement }, { session });
+        if (prior) await heads.updateOne({ _id: row.key, revision: prior.revision }, { $set: replacement,
+          $unset: recovery ? { body_ref: '', body_text: '' } : { body_control: '', body_text: '' },
+        }, { session });
         else await heads.insertOne({ _id: row.key, ...replacement }, { session });
+        if (recovery) await technical.store(recovery, session);
       }, transactionOptions);
     } finally { await session.endSession(); }
     const saved = await heads.findOne({ _id: row.key });
-    const packed = await objects.readBytes(saved.body_ref, { maxBytes: 33 * 1024 * 1024 });
-    requireImport(gunzipSync(packed, { maxOutputLength: 32 * 1024 * 1024 }).toString() === row.body_text,
+    const actual = saved.body_control ? await technical.read(saved.body_control)
+      : gunzipSync(await objects.readBytes(saved.body_ref, { maxBytes: 33 * 1024 * 1024 }),
+        { maxOutputLength: 32 * 1024 * 1024 }).toString();
+    requireImport(actual === row.body_text,
       'Original reporting document readback differs');
     fingerprint.update(JSON.stringify([row.key, row.revision, bodySha256]) + '\n');
     if (existing) reused++;
@@ -90,7 +101,7 @@ export async function importDriverAuditMongoDocuments({ db, client, objects, doc
   return { verified: true, imported, reused, documents: imported + reused, sha256: fingerprint.digest('hex') };
 }
 
-export async function importDriverAuditMongoReceipts({ db, client, objects, receipts, importSha256 }) {
+export async function importDriverAuditMongoReceipts({ db, client, objects, receipts, importSha256, collectorRevisions = [] }) {
   requireImport(sha256.test(importSha256 || ''), 'A pinned receipt import is required');
   const stored = db.collection('driverAuditNativeReceipts');
   const control = db.collection('driverAuditNativeControl');
@@ -133,6 +144,9 @@ export async function importDriverAuditMongoReceipts({ db, client, objects, rece
   let batch = [];
   let bytes = 0;
   for await (const row of receipts) {
+    requireImport(!isDriverAuditTechnicalKey(row.key), 'Historical bookkeeping belongs in its verified backup');
+    requireImport(row.key !== 'collector-state' || collectorRevisions.includes(row.revision),
+      'Only required collector checkpoint receipts belong in the live import');
     requireImport(keyPattern.test(row.key) && Number.isSafeInteger(row.revision) && row.revision > 0
       && typeof row.event_id === 'string' && sha256.test(row.request_sha256),
     'Invalid original reporting receipt');

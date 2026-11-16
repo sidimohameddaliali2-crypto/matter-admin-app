@@ -1,6 +1,7 @@
 import {createHash} from 'node:crypto';
-import {gzipSync} from 'node:zlib';
-import {createDriverAuditMongoTextReader} from './driverAuditMongoText.js';
+import {createDriverAuditMongoTextReader,storeDriverAuditMongoText} from './driverAuditMongoText.js';
+import {isDriverAuditTechnicalKey} from './driverAuditLiveImport.js';
+import {createDriverAuditTechnicalState} from './driverAuditTechnicalState.js';
 
 const maxTextBytes=32*1024*1024;
 const archiveLimit=60_000_000_000;
@@ -71,6 +72,12 @@ export async function initializeDriverAuditMongoRpc({db,client}){
   await receipts.createIndex({key:1,event_id:1},{unique:true});
   await db.collection('driverAuditNativeConsumption').createIndex({reservation_id:1,operation_id:1},{unique:true});
   await db.collection('driverAuditNativeReservations').createIndex({released_at:1});
+  await db.collection('driverAuditNativeReservations').createIndex({expires_at:1},{expireAfterSeconds:0});
+  await db.collection('driverAuditNativeConsumption').createIndex({expires_at:1},{expireAfterSeconds:0});
+  await db.collection('driverAuditNativeRoadCache').createIndex({expires_at:1},{expireAfterSeconds:0});
+  await db.collection('driverAuditNativeTechnicalRecords').createIndex({key:1,revision:1},{unique:true});
+  await db.collection('driverAuditNativeTechnicalRecords').createIndex({expires_at:1});
+  await db.collection('driverAuditNativeTechnicalChunks').createIndex({recordId:1});
   await db.collection('driverAuditNativeArchiveControl').updateOne({_id:'total'},{
     $setOnInsert:{used_bytes:0,reserved_bytes:0,write_fence:0},
   },{upsert:true,writeConcern:options.writeConcern});
@@ -100,6 +107,7 @@ export function createDriverAuditMongoRpc({db,client,objects}){
   const control=db.collection('driverAuditNativeArchiveControl');
   const roads=db.collection('driverAuditNativeRoadCache');
   const readStoredText=createDriverAuditMongoTextReader(objects);
+  const technical=createDriverAuditTechnicalState({db,objects});
 
   async function transaction(operation){
     for(let attempt=0;attempt<3;attempt++){
@@ -122,10 +130,11 @@ export function createDriverAuditMongoRpc({db,client,objects}){
     return result.now;
   }
   async function storeText(text,session){
-    return objects.putBytes(gzipSync(Buffer.from(text),{level:6}),{session});
+    return storeDriverAuditMongoText({objects,text,session});
   }
   async function readText(row,field,session){
     let text=row[field+'_text'];
+    if(row[field+'_control'])text=await technical.read(row[field+'_control'],session);
     if(typeof text!=='string'){
       text=await readStoredText(row[field+'_ref'],{session});
     }
@@ -135,6 +144,7 @@ export function createDriverAuditMongoRpc({db,client,objects}){
   }
   async function stateRead(key,session){
     valid(matches(keyPattern,key),'Invalid native reporting key');
+    if(isDriverAuditTechnicalKey(key)&&!session)return transaction(session=>stateRead(key,session));
     const row=await documents.findOne({_id:key},readOptions(session));
     if(!row||row.revision===0)return {revision:0,body_text:null};
     valid(integer(row.revision,1),'Invalid native reporting revision');
@@ -164,16 +174,19 @@ export function createDriverAuditMongoRpc({db,client,objects}){
     // must invalidate that proof and conflict with a concurrent activation.
     await db.collection('driverAuditNativeControl').updateOne({_id:'authority',status:'staging'},
       {$inc:{writeFence:1}},{session});
-    const body_ref=await storeText(args.p_body_text,session),event_ref=await storeText(args.p_event_text,session);
     const revision=args.p_expected+1,body_sha256=hash(args.p_body_text),event_sha256=hash(args.p_event_text);
-    const saved={revision,body_ref,body_sha256};
+    const recovery=isDriverAuditTechnicalKey(key)?technical.prepare({key,revision,body:args.p_body_text,event:args.p_event_text}):null;
+    const payload=recovery?{body_control:recovery.references.body,event_control:recovery.references.event}
+      :{body_ref:await storeText(args.p_body_text,session),event_ref:await storeText(args.p_event_text,session)};
+    const saved={revision,body_sha256,...(recovery?{body_control:payload.body_control}:{body_ref:payload.body_ref})};
     if(current){
       const changed=await documents.updateOne({_id:key,revision:args.p_expected},
-        {$set:saved,$unset:{body_text:''}},{session});
+        {$set:saved,$unset:recovery?{body_text:'',body_ref:''}:{body_text:'',body_control:''}},{session});
       if(changed.matchedCount!==1)throw failure('Native reporting revision conflict');
     }else await documents.insertOne({_id:key,...saved},{session});
+    if(recovery)await technical.store(recovery,session);
     const receipt={key,revision,event_id:args.p_event_id,request_sha256:signature,
-      body_sha256,event_sha256,body_ref,event_ref,created_at:await now(session)};
+      body_sha256,event_sha256,...payload,...(recovery?{technical:true}:{}),created_at:await now(session)};
     await receipts.insertOne(receipt,{session});
     return receiptResult(receipt,false,session);
   }
@@ -292,7 +305,9 @@ export function createDriverAuditMongoRpc({db,client,objects}){
     if(row.released_at===null){
       valid(total.reserved_bytes>=row.reserved_bytes,'Native archive reservation total differs');
       row.released_at=await now(session);
-      await reservations.updateOne({_id:row._id},{$set:{released_at:row.released_at}},{session});
+      const expires_at=new Date(row.released_at.getTime()+24*60*60_000);
+      await reservations.updateOne({_id:row._id},{$set:{released_at:row.released_at,expires_at}},{session});
+      await consumption.updateMany({reservation_id:row._id},{$set:{expires_at}},{session});
       await control.updateOne({_id:'total'},{$inc:{reserved_bytes:-row.reserved_bytes}},{session});
     }
     return reservationResult(row);
@@ -348,15 +363,18 @@ export function createDriverAuditMongoRpc({db,client,objects}){
       case 'matter_hosted_state_receipts': {
         const {p_key,p_after=0,p_limit=1}=args;
         valid(matches(keyPattern,p_key)&&integer(p_after)&&p_limit===1,'Invalid native receipt request');
-        const rows=await receipts.find({key:p_key,revision:{$gt:p_after}},readOptions()).sort({revision:1}).limit(1).toArray();
+        const read=async session=>{
+        const rows=await receipts.find({key:p_key,revision:{$gt:p_after}},readOptions(session)).sort({revision:1}).limit(1).toArray();
         const result=[];
         for(const row of rows){
-          const saved=await receiptResult(row,false);
+          const saved=await receiptResult(row,false,session);
           result.push({revision:row.revision,event_id:row.event_id,request_sha256:row.request_sha256,
             body_sha256:row.body_sha256,body_text:saved.body_text,event_text:saved.event_text,
             created_at:row.created_at instanceof Date?row.created_at.toISOString():row.created_at});
         }
         return result;
+        };
+        return isDriverAuditTechnicalKey(p_key)?transaction(read):read();
       }
       case 'matter_hosted_state_cas':
         valid(matches(keyPattern,args.p_key),'Invalid native reporting key');

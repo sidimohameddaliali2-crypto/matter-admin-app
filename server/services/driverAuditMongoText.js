@@ -1,9 +1,42 @@
 import { createHash } from 'node:crypto';
-import { brotliCompressSync, brotliDecompressSync, constants, gunzipSync } from 'node:zlib';
+import { brotliCompressSync, brotliDecompressSync, constants, gzipSync, gunzipSync } from 'node:zlib';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const maximumTextBytes = 32 * 1024 * 1024;
 const maximumPackBytes = 64 * 1024 * 1024;
+const minimumPieceBytes = 16 * 1024;
+const maximumPieceBytes = 64 * 1024;
+const gear = Uint32Array.from({ length: 256 }, (_, index) =>
+  createHash('sha256').update(Buffer.from([index])).digest().readUInt32LE(0));
+
+// Keep publication revisions addressable, but share unchanged byte ranges even
+// when a small insertion moves their positions. No JSON reserialization occurs.
+export async function storeDriverAuditMongoText({ objects, text, session }) {
+  if (typeof text !== 'string' || Buffer.byteLength(text) > maximumTextBytes) throw Error('Invalid native reporting text');
+  const bytes = Buffer.from(text);
+  if (bytes.length < 128 * 1024) return objects.putBytes(gzipSync(bytes), { session });
+  const chunks = [], saved = new Map();
+  let start = 0, fingerprint = 0;
+  async function add(end) {
+    const plain = bytes.subarray(start, end), sha256 = hash(plain);
+    let packed = saved.get(sha256);
+    if (!packed) {
+      packed = await objects.putBytes(gzipSync(plain), { session });
+      saved.set(sha256, packed);
+    }
+    chunks.push({ size: plain.length, sha256, packed });
+    start = end;
+    fingerprint = 0;
+  }
+  for (let index = 0; index < bytes.length; index++) {
+    fingerprint = ((fingerprint << 1) + gear[bytes[index]]) >>> 0;
+    const size = index + 1 - start;
+    if (size >= minimumPieceBytes && ((fingerprint & 0x7fff) === 0 || size >= maximumPieceBytes)) await add(index + 1);
+  }
+  if (start < bytes.length) await add(bytes.length);
+  return { version: 3, encoding: 'chunked-gzip-text-v1', plainBytes: bytes.length,
+    size: chunks.reduce((sum, part) => sum + part.packed.size, 0), sha256: hash(bytes), chunks };
+}
 
 // Historical receipts often repeat a large checkpoint. Compress a bounded
 // group together so the original text stays recoverable without another full
@@ -39,6 +72,38 @@ export function createDriverAuditMongoTextReader(objects) {
   // transactional reads fresh and bound retained decoded memory to 8 MiB.
   let cached;
   return async function read(reference, { session } = {}) {
+    if (reference?.version === 3) {
+      if (reference.encoding !== 'chunked-gzip-text-v1' || !Number.isSafeInteger(reference.plainBytes)
+          || reference.plainBytes < 1 || reference.plainBytes > maximumTextBytes
+          || !Number.isSafeInteger(reference.size) || reference.size < 1
+          || reference.size > maximumTextBytes + 128 * (maximumTextBytes / minimumPieceBytes + 1)
+          || !/^[a-f0-9]{64}$/.test(reference.sha256 || '') || !Array.isArray(reference.chunks)
+          || !reference.chunks.length || reference.chunks.length > maximumTextBytes / minimumPieceBytes + 1) {
+        throw Error('Invalid native text chunk reference');
+      }
+      const parts = [], local = new Map();
+      let size = 0, packedSize = 0;
+      for (const [index, part] of reference.chunks.entries()) {
+        if (!Number.isSafeInteger(part?.size) || part.size < 1 || part.size > maximumPieceBytes
+            || index < reference.chunks.length - 1 && part.size < minimumPieceBytes
+            || !/^[a-f0-9]{64}$/.test(part.sha256 || '')) throw Error('Invalid native text piece');
+        const identity = JSON.stringify(part.packed);
+        let plain = local.get(identity);
+        if (!plain) {
+          plain = gunzipSync(await objects.readBytes(part.packed, { maxBytes: 128 * 1024, session }),
+            { maxOutputLength: maximumPieceBytes });
+          local.set(identity, plain);
+        }
+        if (plain.length !== part.size || hash(plain) !== part.sha256) throw Error('Native text piece integrity failure');
+        size += plain.length;
+        packedSize += part.packed.size;
+        if (size > reference.plainBytes) throw Error('Native text chunk size differs');
+        parts.push(plain);
+      }
+      const text = Buffer.concat(parts, size);
+      if (size !== reference.plainBytes || packedSize !== reference.size || hash(text) !== reference.sha256) throw Error('Native text integrity failure');
+      return text.toString('utf8');
+    }
     if (reference?.version !== 2) {
       return gunzipSync(await objects.readBytes(reference,
         { maxBytes: maximumTextBytes + 1024 * 1024, session }),

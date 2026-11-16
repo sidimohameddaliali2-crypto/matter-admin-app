@@ -10,6 +10,10 @@ The existing mode uses the Supabase reporting workflow as its authority and impo
 
 The native mode runs collection, grading and report generation on Sidi's DigitalOcean host and stores reporting state, review journals, original receipts and immutable evidence in the app's existing MongoDB database. Set `DRIVER_AUDIT_DATA_STORE=mongo` only after the final import, archive closure and writer handoff are verified. Operational delivery collections, assignments, users, KPIs and timestamps keep their existing contracts. See [native storage and migration](driver-audits/source-worker.md#native-mongodb-storage).
 
+The live import keeps driver evidence, every original report date, GPS, photographs, human reviews, household decisions and the recovery records they require. Historical technical bookkeeping stays in the verified backup. Current safety counters and unresolved attempts remain exact. Known technical updates use bounded recovery storage; they do not append full state bodies to the immutable report archive. Protected collector revisions remain readable through lossless shared text chunks.
+
+The backup-side exporter sends only selected compressed receipts to the app host. A native context index keeps older human reviews connected to their original report and photo evidence when newer report catalogs no longer list those paths. Original missing evidence stays recorded as missing. The index reuses archived image hashes.
+
 The imported package contains the current report, original findings, retained history references, GPS evidence, renderer and immutable file identities. Reports → Open driver audits opens the existing audit interface at `/api/reporting/view` on this app's own origin.
 
 ### Placement and new arrivals

@@ -97,3 +97,18 @@ test('native activation requires exact preservation proof and a final fence for 
     await assert.rejects(importDriverAuditMongoDocuments({ ...f, documents: original, importSha256: firstHash }),
       /already selected/);
   });
+
+test('live imports preserve current budget attempts but refuse historical technical receipts', { skip: !uri }, async t => {
+  const f = await fixture(t);
+  const body_text = '{"spentMicros":123,"attempts":{"old":{"status":"uncertain","reservedMicros":456}}}';
+  const documents = [{ key: 'photo-grading-budget', revision: 84, body_text }];
+  await importDriverAuditMongoDocuments({ ...f, documents, importSha256: firstHash });
+  assert.deepEqual(await f.rpc('matter_hosted_state_read', { p_key: documents[0].key }), { revision: 84, body_text });
+  assert.equal(await f.db.collection('driverAuditNativeChunks').countDocuments(), 0);
+  const digest = text => createHash('sha256').update(text).digest('hex');
+  await assert.rejects(importDriverAuditMongoReceipts({ ...f, importSha256: firstHash, receipts: [{
+    ...documents[0], event_id: 'old-budget-event', body_sha256: digest(body_text),
+    request_sha256: digest('original'), event_text: '{"kind":"budget"}', created_at: '2026-11-16T10:00:00Z',
+  }] }), /bookkeeping.*backup/i);
+  assert.equal(await f.db.collection('driverAuditNativeReceipts').countDocuments(), 0);
+});

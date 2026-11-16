@@ -1,13 +1,13 @@
 import '../loadEnv.js';
-import fs from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
 import path from 'node:path';
-import readline from 'node:readline';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import mongoose from 'mongoose';
 import { createDriverAuditMongoArchive } from '../services/driverAuditMongoArchive.js';
 import { createDriverAuditMongoTextReader } from '../services/driverAuditMongoText.js';
+import { importDriverAuditReviewContexts } from '../services/driverAuditReviewContexts.js';
+import { collectDriverAuditReceiptRoots, createDriverAuditReceiptSelection,
+  readDriverAuditImportRows as verifiedRows } from '../services/driverAuditLiveImport.js';
 import { createDriverAuditMongoRpc, initializeDriverAuditMongoRpc } from '../services/driverAuditMongoRpc.js';
 import { importDriverAuditMongoDocuments, importDriverAuditMongoHistorical,
   importDriverAuditMongoReceipts } from '../services/driverAuditMongoImport.js';
@@ -18,32 +18,17 @@ import { readPrivateDriverAuditSource, verifyDriverAuditSource } from '../servic
 const sha = value => createHash('sha256').update(value).digest('hex');
 const hashPattern = /^[a-f0-9]{64}$/;
 
-async function* verifiedRows(root, reference) {
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]+\.jsonl$/.test(reference?.file || '')
-      || !hashPattern.test(reference.sha256 || '')) throw Error('A pinned private import file is required');
-  const filename = path.join(root, reference.file);
-  const info = await fs.lstat(filename);
-  if (!info.isFile() || info.uid !== process.getuid() || info.mode & 0o077
-      || await fs.realpath(filename) !== filename) throw Error('The import input must be owner-private');
-  const digest = createHash('sha256');
-  for await (const part of createReadStream(filename)) digest.update(part);
-  if (digest.digest('hex') !== reference.sha256) throw Error('The original import file hash differs');
-  const lines = readline.createInterface({ input: createReadStream(filename), crlfDelay: Infinity });
-  for await (const line of lines) {
-    if (Buffer.byteLength(line) > 66 * 1024 * 1024) throw Error('The original import record exceeds its limit');
-    if (line) yield JSON.parse(line);
-  }
-}
-
 async function profileInput(file, expected) {
   const bytes = await readPrivateDriverAuditSource(file, 1024 * 1024);
   if (!hashPattern.test(expected || '') || sha(bytes) !== expected) throw Error('The native import profile hash differs');
   const profile = JSON.parse(bytes);
-  if (profile.version !== 1 || typeof profile.targetDatabase !== 'string'
+  if (profile.version !== 2 || typeof profile.targetDatabase !== 'string'
       || !profile.documents || !profile.receipts || !profile.historical || !profile.objects
+      || !profile.bookkeepingBackup || !profile.reviewContexts || !profile.reviewDependencies
       || !Number.isSafeInteger(profile.capacityBytes) || profile.capacityBytes < 1) {
     throw Error('The native import profile is incomplete');
   }
+  if (!['full', 'selected'].includes(profile.receiptInput || 'full')) throw Error('Unknown native receipt input');
   return { profile, root: path.dirname(file) };
 }
 
@@ -63,6 +48,45 @@ async function main() {
     if (db.databaseName !== profile.targetDatabase) throw Error('The native import targets another database');
     const archive = createDriverAuditMongoArchive({ db, client, capacityBytes: profile.capacityBytes });
     const state = createCloudState({ rpc: createDriverAuditMongoRpc({ db, client, objects: archive }) });
+    const original = await Array.fromAsync(verifiedRows(root, profile.documents));
+    const reference = profile.bookkeepingBackup;
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]+\.private\.json$/.test(reference.file || '')) throw Error('Pinned bookkeeping backup required');
+    const backupBytes = await readPrivateDriverAuditSource(path.join(root, reference.file), 1024 * 1024);
+    if (!hashPattern.test(reference.sha256 || '') || sha(backupBytes) !== reference.sha256) throw Error('Bookkeeping backup proof differs');
+    const backup = JSON.parse(backupBytes);
+    const census = await collectDriverAuditReceiptRoots({ db, documents: original, syncRoot: profile.syncRoot });
+    const preselected = profile.receiptInput === 'selected';
+    const selection = createDriverAuditReceiptSelection({ backup,
+      originalReceiptSha256: preselected ? backup.originalReceiptSha256 : profile.receipts.sha256,
+      collectorRevisions: census.collectorRevisions });
+    if (preselected && (backup.liveReceiptSha256 !== profile.receipts.sha256
+        || !Number.isSafeInteger(backup.liveReceiptCount) || backup.liveReceiptCount < 1
+        || backup.collectorRootsSha256 !== census.sha256)) throw Error('Selected receipt proof differs');
+    if (operation !== 'plan' && census.sha256 !== profile.collectorRootsSha256) throw Error('Required collector roots changed');
+    const selectedStats = { original: preselected ? backup.receiptCount : 0, inputRows: 0,
+      live: 0, backupOnly: preselected ? backup.receiptCount - backup.liveReceiptCount : 0 };
+    const foundCollector = new Set();
+    async function* selectedReceipts() {
+      for await (const row of verifiedRows(root, profile.receipts)) {
+        selectedStats.inputRows++;
+        if (!preselected) selectedStats.original++;
+        if (!selection.include(row)) {
+          if (preselected) throw Error('Selected live input contains backup-only bookkeeping');
+          selectedStats.backupOnly++; continue;
+        }
+        selectedStats.live++;
+        if (row.key === 'collector-state') foundCollector.add(row.revision);
+        yield row;
+      }
+      if (selectedStats.inputRows !== (preselected ? backup.liveReceiptCount : backup.receiptCount)
+          || census.collectorRevisions.some(revision => !foundCollector.has(revision))) {
+        throw Error('Original receipt backup or required collector coverage differs');
+      }
+    }
+    const assertCensus = async () => {
+      const actual = await collectDriverAuditReceiptRoots({ db, documents: original, syncRoot: profile.syncRoot });
+      if (actual.sha256 !== census.sha256) throw Error('Serving or retained collector roots changed during migration');
+    };
     const objectIndex = [];
     const seen = new Set();
     for await (const row of verifiedRows(root, profile.objects)) {
@@ -84,16 +108,18 @@ async function main() {
     const plan = { objects: objectIndex.length, missingObjects, missingBytes,
       availableAllowanceBytes: profile.capacityBytes - stored.usedBytes };
     if (operation === 'plan') {
-      console.log(JSON.stringify({ status: 'planned', importSha256: expected, ...plan }));
+      console.log(JSON.stringify({ status: 'planned', importSha256: expected, ...plan,
+        collectorRootsSha256: census.sha256, collectorRevisions: census.collectorRevisions,
+        technicalHistory: 'verified-backup-only' }));
       return;
     }
     await initializeDriverAuditMongoRpc({ db, client });
-    const args = { db, client, objects: archive, importSha256: expected };
+    const args = { db, client, objects: archive, importSha256: expected, collectorRevisions: census.collectorRevisions };
     if (operation === 'stage') {
       if (missingBytes > plan.availableAllowanceBytes) throw Error('The native archive exceeds the available allowance');
       const documents = await importDriverAuditMongoDocuments({ ...args,
         documents: verifiedRows(root, profile.documents), previousImportSha256: profile.previousImportSha256 });
-      const receipts = await importDriverAuditMongoReceipts({ ...args, receipts: verifiedRows(root, profile.receipts) });
+      const receipts = await importDriverAuditMongoReceipts({ ...args, receipts: selectedReceipts() });
       const historical = await importDriverAuditMongoHistorical({ ...args, records: verifiedRows(root, profile.historical) });
       for (const row of objectIndex) {
         const target = path.join(root, row.key);
@@ -107,11 +133,13 @@ async function main() {
           await archive.putVerifiedObject(row.key, bytes);
         }
       }
-      console.log(JSON.stringify({ status: 'staged', importSha256: expected, documents, receipts, historical,
-        archive: await archive.status(), activationPending: true }));
+      const reviewContexts = await importDriverAuditReviewContexts({ db, archive, documents: original, importSha256: expected,
+        contexts: verifiedRows(root, profile.reviewContexts), dependencies: verifiedRows(root, profile.reviewDependencies) });
+      await assertCensus();
+      console.log(JSON.stringify({ status: 'staged', importSha256: expected, documents, receipts, historical, selectedStats,
+        reviewContexts, archive: await archive.status(), activationPending: true }));
       return;
     }
-    const original = await Array.fromAsync(verifiedRows(root, profile.documents));
     await verifyDriverAuditSource({ runtimeRoot: profile.runtimeRoot, expectedSha256: profile.runtimeSha256 });
     const { createCloudPublication } = await import(pathToFileURL(
       path.join(profile.runtimeRoot, 'source/integration/cloud/publication.mjs')).href);
@@ -128,7 +156,7 @@ async function main() {
     }
     let receiptCount = 0, historicalCount = 0;
     const readText = createDriverAuditMongoTextReader(archive);
-    for await (const row of verifiedRows(root, profile.receipts)) {
+    for await (const row of selectedReceipts()) {
       const saved = await db.collection('driverAuditNativeReceipts').findOne({ key: row.key, revision: row.revision });
       if (!saved || saved.event_id !== row.event_id || saved.request_sha256 !== row.request_sha256
           || saved.body_sha256 !== row.body_sha256 || saved.created_at !== row.created_at
@@ -153,6 +181,8 @@ async function main() {
       const bytes = Buffer.concat(await archive.readObject(row.key, { maxBytes: row.bytes }));
       if (bytes.length !== row.bytes) throw Error('Native evidence size differs');
     }
+    const reviewContexts = await importDriverAuditReviewContexts({ db, archive, documents: original, verifyOnly: true, importSha256: expected,
+      contexts: verifiedRows(root, profile.reviewContexts), dependencies: verifiedRows(root, profile.reviewDependencies) });
     const [before, after] = await Promise.all([load(source), load(target)]);
     const queries = ['reporting_validated_deliveries', 'reporting_saved_gps_assessment_history'];
     const resultsEqual = queries.every(key => sha(JSON.stringify(before.app.queries[key]))
@@ -163,12 +193,14 @@ async function main() {
     const historyEqual = sha(JSON.stringify(before.app._dataAppQueryLoading.queries[historyId]))
       === sha(JSON.stringify(after.app._dataAppQueryLoading.queries[historyId]));
     if (!resultsEqual || !identitiesEqual || !historyEqual) throw Error('Original report readback differs');
+    await assertCensus();
     // This inventory proves only its declared objects. It cannot certify that
     // every historical photo, GPS window and review-snapshot dependency was
     // included. Never mint an activation parity receipt from this partial check.
     console.log(JSON.stringify({ status: 'staged-data-verified', importSha256: expected,
       documents: original.length, receipts: receiptCount, historical: historicalCount,
-      archiveObjects: objectIndex.length, resultsEqual, reportIdentityEqual: identitiesEqual,
+      selectedStats, collectorRootsSha256: census.sha256,
+      archiveObjects: objectIndex.length, reviewContexts, resultsEqual, reportIdentityEqual: identitiesEqual,
       assessmentHistoryEqual: historyEqual, activationPending: true, archiveClosurePending: true }));
   } finally { await connection.close(); }
 }

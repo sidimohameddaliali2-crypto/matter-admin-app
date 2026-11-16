@@ -40,7 +40,10 @@ export function createDriverAuditMongoArchive({ db, client, capacityBytes }) {
   async function allowance(session) {
     const current = await control.findOne({ _id: 'capacity' }, { session });
     if (current) {
-      if (current.limitBytes !== capacityBytes || !Number.isSafeInteger(current.usedBytes)) {
+      const technicalBytes = current.technicalBytes === undefined ? 0 : current.technicalBytes;
+      if (current.limitBytes !== capacityBytes || !Number.isSafeInteger(current.usedBytes)
+          || current.usedBytes < 0 || current.usedBytes > capacityBytes
+          || !Number.isSafeInteger(technicalBytes) || technicalBytes < 0 || technicalBytes > current.usedBytes) {
         throw Error('Native reporting storage allowance differs');
       }
       return;
@@ -146,6 +149,23 @@ export function createDriverAuditMongoArchive({ db, client, capacityBytes }) {
 
   return {
     putBytes, readBytes, readObject, putVerifiedObject,
+    async reserveTechnicalBytes(bytes, { session }) {
+      if (!session?.inTransaction() || !Number.isSafeInteger(bytes) || bytes < 1) throw Error('Invalid native recovery allocation');
+      await allowance(session);
+      const changed = await control.updateOne({ _id: 'capacity', limitBytes: capacityBytes,
+        usedBytes: { $lte: capacityBytes - bytes },
+        $expr: { $lte: [{ $ifNull: ['$technicalBytes', 0] }, 64 * 1024 * 1024 - bytes] },
+      }, { $inc: { usedBytes: bytes, technicalBytes: bytes } }, { session });
+      if (!changed.matchedCount) throw Object.assign(Error('Native recovery allowance exhausted'), { code: 'AUDIT_RECOVERY_CAPACITY' });
+    },
+    async releaseTechnicalBytes(bytes, { session }) {
+      if (!session?.inTransaction() || !Number.isSafeInteger(bytes) || bytes < 1) throw Error('Invalid native recovery release');
+      await allowance(session);
+      const changed = await control.updateOne({ _id: 'capacity', limitBytes: capacityBytes,
+        usedBytes: { $gte: bytes }, technicalBytes: { $gte: bytes },
+      }, { $inc: { usedBytes: -bytes, technicalBytes: -bytes } }, { session });
+      if (!changed.matchedCount) throw Error('Native recovery allocation differs');
+    },
     async assertPrivate() { return { bucket: 'matter-report-archive', public: false }; },
     async status() {
       const saved = await control.findOne({ _id: 'capacity' });

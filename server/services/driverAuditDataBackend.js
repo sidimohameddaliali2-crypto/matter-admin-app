@@ -3,6 +3,7 @@ import { createHostedRpc } from '../vendor/driver-audits/integration/cloud/rpc.m
 import { createSupabaseArchiveTransport } from '../vendor/driver-audits/integration/hosted/supabase-archive.mjs';
 import { createDriverAuditMongoArchive } from './driverAuditMongoArchive.js';
 import { createDriverAuditMongoRpc, initializeDriverAuditMongoRpc } from './driverAuditMongoRpc.js';
+import { createDriverAuditReviewContexts } from './driverAuditReviewContexts.js';
 
 export const driverAuditNativeBackendSymbol = Symbol.for('matter.driver-audit.native-backend');
 
@@ -34,7 +35,8 @@ export async function createDriverAuditDataBackend({ db, env = process.env, stag
     db, client: db.client, capacityBytes: Number(env.DRIVER_AUDIT_NATIVE_CAPACITY_BYTES),
   });
   await initializeDriverAuditMongoRpc({ db, client: db.client });
-  return { kind, archive, rpc: createDriverAuditMongoRpc({ db, client: db.client, objects: archive }) };
+  return { kind, archive, rpc: createDriverAuditMongoRpc({ db, client: db.client, objects: archive }),
+    reviewContexts: createDriverAuditReviewContexts({ db, archive }) };
 }
 
 // CLI workers use the same MongoDB setting as the app. It stays out of the

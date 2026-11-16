@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import test from 'node:test';
-import { createDriverAuditMongoTextReader, packDriverAuditMongoTexts } from './driverAuditMongoText.js';
+import { createDriverAuditMongoTextReader, packDriverAuditMongoTexts, storeDriverAuditMongoText } from './driverAuditMongoText.js';
 
 function fixture() {
   const values = new Map();
@@ -24,6 +24,21 @@ test('bounded receipt packs reuse repeated checkpoints while preserving exact Un
   const read = createDriverAuditMongoTextReader(f.objects);
   for (let i = 0; i < texts.length; i++) assert.equal(await read(refs[i]), texts[i]);
   assert.ok([...f.values.values()].reduce((sum, bytes) => sum + bytes.length, 0) < Buffer.byteLength(texts.join('')) / 8);
+});
+
+test('a checkpoint insertion reuses unchanged text chunks and preserves exact original bytes', async () => {
+  const f=fixture();
+  const payload=randomBytes(1024*1024).toString('hex');
+  const before=JSON.stringify({state:'before',payload,tail:'دبي 😀'});
+  const after=JSON.stringify({state:'a different length and value',payload,tail:'دبي 😀'});
+  const first=await storeDriverAuditMongoText({...f,text:before});
+  const initial=[...f.values.values()].reduce((sum,bytes)=>sum+bytes.length,0);
+  const second=await storeDriverAuditMongoText({...f,text:after});
+  const added=[...f.values.values()].reduce((sum,bytes)=>sum+bytes.length,0)-initial;
+  assert.ok(added<initial/4,'A small checkpoint change must not duplicate the whole publication');
+  const read=createDriverAuditMongoTextReader(f.objects);
+  assert.equal(await read(first),before);
+  assert.equal(await read(second),after);
 });
 
 test('packed history rejects changed offsets, oversized decoded packs and tampered original text hashes', async () => {
