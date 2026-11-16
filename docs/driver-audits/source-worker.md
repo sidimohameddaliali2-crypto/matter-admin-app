@@ -31,7 +31,19 @@ Include the manifest and every file declared by its inventory. The example conta
 
 The separate environment is a JSON object mapping environment variable names to strings. Preserve the recovered switches exactly. It includes the declared collector credentials and `AI_GATEWAY_API_KEY` when grading is enabled. The adapter supplies that API key in the original handler's identity header. Confirm the key against the original Gateway catalog and eligibility check and through isolated grading parity. Persisted Vercel OIDC tokens are rejected.
 
-Staging writes `source.json` with the exact runtime, environment hash, executable and version. Worker activation uses the separate start operation. The initial cursor is supplied by the final cutover evidence. `audit-source-check` verifies these inputs and imports the three scheduled handler modules in isolated child processes. Schedule and data parity, credential qualification, resource sizing and archive recovery require their separate evidence.
+Staging writes `source.json` with the exact runtime, environment hash, executable and version. Worker activation uses the separate start operation. The initial cursor is supplied by the final cutover evidence. `audit-source-check` verifies these inputs and imports the three scheduled handler modules in isolated child processes.
+
+## Qualify on the Linux host
+
+Upload the reviewed replay fixture as a private, content-addressed `<SHA-256>.gz` archive object using the normal archive reservation and reader budget. The gzip JSON contains the staged source runtime manifest hash, a SHA-pinned saved-state document, the exact immutable archive keys and lengths needed by the saved replay, and the previously verified output counts and hashes. The source qualification allows a 1 MiB compressed fixture and at most 112 MiB of declared archive objects. Keep the fixture and the local replay receipt private.
+
+Run `audit-source-qualify` with the deployed application commit, source manifest, source Node executable and `audit_source_qualification_sha256`. Leave the existing source schedules running until the cutover fence and leave the new source process stopped. The operation holds the shared heavy-work lock so the online sync process can wait without overlapping the rehearsals.
+
+The qualification runs the exact recovered collector request through the app adapter against the saved capture. It verifies failure recovery, duplicate detection and the preserved row, photo grade, history and archive output fingerprints. The builder uses the pinned deployed code, renderer, validation journals, Node executable and heap settings. Its candidate lives in a temporary private workspace. The builder uses its archive-backed baseline and verifies immutable objects from the original local cache or ordinary budgeted archive reads. The isolated processes get no production credentials. Application-level network calls are restricted to the saved replay transport and the parent only obtains bounded verified archive reads. The normal reader ledger records those downloads.
+
+The operation collects Linux process resident memory and high-water values, present API and sync memory, available memory and disk. After a verified build and validation, it keeps that disposable builder process alive during a second source replay to measure retained memory. The existing build disk reserve still applies. If a stage cannot finish, the workflow returns a partial receipt with the stage and reason. The application requires a verified receipt before source startup.
+
+Read the bounded JSON result in the SSH step of the raw GitHub Actions job log. The GitHub CLI run-log view can omit nested action output. The host writes an owner-private `qualification-<fixture SHA-256>.private.json` under the staged source root. Preserve its reported `receiptSha256` and fixture hash in the parity receipt as `"hostQualification": { "fixtureSha256": "<fixture hash>", "receiptSha256": "<host receipt hash>" }`. Startup verifies the host receipt bytes and the exact app, source, environment, Node and builder settings. Run qualification again when those settings change.
 
 ## Cutover evidence
 
@@ -68,6 +80,7 @@ The workflow exposes the following explicit operations. Supply the exact deploye
 | Operation | Effect |
 | --- | --- |
 | `audit-source-check` | Verify private files, configuration, runtime and handler imports. |
+| `audit-source-qualify` | Replay the saved source and builder with Linux memory and disk measurements. |
 | `audit-source-start` | Verify fresh cutover evidence, persist activation, start the source process and verify its heartbeat. |
 | `audit-source-pause` | Stop the source process, drain children and verify release of its SQLite lock. |
 | `audit-source-resume` | Restart the same paused registration using its saved active receipt. |
@@ -80,6 +93,10 @@ DRIVER_AUDIT_DEPLOY_SHA="$REVIEWED_APP_SHA" \
 DRIVER_AUDIT_SOURCE_MANIFEST="$SOURCE_MANIFEST_SHA" \
 DRIVER_AUDIT_SOURCE_NODE="$QUALIFIED_NODE" \
 "$QUALIFIED_NODE" server/scripts/driverAuditSourceDeploy.js audit-source-check
+
+# Complete the saved Linux source and builder qualification before the fence.
+export DRIVER_AUDIT_SOURCE_QUALIFICATION_SHA256="$HOST_FIXTURE_SHA256"
+"$QUALIFIED_NODE" server/scripts/driverAuditSourceDeploy.js audit-source-qualify
 
 DRIVER_AUDIT_DEPLOY_SHA="$REVIEWED_APP_SHA" \
 DRIVER_AUDIT_SOURCE_MANIFEST="$SOURCE_MANIFEST_SHA" \

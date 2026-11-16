@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import {
+  driverAuditSourceHash,
   readDriverAuditSourceConfig,
   readPrivateDriverAuditSource,
   requirePrivateDriverAuditSourceDirectory,
@@ -188,7 +189,13 @@ async function runtimeAdapter(config, shell) {
     check: () => checkDriverAuditSource(config),
     async verifyRelease() {
       const reference = { path: shell.DRIVER_AUDIT_SOURCE_RELEASE_FILE, sha256: shell.DRIVER_AUDIT_SOURCE_RELEASE_SHA256 };
-      await verifyDriverAuditSourceRelease(config, reference);
+      const { release } = await verifyDriverAuditSourceRelease(config, reference);
+      const parityFile = path.isAbsolute(release.parity.path) ? release.parity.path : path.join(path.dirname(reference.path), release.parity.path);
+      const parityBytes = await readPrivateDriverAuditSource(parityFile);
+      requireDeployment(driverAuditSourceHash(parityBytes) === release.parity.sha256, 'Source parity receipt changed during verification.');
+      const { requireDriverAuditSourceHostQualification } = await import('./driverAuditSourceQualify.js');
+      await requireDriverAuditSourceHostQualification({ config, commit: shell.DRIVER_AUDIT_DEPLOY_SHA,
+        reference: JSON.parse(parityBytes).hostQualification, supervisor: async () => JSON.parse(await pm2(['jlist'], shell)) });
       return { reference };
     },
     readActivation: activation,
@@ -247,7 +254,7 @@ export async function deployDriverAuditSource(operation, shell = process.env) {
   const worker = await registeredWorker(shell);
   const maintenance = operation.startsWith('deploy-source-');
   const action = operation.replace(/^(?:audit|deploy)-source-/, '');
-  requireDeployment(['check', 'start', 'pause', 'resume', 'rollback'].includes(action), 'Invalid source operation.');
+  requireDeployment(['check', 'qualify', 'start', 'pause', 'resume', 'rollback'].includes(action), 'Invalid source operation.');
   if (maintenance && action === 'pause' && (!worker || worker.status === 'stopped')) return { status: 'inactive' };
   const manifest = shell.DRIVER_AUDIT_SOURCE_MANIFEST;
   const file = maintenance ? worker?.config : digestPattern.test(manifest ?? '') ? path.join(sourceRoot, manifest, 'source.json') : worker?.config;
@@ -260,7 +267,7 @@ export async function deployDriverAuditSource(operation, shell = process.env) {
     // Ordinary app deployments may use another Node major version. Re-execute
     // the control operation with the source worker's qualified interpreter.
     const output = await exec(executable, [fileURLToPath(import.meta.url), operation], {
-      cwd: appRoot, env: shell, timeout: 360_000, maxBuffer: 1024 * 1024,
+      cwd: appRoot, env: shell, timeout: action === 'qualify' ? 54 * 60_000 : 360_000, maxBuffer: 1024 * 1024,
     });
     return JSON.parse(output.stdout.trim());
   }
@@ -268,6 +275,17 @@ export async function deployDriverAuditSource(operation, shell = process.env) {
   const config = await readDriverAuditSourceConfig(file);
   requireDeployment(path.basename(path.dirname(file)) === config.manifestSha256,
     'Source staging directory differs from its pinned manifest.');
+  if (action === 'qualify') {
+    requireDeployment(!maintenance && digestPattern.test(shell.DRIVER_AUDIT_SOURCE_QUALIFICATION_SHA256 ?? ''),
+      'A pinned private qualification fixture is required.');
+    const { qualifyDriverAuditSource } = await import('./driverAuditSourceQualify.js');
+    const { acquireWorkerLock } = await import('../vendor/driver-audits/integration/hosted/worker-lock.mjs');
+    const lock = await acquireWorkerLock(path.join(sourceRoot, 'source-deployment.lock'));
+    try {
+      return await qualifyDriverAuditSource({ config, commit: head, fixtureSha256: shell.DRIVER_AUDIT_SOURCE_QUALIFICATION_SHA256,
+        supervisor: async () => JSON.parse(await pm2(['jlist'], shell)) });
+    } finally { await lock.release(); }
+  }
   const adapter = await runtimeAdapter(config, shell);
   const { acquireWorkerLock } = await import('../vendor/driver-audits/integration/hosted/worker-lock.mjs');
   const lock = await acquireWorkerLock(path.join(sourceRoot, 'source-deployment.lock'));

@@ -17,6 +17,7 @@ on:
           - audit-builder-upgrade
           - audit-builder-rollback
           - audit-source-check
+          - audit-source-qualify
           - audit-source-host-check
           - audit-source-stage
           - audit-source-proof-stage
@@ -32,6 +33,9 @@ on:
         type: string
       audit_source_proof_sha256:
         description: SHA-256 of the compressed private proof envelope
+        type: string
+      audit_source_qualification_sha256:
+        description: SHA-256 of the saved replay fixture in the private archive
         type: string
       source_node_executable:
         description: Absolute host path of the qualified source Node executable
@@ -142,6 +146,7 @@ jobs:
           SOURCE_NODE: ${{ inputs.source_node_executable }}
           SOURCE_BUNDLE_SHA: ${{ inputs.audit_source_bundle_sha256 }}
           SOURCE_PROOF_SHA: ${{ inputs.audit_source_proof_sha256 }}
+          SOURCE_QUALIFICATION_SHA: ${{ inputs.audit_source_qualification_sha256 }}
           REPORTING_SECRET: ${{ inputs.operation != 'audit-rollback' && secrets.DRIVER_AUDIT_SUPABASE_SECRET || '' }}
         run: |
           set -euo pipefail
@@ -174,6 +179,10 @@ jobs:
               fi
               if [ "$OPERATION" = audit-source-proof-stage ] && [[ ! "$SOURCE_PROOF_SHA" =~ ^[a-f0-9]{64}$ ]]; then
                 echo "The private proof envelope hash is required."
+                exit 1
+              fi
+              if [ "$OPERATION" = audit-source-qualify ] && [[ ! "$SOURCE_QUALIFICATION_SHA" =~ ^[a-f0-9]{64}$ ]]; then
+                echo "The pinned saved replay fixture hash is required."
                 exit 1
               fi
               if [ "$OPERATION" = audit-source-start ] && [[ ! "$SOURCE_RELEASE_SHA" =~ ^[a-f0-9]{64}$ || "$SOURCE_RELEASE_FILE" != /* ]]; then
@@ -391,14 +400,15 @@ jobs:
           DRIVER_AUDIT_SOURCE_BUNDLE_SHA256: ${{ inputs.audit_source_bundle_sha256 }}
           DRIVER_AUDIT_SOURCE_STAGE_TOKEN: ${{ steps.source-transfer.outputs.token }}
           DRIVER_AUDIT_SOURCE_PROOF_SHA256: ${{ inputs.audit_source_proof_sha256 }}
+          DRIVER_AUDIT_SOURCE_QUALIFICATION_SHA256: ${{ inputs.audit_source_qualification_sha256 }}
           DRIVER_AUDIT_SOURCE_PROOF_B64: ${{ inputs.operation == 'audit-source-proof-stage' && secrets.DRIVER_AUDIT_SOURCE_PROOF_B64 || '' }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
-          command_timeout: 20m
-          envs: DO_APP_PATH,AUDIT_OPERATION,DRIVER_AUDIT_BUILDER_FROM,DRIVER_AUDIT_BUILDER_TO,DRIVER_AUDIT_DEPLOY_SHA,DRIVER_AUDIT_DEPLOY_MANIFEST,DRIVER_AUDIT_DEPLOY_CAPACITY_BYTES,DRIVER_AUDIT_DEPLOY_SECRET,DRIVER_AUDIT_STAFF_GENERATION,DRIVER_AUDIT_STAFF_VERIFICATION,DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256,DRIVER_AUDIT_RETAINED_GENERATIONS,DRIVER_AUDIT_SYNC_MIN_MEMORY,DRIVER_AUDIT_SYNC_MIN_DISK,DRIVER_AUDIT_SOURCE_MANIFEST,DRIVER_AUDIT_SOURCE_RELEASE_FILE,DRIVER_AUDIT_SOURCE_RELEASE_SHA256,DRIVER_AUDIT_SOURCE_NODE,DRIVER_AUDIT_SOURCE_BUNDLE_SHA256,DRIVER_AUDIT_SOURCE_STAGE_TOKEN,DRIVER_AUDIT_SOURCE_PROOF_SHA256,DRIVER_AUDIT_SOURCE_PROOF_B64
+          command_timeout: ${{ inputs.operation == 'audit-source-qualify' && '55m' || '20m' }}
+          envs: DO_APP_PATH,AUDIT_OPERATION,DRIVER_AUDIT_BUILDER_FROM,DRIVER_AUDIT_BUILDER_TO,DRIVER_AUDIT_DEPLOY_SHA,DRIVER_AUDIT_DEPLOY_MANIFEST,DRIVER_AUDIT_DEPLOY_CAPACITY_BYTES,DRIVER_AUDIT_DEPLOY_SECRET,DRIVER_AUDIT_STAFF_GENERATION,DRIVER_AUDIT_STAFF_VERIFICATION,DRIVER_AUDIT_GC_RESTORE_RECEIPT_SHA256,DRIVER_AUDIT_RETAINED_GENERATIONS,DRIVER_AUDIT_SYNC_MIN_MEMORY,DRIVER_AUDIT_SYNC_MIN_DISK,DRIVER_AUDIT_SOURCE_MANIFEST,DRIVER_AUDIT_SOURCE_RELEASE_FILE,DRIVER_AUDIT_SOURCE_RELEASE_SHA256,DRIVER_AUDIT_SOURCE_NODE,DRIVER_AUDIT_SOURCE_BUNDLE_SHA256,DRIVER_AUDIT_SOURCE_STAGE_TOKEN,DRIVER_AUDIT_SOURCE_PROOF_SHA256,DRIVER_AUDIT_SOURCE_PROOF_B64,DRIVER_AUDIT_SOURCE_QUALIFICATION_SHA256
           script: |
             set -e
             cd -- "$DO_APP_PATH"
