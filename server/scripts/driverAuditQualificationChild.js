@@ -13,7 +13,7 @@ import { Readable } from 'node:stream';
 import tls from 'node:tls';
 import { pathToFileURL } from 'node:url';
 import { getHeapStatistics } from 'node:v8';
-import { driverAuditSourceHash as sha256, invokeDriverAuditSourceHandler } from '../services/driverAuditSource.js';
+import { DRIVER_AUDIT_SOURCE_CACHE_ENV, driverAuditSourceHash as sha256, invokeDriverAuditSourceHandler } from '../services/driverAuditSource.js';
 
 const MiB = 1024 * 1024;
 const OriginalDate = Date;
@@ -101,6 +101,7 @@ function createReplayState(state, day, time, capture) {
 function createReplayTransport(state, time, readObject, { failPublication, reject }) {
   const writes = new Map();
   const reservations = new Map();
+  const archiveReads = { requests: 0, bytes: 0 };
   let lease = null;
   let failedOnce = false;
   const store = key => state.get(key) ?? { revision: 0, body: null };
@@ -169,7 +170,12 @@ function createReplayTransport(state, time, readObject, { failPublication, rejec
     if (url.pathname === '/storage/v1/bucket/matter-report-archive' && options.method === 'GET')
       return Response.json({ id: 'matter-report-archive', public: false });
     const match = /^\/storage\/v1\/object\/(?:authenticated\/)?matter-report-archive\/([a-f0-9]{64}\.gz)$/.exec(url.pathname);
-    if (match && options.method === 'GET') return new Response(await read(match[1]));
+    if (match && options.method === 'GET') {
+      const body = await read(match[1]);
+      archiveReads.requests++;
+      archiveReads.bytes += body.length;
+      return new Response(body);
+    }
     if (match && options.method === 'POST') {
       const bytes = Buffer.from(options.body);
       assert.equal(sha256(bytes) + '.gz', match[1]);
@@ -178,11 +184,11 @@ function createReplayTransport(state, time, readObject, { failPublication, rejec
     }
     return reject();
   };
-  return { read, writes, store, leaseReleased: () => lease === null, failedOnce: () => failedOnce,
+  return { read, writes, store, archiveReads, leaseReleased: () => lease === null, failedOnce: () => failedOnce,
     reservationsReleased: () => [...reservations.values()].every(item => item.released) };
 }
 
-async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsRoot, expected, failPublication }) {
+async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsRoot, expected, failPublication, archiveCacheDirectory }) {
   const state = await readState(stateFile);
   const prior = JSON.parse(state.get('collector-state').body);
   const { day, observedAt } = prior.head.source;
@@ -192,7 +198,10 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
   const originalCapture = JSON.parse(await readObject(capture.ref.key));
   assert.equal(originalCapture.snapshot.rows.length, expected.sourceRows);
   createReplayState(state, day, time, capture);
-  Object.assign(process.env, fakeEnvironment);
+  assert(archiveCacheDirectory === undefined || archiveCacheDirectory === path.join(path.dirname(root), 'source-archive-cache'));
+  const environment = archiveCacheDirectory === undefined ? fakeEnvironment
+    : { ...fakeEnvironment, [DRIVER_AUDIT_SOURCE_CACHE_ENV]: archiveCacheDirectory };
+  Object.assign(process.env, environment);
   globalThis.Date = class extends OriginalDate {
     constructor(...args) { super(...(args.length ? args : [time])); }
     static now() { return time; }
@@ -203,9 +212,11 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
     throw new Error('Request outside saved collector fixture.');
   } });
   const handler = (await load(path.join(runtimeRoot, entrypoint.module))).default;
-  const invoke = () => invokeDriverAuditSourceHandler(handler, { entrypoint, environment: fakeEnvironment });
+  const invoke = () => invokeDriverAuditSourceHandler(handler, { entrypoint, environment });
+  let firstArchiveReads;
   if (failPublication) {
     const failed = await invoke();
+    firstArchiveReads = { ...fixture.archiveReads };
     assert.equal(failed.status, 'needs-inspection');
     assert.equal(failed.failed, 1);
     const afterFailure = fixture.store('collector-state');
@@ -219,6 +230,7 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
     state.set('collector-state', { ...afterFailure, body: JSON.stringify(publication) });
   }
   const result = await invoke();
+  firstArchiveReads ??= { ...fixture.archiveReads };
   const handlerPeakRssBytes = process.resourceUsage().maxRSS * 1024;
   assert.equal(result.httpStatus, 200);
   assert.equal(result.status, 'complete');
@@ -252,7 +264,7 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
   for (const [key, bytes] of fixture.writes) await fs.writeFile(path.join(root, key), bytes, { flag: 'wx', mode: 0o600 });
   return { status: 'verified', reportHash: current.head.reportHash, generation: current.head.manifest.sha256, records: rows.length,
     history: current.historyCount, acceptedGrades: expected.acceptedGrades, sourceRows: expected.sourceRows,
-    outputObjects: fixture.writes.size, handlerPeakRssBytes, failureRetry: !!failPublication };
+    outputObjects: fixture.writes.size, handlerPeakRssBytes, failureRetry: !!failPublication, archiveReads: firstArchiveReads };
 }
 
 function archiveFromParent(key, maxBytes) {

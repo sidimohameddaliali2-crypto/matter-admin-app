@@ -111,6 +111,15 @@ async function registeredWorker(shell) {
   return { id: worker.pm_id, status: env.status, config, startedAt: env.pm_uptime, interpreter: env.exec_interpreter };
 }
 
+async function registeredArchiveCacheDirectory(processes) {
+  const sync = processes.filter(entry => entry.name === 'matter-driver-audit-sync');
+  requireDeployment(sync.length === 1, 'The reporting cache requires the managed builder.');
+  const { driverAuditSyncArchiveCacheDirectory } = await import('./driverAuditSourceQualify.js');
+  const directory = driverAuditSyncArchiveCacheDirectory(sync[0]);
+  await requirePrivateDriverAuditSourceDirectory(directory);
+  return directory;
+}
+
 async function inspectHost(shell, commit) {
   const candidates = [...new Set([shell.DRIVER_AUDIT_SOURCE_NODE, process.execPath,
     '/usr/local/bin/node', '/usr/bin/node', '/opt/node24/bin/node'].filter(Boolean))];
@@ -125,15 +134,19 @@ async function inspectHost(shell, commit) {
       nodes.push({ executable, ...JSON.parse(stdout) });
     } catch { nodes.push({ executable: candidate, available: false }); }
   }
-  const processes = JSON.parse(await pm2(['jlist'], shell)).filter(entry =>
-    ['matter-delivery-api', 'matter-driver-audit-sync', sourceName].includes(entry.name)).map(entry => ({
+  const registered = JSON.parse(await pm2(['jlist'], shell)).filter(entry =>
+    ['matter-delivery-api', 'matter-driver-audit-sync', sourceName].includes(entry.name));
+  const processes = registered.map(entry => ({
     name: entry.name, status: entry.pm2_env?.status, pid: entry.pid,
     interpreter: entry.pm2_env?.exec_interpreter,
   }));
+  let archiveCacheDirectory = null;
+  try { archiveCacheDirectory = await registeredArchiveCacheDirectory(registered); }
+  catch { /* The host check still reports health when the cache is unavailable. */ }
   const disk = await fs.statfs(appRoot);
   const memory = await fs.readFile('/proc/meminfo', 'utf8').catch(() => '');
   const available = /^MemAvailable:\s+(\d+) kB$/m.exec(memory);
-  return { status: 'host-checked', deployedSha: commit, platform: process.platform, architecture: process.arch, nodes, processes,
+  return { status: 'host-checked', deployedSha: commit, platform: process.platform, architecture: process.arch, nodes, processes, archiveCacheDirectory,
     freeDiskBytes: disk.bavail * disk.bsize, freeMemoryBytes: available ? Number(available[1]) * 1024 : os.freemem() };
 }
 
@@ -202,6 +215,11 @@ async function runtimeAdapter(config, shell) {
     writeActivation: value => writeDriverAuditSourceState(activationFile, value),
     async start() {
       const worker = await registeredWorker(shell);
+      if (config.archiveCacheDirectory) {
+        const processes = JSON.parse(await pm2(['jlist'], shell));
+        requireDeployment(config.archiveCacheDirectory === await registeredArchiveCacheDirectory(processes),
+          'The managed builder archive cache changed.');
+      }
       if (worker) {
         requireDeployment(worker.config === config.file && worker.status === 'stopped', 'The source worker is not paused.');
         requireDeployment(await fs.realpath(worker.interpreter) === await fs.realpath(process.execPath),

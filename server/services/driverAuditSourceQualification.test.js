@@ -97,6 +97,22 @@ test('start accepts only a complete exact Linux host qualification receipt', asy
   const reference = await save(complete);
   assert.deepEqual(await verify(reference), complete);
   await assert.rejects(verify({ ...reference, receiptSha256: digest('0') }), /integrity/i);
+
+  const cacheRoot = path.join(root, 'archive-cache');
+  const verifySharedCache = (reference, cacheDirectory = cacheRoot) => verifyDriverAuditSourceHostQualification({
+    config: { ...config, archiveCacheDirectory: cacheDirectory }, commit, reference,
+    builder: { ...builder, cacheRoot }, nodeExecutable, nodeVersion, nodeArgs,
+  });
+  await assert.rejects(verifySharedCache(reference), /archive cache/i);
+  const shared = { ...complete, sourceArchiveCacheDirectory: cacheRoot,
+    source: { ...complete.source, archiveReads: { requests: 50, bytes: 147_000_000 } },
+    sourceAfterBuilder: { ...complete.sourceAfterBuilder, archiveReads: { requests: 3, bytes: 230_000 } } };
+  const sharedReference = await save(shared);
+  assert.deepEqual(await verifySharedCache(sharedReference), shared);
+  await assert.rejects(verifySharedCache(sharedReference, path.join(root, 'other-cache')), /archive cache/i);
+  await assert.rejects(verifySharedCache(await save({ ...shared, sourceAfterBuilder: {
+    ...shared.sourceAfterBuilder, archiveReads: { requests: 50, bytes: 147_000_000 },
+  } })), /archive cache/i);
 });
 
 async function replayFixture(t, { network = false } = {}) {

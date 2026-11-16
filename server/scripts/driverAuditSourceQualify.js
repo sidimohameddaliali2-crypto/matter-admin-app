@@ -137,10 +137,14 @@ function meter({ apiPid, syncPid, directory }) {
 }
 
 export function runDriverAuditQualificationChild({ mode, inputFile, executable, args, root, readRoots,
-  timeoutMs, signal, readArchive, pid: onPid = () => {} }) {
+  timeoutMs, signal, readArchive, archiveCacheDirectory, pid: onPid = () => {} }) {
+  requireQualification(archiveCacheDirectory === undefined || mode === 'source'
+    && archiveCacheDirectory === path.join(path.dirname(root), 'source-archive-cache'),
+  'Qualification needs an isolated archive cache.');
+  const writable = archiveCacheDirectory === undefined ? [root] : [root, archiveCacheDirectory];
   const child = fork(script, [inputFile, mode], {
     execPath: executable, cwd: root, env: { HOME: root, LANG: 'C', TZ: 'UTC' },
-    execArgv: [...args, '--permission', '--allow-fs-write=' + root, ...[
+    execArgv: [...args, '--permission', ...writable.map(file => '--allow-fs-write=' + file), ...[
       root, path.join(serverRoot, 'package.json'), path.join(serverRoot, 'services', 'driverAuditSource.js'), ...readRoots,
     ].map(file => '--allow-fs-read=' + file)],
     stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
@@ -207,7 +211,7 @@ function checkedWorkers(rows) {
 const noSourceActive = rows => requireQualification(rows.filter(row => row.name === 'matter-driver-audit-source')
   .every(row => row.pm2_env?.status === 'stopped'), 'Stop the source worker before pre-switch qualification.');
 
-async function builderInputs(sync) {
+function managedSyncConfig(sync) {
   const [flag, file, ...extra] = sync.pm2_env.args ?? [];
   const root = typeof file === 'string' ? path.dirname(file) : '';
   const work = path.join(root, 'work');
@@ -215,6 +219,15 @@ async function builderInputs(sync) {
     && sync.pm2_env.pm_cwd === serverRoot && sync.pm2_env.pm_exec_path === path.join(serverRoot, 'scripts', 'driverAuditSync.js')
     && path.dirname(root) === path.join(serverRoot, '.private', 'driver-audits') && hashPattern.test(path.basename(root))
     && file === path.join(root, 'sync.json'), 'Managed sync configuration differs.');
+  return { root, work, file };
+}
+
+export function driverAuditSyncArchiveCacheDirectory(sync) {
+  return path.join(managedSyncConfig(sync).work, 'archive-cache');
+}
+
+async function builderInputs(sync) {
+  const { root, work, file } = managedSyncConfig(sync);
   const config = await readJson(file);
   requireQualification(config.version === 1 && config.root === root && config.codeRoot === path.join(root, 'builder')
     && config.baselineRoot === path.join(root, 'baseline')
@@ -330,6 +343,11 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
   const first = await supervisor();
   noSourceActive(first);
   const [api, sync] = checkedWorkers(first);
+  if (config.archiveCacheDirectory) {
+    requireQualification(config.archiveCacheDirectory === driverAuditSyncArchiveCacheDirectory(sync),
+      'Source and builder archive cache directories differ.');
+    await requirePrivateDriverAuditSourceDirectory(config.archiveCacheDirectory);
+  }
   const entrypoint = config.runtime.entrypoints.find(entry => entry.path === '/api/collector?task=delivery');
   requireQualification(entrypoint, 'Saved source collector schedule is unavailable.');
   const secret = config.environment.MATTER_SUPABASE_SECRET;
@@ -353,6 +371,15 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
   const interrupts = ['SIGTERM', 'SIGINT', 'SIGHUP'];
   for (const event of interrupts) process.once(event, interrupt);
   try {
+    let archiveCacheDirectory;
+    if (config.archiveCacheDirectory) {
+      if (!hasDriverAuditBuildSpace(await freeDisk(directory), { compact: true })) {
+        throw Object.assign(new Error('Qualification workspace reserve unavailable.'), { code: 'disk' });
+      }
+      archiveCacheDirectory = path.join(directory, 'source-archive-cache');
+      await fs.mkdir(archiveCacheDirectory, { mode: 0o700 });
+      receipt.sourceArchiveCacheDirectory = config.archiveCacheDirectory;
+    }
     const saved = await stageDriverAuditQualification({ root: directory, fixtureSha256,
       runtimeManifestSha256: config.manifestSha256, archive, signal });
     receipt.savedStateSha256 = saved.savedStateSha256;
@@ -366,10 +393,10 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
       const root = path.join(directory, phase);
       await fs.mkdir(root, { mode: 0o700 });
       const inputFile = path.join(root, 'input.private.json');
-      await writeDriverAuditSourceState(inputFile, { root, ...saved, runtimeRoot: config.runtimeRoot, entrypoint, failPublication });
+      await writeDriverAuditSourceState(inputFile, { root, ...saved, runtimeRoot: config.runtimeRoot, entrypoint, failPublication, archiveCacheDirectory });
       const child = await measureChild({ phase, retained, measure, signal, specification: { mode: 'source', root, inputFile,
         executable: process.execPath, args: ['--max-old-space-size=3072'], readRoots: [directory, config.runtimeRoot],
-        timeoutMs: entrypoint.maxDurationSeconds * 1000 } });
+        timeoutMs: entrypoint.maxDurationSeconds * 1000, archiveCacheDirectory } });
       try {
         requireQualification(child.result.nodeVersion === config.nodeVersion, 'Qualified source Node version changed.');
         return { root, result: child.result };
@@ -415,6 +442,7 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
           rendererSha256: builder.rendererBuild.sha256, journalsSha256: builder.journals.sha256, downloadedArchive: loader.stats() };
         receipt.sourceAfterBuilder = (await runSource('source-after-builder', [['builder', builderChild.pid]], false, source.result.peakRssBytes)).result;
         requireQualification(await memoryForProcess(builderChild.pid), 'Builder exited before retained-memory qualification.');
+        requireSharedArchiveCache(config, builder, receipt);
         receipt.verified = true;
         receipt.status = 'verified';
       } catch (error) {
@@ -444,6 +472,18 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
   return { ...receipt, receiptSha256: driverAuditSourceHash(await readPrivateDriverAuditSource(receiptFile)) };
 }
 
+function requireSharedArchiveCache(config, builder, receipt) {
+  if (!config.archiveCacheDirectory) return;
+  const cold = receipt.source?.archiveReads;
+  const warm = receipt.sourceAfterBuilder?.archiveReads;
+  requireQualification(config.archiveCacheDirectory === builder.cacheRoot
+    && receipt.sourceArchiveCacheDirectory === builder.cacheRoot
+    && [cold, warm].every(item => Number.isSafeInteger(item?.requests) && item.requests >= 0
+      && Number.isSafeInteger(item?.bytes) && item.bytes >= 0)
+    && warm.requests < cold.requests && warm.bytes < cold.bytes,
+  'The shared archive cache needs a verified cold and warm replay.');
+}
+
 export async function verifyDriverAuditSourceHostQualification({ config, commit, reference, builder, nodeExecutable, nodeVersion, nodeArgs }) {
   requireQualification(hashPattern.test(reference?.fixtureSha256 ?? '') && hashPattern.test(reference?.receiptSha256 ?? ''),
     'A verified host qualification reference is required.');
@@ -467,6 +507,7 @@ export async function verifyDriverAuditSourceHostQualification({ config, commit,
       && receipt.measurements[phase].peakApiRssBytes > 0 && receipt.measurements[phase].peakSyncRssBytes > 0
       && receipt.measurements[phase].minimumAvailableBytes >= memorySafetyReserve),
   'Host qualification is incomplete or the reviewed runtime changed.');
+  requireSharedArchiveCache(config, builder, receipt);
   return receipt;
 }
 
@@ -474,6 +515,11 @@ export async function requireDriverAuditSourceHostQualification({ config, commit
   const rows = await supervisor();
   noSourceActive(rows);
   const [, sync] = checkedWorkers(rows);
-  const { builder, executable, nodeVersion, args } = await builderInputs(sync);
+  const { builder, compact, executable, nodeVersion, args } = await builderInputs(sync);
+  if (config.archiveCacheDirectory) {
+    await requirePrivateDriverAuditSourceDirectory(builder.cacheRoot);
+    requireQualification(hasDriverAuditBuildSpace(await freeDisk(builder.cacheRoot), { compact }),
+      'The report build volume has insufficient free space.');
+  }
   return verifyDriverAuditSourceHostQualification({ config, commit, reference, builder, nodeExecutable: executable, nodeVersion, nodeArgs: args });
 }

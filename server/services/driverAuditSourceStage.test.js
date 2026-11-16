@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { stageDriverAuditSource, stageDriverAuditSourceProof } from '../scripts/driverAuditSourceStage.js';
+import { readDriverAuditSourceConfig } from './driverAuditSource.js';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 
@@ -65,6 +66,30 @@ test('source staging preserves an existing release when environment or bundle id
   assert.deepEqual(await fs.readFile(staged.configFile), before);
   await fs.writeFile(staged.configFile, '{"version":2}', { mode: 0o600 });
   await assert.rejects(stageDriverAuditSource(f.args()), /configuration.*changed/i);
+});
+
+test('a cache-enabled source release is staged only with the managed cache path', async t => {
+  const f = await fixture(t);
+  const sourceRoot = path.join(f.root, 'driver-audit-source');
+  await fs.mkdir(sourceRoot, { mode: 0o700 });
+  const marker = 'source/integration/hosted/archive-read-cache.mjs';
+  const cacheModule = Buffer.from('export {};');
+  const [manifest] = f.bundle.files;
+  const original = JSON.parse(Buffer.from(manifest.dataBase64, 'base64'));
+  original.files.push({ path: marker, bytes: cacheModule.length, sha256: hash(cacheModule) });
+  const updated = Buffer.from(JSON.stringify(original));
+  manifest.dataBase64 = updated.toString('base64');
+  f.bundle.manifestSha256 = hash(updated);
+  f.bundle.files.push({ path: marker, dataBase64: cacheModule.toString('base64') });
+  const args = { ...f.args(), sourceRoot, expectedManifestSha256: f.bundle.manifestSha256 };
+  const stage = cacheDirectory => stageDriverAuditSource({ ...args, environmentBytes: Buffer.from(JSON.stringify({
+    ...JSON.parse(f.environmentBytes), MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: cacheDirectory,
+  })) });
+  await assert.rejects(stage(undefined), /managed builder archive cache/i);
+  await assert.rejects(stage(path.join(f.root, 'originals')), /managed builder archive cache/i);
+  const cacheDirectory = path.join(f.root, 'driver-audits', 'a'.repeat(64), 'work', 'archive-cache');
+  const staged = await stage(cacheDirectory);
+  assert.equal((await readDriverAuditSourceConfig(staged.configFile)).archiveCacheDirectory, cacheDirectory);
 });
 
 test('proof staging writes pinned JSON evidence without creating activation or changing source files', async t => {

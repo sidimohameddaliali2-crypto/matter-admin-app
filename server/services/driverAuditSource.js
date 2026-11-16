@@ -143,6 +143,21 @@ async function readPinnedJson(reference, label) {
   return JSON.parse(bytes);
 }
 
+export const DRIVER_AUDIT_SOURCE_CACHE_ENV = 'MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY';
+
+export function driverAuditSourceArchiveCacheDirectory(root, files, environment) {
+  const directory = environment[DRIVER_AUDIT_SOURCE_CACHE_ENV];
+  const supportsCache = files.some(file => file.path === 'source/integration/hosted/archive-read-cache.mjs');
+  if (!supportsCache && directory === undefined) return null;
+  const privateRoot = path.dirname(path.dirname(root));
+  const parts = typeof directory === 'string' && path.isAbsolute(directory)
+    ? path.relative(privateRoot, directory).split(path.sep) : [];
+  requireSource(supportsCache && parts.length === 4 && parts[0] === 'driver-audits'
+    && hashPattern.test(parts[1]) && parts[2] === 'work' && parts[3] === 'archive-cache'
+    && directory === path.join(privateRoot, ...parts), 'Use the managed builder archive cache directory.');
+  return directory;
+}
+
 export async function readDriverAuditSourceConfig(file) {
   const bytes = await readPrivateDriverAuditSource(file);
   const config = JSON.parse(bytes);
@@ -161,6 +176,7 @@ export async function readDriverAuditSourceConfig(file) {
     && Object.entries(environment).every(([key, value]) => /^[A-Z][A-Z0-9_]*$/.test(key)
       && typeof value === 'string' && value.length <= 16384 && !value.includes('\0')),
   'Invalid source environment.');
+  const archiveCacheDirectory = driverAuditSourceArchiveCacheDirectory(config.root, runtime.files, environment);
   // Runtime configuration contains source credentials only. Node loader and
   // process options remain controlled by the app's supervised runner.
   requireSource(!Object.keys(environment).some(key => ['NODE_OPTIONS', 'NODE_PATH', 'PATH', 'HOME', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES'].includes(key)),
@@ -184,7 +200,7 @@ export async function readDriverAuditSourceConfig(file) {
   requireSource(environment.MATTER_PHOTO_GRADE_ENABLED !== '1' || gatewayCredential,
     'Enabled photo grading requires a qualified Gateway credential.');
   return { ...config, file, configSha256: driverAuditSourceHash(bytes), runtime,
-    environmentReference: config.environment, environment, gatewayCredential };
+    environmentReference: config.environment, environment, gatewayCredential, archiveCacheDirectory };
 }
 
 export async function verifyDriverAuditSourceRelease(config, reference, now = new Date()) {
