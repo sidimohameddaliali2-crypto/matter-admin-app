@@ -29,6 +29,11 @@ export const assertKitchenRosterCovered = (selections, roster, date) => {
       .reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
     const required = requiredKitchenMeals(sub, entry, date);
     const snackPortions = meals.filter(meal => meal.mealType === 'snack').reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
+    if ((entry?.kitchenAutoHolds || []).some(hold => hold.date === date)
+      && (portions < required || (sub.snacks_per_day != null && snackPortions < Number(sub.snacks_per_day))
+        || (core && sub.breakfast_included === true && !meals.some(meal => meal.mealType === 'breakfast')))) {
+      throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || entry?.customerName || sub.email || sub.customer_id}. Automatic assignment is paused after a staff deletion. Add the missing portions before cutoff or choose Restore automatic assignment.`);
+    }
     if (sub.snacks_per_day != null && snackPortions < Number(sub.snacks_per_day)) throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || sub.email || sub.customer_id} needs ${sub.snacks_per_day} snack(s), but has ${snackPortions}.`);
     if (core && sub.breakfast_included === true && !meals.some(meal => meal.mealType === 'breakfast')) throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || sub.email || sub.customer_id} is missing the included breakfast.`);
     if (!entry || portions < required) {

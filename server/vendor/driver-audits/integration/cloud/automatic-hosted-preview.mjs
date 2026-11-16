@@ -19,9 +19,10 @@ function validatePackage(value,pointer){
 // Request-triggered polling avoids a background timer in hosted runtimes. A
 // complete package and handler are prepared before active changes; failures keep
 // the current handler and its metadata intact.
-export function createAutomaticHostedPreview({loadPointer,loadPackage,createRuntime,fallback,clock=()=>Date.now(),intervalMs=30000,maxHandlers=3,refreshOnRequest=true}={}){
+export function createAutomaticHostedPreview({loadPointer,loadPackage,createRuntime,fallback,clock=()=>Date.now(),intervalMs=30000,maxHandlers=3,refreshOnRequest=true,restorePrevious=false}={}){
  if([loadPointer,loadPackage,createRuntime].some(x=>typeof x!=='function')||fallback!==undefined&&typeof fallback!=='function'||typeof clock!=='function'||!Number.isInteger(intervalMs)||intervalMs<1000||!Number.isInteger(maxHandlers)||maxHandlers<1)throw Error('Invalid hosted preview coordinator');
  let active=null,inflight=null,lastAttemptAt=0,stopped=false;
+ let previousAttempt=null;
  const retained=[];
  const state={status:'fallback',lastAttemptAt:null,lastError:null,active:null};
  function snapshot(){return structuredClone(state);}
@@ -54,7 +55,28 @@ export function createAutomaticHostedPreview({loadPointer,loadPackage,createRunt
   if(!stopped&&refreshOnRequest)await refresh(false);
   const query=new URL(req.url,'http://preview.internal').searchParams;
   const requested=query.get('generation')||query.get('snapshot');
-  const chosen=requested?retained.find(x=>x.pointer.generation===requested||x.pointer.reportHash===requested):active;
+  let chosen=requested?retained.find(x=>x.pointer.generation===requested||x.pointer.reportHash===requested):active;
+  const previous=active?.pointer.previous;
+  if(!chosen&&!stopped&&restorePrevious&&validPointer(previous)&&
+     (previous.generation===requested||previous.reportHash===requested)){
+   const identity=pointerKey(previous),activeAtStart=active;
+   if(previousAttempt?.identity!==identity||clock()-previousAttempt.at>=intervalMs){
+    const promise=(async()=>{
+     try{
+      const loaded=await loadPackage({descriptor:previous.descriptor,pointer:previous});
+      const packageOverride=validatePackage(loaded,previous);
+      const handler=await createRuntime({packageOverride,automaticFeed:true});
+      if(typeof handler!=='function'||active!==activeAtStart||stopped)return null;
+      const restored={identity,pointer:previous,handler};
+      retained.splice(1,0,restored);
+      while(retained.length>maxHandlers)retained.pop();
+      return restored;
+     }catch{return null;}
+    })();
+    previousAttempt={identity,at:clock(),promise};
+   }
+   chosen=await previousAttempt.promise;
+  }
   const handler=chosen?.handler||(!requested?fallback:null)||active?.handler||fallback;
   if(!handler)throw Error('Automatic preview is not ready');
   return handler(req,res);

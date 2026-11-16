@@ -1,6 +1,8 @@
 import Record from '../models/MenuSelectionRecord.js';
+import { dayHeld } from './kitchenMealEditPolicy.js';
 
 export const kitchenDateUnavailable = async (record, date, nutrition) => {
+  if (dayHeld(record, date)) return true;
   const skip = (record?.skippedDays || []).find(day => String(day.date).slice(0, 10) === date && !day.resumedAt);
   const dates = nutrition?.active_delivery_dates;
   if (!Array.isArray(dates)) return !!skip;

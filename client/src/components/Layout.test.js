@@ -6,8 +6,9 @@ let mockPathname = '/customer-service/chats';
 const mockNavigate = jest.fn();
 const mockDispatch = jest.fn();
 jest.mock('react-router-dom', () => ({
-  Link: ({ to, children, onClick, ...props }) => <a href={to} {...props} onClick={event => { event.preventDefault(); onClick?.(event); mockNavigate(to); }}>{children}</a>,
+  Link: ({ to, children, onClick, reloadDocument, ...props }) => <a href={to} data-reload={reloadDocument || undefined} {...props} onClick={event => { event.preventDefault(); onClick?.(event); mockNavigate(to); }}>{children}</a>,
   useLocation: () => ({ pathname: mockPathname }),
+  useMatch: pattern => (mockPathname === pattern || mockPathname === pattern + '/') ? {} : null,
   useNavigate: () => mockNavigate,
 }), { virtual: true });
 jest.mock('react-redux', () => ({
@@ -99,4 +100,19 @@ test('inbox has a skip target and descriptive heading/title without retaining it
   expect(document.title).toBe('Matter App');
   expect(container.querySelector('h1')).toBeNull();
   expect(mockDispatch).not.toHaveBeenCalled();
+});
+
+test('Driver Reports is a separate item and preserves the native unload boundary', async () => {
+  mockPathname = '/reports';
+  await mountLayout();
+  await openMenu();
+  expect(dialog().querySelector('a[href="/driver-reports"]').getAttribute('data-reload')).toBe('true');
+  expect(dialog().querySelector('a[href="/reports"]').getAttribute('aria-current')).toBe('page');
+  expect(dialog().querySelector('a[href="/reports"]').hasAttribute('data-reload')).toBe(false);
+
+  mockPathname = '/driver-reports/';
+  await mountLayout();
+  await openMenu();
+  expect(dialog().querySelector('a[href="/reports"]').getAttribute('data-reload')).toBe('true');
+  expect(dialog().querySelector('a[href="/driver-reports"]').getAttribute('aria-current')).toBe('page');
 });

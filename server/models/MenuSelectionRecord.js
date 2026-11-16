@@ -175,6 +175,11 @@ const menuSelectionRecordSchema = new mongoose.Schema({
     unpausedAt: Date
   }],
 
+  kitchenEditRevision: { type: Number, default: 0 },
+  // A staff deletion puts this customer/date under manual control. It is
+  // deliberately separate from a Matter pause and never changes deliveries.
+  kitchenAutoHolds: [{ _id: false, date: String, at: Date, actorId: String, actorName: String }],
+  kitchenLastMealEdit: { action: String, date: String, at: Date, actorName: String, summary: String },
   submittedAt: {
     type: Date,
     default: Date.now

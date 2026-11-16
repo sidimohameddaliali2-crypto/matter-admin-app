@@ -18,7 +18,7 @@ export function connectPreviewOrderTiming(service,view,index,{households,decisio
   if(Object.entries(row.delivery).some(([key,field])=>JSON.stringify(field)!==JSON.stringify(source.delivery[key])))return null;
   return gpsEvidenceSummary(value);
  }
- let cachedArrangements=null,cachedAssessments=null,cachedOverlay=null,cachedOriginal=null;
+ let cachedArrangements=null,cachedAssessments=null,cachedOverlay=null;
  async function assess(){
  let arrangements=[];try{arrangements=households?(await households.read()).arrangements:[];}catch{ /* storage failure never clears a warning */ }
  const revision=JSON.stringify(arrangements);if(frozen&&cachedAssessments&&revision===cachedArrangements)return cachedAssessments;
@@ -32,7 +32,10 @@ export function connectPreviewOrderTiming(service,view,index,{households,decisio
   const h=matched.householdResolution,keys=[h.recordKey,h.partnerRecordKey].sort();
   return {stopId:h.stopId,authority:'owner_accepted',arrangementId:h.arrangementId,arrangementHash:h.arrangementHash,sourceRef:h.sourceRef,sourceSha256:h.sourceSha256,members:keys.map(k=>{const r=byKey.get(k);return {recordKey:k,assessmentHash:r.assessmentHash,deliverySourceSha256:r.delivery.source_sha256,customer:r.delivery.customer,date:r.date,upload:r.delivery.upload,windowStart:r.delivery.window_start,deadline:r.delivery.deadline,addressRelation:'same_apartment'};})};
  },async evidenceOverlay(params){const overlay=await service.evidenceOverlay(params);if(overlay.status!=='ready'||overlay.generation!==view.generation)return overlay;
-  const assessments=await assess();if(frozen&&cachedOverlay&&cachedOriginal===overlay)return cachedOverlay;const entries=new Map(overlay.entries.map(e=>[e.recordKey,{...e}]));for(const [key,timingReassessment]of assessments){const row=byKey.get(key);let entry=entries.get(key);if(entry&&(entry.assessmentHash!==row.assessmentHash||entry.deliverySourceSha256!==row.delivery.source_sha256))throw Error('Timing reassessment binding mismatch');if(!entry){entry={version:'matter-evidence-overlay-entry-v1',generation:view.generation,recordKey:key,assessmentHash:row.assessmentHash,deliverySourceSha256:row.delivery.source_sha256};entries.set(key,entry);}entry.timingReassessment=timingReassessment;}
+  const assessments=await assess();if(frozen&&cachedOverlay?.original===overlay&&cachedOverlay.assessments===assessments)return cachedOverlay.value;const entries=new Map(overlay.entries.map(e=>[e.recordKey,{...e}]));for(const [key,timingReassessment]of assessments){const row=byKey.get(key);let entry=entries.get(key);if(entry&&(entry.assessmentHash!==row.assessmentHash||entry.deliverySourceSha256!==row.delivery.source_sha256))throw Error('Timing reassessment binding mismatch');if(!entry){entry={version:'matter-evidence-overlay-entry-v1',generation:view.generation,recordKey:key,assessmentHash:row.assessmentHash,deliverySourceSha256:row.delivery.source_sha256};entries.set(key,entry);}entry.timingReassessment=timingReassessment;}
   for(const [key,entry]of entries){const value=gpsSummary(byKey.get(key));delete entry.gpsEvidence;if(value)entry.gpsEvidence=value;}
-  cachedOriginal=overlay;cachedOverlay={...overlay,orderTimingPolicy:ORDER_TIMING_POLICY,entries:[...entries.values()]};return cachedOverlay;},async snapshotFor(hash){const snapshot=await service.snapshotFor(hash);if(hash!==view.reportHash)return snapshot;const assessments=await assess();return {...snapshot,rows:snapshot.rows.map(row=>{const value=gpsSummary(row),{gpsEvidence:priorGpsEvidence,...current}=row;return {...applyOrderTiming(current,assessments.get(row.key)),...(value?{gpsEvidence:value}:{})};})};}};
+  const value={...overlay,orderTimingPolicy:ORDER_TIMING_POLICY,entries:[...entries.values()]};
+  // An older in-flight request may finish after the household state changed.
+  if(frozen&&cachedAssessments===assessments)cachedOverlay={original:overlay,assessments,value};
+  return value;},async snapshotFor(hash){const snapshot=await service.snapshotFor(hash);if(hash!==view.reportHash)return snapshot;const assessments=await assess();return {...snapshot,rows:snapshot.rows.map(row=>{const value=gpsSummary(row),{gpsEvidence:priorGpsEvidence,...current}=row;return {...applyOrderTiming(current,assessments.get(row.key)),...(value?{gpsEvidence:value}:{})};})};}};
 }
