@@ -11,6 +11,22 @@ const mockExcelRows = jest.fn();
 jest.mock('xlsx-js-style',()=>({utils:{ book_new: () => ({}), aoa_to_sheet: rows => { mockExcelRows(rows); return {}; }, book_append_sheet: () => {} }, writeFile: jest.fn()}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
 
+test('each menu has a whole-menu non-selector button that checks only the clicked menu', async () => {
+  api.get.mockImplementation(async url => ({ data: { success: true, data: url === '/menus'
+    ? [{ _id: 'week-a', title: 'Week A', startDate: '2026-11-16', endDate: '2026-11-22', meals: [] }, { _id: 'week-b', title: 'Week B', startDate: '2026-11-23', endDate: '2026-11-29', meals: [] }]
+    : { customers: [], startDate: '2026-11-23', endDate: '2026-11-29', checkedAt: '2026-11-16T08:00:00Z' } } }));
+  const node = document.createElement('div'); document.body.appendChild(node); const root = createRoot(node);
+  try {
+    await act(async () => root.render(<MenuManagement />));
+    const buttons = [...node.querySelectorAll('button')].filter(button => button.textContent === 'Customers who did not select');
+    expect(buttons).toHaveLength(2);
+    expect(api.get).not.toHaveBeenCalledWith(expect.stringContaining('/did-not-select'), expect.anything());
+    await act(async () => buttons[1].click());
+    expect(api.get).toHaveBeenCalledWith('/menus/week-b/did-not-select', expect.anything());
+    expect(node.querySelector('[role="dialog"]').textContent).toContain('Week B');
+  } finally { await act(async () => root.unmount()); node.remove(); jest.clearAllMocks(); }
+});
+
 test.each([
   [{preferenceConflict:['Coriander'],carbVegAction:'kept'},[]],
   [{carbVegAction:'replace',carbConflict:['DAIRY'],vegConflict:['MUSHROOM']},['Replace carb: Dairy','Replace veg: Mushroom']],

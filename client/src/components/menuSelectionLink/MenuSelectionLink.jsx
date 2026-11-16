@@ -148,15 +148,16 @@ function buildDemoModel() {
   return { menuName: DEMO_MENU_NAME, menuRange: DEMO_MENU_RANGE, dayKeys, meals };
 }
 
-function expandSaturdaySkips(dates, deliveryDates) {
+function expandSaturdaySkips(dates, deliveryDates, restoredDates = []) {
   const result = new Set(dates);
   const eligible = new Set(deliveryDates || []);
+  const restored = new Set(restoredDates);
   dates.forEach((key) => {
     const date = dateFromKey(key);
     if (date.getDay() !== 6) return;
     date.setDate(date.getDate() + 1);
     const sunday = toDateKey(date);
-    if (eligible.has(sunday)) result.add(sunday);
+    if (eligible.has(sunday) && !restored.has(sunday)) result.add(sunday);
   });
   return [...result].sort();
 }
@@ -299,9 +300,9 @@ const MenuSelectionLink = ({ token }) => {
   const [manualSkipped, setSkipped] = useState({});
   const skipped = useMemo(() => {
     const keys = model?.dayKeys || [];
-    const dates = new Set(expandSaturdaySkips(keys.filter((_, i) => manualSkipped[i]), keys));
+    const dates = new Set(expandSaturdaySkips(keys.filter((_, i) => manualSkipped[i]), keys, account?.restoredSkipDates));
     return Object.fromEntries(keys.map((key, i) => [i, dates.has(key)]));
-  }, [manualSkipped, model]);
+  }, [manualSkipped, model, account?.restoredSkipDates]);
   // Snapshot of `skipped` taken at the moment of a successful submit. Once a
   // day has been submitted as skipped, "Change my selections" can no longer
   // un-skip (or re-skip) it — a skip actually pauses that delivery on the
@@ -445,6 +446,7 @@ const MenuSelectionLink = ({ token }) => {
         perDay: Number(profile.mealPerDay) || 1,
         weekend: !!profile.weekend,
         deliveryDates: profile.deliveryDates || built.dayKeys,
+        restoredSkipDates: profile.restoredSkipDates || [],
         // Menu-selection Partner members (Customer.unlimitedMeals) have no daily cap.
         unlimitedMeals: !!profile.unlimitedMeals,
         allergensDisplay,
@@ -783,7 +785,7 @@ const MenuSelectionLink = ({ token }) => {
         });
       });
       const skippedDates = [...new Set([
-        ...expandSaturdaySkips(dayKeys.filter((_, i) => skipped[i]), account.deliveryDates || dayKeys),
+        ...expandSaturdaySkips(dayKeys.filter((_, i) => skipped[i]), account.deliveryDates || dayKeys, account.restoredSkipDates),
         ...(pauseDecisions || []).map((d) => d.date),
       ])];
       const res = await api.post(`/menus/customers/${encodeURIComponent(account.email)}/select-meals`, {
@@ -831,6 +833,7 @@ const MenuSelectionLink = ({ token }) => {
     try {
       const res = await api.post(`/menus/customers/${encodeURIComponent(account.email)}/skip-pause-preview`, {
         dates: skippedDateKeys,
+        weeklyMenuId: rawMenu._id,
       });
       const pauses = res.data?.data?.pauses;
       setSkipPauseReview({ ...res.data?.data, pauses: Array.isArray(pauses) && pauses.length ? pauses : skippedDateKeys.map((date) => ({ date, alreadyPaused: false, resumeDate: null })) });
@@ -842,7 +845,7 @@ const MenuSelectionLink = ({ token }) => {
     } finally {
       setPausePreviewLoading(false);
     }
-  }, [account, flash]);
+  }, [account, flash, rawMenu]);
 
   const handleConfirmPauseReview = useCallback((decisions) => {
     doSubmit(decisions);
@@ -873,7 +876,7 @@ const MenuSelectionLink = ({ token }) => {
       setDay((d) => d + 1);
       return;
     }
-    const skippedDateKeys = expandSaturdaySkips(dayKeys.filter((_, i) => skipped[i]), account?.deliveryDates || dayKeys);
+    const skippedDateKeys = expandSaturdaySkips(dayKeys.filter((_, i) => skipped[i]), account?.deliveryDates || dayKeys, account?.restoredSkipDates);
     if (preview || skippedDateKeys.length === 0) {
       doSubmit();
       return;
@@ -906,7 +909,8 @@ const MenuSelectionLink = ({ token }) => {
   const currentDate = dayKeys[day] ? dateFromKey(dayKeys[day]) : null;
   const previousDate = currentDate ? new Date(currentDate) : null;
   previousDate?.setDate(previousDate.getDate() - 1);
-  const sundayIncluded = currentDate?.getDay() === 0 && !!skipped[dayKeys.indexOf(toDateKey(previousDate))];
+  const sundayIncluded = currentDate?.getDay() === 0 && !!skipped[dayKeys.indexOf(toDateKey(previousDate))]
+    && !(account?.restoredSkipDates || []).includes(dayKeys[day]);
   const dayHeading = dayKeys[day] ? fmtDayLong(dayKeys[day]) : `Day ${day + 1}`;
   const selectedToday = dayCount(day);
   const dayFull = !skippedToday && selectedToday >= target;

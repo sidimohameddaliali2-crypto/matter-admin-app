@@ -215,3 +215,10 @@ test.each([['2099-10-21',false],['2026-11-13',true],['2026-11-14',false],[null,f
     expect(Boolean(renewal)).toBe(visible);
   } finally { clock.mockRestore(); }
 });
+
+test('a Sunday restored by a Matter admin is not implicitly skipped again by a saved Saturday', () => {
+  const dates = ['2026-11-14', '2026-11-15'];
+  expect(expandSaturdaySkips([dates[0]], dates, [dates[1]])).toEqual([dates[0]]);
+  // A fresh explicit Sunday skip is still permitted.
+  expect(expandSaturdaySkips(dates, dates, [dates[1]])).toEqual(dates);
+});

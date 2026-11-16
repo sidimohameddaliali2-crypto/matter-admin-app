@@ -1,8 +1,21 @@
 import MenuSelectionBrowser from '../components/MenuSelectionBrowser';
+import MenuNonSelectors from '../components/MenuNonSelectors';
 import SelectionComponentTags from '../components/SelectionComponentTags';
 import { selectionComponentDetails, selectionHasWarning } from '../utils/selectionComponentDetails';
 import { loadMenuSelectionSummaries, loadMenuSelectionDetails } from '../lib/menuSelectionLoading';
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import api from '../utils/api';
+import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
+import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
+import { copyManagedMenuItem, managedMenuPayload } from '../utils/managedMenuItems';
+import { importSavedCycleMenu } from '../utils/cycleMenuImport';
+import { MENU_EXCEL_HEADERS, parseCorePlanFlag, corePlanExcelValue } from '../utils/menuExcelCore';
+import SupyRecipeSearch from '../components/SupyRecipeSearch';
+import IngredientTagEditor from '../components/IngredientTagEditor';
+import { toSentenceCase } from '../utils/textFormat';
+import XLSX from 'xlsx-js-style';
+import html2canvas from 'html2canvas';
+import jsPDF from 'jspdf';
 import {
   Plus,
   Edit,
@@ -43,18 +56,6 @@ const FIXED_SELECTION_DEADLINES = [
   { deliveryDay: 'Saturday', daysBefore: 3, deadlineTime: '00:00' },
   { deliveryDay: 'Sunday', daysBefore: 4, deadlineTime: '00:00' },
 ];
-import api from '../utils/api';
-import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
-import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
-import { copyManagedMenuItem, managedMenuPayload } from '../utils/managedMenuItems';
-import { importSavedCycleMenu } from '../utils/cycleMenuImport';
-import { MENU_EXCEL_HEADERS, parseCorePlanFlag, corePlanExcelValue } from '../utils/menuExcelCore';
-import SupyRecipeSearch from '../components/SupyRecipeSearch';
-import IngredientTagEditor from '../components/IngredientTagEditor';
-import { toSentenceCase } from '../utils/textFormat';
-import XLSX from 'xlsx-js-style';
-import html2canvas from 'html2canvas';
-import jsPDF from 'jspdf';
 
 // Real fields only: isPublished / isActive / shareLink.isActive / startDate /
 // endDate. There's no status enum on WeeklyMenu, so this derives one of
@@ -113,6 +114,8 @@ const getMenuDayStrip = (menu) => {
 
 const MenuManagement = () => {
   const [menus, setMenus] = useState([]);
+  const [nonSelectorMenu, setNonSelectorMenu] = useState(null);
+  const closeNonSelectors = useCallback(() => setNonSelectorMenu(null), []);
   const [statusFilter, setStatusFilter] = useState('All');
   const [openActionsMenuId, setOpenActionsMenuId] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -2360,6 +2363,10 @@ const MenuManagement = () => {
                     {selectionMenuId === menu._id ? 'Hide selections' : 'View selections'}
                   </button>
 
+                  <button type="button" onClick={() => setNonSelectorMenu(menu)} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-matter-neutral-100 text-matter-neutral-800 hover:bg-matter-neutral-200">
+                    Customers who did not select
+                  </button>
+
                   {menu.isPublished ? (
                     <button
                       onClick={() => copyShareLink(menu._id)}
@@ -3439,12 +3446,13 @@ const MenuManagement = () => {
                 }}
                 className="flex-1 bg-matter-navy hover:bg-matter-blueblack text-white rounded-lg py-2 text-sm font-medium transition-colors disabled:opacity-50"
               >
-                {savingPresetMacros ? 'Saving…' : 'Save Presets'}
+                    {savingPresetMacros ? 'Saving…' : 'Save Presets'}
               </button>
             </div>
           </div>
         </div>
       )}
+      {nonSelectorMenu && <MenuNonSelectors key={nonSelectorMenu._id} menu={nonSelectorMenu} onClose={closeNonSelectors} />}
     </div>
   );
 };
