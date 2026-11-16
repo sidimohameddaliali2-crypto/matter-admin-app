@@ -88,6 +88,8 @@ on:
       - '.github/workflows/audit-sync-status.yml'
       - '.github/scripts/audit-sync-status.mjs'
       - '.github/scripts/audit-sync-status.test.mjs'
+      - '.github/workflows/driver-audit-native-handoff.yml'
+      - '.github/scripts/driver-audit-native-handoff.mjs'
 
 concurrency:
   group: production-deploy
