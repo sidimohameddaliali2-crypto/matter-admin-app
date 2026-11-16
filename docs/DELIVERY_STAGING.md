@@ -66,6 +66,22 @@ recompressing/overwriting evidence. Photo bytes are not publicly served and this
 does not modify delivery proof, customer pins, bag state or business timestamps.
 There is no automatic capture retention/deletion policy; monitor staging DB size.
 
+Delivery business proof also preserves optional `proof.clientEventId` and typed
+`proof.photoEvidence`: the selected photo/delivery IDs, original shutter and
+completion times, size/MD5, boot/shift IDs, and available/unavailable GPS snapshot
+with accuracy, original fix time and quality flags. Legacy proof without these
+fields remains valid. Invalid linkage to another delivery, oversized evidence,
+or an unavailable fix carrying live coordinates is rejected; arbitrary local
+paths are not persisted. The driver's completion endpoint reports invalid
+capture metadata as HTTP 400 so it is retained for attention instead of retried
+as an unexplained server failure.
+
+These are client capture claims and references, not a server GPS verdict. The
+private capture ledger remains the immutable original. Persisting an event ID
+does not itself implement business-action idempotency. Existing delivery proof
+that previously lost these fields is not silently backfilled or re-completed;
+qualify the fix with a new staging completion and preserve the earlier result.
+
 The mobile staging build allows exactly https://staging.matterapp.online/api as
 an exception to the MATTER production/subdomain block. Native transport also
 requires com.matterapp.online.staging, refuses redirects and stores only an

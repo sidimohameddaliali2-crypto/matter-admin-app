@@ -2,6 +2,40 @@ import mongoose from 'mongoose';
 import { sanitizeDeliveryAddressEdit } from '../services/deliveryAddressEdit.js';
 import { applyZoneRules, isAbuDhabiEmirate, ABU_DHABI_ZONE } from '../config/zoneRules.js';
 
+const captureFixSchema = new mongoose.Schema({
+  latitude: { type: Number, min: -90, max: 90 },
+  longitude: { type: Number, min: -180, max: 180 },
+  fixAt: Date, accuracyM: { type: Number, min: 0 },
+}, { _id: false });
+const captureLocationSchema = new mongoose.Schema({
+  status: { type: String, enum: ['available', 'unavailable'], required: true },
+  reason: { type: String, maxlength: 100 },
+  latitude: { type: Number, min: -90, max: 90 },
+  longitude: { type: Number, min: -180, max: 180 },
+  fixAt: Date, accuracyM: { type: Number, min: 0 }, ageMs: Number,
+  provider: { type: String, maxlength: 100 },
+  fixElapsedRealtimeNs: { type: String, maxlength: 64 }, mocked: Boolean,
+  qualityFlags: { type: [String], default: undefined,
+    validate: values => values.length <= 16 && values.every(value => value.length <= 100) },
+  lastKnownFix: { type: captureFixSchema, default: undefined },
+}, { _id: false });
+const photoEvidenceSchema = new mongoose.Schema({
+  schemaVersion: { type: Number, enum: [1], required: true },
+  photoId: { type: String, required: true, maxlength: 128 },
+  deliveryId: { type: String, required: true, match: /^[a-f\d]{24}$/i,
+    validate: function(value) { return value === String(this.ownerDocument()._id); } },
+  shiftId: { type: String, maxlength: 128 }, bootSessionId: { type: String, maxlength: 128 },
+  byteSize: { type: Number, min: 1, max: 750000, required: true },
+  contentMd5: { type: String, match: /^[a-f\d]{32}$/i, required: true },
+  captureStartedAt: { type: Date, required: true }, captureCompletedAt: Date,
+  location: { type: captureLocationSchema, default: undefined, validate: value => !value || (
+    value.status === 'unavailable'
+      ? value.latitude == null && value.longitude == null
+      : Number.isFinite(value.latitude) && Number.isFinite(value.longitude)
+        && Number.isFinite(value.accuracyM) && value.fixAt instanceof Date
+  ) },
+}, { _id: false });
+
 const deliverySchema = new mongoose.Schema({
   bagReturnReceipts: [{bagId:String,eventId:String,receivedAt:Date}],
   
@@ -212,6 +246,11 @@ deliveryType: {
     timestamp: Date,
     photoCapturedAt: Date,
     photoSource: { type: String, enum: ['camera', 'upload', 'unknown'] },
+    // Client capture claims and a stable action reference. The private capture
+    // ledger remains the immutable original; these fields do not assert a
+    // server-verified GPS fix or make business completion idempotent.
+    clientEventId: { type: String, minlength: 1, maxlength: 128 },
+    photoEvidence: { type: photoEvidenceSchema, default: undefined },
     receivedAt: Date,
     location: {
       lat: Number,
