@@ -262,36 +262,56 @@ export async function invokeDriverAuditSourceHandler(handler, { entrypoint, envi
   return result;
 }
 
-export function runDriverAuditSourceChild(config, entrypoint, { probe = false } = {}) {
+export function runDriverAuditSourceChild(config, entrypoint, { probe = false, signal, onAdmission = async () => {} } = {}) {
   const script = fileURLToPath(new URL('../scripts/driverAuditSource.js', import.meta.url));
   return new Promise((resolve, reject) => {
     // Do not inherit app secrets, NODE_OPTIONS or the operator's environment.
     const env = Object.fromEntries(['HOME', 'LANG', 'LC_ALL', 'TZ'].filter(key => process.env[key] !== undefined)
       .map(key => [key, process.env[key]]));
     const child = fork(script, ['--config', config.file, '--child'], {
-      cwd: config.runtimeRoot, env, execArgv: [], stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+      cwd: config.runtimeRoot, env, execArgv: ['--max-old-space-size=3072'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     });
     let result;
     let timedOut = false;
     let dispatched = false;
-    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, (probe ? 30 : entrypoint.maxDurationSeconds) * 1000);
+    let admitted = probe;
+    let cancelled = false;
+    let admissionError;
+    let timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, 30_000);
+    const abort = () => {
+      if (!admitted) { cancelled = true; child.kill('SIGTERM'); }
+    };
+    signal?.addEventListener('abort', abort, { once: true });
     child.once('error', () => reject(new Error('Source child could not start.')));
     child.on('message', value => {
       if (value?.version === 1 && value.ready === true && !dispatched) {
+        if (cancelled) return;
         dispatched = true;
+        if (!probe) clearTimeout(timer);
         child.send({ version: 1, configSha256: config.configSha256, id: entrypoint.id, probe }, error => {
           if (error) child.kill('SIGKILL');
         });
+      }
+      if (value?.version === 1 && value.admitted === true && !cancelled) {
+        admitted = true;
+        timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, entrypoint.maxDurationSeconds * 1000);
+        Promise.resolve(onAdmission()).then(() => {
+          if (child.connected) child.send({ version: 1, run: true });
+        }).catch(error => { admissionError = error; child.kill('SIGKILL'); });
       }
       if (value?.version === 1 && value.ok === true && value.id === entrypoint.id
         && Number.isInteger(value.result?.httpStatus) && typeof value.result?.status === 'string') result = value.result;
     });
     child.once('exit', code => {
       clearTimeout(timer);
-      if (timedOut) reject(new Error('Source child exceeded its execution time.'));
+      signal?.removeEventListener('abort', abort);
+      if (cancelled) reject(Object.assign(new Error('Source admission cancelled.'), { code: 'AUDIT_ADMISSION_CANCELLED' }));
+      else if (admissionError) reject(admissionError);
+      else if (timedOut) reject(new Error('Source child exceeded its execution time.'));
       else if (code !== 0 || !result) reject(new Error('Source child execution failed.'));
       else resolve(result);
     });
+    if (signal?.aborted) abort();
   });
 }
 
@@ -306,20 +326,33 @@ export async function createDriverAuditSourceScheduler({ entrypoints, stateFile,
       && state.jobs && typeof state.jobs === 'object' && !Array.isArray(state.jobs), 'Saved source schedule state differs from its configuration.');
     if (initialCursor !== undefined) {
       requireSource(validTime(initialCursor), 'A fenced initial source schedule cursor is required.');
-      if (Date.parse(initialCursor) > Date.parse(state.lastScanAt)) state.lastScanAt = initialCursor;
+      if (Date.parse(initialCursor) > Date.parse(state.lastScanAt)) {
+        state.lastScanAt = initialCursor;
+        state.pending = (state.pending ?? []).filter(item => Date.parse(item.scheduledAt) > Date.parse(initialCursor));
+      }
     }
   } else {
     requireSource(validTime(initialCursor), 'A fenced initial source schedule cursor is required.');
-    state = { version: 1, configSha256, lastScanAt: initialCursor, missedMinutes: 0, jobs: {} };
+    state = { version: 1, configSha256, lastScanAt: initialCursor, missedMinutes: 0, jobs: {}, pending: [] };
   }
-  for (const job of Object.values(state.jobs)) {
-    if (job.status === 'running') job.status = 'interrupted';
+  state.pending ??= [];
+  const knownIds = new Set(entrypoints.map(entry => entry.id));
+  requireSource(Array.isArray(state.pending) && state.pending.every(item => knownIds.has(item.id) && validTime(item.scheduledAt)),
+    'Saved pending source schedule is invalid.');
+  requireSource(new Set(state.pending.map(item => item.id + ':' + item.scheduledAt)).size === state.pending.length,
+    'Saved pending source schedule has duplicate claims.');
+  for (const [id, job] of Object.entries(state.jobs)) {
+    if (job.status === 'running') {
+      job.status = 'interrupted';
+      state.pending = state.pending.filter(item => item.scheduledAt !== job.scheduledAt || item.id !== id);
+    }
   }
   await writeDriverAuditSourceState(stateFile, state);
-  const active = new Map();
+  let active;
   let stopped = false;
   let persistenceError;
   let queue = Promise.resolve();
+  const cancellation = new AbortController();
   const enqueue = operation => {
     const result = queue.then(() => {
       if (persistenceError) throw persistenceError;
@@ -329,17 +362,49 @@ export async function createDriverAuditSourceScheduler({ entrypoints, stateFile,
     return result;
   };
   const save = () => writeDriverAuditSourceState(stateFile, state);
-  const routeKey = entry => entry.method + ' ' + entry.path;
+  async function dispatch() {
+    while (!stopped && state.pending.length > 0) {
+      const claim = state.pending[0];
+      const entry = entrypoints.find(item => item.id === claim.id);
+      await enqueue(async () => {
+        state.jobs[claim.id] = { scheduledAt: claim.scheduledAt, status: 'waiting' };
+        await save();
+      });
+      let outcome;
+      let admitted = false;
+      try {
+        outcome = await invoke(entry, { scheduledAt: claim.scheduledAt, signal: cancellation.signal,
+          onAdmission: () => enqueue(async () => {
+            state.jobs[claim.id] = { scheduledAt: claim.scheduledAt, status: 'running' };
+            state.pending.shift();
+            await save();
+            admitted = true;
+          }) });
+      } catch (error) {
+        if (error.code === 'AUDIT_ADMISSION_CANCELLED' && stopped) break;
+        outcome = { status: 'failed' };
+      }
+      await enqueue(async () => {
+        state.jobs[claim.id] = { scheduledAt: claim.scheduledAt, ...outcome };
+        if (!admitted) state.pending.shift();
+        await save();
+      });
+    }
+  }
+  const kick = () => {
+    if (active || stopped || state.pending.length === 0) return;
+    active = dispatch().catch(error => { persistenceError = error; stopped = true; }).finally(() => { active = null; });
+  };
   return {
-    stop() { stopped = true; },
+    stop() { stopped = true; cancellation.abort(); },
     async drain() {
-      await Promise.allSettled([...active.values()]);
+      await active;
       await queue;
       if (persistenceError) throw persistenceError;
     },
     snapshot() { return structuredClone(state); },
-    tick(now = new Date()) {
-      return enqueue(async () => {
+    async tick(now = new Date()) {
+      await enqueue(async () => {
         if (stopped) return;
         const current = Math.floor(now.getTime() / minuteMs) * minuteMs;
         const previous = Date.parse(state.lastScanAt);
@@ -347,35 +412,13 @@ export async function createDriverAuditSourceScheduler({ entrypoints, stateFile,
         if (current === previous) return;
         state.missedMinutes = (state.missedMinutes ?? 0) + Math.max(0, (current - previous) / minuteMs - 1);
         state.lastScanAt = new Date(current).toISOString();
-        const launch = [];
-        const reserved = new Set(active.keys());
         for (const entry of entrypoints) {
           if (!sourceScheduleMatches(entry.schedule, new Date(current))) continue;
-          const key = routeKey(entry);
-          const busy = reserved.has(key);
-          state.jobs[entry.id] = busy && state.jobs[entry.id]?.status === 'running'
-            ? { ...state.jobs[entry.id], lastSkippedAt: state.lastScanAt }
-            : { scheduledAt: state.lastScanAt, status: busy ? 'busy' : 'running' };
-          if (!busy) { reserved.add(key); launch.push(entry); }
+          state.pending.push({ id: entry.id, scheduledAt: state.lastScanAt });
         }
         await save();
-        for (const entry of launch) {
-          const scheduledAt = state.lastScanAt;
-          const key = routeKey(entry);
-          const task = Promise.resolve().then(() => invoke(entry, { scheduledAt })).then(
-            result => result,
-            () => ({ status: 'failed' }),
-          ).then(outcome => enqueue(async () => {
-            if (state.jobs[entry.id]?.scheduledAt === scheduledAt) {
-              state.jobs[entry.id] = { ...state.jobs[entry.id], ...outcome };
-              await save();
-            }
-          })).finally(() => { active.delete(key); });
-          // The scheduler retains the failure for drain(), without an unhandled rejection.
-          task.catch(() => {});
-          active.set(key, task);
-        }
       });
+      kick();
     },
   };
 }

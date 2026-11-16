@@ -22,16 +22,36 @@ async function childMain(config) {
   const entrypoint = config.runtime.entrypoints.find(entry => entry.id === message.id);
   if (!entrypoint) throw new Error('Source child schedule is unavailable.');
   Object.assign(process.env, config.environment);
-  const module = await import(pathToFileURL(path.join(config.runtimeRoot, entrypoint.module)).href);
-  if (typeof module.default !== 'function') throw new Error('Source handler export is unavailable.');
-  const result = message.probe ? { httpStatus: 200, status: 'checked' } : await invokeDriverAuditSourceHandler(module.default, {
-    entrypoint, environment: config.environment,
-    gatewayCredential: new URL(entrypoint.path, 'https://source.invalid').searchParams.get('task') === 'photo-grade'
-      ? config.gatewayCredential : null,
-  });
-  await new Promise((resolve, reject) => process.send({ version: 1, ok: true, id: entrypoint.id, result }, error => error ? reject(error) : resolve()));
-  process.removeListener('disconnect', orphaned);
-  process.disconnect();
+  const load = async () => {
+    const module = await import(pathToFileURL(path.join(config.runtimeRoot, entrypoint.module)).href);
+    if (typeof module.default !== 'function') throw new Error('Source handler export is unavailable.');
+    return module.default;
+  };
+  const send = async result => {
+    await new Promise((resolve, reject) => process.send({ version: 1, ok: true, id: entrypoint.id, result }, error => error ? reject(error) : resolve()));
+  };
+  if (message.probe) {
+    await load();
+    await send({ httpStatus: 200, status: 'checked' });
+    process.removeListener('disconnect', orphaned);
+    process.disconnect();
+  } else {
+    const { withDriverAuditHeavyWork } = await import('../services/driverAuditHeavyWork.js');
+    await withDriverAuditHeavyWork({ root: path.join(config.root, '../../driver-audit-heavy-work'), owner: 'source' }, async () => {
+      const run = new Promise(resolve => process.once('message', resolve));
+      process.send({ version: 1, admitted: true });
+      const permit = await run;
+      if (permit?.version !== 1 || permit.run !== true) throw new Error('Source execution permit is invalid.');
+      const result = await invokeDriverAuditSourceHandler(await load(), {
+        entrypoint, environment: config.environment,
+        gatewayCredential: new URL(entrypoint.path, 'https://source.invalid').searchParams.get('task') === 'photo-grade'
+          ? config.gatewayCredential : null,
+      });
+      await send(result);
+      // Keep the OS lock until this memory-heavy child has exited.
+      process.exit(0);
+    });
+  }
 }
 
 export async function checkDriverAuditSource(config) {
@@ -61,14 +81,14 @@ export async function runDriverAuditSource(config) {
     await writeDriverAuditSourceState(path.join(config.root, 'source-status.private.json'), {
       version: 1, status, pid: process.pid, configSha256: config.configSha256, manifestSha256: config.manifestSha256,
       checkedAt: new Date().toISOString(), lastScanAt: state?.lastScanAt ?? null,
-      missedMinutes: state?.missedMinutes ?? 0, jobs: state?.jobs ?? {},
+      missedMinutes: state?.missedMinutes ?? 0, jobs: state?.jobs ?? {}, pendingJobs: state?.pending.length ?? 0,
     });
   };
   try {
     scheduler = await createDriverAuditSourceScheduler({
       entrypoints: config.runtime.entrypoints, stateFile: path.join(config.root, 'source-state.private.json'),
       configSha256: config.configSha256, initialCursor: release.initialCursor,
-      invoke: entrypoint => runDriverAuditSourceChild(config, entrypoint),
+      invoke: (entrypoint, options) => runDriverAuditSourceChild(config, entrypoint, options),
     });
     await heartbeat('ready');
     while (!stopped) {

@@ -7,6 +7,7 @@ import {runDriverAuditDirectImport} from '../services/driverAuditDirectImport.js
 import {collectDriverAuditGarbage} from '../services/driverAuditGarbageCollection.js';
 import {driverAuditReplicaRetentionStatus,driverAuditRetentionImplementation} from '../services/driverAuditRetention.js';
 import {withDriverAuditWriter} from '../services/driverAuditWriter.js';
+import {withDriverAuditHeavyWork} from '../services/driverAuditHeavyWork.js';
 import {compactActiveDriverAuditBuildFiles,compactPreviousDriverAuditInputs,compactRetiredDriverAuditInputs,hasDriverAuditBuildSpace,pruneDriverAuditWorkspace,reclaimDriverAuditBuildCache,requireDriverAuditBuildSpace} from '../services/driverAuditWorkspace.js';
 import {readDriverAuditBuildRecipe,saveDriverAuditBuildRecipe} from '../services/driverAuditBuildRecipe.js';
 import {acceptedWorkspace,prunePreviousDriverAuditCopies} from '../services/driverAuditWorkspaceRetirement.js';
@@ -198,7 +199,8 @@ async function main(){
   let next=Date.parse(scheduled?.nextCheckAt??'');
   if(!Number.isFinite(next)||next>Date.now()+budgetRetry)next=Date.now();
   let stopped=false,wake;
-  const stop=()=>{stopped=true;wake?.();};
+  const admissionStop=new AbortController();
+  const stop=()=>{stopped=true;admissionStop.abort();wake?.();};
   process.once('SIGTERM',stop);
   process.once('SIGINT',stop);
   async function status(value){
@@ -216,6 +218,15 @@ async function main(){
    if(stopped)break;
    next=Date.now()+interval;
    try{
+    let waitingReported=false;
+    await withDriverAuditHeavyWork({root:path.join(root,'../../driver-audit-heavy-work'),owner:'sync',signal:admissionStop.signal,
+     async onWaiting(){
+      if(waitingReported)return;
+      waitingReported=true;
+      const previous=await privateAuditJson(heartbeat).catch(()=>null);
+      await status({status:'pending',pending:true,errorCode:null,admission:'waiting',
+       latestCaptureAt:previous?.latestCaptureAt??null,visibleCutoffAt:previous?.visibleCutoffAt??null});
+     }},async()=>{
     await recoverStage();
     await runDriverAuditSyncTick({
      async readSource(){
@@ -253,7 +264,9 @@ async function main(){
      onMaintenanceError:()=>console.warn('Driver audit workspace maintenance deferred.'),
      status,
     });
+    });
    }catch(error){
+    if(error.code==='AUDIT_ADMISSION_CANCELLED'&&stopped)break;
     if(error.code==='AUDIT_BUDGET')next=Date.now()+budgetRetry;
     const failure=describeDriverAuditSyncFailure(error);
     const active=await readHead().catch(()=>null);

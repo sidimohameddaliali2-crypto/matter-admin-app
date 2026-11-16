@@ -113,7 +113,7 @@ test('durable claims prevent duplicate dispatch and retain disabled outcomes acr
   assert.deepEqual(invocations, ['delivery']);
 });
 
-test('overlapping schedules preserve independent tasks and skip a busy route without a concurrent duplicate', async t => {
+test('overlapping schedules queue durably and execute one source child at a time', async t => {
   const f = await fixture(t);
   let finish;
   const active = new Promise(resolve => { finish = resolve; });
@@ -132,14 +132,55 @@ test('overlapping schedules preserve independent tasks and skip a busy route wit
   await scheduler.tick(new Date('2026-11-16T04:02:00.000Z'));
   assert.equal(calls.filter(id => id === 'delivery').length, 1);
   assert.equal(calls.includes('same-route'), false);
-  assert.equal(calls.includes('gps'), true);
+  assert.deepEqual(calls, ['delivery']);
+  const waiting = JSON.parse(await fs.readFile(path.join(f.root, 'state.private.json')));
+  assert.equal(waiting.pending.length, 6);
   finish();
   await scheduler.drain();
   const state = JSON.parse(await fs.readFile(path.join(f.root, 'state.private.json')));
-  assert.equal(state.jobs['same-route'].status, 'busy');
+  assert.deepEqual(calls, ['delivery', 'same-route', 'gps', 'delivery', 'same-route', 'gps']);
+  assert.equal(state.pending.length, 0);
+  assert.equal(state.jobs['same-route'].status, 'complete');
   assert.equal(state.jobs.delivery.status, 'complete');
-  assert.equal(state.jobs.delivery.scheduledAt, minute);
-  assert.equal(state.jobs.delivery.lastSkippedAt, '2026-11-16T04:02:00.000Z');
+  assert.equal(state.jobs.delivery.scheduledAt, '2026-11-16T04:02:00.000Z');
+});
+
+test('queued source work resumes after restart and preserves jobs admitted before stop', async t => {
+  const f = await fixture(t);
+  const stateFile = path.join(f.root, 'state.private.json');
+  const options = { entrypoints: [{ ...f.entrypoint, schedule: '* * * * *' }], stateFile,
+    configSha256: 'a'.repeat(64), initialCursor: '2026-11-16T04:00:00.000Z' };
+  let finish;
+  const scheduler = await createDriverAuditSourceScheduler({ ...options,
+    invoke: async () => { await new Promise(resolve => { finish = resolve; }); return { status: 'complete', httpStatus: 200 }; } });
+  await scheduler.tick(new Date(minute));
+  await scheduler.tick(new Date('2026-11-16T04:02:00.000Z'));
+  scheduler.stop();
+  finish();
+  await scheduler.drain();
+  assert.equal(JSON.parse(await fs.readFile(stateFile)).pending.length, 1);
+  let calls = 0;
+  const restarted = await createDriverAuditSourceScheduler({ ...options,
+    invoke: async () => { calls++; return { status: 'complete', httpStatus: 200 }; } });
+  await restarted.tick(new Date('2026-11-16T04:02:00.000Z'));
+  await restarted.drain();
+  assert.equal(calls, 1);
+  assert.equal(JSON.parse(await fs.readFile(stateFile)).pending.length, 0);
+});
+
+test('an admitted occurrence is not dispatched twice after an interrupted result save', async t => {
+  const f = await fixture(t);
+  const stateFile = path.join(f.root, 'state.private.json');
+  const configSha256 = 'a'.repeat(64);
+  await writeDriverAuditSourceState(stateFile, { version: 1, configSha256, lastScanAt: minute,
+    jobs: { delivery: { scheduledAt: minute, status: 'running' } },
+    pending: [{ id: 'delivery', scheduledAt: minute }, { id: 'delivery', scheduledAt: '2026-11-16T04:02:00.000Z' }] });
+  const calls = [];
+  const scheduler = await createDriverAuditSourceScheduler({ stateFile, configSha256, entrypoints: [f.entrypoint],
+    invoke: async (_entry, options) => { calls.push(options.scheduledAt); await options.onAdmission(); return { status: 'complete', httpStatus: 200 }; } });
+  await scheduler.tick(new Date(minute));
+  await scheduler.drain();
+  assert.deepEqual(calls, ['2026-11-16T04:02:00.000Z']);
 });
 
 test('failed and interrupted jobs retain claims while missed minutes do not create a replay burst', async t => {
@@ -299,7 +340,7 @@ test('source config rejects stale OIDC values and requires a bound Gateway key w
 
 test('a source child runs the pinned handler with isolated environment and returns only bounded status', async t => {
   const f = await configuredFixture(t);
-  const source = 'export default async function(req,res){if(process.env.UNRELATED_APP_SECRET)throw Error("leaked app secret");res.writeHead(200);res.end(JSON.stringify({status:"disabled",private:"do not return"}));}';
+  const source = 'export default async function(req,res){if(process.env.UNRELATED_APP_SECRET)throw Error("leaked app secret");if(!process.execArgv.includes("--max-old-space-size=3072"))throw Error("missing heap cap");res.writeHead(200);res.end(JSON.stringify({status:"disabled",private:"do not return"}));}';
   await fs.writeFile(path.join(f.runtimeRoot, f.entrypoint.module), source, { mode: 0o600 });
   f.manifest.files[0] = { path: f.entrypoint.module, bytes: Buffer.byteLength(source), sha256: hash(source) };
   f.config.manifestSha256 = await f.saveManifest();
@@ -324,6 +365,50 @@ test('a hanging source child is killed after its scheduled execution bound', asy
   await fs.writeFile(f.configFile, JSON.stringify(f.config), { mode: 0o600 });
   const config = await readDriverAuditSourceConfig(f.configFile);
   await assert.rejects(runDriverAuditSourceChild(config, { ...f.entrypoint, maxDurationSeconds: 1 }), /time|execution/i);
+});
+
+test('a source child waits behind a heavy builder without spending its execution timeout', async t => {
+  const f = await configuredFixture(t);
+  const config = await readDriverAuditSourceConfig(f.configFile);
+  const { withDriverAuditHeavyWork } = await import('./driverAuditHeavyWork.js');
+  const root = path.join(f.root, '../../driver-audit-heavy-work');
+  let finish;
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const builder = withDriverAuditHeavyWork({ root, owner: 'sync' }, async () => {
+    started(); await new Promise(resolve => { finish = resolve; });
+  });
+  await ready;
+  let admitted = false;
+  const child = runDriverAuditSourceChild(config, { ...f.entrypoint, maxDurationSeconds: 1 }, {
+    onAdmission: async () => { admitted = true; },
+  });
+  await new Promise(resolve => setTimeout(resolve, 1200));
+  assert.equal(admitted, false);
+  finish();
+  await builder;
+  assert.equal((await child).status, 'disabled');
+  assert.equal(admitted, true);
+});
+
+test('stopping a source child waiting for heavy admission retains the builder lock', async t => {
+  const f = await configuredFixture(t);
+  const config = await readDriverAuditSourceConfig(f.configFile);
+  const { withDriverAuditHeavyWork } = await import('./driverAuditHeavyWork.js');
+  const root = path.join(f.root, '../../driver-audit-heavy-work');
+  let finish;
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const builder = withDriverAuditHeavyWork({ root, owner: 'sync' }, async () => {
+    started(); await new Promise(resolve => { finish = resolve; });
+  });
+  await ready;
+  const cancellation = new AbortController();
+  const child = runDriverAuditSourceChild(config, f.entrypoint, { signal: cancellation.signal });
+  cancellation.abort();
+  await assert.rejects(child, { code: 'AUDIT_ADMISSION_CANCELLED' });
+  finish();
+  await builder;
 });
 
 test('a source child declares readiness before accepting its invocation', async t => {
