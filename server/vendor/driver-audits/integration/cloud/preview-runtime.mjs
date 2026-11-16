@@ -103,9 +103,11 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
 
  .mm-workspace-shell > .mm-content, .mm-workspace-shell > .mm-snapshot-foot { margin-left: 0 !important; }
  </style><script>window.addEventListener('matter-session-expired',()=>parent.postMessage('matter-audit-session-expired',location.origin));</script>`;
+ // Staff can select and copy report text without the captured dashboard's AI popup.
+ const selectionStyle=staffIntegration?'<style data-matter-driver-report-selection>.dashboard-ask-anchor[data-source="selection"]:has(> .dashboard-ask-panel:not([data-exploration])){display:none!important}</style>':'';
  return createCloudHttp({auth,service:report,origin,login,loginPage:passwordLoginHtml,compressPreviewReads:true,frozenEvidenceOverlay:staffIntegration,localFontAssets:staffIntegration,staffReportFrame,afterResponse,onAuthenticatedRequest,isRetiredAuditGeneration,mapsEnabled:maps.enabled===true,readerBudget:local||remoteReadsBudgeted?undefined:createReaderBudgetPool({stateStore:rawState}),renderer:async(_actor,_service,url,framed)=>{
   if(!html){let source=fonts.html.replace(build.snapshot.path,'report-data/snapshot-'+build.snapshot.sha256+'.json');source=cloudHtml({html:initializeReportTab(source),priorManifest:build.snapshot,head:{...head,manifest:await report.browserManifest()},generation:head.manifest.sha256,publicPathPrefix});html=addCasePrefetch(addBrowserReadCache(addBrowserRequestQueue(addPrivateEvidenceCache(source.replace('</head>','<script>window.__matterPrivatePreview=true;window.__matterGpsPreview=true;window.__matterAutomaticPreview='+JSON.stringify(automaticRefresh||automaticFeed)+';</script></head>')))));html=addPreviewStartup(addStatusFlight(html),{...(await report.browserManifest()),generation:head.manifest.sha256,publicPathPrefix});}
-  const document=framed?html.replace('<head>','<head>'+frameHead):html;
+  const document=(framed?html.replace('<head>','<head>'+frameHead):html).replace('</head>',selectionStyle+'</head>');
   const page=prioritizePreviewStartup(addPreviewPhotoPrime(document,photoHints,url));
   return auditSyncStatus?addDriverAuditSyncStatus(page,framed?null:await syncStatus()):page;
  }});

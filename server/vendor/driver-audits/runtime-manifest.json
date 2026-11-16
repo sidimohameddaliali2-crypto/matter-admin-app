@@ -1,7 +1,7 @@
 {
   "version": 1,
   "files": {
-    "integration/cloud/preview-runtime.mjs": "093b99ec77239e9aca2a53c85a3e9a783d58176d2645db15c21c1004860cb37e",
+    "integration/cloud/preview-runtime.mjs": "f026723ea6b72a243e430e2abb45d492b3fdd74b5c2f578e180888775a87b873",
     "integration/cloud/audit-replica.mjs": "ae7db2f5948958b8d6763bc1f69b5db797354ef82851d4a2b71fe723a182b559",
     "integration/cloud/automatic-hosted-preview.mjs": "5d2f6b9c73bee499fe15afdd7a0754773566c51b31e3ac88038a6a4836c6a18f",
     "integration/cloud/automatic-preview-publication.mjs": "e3e14f618b792eb74da2b46e0d8d98e532834183a5a1940b4360718aa5121866",
