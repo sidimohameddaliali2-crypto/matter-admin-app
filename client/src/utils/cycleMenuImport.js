@@ -1,4 +1,4 @@
-import { mealType, mealFormat, cycleSlots } from '../pages/adminMealSelectionV2/workbookMeals';
+import { mealType, mealFormat, cycleSlots, cycleDayIndexes } from '../pages/adminMealSelectionV2/workbookMeals';
 
 export const CYCLE_CATALOGUE_KEY = 'matter-admin-v2:workbook-cycle-v2';
 export const CYCLE_BOARD_KEY = 'matter-admin-v2:weekly-board-v1';
@@ -14,9 +14,8 @@ const nameOf = (meal, types) => meal.components.filter(c => types.includes(c.typ
 const seed = meals => {
   const board = Array.from({ length: 7 }, () => Array.from({ length: 4 }, () => []));
   meals.forEach(meal => {
-    const days = meal.day === 'DAY 6 & 7' ? [5, 6] : /^DAY ([1-5])$/.test(meal.day) ? [Number(meal.day.slice(-1)) - 1] : [];
     const slot = mealFormat(meal) === 'Breakfast' ? 0 : mealFormat(meal) === 'Snack' ? 3 : 1;
-    days.forEach(day => board[day][slot].push({ mealId: meal.id, isMatterCore: false }));
+    cycleDayIndexes(meal).forEach(day => board[day][slot].push({ mealId: meal.id, isMatterCore: false }));
   });
   return board;
 };

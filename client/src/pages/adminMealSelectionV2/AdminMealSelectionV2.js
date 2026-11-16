@@ -19,14 +19,14 @@ export default function AdminMealSelectionV2() {
   const cycle = saved.data?.catalogue;
   const [message, setMessage] = useState('');
   useEffect(() => { contentRef.current?.closest('main')?.scrollTo(0, 0); }, [location.pathname]);
-  const importMeals = async catalogue => { await mealCreationStore.save({ catalogue }); setMessage('Meals saved to the library. Existing meals and cycle placements retained.'); };
+  const importMeals = async catalogue => { await mealCreationStore.save({ catalogue, skipDuplicates: true }); setMessage('Meals saved. Identical recipes are skipped; existing meals and cycle placements are retained.'); };
   const route = location.pathname.slice(BASE.length).split('/').filter(Boolean);
   const page = route[0] || 'meals';
   if (!cycle || saved.status === 'loading' || saved.status === 'idle') return <div className="av2 av2-integrated"><div className="av2-page-body">{saved.error ? <Notice tone="red">{saved.error}<button onClick={() => mealCreationStore.load().catch(() => {})}>Retry loading meals</button></Notice> : <p role="status">Loading saved meals and cycles…</p>}</div></div>;
   if (!['ingredients', 'recipes', 'components', 'meals', 'weekly-menu', 'kitchen', 'subscriptions'].includes(page)) return <Navigate to={`${BASE}/meals`} replace />;
   return <div className="av2 av2-integrated" ref={contentRef}><div className="av2-page-body">
     {(saved.error || message) && <div className="av2-feedback" role="status">{saved.error || message}<button aria-label="Dismiss message" onClick={() => setMessage('')}><X size={16} /></button></div>}
-    {page === 'meals' && (route[1] ? <MealComposer key={route[1]} meal={cycle.meals.find(m => m.id === route[1])} isNew={route[1] === 'new'} onSave={async meal => {
+    {page === 'meals' && (route[1] ? <MealComposer key={route[1]} meal={cycle.meals.find(m => m.id === ((saved.data.aliases || []).find(alias => alias.from === route[1])?.to || route[1]))} isNew={route[1] === 'new'} onSave={async meal => {
       const version = view.current.version;
       await mealCreationStore.save({ catalogue: { meals: [meal] } });
       if (!alive.current || version !== view.current.version) return;

@@ -48,19 +48,26 @@ export function parseMealWorkbook(sheets) {
     row['Sauce 2'] = row['Sauce 2'] || row['Sauce 2 / extras'] || '';
   });
   const componentRows = records(sheets.Components, ['Meal ID', 'Component type', 'Component name', 'Preparation / option notes'], 'Components');
-  const ids = new Set();
-  const meals = rows.map(row => {
+  const ids = new Map(), meals = [];
+  const rowSignature = row => JSON.stringify(Object.fromEntries(Object.keys(row).filter(key => !['Day','Source row','Source rows','sourceRow'].includes(key)).sort().map(key => [key, text(row[key]).toLowerCase().replace(/\s+/g, ' ')])));
+  rows.forEach(row => {
     const id = row['Meal ID'];
-    if (!id || ids.has(id)) throw new Error(`Meals row ${row.sourceRow}: missing or duplicate Meal ID “${id}”.`);
+    if (!id) throw new Error(`Meals row ${row.sourceRow}: missing Meal ID.`);
     if (!row['Meal name']) throw new Error(`Meals row ${row.sourceRow}: meal name is required.`);
     if (!CYCLE_DAYS.includes(row.Day)) throw new Error(`Meals row ${row.sourceRow}: unsupported cycle day “${row.Day}”.`);
-    ids.add(id);
-    return {
+    if (ids.has(id)) {
+      const previous = ids.get(id);
+      if (rowSignature(previous.row) !== rowSignature(row)) throw new Error(`Meals row ${row.sourceRow}: duplicate Meal ID “${id}” has conflicting recipe details.`);
+      previous.meal.cycleDays = [...new Set([previous.meal.day, ...(previous.meal.cycleDays || []), row.Day])];
+      return;
+    }
+    const meal = {
       id, name: row['Meal name'], day: row.Day, category: row['Meal category'], temperature: row.Temperature,
       tags: row.Tags, carbCombined: row['Carb combined with veg'], notes: row['Preparation / option notes'],
       sourceRows: row['Source rows'] || row['Source row'], workbookRow: row.sourceRow, status: 'Draft', components: [],
       absentSlots: Object.fromEntries(['Sauce', 'Sauce 2', 'Garnish'].filter(column => absentComponent(column, row[column])).map(column => [column, row[column]])),
     };
+    ids.set(id, { row, meal }); meals.push(meal);
   });
   const byId = new Map(meals.map(meal => [meal.id, meal]));
   componentRows.forEach((row, index) => {
@@ -97,4 +104,9 @@ export function componentName(meal, type) {
 // A main meal can occupy either Main or Sub; that belongs to the assignment.
 export function cycleSlots(meal) {
   return mealFormat(meal) === 'Breakfast' ? [0] : mealFormat(meal) === 'Snack' ? [3] : [1, 2];
+}
+
+// A single library recipe may have several source-workbook cycle occurrences.
+export function cycleDayIndexes(meal) {
+  return [...new Set([meal.day, ...(meal.cycleDays || [])].flatMap(day => day === 'DAY 6 & 7' ? [5, 6] : /^DAY ([1-5])$/.test(day || '') ? [Number(day.slice(-1)) - 1] : []))];
 }

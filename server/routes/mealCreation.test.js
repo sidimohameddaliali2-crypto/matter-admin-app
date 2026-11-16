@@ -48,3 +48,21 @@ test('routes are staff-authenticated and require effective menus permission',()=
   let passed=false;guard({user:{role:'super_admin'}},res(),()=>{passed=true;});assert.equal(passed,true);
   const denied=res();guard({user:{role:'viewer',permissions:{menus:false}}},denied,()=>assert.fail('must deny'));assert.equal(denied.statusCode,403);
 });
+
+test('bootstrap removes existing duplicate records once, remaps Core placements and retains aliases',()=>fixtures(async saved=>{
+  const canonical=meal('first'),duplicate={...meal('second'),name:'FIRST'};
+  const week=board();week[4][2]=[{mealId:'second',isMatterCore:true}];
+  saved.state={_id:'shared',catalogue:{meals:[canonical,duplicate],source:'Own.xlsx'},boards:{'Main menu:Week 2':week},revision:3,aliases:[]};
+  const response=res();await route('post','/bootstrap')({body:{}},response);
+  assert.equal(response.statusCode,200);assert.equal(response.body.data.catalogue.meals.length,1);assert.deepEqual(response.body.data.boards['Main menu:Week 2'][4][2],[{mealId:'first',isMatterCore:true}]);assert.deepEqual(response.body.data.aliases,[{from:'second',to:'first'}]);assert.equal(response.body.data.revision,4);
+  const again=res();await route('post','/bootstrap')({body:{}},again);assert.equal(saved.writes,1);assert.deepEqual(again.body.data,response.body.data);
+}));
+
+test('repeat upload skips a duplicate recipe and later board saves accept its old import ID',()=>fixtures(async saved=>{
+  await route('post','/bootstrap')({body:{}},res());
+  const duplicate={...meal('upload'),name:'RECOVERED'};
+  const response=res();await route('put','/')({body:{revision:0,catalogue:{meals:[duplicate]},skipDuplicates:true}},response);
+  assert.equal(response.statusCode,200);assert.equal(response.body.data.catalogue.meals.length,1);assert.equal(response.body.data.aliases[0].from,'upload');
+  const week=board();week[3][1]=[{mealId:'upload',isMatterCore:true}];
+  const next=res();await route('put','/')({body:{revision:1,boards:{'Main menu:Week 2':week}}},next);assert.equal(next.statusCode,200);assert.equal(next.body.data.boards['Main menu:Week 2'][3][1][0].mealId,'recovered');
+}));

@@ -7,7 +7,7 @@ import { changeMealCreationState, recoverMealCreationState, mergeLegacyDraft } f
 
 const router = express.Router();
 router.use(protect, (req, res, next) => effectivePermissions(req.user).menus ? next() : res.status(403).json({ success: false, message: 'Menu access is required.' }));
-const output = state => ({ catalogue: state.catalogue, boards: state.boards, revision: state.revision, recovery: state.recovery });
+const output = state => ({ catalogue: state.catalogue, boards: state.boards, aliases: state.aliases || [], revision: state.revision, recovery: state.recovery });
 const conflict = res => res.status(409).json({ success: false, message: 'The meal library was changed in another tab. Reload before editing; your current draft has not overwritten it.' });
 
 router.post('/bootstrap', async (req, res) => {
@@ -22,9 +22,9 @@ router.post('/bootstrap', async (req, res) => {
       try { current = (await State.create({ _id: 'shared', ...initial, recovery: recovered.recovery })).toObject(); }
       catch (error) { if (error.code !== 11000) throw error; current = await State.findById('shared').lean(); }
     }
-    if (req.body?.legacy) {
-      const merged = mergeLegacyDraft(current, req.body.legacy);
-      if (JSON.stringify(merged) !== JSON.stringify({ catalogue: current.catalogue, boards: current.boards })) {
+    {
+      const merged = mergeLegacyDraft(current, req.body?.legacy);
+      if (JSON.stringify(merged) !== JSON.stringify({ catalogue: current.catalogue, boards: current.boards, aliases: current.aliases || [] })) {
         current = await State.findOneAndUpdate({ _id: 'shared', revision: current.revision }, { $set: merged, $inc: { revision: 1 } }, { new: true }).lean();
         if (!current) return conflict(res);
       }

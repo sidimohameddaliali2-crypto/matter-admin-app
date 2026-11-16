@@ -52,8 +52,8 @@ export function WorkbookImport({ onClose, onImport }) {
 export function MealLibrary({ meals, source, onImport }) {
   const [query, setQuery] = useState(''), [day, setDay] = useState(''), [category, setCategory] = useState(''), [temperature, setTemperature] = useState('');
   const [importing, setImporting] = useState(false);
-  const filtered = meals.filter(m => (!day || m.day === day) && (!category || mealType(m) === category) && (!temperature || m.temperature === temperature) && [m.id, m.name, ...m.components.map(c => c.name)].some(value => value.toLowerCase().includes(query.toLowerCase())));
-  const stats = [[meals.length, 'Meals in cycle'], [meals.reduce((s, m) => s + m.components.length, 0), 'Component entries'], [meals.filter(m => m.components.some(c => c.type === 'Sauce 2')).length, 'Meals with salad dressing'], [new Set(meals.map(m => m.day).filter(Boolean)).size, 'Cycle day groups']];
+  const filtered = meals.filter(m => (!day || m.day === day || m.cycleDays?.includes(day)) && (!category || mealType(m) === category) && (!temperature || m.temperature === temperature) && [m.id, m.name, ...m.components.map(c => c.name)].some(value => value.toLowerCase().includes(query.toLowerCase())));
+  const stats = [[meals.length, 'Meals in cycle'], [meals.reduce((s, m) => s + m.components.length, 0), 'Component entries'], [meals.filter(m => m.components.some(c => c.type === 'Sauce 2')).length, 'Meals with salad dressing'], [new Set(meals.flatMap(m => [m.day, ...(m.cycleDays || [])]).filter(Boolean)).size, 'Cycle day groups']];
   return <>
     <PageHeading title="Meals" subtitle="Create meals and assign them in your cycle menu."><Action icon={Upload} onClick={() => setImporting(true)}>Import Excel cycle</Action><Link to={`${BASE}/meals/new`} className="av2-action av2-primary"><Plus size={15}/>Create meal</Link></PageHeading>
     <div className="av2-source-strip"><FileSpreadsheet size={18}/><div><strong>{source || 'No workbook imported'}</strong><small>Saved meal library · Supy recipe links not verified</small></div></div>

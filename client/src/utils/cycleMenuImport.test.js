@@ -51,3 +51,8 @@ test('storage reader performs no writes and reports malformed saved JSON', () =>
   expect(importSavedCycleMenu({ ...options, storage })).toHaveLength(7); expect(storage.setItem).not.toHaveBeenCalled();
   storage.getItem.mockReturnValue('{bad');expect(()=>importSavedCycleMenu({ ...options,storage })).toThrow('could not be read');
 });
+
+test('a deduplicated recipe seeds every original workbook occurrence once',()=>{
+  const options=input();options.catalogue.meals=[{...options.catalogue.meals[0],day:'DAY 1',cycleDays:['DAY 1','DAY 6 & 7']}];options.boards={};
+  const days=importCycleMenu(options);expect(days.map(day=>day.items.length)).toEqual([1,0,0,0,0,1,1]);expect(days[6].items[0].cycleMeal.id).toBe('Main');
+});

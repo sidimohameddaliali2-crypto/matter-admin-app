@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Save, Check, Upload, Copy, History, Eye, X, GripVertical } from 'lucide-react';
 import { Action, Badge, Tabs, SearchBox, Modal, Notice } from './components';
-import { componentName, mealType, mealFormat, cycleSlots } from './workbookMeals';
+import { componentName, mealType, mealFormat, cycleSlots, cycleDayIndexes } from './workbookMeals';
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const GROUPS = ['Breakfast', 'Main', 'Sub', 'Snack'];
@@ -11,8 +11,7 @@ const slotFor = meal => mealFormat(meal) === 'Breakfast' ? 0 : mealFormat(meal) 
 function seedBoard(meals) {
   const board = emptyBoard();
   meals.forEach(meal => {
-    const days = meal.day === 'DAY 6 & 7' ? [5, 6] : [/^DAY ([1-5])$/.test(meal.day) ? Number(meal.day.slice(-1)) - 1 : -1];
-    days.filter(day => day >= 0).forEach(day => board[day][slotFor(meal)].push({ mealId: meal.id, isMatterCore: false }));
+    cycleDayIndexes(meal).forEach(day => board[day][slotFor(meal)].push({ mealId: meal.id, isMatterCore: false }));
   });
   return board;
 }

@@ -1,13 +1,18 @@
 import { validateCycleMealSnapshot } from './menuComponentSnapshot.js';
+import { createHash } from 'node:crypto';
+import { deduplicateMeals, mealFingerprint, rewriteDuplicateBoards } from './mealLibraryDuplicates.js';
 
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
 const clone = value => JSON.parse(JSON.stringify(value));
 const boardKeys = new Set(['Main menu:Week 1', 'Main menu:Week 2']);
 const emptyBoard = () => Array.from({ length: 7 }, () => Array.from({ length: 4 }, () => []));
-const checkedMeal = meal => validateCycleMealSnapshot({ ...meal,
-  ...(typeof meal?.carbCombined === 'string' && !meal.carbCombined.trim() ? { carbCombined: 'Not specified' } : {}),
-});
+const checkedMeal = meal => {
+  if (meal?.cycleDays !== undefined && (!Array.isArray(meal.cycleDays) || meal.cycleDays.some(day => typeof day !== 'string'))) fail('Source cycle days must be a list of text values.');
+  return validateCycleMealSnapshot({ ...meal,
+    ...(typeof meal?.carbCombined === 'string' && !meal.carbCombined.trim() ? { carbCombined: 'Not specified' } : {}),
+  });
+};
 // Match the existing mealFormat precedence for legacy workbook categories.
 const primarySlot = meal => {
   if (meal.mealKind === 'Main meal') return 1;
@@ -32,19 +37,24 @@ const compatibleBoards = (boards, meals) => {
 
 export function checkedCatalogue(value) {
   if (!plain(value) || !Array.isArray(value.meals) || value.source !== undefined && typeof value.source !== 'string') fail('A meal catalogue is required.');
-  const ids = new Set();
-  const meals = value.meals.map(meal => {
+  const ids = new Map(), meals = [];
+  value.meals.forEach(meal => {
     const saved = checkedMeal(meal);
-    if (ids.has(saved.id)) fail('Meal IDs must be unique.');
-    ids.add(saved.id);
-    return saved;
+    if (ids.has(saved.id)) {
+      if (mealFingerprint(ids.get(saved.id)) !== mealFingerprint(saved)) fail('A repeated Meal ID has conflicting recipe details.');
+      const canonical = ids.get(saved.id);
+      canonical.cycleDays = [...new Set([canonical.day, ...(canonical.cycleDays || []), saved.day, ...(saved.cycleDays || [])].filter(Boolean))];
+      return;
+    }
+    ids.set(saved.id, saved); meals.push(saved);
   });
   return { meals, source: value.source || '' };
 }
 
-export function checkedBoards(value, meals) {
+export function checkedBoards(value, meals, aliases = []) {
   if (!plain(value)) fail('Cycle weeks must be an object.');
   const ids = new Set(meals.map(meal => meal.id));
+  const replacements = new Map(aliases.map(alias => [alias.from, alias.to]));
   const boards = {};
   for (const [key, days] of Object.entries(value)) {
     if (!boardKeys.has(key) || !Array.isArray(days) || days.length !== 7) fail('Each cycle week must contain seven days.');
@@ -53,8 +63,9 @@ export function checkedBoards(value, meals) {
       return groups.map(entries => {
         if (!Array.isArray(entries)) fail('Cycle assignments must be lists.');
         return entries.map(entry => {
-          if (!plain(entry) || !ids.has(entry.mealId) || typeof entry.isMatterCore !== 'boolean') fail('A cycle assignment refers to an unknown meal or invalid Matter Core flag.');
-          return { mealId: entry.mealId, isMatterCore: entry.isMatterCore };
+          const mealId = replacements.get(entry?.mealId) || entry?.mealId;
+          if (!plain(entry) || !ids.has(mealId) || typeof entry.isMatterCore !== 'boolean') fail('A cycle assignment refers to an unknown meal or invalid Matter Core flag.');
+          return { mealId, isMatterCore: entry.isMatterCore };
         });
       });
     });
@@ -64,18 +75,48 @@ export function checkedBoards(value, meals) {
 
 export function changeMealCreationState(current, change, missingOnly = false) {
   if (!plain(change)) fail('A library change is required.');
+  if (change.skipDuplicates !== undefined && typeof change.skipDuplicates !== 'boolean') fail('The duplicate handling option must be true or false.');
   const catalogue = clone(current.catalogue), boards = clone(current.boards);
+  const initial = deduplicateMeals(catalogue.meals, current.aliases || []);
+  catalogue.meals = initial.meals;
+  let aliases = initial.aliases;
   if (change.catalogue !== undefined) {
     const incoming = checkedCatalogue(change.catalogue);
     const byId = new Map(catalogue.meals.map(meal => [meal.id, meal]));
-    for (const meal of incoming.meals) if (!missingOnly || !byId.has(meal.id)) byId.set(meal.id, meal);
+    const fingerprints = new Map(catalogue.meals.map(meal => [mealFingerprint(meal), meal.id]));
+    for (const meal of incoming.meals) {
+      const canonicalId = fingerprints.get(mealFingerprint(meal));
+      if ((change.skipDuplicates || missingOnly) && canonicalId) {
+        if (!byId.has(meal.id) && meal.id !== canonicalId) aliases.push({ from: meal.id, to: canonicalId });
+        const canonical = byId.get(canonicalId);
+        const cycleDays = [...new Set([canonical.day, ...(canonical.cycleDays || []), meal.day, ...(meal.cycleDays || [])].filter(Boolean))];
+        const previousDays = [...new Set([canonical.day, ...(canonical.cycleDays || [])].filter(Boolean))];
+        if (JSON.stringify(cycleDays) !== JSON.stringify(previousDays)) byId.set(canonicalId, { ...canonical, cycleDays });
+        continue;
+      }
+      if (!missingOnly || !byId.has(meal.id)) {
+        // An import reusing an ID for a different recipe must not replace the
+        // existing dietary variant. Ordinary editor saves still update by ID.
+        if (change.skipDuplicates && byId.has(meal.id)) {
+          const importedMealId = meal.id, base = `${meal.id}~${createHash('sha256').update(mealFingerprint(meal)).digest('hex').slice(0,12)}`;
+          let id = base, suffix = 2; while (byId.has(id)) id = `${base}-${suffix++}`;
+          const variant = { ...meal, id, importedMealId };
+          byId.set(id, variant); fingerprints.set(mealFingerprint(variant), id); continue;
+        }
+        const previous = byId.get(meal.id);
+        if (previous && fingerprints.get(mealFingerprint(previous)) === meal.id) fingerprints.delete(mealFingerprint(previous));
+        byId.set(meal.id, meal);
+        if (!fingerprints.has(mealFingerprint(meal))) fingerprints.set(mealFingerprint(meal), meal.id);
+      }
+    }
     catalogue.meals = [...byId.values()];
     if (incoming.source && (!missingOnly || !catalogue.source)) catalogue.source = incoming.source;
   }
-  if (change.boards !== undefined) for (const [key, value] of Object.entries(checkedBoards(change.boards, catalogue.meals))) {
+  const unique = deduplicateMeals(catalogue.meals, aliases); catalogue.meals = unique.meals; aliases = unique.aliases;
+  if (change.boards !== undefined) for (const [key, value] of Object.entries(checkedBoards(change.boards, catalogue.meals, aliases))) {
     if (!missingOnly || !Object.hasOwn(boards, key)) boards[key] = value;
   }
-  const state = { catalogue, boards: compatibleBoards(boards, catalogue.meals) };
+  const state = { catalogue, boards: compatibleBoards(rewriteDuplicateBoards(boards, aliases), catalogue.meals), aliases };
   // Stay below MongoDB's document limit and return a useful error before writing.
   if (Buffer.byteLength(JSON.stringify(state)) > 8 * 1024 * 1024) fail('The meal library is too large to save. No data was changed.', 413);
   return state;
@@ -112,14 +153,14 @@ export function recoverMealCreationState(menus) {
 // Old per-tab drafts are a one-way, additive migration. An old browser must
 // never replace a newer database recipe or reset an intentionally empty week.
 export function mergeLegacyDraft(current, legacy, missingOnly = true) {
-  if (!legacy) return { catalogue: current.catalogue, boards: current.boards };
+  if (!legacy) return changeMealCreationState(current, {});
   const merged = changeMealCreationState(current, { catalogue: legacy.catalogue }, missingOnly);
   const boards = {};
   for (const [key, days] of Object.entries(legacy.boards || {})) {
     if (!boardKeys.has(key) || missingOnly && Object.hasOwn(merged.boards, key)) continue;
     // Keep the original browser draft available if it has unrecoverable IDs.
-    try { Object.assign(boards, checkedBoards({ [key]: days }, merged.catalogue.meals)); }
+    try { Object.assign(boards, checkedBoards({ [key]: days }, merged.catalogue.meals, merged.aliases)); }
     catch { continue; }
   }
-  return { ...merged, boards: compatibleBoards({ ...merged.boards, ...boards }, merged.catalogue.meals) };
+  return { ...merged, boards: compatibleBoards(rewriteDuplicateBoards({ ...merged.boards, ...boards }, merged.aliases), merged.catalogue.meals) };
 }
