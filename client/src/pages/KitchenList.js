@@ -7,7 +7,7 @@ import { snackPresetChanges } from '../lib/kitchenSnackPresetChanges';
 import useKitchenCurrentScope from '../lib/useKitchenCurrentScope';
 import { formatKitchenDay, visibleKitchenCustomer, kitchenCustomerDay } from '../lib/kitchenDayScope';
 import { loadKitchenSnapshot, verifiedKitchenRoster } from '../lib/kitchenSnapshot';
-import PartnerKitchenOrders from '../components/PartnerKitchenOrders';
+import { loadPartnerKitchenOrders, partnerPaperRows, partnerPaperHtml, appendPartnerPaperPdf } from '../lib/partnerKitchenData';
 import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealChanges } from '../utils/kitchenIntegrity';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, Trash2, FileText, ChevronDown, ChevronUp, AlertTriangle, Pencil } from 'lucide-react';
@@ -1567,7 +1567,7 @@ const KitchenList = () => {
     finally { exportInFlight.current = false; setExportBusy(false); }
   };
 
-  const getDeliverableRows = async (dateKey) => {
+  const getDeliverableRows = async (dateKey, allowEmpty = false) => {
     const scope = `${selectedMenuId}:${missingCheckDate}`;
     if (loadingSelections || loadedSelectionScope !== scope || dateKey !== missingCheckDate) {
       setExportError('Load and finish preparing the selected date before exporting.'); return null;
@@ -1577,7 +1577,7 @@ const KitchenList = () => {
       const selectedKeys = new Set(customerRows.map((entry) => String(entry.email || entry.customerId)));
       const filteredView = search || showOnlyMissing || planFilter || showOnlyAttention;
       const rows = snapshot.entries.filter((entry) => (!filteredView || selectedKeys.has(String(entry.email || entry.customerId))) && (!paperPlan || entry.planName === paperPlan));
-      if (!rows.length) throw new Error('No confirmed meals match this date and the current filters. Clear the search and plan filters, or choose a different date.');
+      if (!rows.length && !allowEmpty) throw new Error('No confirmed meals match this date and the current filters. Clear the search and plan filters, or choose a different date.');
       assertKitchenExportReady(rows);
       if (activeSelectionScope.current !== scope) return null;
       setPaperExcluded({ dateKey, names: [] });
@@ -1683,10 +1683,11 @@ const KitchenList = () => {
   // Matter delivery that day = left out).
   const exportDayKitchenPaperToExcel = async (dateKey) => {
     if (!dateKey) return;
-    const deliverableRows = await getDeliverableRows(dateKey);
+    const deliverableRows = await getDeliverableRows(dateKey, true);
     if (!deliverableRows) return;
+    const partnerData = await loadPartnerKitchenOrders(api, dateKey, () => activeSelectionScope.current === `${selectedMenuId}:${dateKey}`);
     const orderedEntries = buildKitchenPaperOrder(dateKey, deliverableRows);
-    if (orderedEntries.length === 0) return;
+    if (!orderedEntries.length && !partnerData.orders.length) return;
     const XLSX = await loadXLSX();
     const yesNo = (v) => (v === null || v === undefined ? 'N/A' : (v ? 'Yes' : 'No'));
     const rows = orderedEntries.flatMap(({ entry, dayMeals }) => {
@@ -1723,14 +1724,16 @@ const KitchenList = () => {
         };
       });
     });
+    rows.push(...partnerPaperRows(partnerData));
     const worksheet = XLSX.utils.json_to_sheet(rows);
     // Readable out of the box: sensible column widths and a filter on the header row.
     const widths = { Section: 24, 'Delivery time': 14, Customer: 28, Plan: 16, 'Meals/day': 9, 'Snacks/day': 10, 'Breakfast included': 11, Exclusions: 34, Address: 48, Type: 10, Meal: 44, 'P (g)': 7, 'C (g)': 7, 'V (g)': 7, 'Total C': 8, 'Total P': 8, 'Total F': 8, Note: 30 };
-    const headers = Object.keys(rows[0] || {});
+    const headers = [...new Set(rows.flatMap(row => Object.keys(row)))];
     worksheet['!cols'] = headers.map((h) => ({ wch: widths[h] || 12 }));
     worksheet['!autofilter'] = { ref: worksheet['!ref'] };
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Paper');
+    if (activeSelectionScope.current !== `${selectedMenuId}:${dateKey}`) return;
     XLSX.writeFile(workbook, `kitchen-paper-${dateKey}${planFileSuffix}.xlsx`);
   };
 
@@ -1798,8 +1801,9 @@ const KitchenList = () => {
     const orDash = (v) => (v === null || v === undefined || v === '' ? 'N/A' : v);
     const nameOf = (row) => row.entry.customerName || row.entry.email || '';
 
-    const deliverableRows = await getDeliverableRows(dateKey);
+    const deliverableRows = await getDeliverableRows(dateKey, true);
     if (!deliverableRows) return;
+    const partnerData = await loadPartnerKitchenOrders(api, dateKey, () => activeSelectionScope.current === `${selectedMenuId}:${dateKey}`);
     const entriesWithMeals = deliverableRows
       .filter((entry) => !paperPlan || entry.planName === paperPlan)
       .map((entry) => ({
@@ -1917,12 +1921,13 @@ p.MsoFooter { margin:0; font-size:8pt; color:#787878; text-align:right; }
 <div class="WordSection1">
 <h1 style="font-size:18pt;margin:0">Kitchen Prep Sheet — ${esc(dayLabel)}</h1>
 <p style="font-size:10pt;color:#787878;margin:0">Generated: ${esc(new Date().toLocaleString())}</p>
-${body}
+${body}${partnerPaperHtml(partnerData)}
 </div>
 <!-- Word reads this div as the page footer: "Page N of M" are live Word fields. -->
 <div style="mso-element:footer" id="f1"><p class="MsoFooter" style="text-align:right">Kitchen Prep Sheet — ${esc(dayLabel)} &nbsp;|&nbsp; Page <span style="mso-field-code:' PAGE '"></span> of <span style="mso-field-code:' NUMPAGES '"></span></p></div>
 </body></html>`;
 
+    if (activeSelectionScope.current !== `${selectedMenuId}:${dateKey}`) return;
     const blob = new Blob(['\uFEFF', html], { type: 'application/msword' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -2116,8 +2121,9 @@ ${body}
         return y + 10;
       };
 
-      const deliverableRows = await getDeliverableRows(dateKey);
+      const deliverableRows = await getDeliverableRows(dateKey, true);
       if (!deliverableRows) return;
+      const partnerData = await loadPartnerKitchenOrders(api, dateKey, () => activeSelectionScope.current === `${selectedMenuId}:${dateKey}`);
       const entriesWithMeals = deliverableRows
         .filter((entry) => !paperPlan || entry.planName === paperPlan)
         .map((entry) => ({
@@ -2243,6 +2249,8 @@ ${body}
         doc.text('No customers have meals selected for this date.', 14, cursorY);
       }
 
+      appendPartnerPaperPdf(doc, autoTable, partnerData);
+
       // Page numbers ("Page 3 of 76") on every page, added last so the total
       // is known — autoTable adds pages of its own while it lays tables out.
       const totalPages = doc.getNumberOfPages();
@@ -2256,6 +2264,7 @@ ${body}
         doc.setTextColor(0);
       }
 
+      if (activeSelectionScope.current !== `${selectedMenuId}:${dateKey}`) return;
       doc.save(`kitchen-paper-${dateKey}${planFileSuffix}.pdf`);
     } finally {
       setGeneratingPdf(false);
@@ -2470,7 +2479,6 @@ ${body}
               {mealRemarksUploadResult.failedCustomers > 0 && ` ${mealRemarksUploadResult.failedCustomers} customer(s) failed to save — try again.`}
             </p>
           )}
-          {downloadsOpen && <PartnerKitchenOrders date={missingCheckDate} />}
         </details>}
 
 

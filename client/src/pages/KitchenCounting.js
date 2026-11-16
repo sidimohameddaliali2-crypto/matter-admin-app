@@ -16,7 +16,9 @@ const loadXLSX = () => {
   return xlsxModulePromise;
 };
 import api from '../utils/api';
-import PartnerKitchenOrders from '../components/PartnerKitchenOrders';
+import { PartnerKitchenCounts } from '../components/PartnerKitchenOrders';
+import usePartnerKitchenOrders from '../lib/usePartnerKitchenOrders';
+import { loadPartnerKitchenOrders, partnerCountingRows } from '../lib/partnerKitchenData';
 import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
 import {
@@ -47,6 +49,10 @@ const KitchenCounting = () => {
   const [loadingMenus, setLoadingMenus] = useState(false);
   const [selectedMenuId, setSelectedMenuId] = useState('');
   const [selectedDate, setSelectedDate] = useState('');
+  const partnerOrders = usePartnerKitchenOrders(selectedDate);
+  const [exportError, setExportError] = useState('');
+  const [exporting, setExporting] = useState(false);
+  const exportInFlight = useRef(false);
   const [loading, setLoading] = useState(false);
   const [loadProgress, setLoadProgress] = useState({ done: 0, total: 0 });
   const [error, setError] = useState('');
@@ -87,6 +93,7 @@ const KitchenCounting = () => {
     requestGuard.current.cancel();
     setLoadedScope('');
     setSelectedDate(date);
+    setExportError('');
   };
 
   const automaticScope = useKitchenCurrentScope({ menus, menuId: selectedMenuId, date: selectedDate,
@@ -306,22 +313,24 @@ const KitchenCounting = () => {
   };
 
   const exportToExcel = async () => {
-    if (loading || error || loadedScope !== `${selectedMenuId}:${selectedDate}`) return;
-    assertKitchenExportReady(customerEntries);
-    if (countRows.length === 0) return;
-    const rows = countRows.map((r) => ({
-      Category: CATEGORY_LABEL[r.category] || r.category,
-      'Meal Name': r.mealName,
-      Count: r.count,
-      'Total Protein Weight (g)': Math.round(r.totalProteinWeight),
-      'Total Carb Weight (g)': Math.round(r.totalCarbWeight),
-      'Total Veg Weight (g)': Math.round(r.totalVegWeight)
-    }));
-    const XLSX = await loadXLSX();
-    const worksheet = XLSX.utils.json_to_sheet(rows);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Counting');
-    XLSX.writeFile(workbook, `kitchen-counting-${selectedDate || 'export'}.xlsx`);
+    if (exportInFlight.current || loading || error || loadedScope !== `${selectedMenuId}:${selectedDate}`) return;
+    const scope = `${selectedMenuId}:${selectedDate}`;
+    exportInFlight.current = true; setExporting(true); setExportError('');
+    try {
+      assertKitchenExportReady(customerEntries);
+      const partnerData = await loadPartnerKitchenOrders(api, selectedDate, () => activeScope.current === scope);
+      const rows = countRows.map(r => ({Category: CATEGORY_LABEL[r.category] || r.category, 'Meal Name': r.mealName, Count: r.count,
+        'Total Protein Weight (g)': Math.round(r.totalProteinWeight), 'Total Carb Weight (g)': Math.round(r.totalCarbWeight), 'Total Veg Weight (g)': Math.round(r.totalVegWeight)}));
+      rows.push(...partnerCountingRows(partnerData));
+      if (!rows.length) return;
+      const XLSX = await loadXLSX();
+      if (activeScope.current !== scope) return;
+      const worksheet = XLSX.utils.json_to_sheet(rows);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Counting');
+      XLSX.writeFile(workbook, `kitchen-counting-${selectedDate}.xlsx`);
+    } catch (err) { if (activeScope.current === scope) setExportError(err.response?.data?.message || err.message || 'Download failed. Please retry.'); }
+    finally { exportInFlight.current = false; setExporting(false); }
   };
 
   return (
@@ -362,7 +371,7 @@ const KitchenCounting = () => {
               </select>
               <button
                 type="button"
-                onClick={() => { nutritionCacheRef.current.clear(); loadCounts(); }}
+                onClick={() => { nutritionCacheRef.current.clear(); loadCounts(); partnerOrders.refresh(); }}
                 disabled={!selectedMenuId || !selectedDate}
                 title="Reload counts"
                 className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
@@ -404,7 +413,7 @@ const KitchenCounting = () => {
               <button
                 type="button"
                 onClick={exportToExcel}
-                disabled={loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}` || countRows.length === 0}
+                disabled={exporting || loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}` || (!countRows.length && !partnerOrders.data?.counts.length)}
                 className="kitchen-button-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold disabled:opacity-50"
               >
                 <Download size={16} /> Export Excel
@@ -416,10 +425,11 @@ const KitchenCounting = () => {
             ) : (
               <KitchenCountingGroups rows={countRows} onDownload={downloadMealCustomerList} />
             )}
+            <PartnerKitchenCounts state={partnerOrders} />
+            {exportError && <p role="alert" className="text-sm text-red-700">{exportError}</p>}
             <p className="kitchen-table-note">Weights are displayed in kg; Excel exports retain grams. Bars show each dish’s share of its category total. Large breakfasts have their own row.</p>
           </div>
         )}
-        <details className="kitchen-paper-section kitchen-count-paper"><summary>Kitchen Paper</summary><p className="kitchen-table-note">Customer PDF, Word and Excel papers are available in <a href="/kitchen-list">Kitchen List</a>.</p><PartnerKitchenOrders date={selectedDate} counting /></details>
       </div>
     </div>
   );

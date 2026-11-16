@@ -4,7 +4,10 @@ import api from '../utils/api';
 import KitchenCounting from './KitchenCounting';
 
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn() } }));
-jest.mock('../components/PartnerKitchenOrders', () => () => null);
+jest.mock('../contexts/SocketContext', () => ({useSocket: () => ({socket: null})}));
+const mockCountingSave = jest.fn();
+const mockCountingRows = jest.fn(rows => rows);
+jest.mock('xlsx', () => ({utils: {book_new: () => ({}), json_to_sheet: rows => mockCountingRows(rows), book_append_sheet: () => {}}, writeFile: (...args) => mockCountingSave(...args)}));
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
 const A = '2026-10-20', B = '2026-10-21';
@@ -27,6 +30,7 @@ beforeEach(async () => {
   pending = {}; fail = false;
   api.post.mockImplementation(async () => ({ data: { success: true, preparation: 'completed' } }));
   api.get.mockImplementation(async (path, config) => {
+    if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}};
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', startDate: A, endDate: B }] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [entry] } };
     if (path.includes('kitchen-inputs')) return { data: { data: { plan_name: 'Custom', macros: { carbohydrates: 60, protein: 60, fat: 20 }, active_delivery_dates: [A, B] } } };
@@ -143,4 +147,57 @@ test('clicking the current date during loading keeps the request alive and clear
   expect(exportButton().disabled).toBe(false);
   expect(api.get).toHaveBeenCalledTimes(reads);
   expect(api.post).toHaveBeenCalledTimes(preparations);
+});
+
+
+test('Partner order is inline below cook groups and included in the main Excel export', async () => {
+  const originalGet = api.get.getMockImplementation();
+  const item = {itemId: 'partner-meal', name: 'Partner Bowl', mealType: 'bowl', quantity: 7};
+  api.get.mockImplementation(async (path, config) => path === '/menus/kitchen-partner-orders'
+    ? {data: {success: true, data: {date: config.params.date, orders: [{id: 'po', lines: [item]}], counts: [item], orderCount: 1, totalQuantity: 7}}}
+    : originalGet(path, config));
+  await select(1, A);
+  await act(async () => pending[A]({data: {success: true, data: [{email: entry.email}]}}));
+  const section = container.querySelector('[aria-label="Partner order"]');
+  expect(section.textContent).toContain('Partner Bowl');
+  expect(section.closest('details')).toBeNull();
+  expect(container.querySelector('.kitchen-count-groups').compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel')).click());
+  expect(mockCountingSave).toHaveBeenCalledWith(expect.anything(), `kitchen-counting-${A}.xlsx`);
+  expect(mockCountingRows.mock.calls.at(-1)[0].at(-1)).toMatchObject({Category: 'Partner order', 'Meal Name': 'Partner Bowl', Count: 7, 'Total Protein Weight (g)': ''});
+  api.get.mockImplementation(async (path, config) => {if (path === '/menus/kitchen-partner-orders') throw new Error('Partner feed failed'); return originalGet(path, config);});
+  const saved = mockCountingSave.mock.calls.length;
+  await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel')).click());
+  expect(mockCountingSave).toHaveBeenCalledTimes(saved);
+  expect(container.textContent).toContain('Partner feed failed');
+});
+
+
+test('a partner-only cooking day can use the main Excel download', async () => {
+  const originalGet = api.get.getMockImplementation();
+  const item = {itemId: 'po', name: 'Partner-only bowl', mealType: 'bowl', quantity: 3};
+  api.get.mockImplementation(async (path, config) => {
+    if (path.endsWith('/selections')) return {data: {success: true, data: []}};
+    if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [{id: 'po', lines: [item]}], counts: [item], orderCount: 1, totalQuantity: 3}}};
+    return originalGet(path, config);
+  });
+  await select(1, A);
+  await act(async () => pending[A]({data: {success: true, data: []}}));
+  const button = [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel'));
+  expect(button.disabled).toBe(false);
+  await act(async () => button.click());
+  expect(mockCountingRows.mock.calls.at(-1)[0]).toEqual([expect.objectContaining({Category: 'Partner order', Count: 3})]);
+});
+
+test('a date change while partner export verification is pending cannot download the old date', async () => {
+  await select(1, A);
+  await act(async () => pending[A]({data: {success: true, data: [{email: entry.email}]}}));
+  const originalGet = api.get.getMockImplementation();
+  let resolvePartner;
+  api.get.mockImplementation((path, config) => path === '/menus/kitchen-partner-orders' && config.params.date === A
+    ? new Promise(resolve => {resolvePartner = resolve;}) : originalGet(path, config));
+  await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel')).click());
+  await select(1, B);
+  await act(async () => resolvePartner({data: {success: true, data: {date: A, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}}));
+  expect(mockCountingSave).not.toHaveBeenCalled();
 });
