@@ -606,6 +606,9 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
   // Apply after portion weights are calculated: this must not resize food
   // or replace breakfast/snack presets or unresolved Matter Core lookups.
   const SPLIT_MACRO_MINIMUM = 5;
+  // Owner (2026-11-16): zero calculated fat defaults to 12g. Apply only
+  // to split main meals, independently of food weights and saved presets.
+  const splitFatDefault = roundedFat => roundedFat === 0 ? 12 : roundedFat;
   const LARGE_BREAKFAST_MULTIPLIER = 1.5;
   const scaleToLargeBreakfast = (macros) => ({
     C: (Number(macros?.C) || 0) * LARGE_BREAKFAST_MULTIPLIER,
@@ -892,7 +895,7 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
       const fixedPlanMacros = {
         C: Math.min(fixedCarbsRaw, MEAL_CARB_CAP),
         P: Math.min(fixedProteinRaw, MEAL_PROTEIN_CAP),
-        F: Math.round(adjusted.F)
+        F: splitFatDefault(Math.round(adjusted.F))
       };
       const fixedProteinWeight = getProteinMealWeight(fixedPlanMacros.P);
       const fixedCarbWeight = getCarbMealWeight(fixedPlanMacros.C);
@@ -1003,7 +1006,7 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
     const roundedMacros = {
       C: Math.max(SPLIT_MACRO_MINIMUM, carbsRounded),
       P: Math.max(SPLIT_MACRO_MINIMUM, proteinRounded),
-      F: fatsRounded
+      F: splitFatDefault(fatsRounded)
     };
 
     return {
