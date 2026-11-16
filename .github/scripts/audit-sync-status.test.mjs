@@ -5,7 +5,64 @@ import path from 'node:path';
 import test from 'node:test';
 import {createHash} from 'node:crypto';
 import {gunzipSync} from 'node:zlib';
-import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup,planRetiredReportingScratch,reclaimReplicatedBundle,reclaimPreviousRuntimeCopies,linkIdenticalBaselineArchive,compactRotatedReportingLogs} from './audit-sync-status.mjs';
+import {readAuditSyncStatus,reclaimReportingMetadata,reclaimArchivedAuditCopies,offloadReportingBackup,planRetiredReportingScratch,reclaimReplicatedBundle,reclaimPreviousRuntimeCopies,linkIdenticalBaselineArchive,compactRotatedReportingLogs,releaseClientBuildDependencies} from './audit-sync-status.mjs';
+
+async function clientBuildFixture(t) {
+  const { appRoot } = await fixture(t);
+  const files = {
+    'client/package.json': JSON.stringify({ scripts: { build: 'react-scripts build' } }),
+    'client/package-lock.json': JSON.stringify({ packages: {} }),
+    'server/package.json': JSON.stringify({ scripts: { start: 'node server.js' } }),
+    'server/package-lock.json': JSON.stringify({ packages: {} }),
+    'client/build/asset-manifest.json': JSON.stringify({ files: { 'main.js': '/static/js/main.js' } }),
+    'client/build/index.html': '<script src="/static/js/main.js"></script>',
+    'client/build/static/js/main.js': 'window.staticBuild=true;',
+    'client/node_modules/build-only/index.js': 'disposable builder package',
+    'server/node_modules/runtime/index.js': 'required server package',
+    'server/uploads/original.jpg': 'original photo bytes',
+    'server/.private/review.json': 'original review event',
+  };
+  for (const [name, bytes] of Object.entries(files)) {
+    await fs.mkdir(path.dirname(path.join(appRoot, name)), { recursive: true });
+    await fs.writeFile(path.join(appRoot, name), bytes);
+  }
+  return { appRoot, files, dependencies: path.join(appRoot, 'client/node_modules') };
+}
+
+test('client dependency release preserves the complete static build, runtime, photos and reviews and can retry', async t => {
+  const { appRoot, dependencies, files } = await clientBuildFixture(t);
+  let healthChecks = 0;
+  const run = apply => releaseClientBuildDependencies({ appRoot, apply, verifyHealth: async () => { healthChecks++; } });
+  const plan = await run(false);
+  assert.ok(plan.allocatedBytes > 0);
+  assert.ok(await fs.stat(dependencies));
+  assert.equal(healthChecks, 0);
+  const result = await run(true);
+  assert.equal(result.preservedSha256, plan.preservedSha256);
+  assert.equal(healthChecks, 2);
+  await assert.rejects(fs.stat(dependencies), { code: 'ENOENT' });
+  for (const [name, bytes] of Object.entries(files)) {
+    if (!name.startsWith('client/node_modules/')) assert.equal(await fs.readFile(path.join(appRoot, name), 'utf8'), bytes);
+  }
+  assert.equal((await run(true)).allocatedBytes, 0);
+});
+
+test('client dependency release refuses a missing build asset, linked runtime or failed health before deleting', async t => {
+  for (const reason of ['missing-asset', 'linked-runtime', 'failed-health', 'linked-client']) {
+    await t.test(reason, async t => {
+      const { appRoot, dependencies } = await clientBuildFixture(t);
+      if (reason === 'missing-asset') await fs.unlink(path.join(appRoot, 'client/build/static/js/main.js'));
+      if (reason === 'linked-runtime') await fs.writeFile(path.join(appRoot, 'server/package-lock.json'), JSON.stringify({ packages: { linked: { link: true } } }));
+      if (reason === 'linked-client') {
+        await fs.rename(dependencies, dependencies + '-retained');
+        await fs.symlink(dependencies + '-retained', dependencies);
+      }
+      await assert.rejects(releaseClientBuildDependencies({ appRoot, apply: true,
+        verifyHealth: async () => { if (reason === 'failed-health') throw Error('health unavailable'); } }));
+      assert.equal(await fs.readFile(path.join(dependencies, 'build-only/index.js'), 'utf8'), 'disposable builder package');
+    });
+  }
+});
 
 test('closed rotated logs keep exact bytes and never match an active supervisor path', async t => {
   const {root} = await fixture(t);
