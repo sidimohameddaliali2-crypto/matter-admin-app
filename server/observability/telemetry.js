@@ -1,3 +1,4 @@
+import { retainEvent } from './recentEvents.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomBytes, randomUUID } from 'node:crypto';
 
@@ -45,6 +46,7 @@ export function emitTelemetry(event, fields = {}, sink = (line) => console.info(
     else if (label(value)) record[key] = value;
   }
   try {
+    retainEvent(record);
     sink(JSON.stringify(record));
   } catch {
     /* Application responses remain independent of logging. */

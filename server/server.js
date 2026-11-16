@@ -7,6 +7,7 @@
 import './loadEnv.js';
 import { createRequestTrace } from './observability/requestTrace.js';
 import { resolveTraceRoute } from './observability/routeCatalog.js';
+import traceabilityRoutes from './routes/traceability.js';
 import path from 'path';
 import {mountCustomerServiceInAdmin} from './services/customerServiceAdminMount.js';
 import { fileURLToPath } from 'url';
@@ -215,6 +216,7 @@ import { createAdapter } from '@socket.io/redis-adapter';
 import { setupMongooseSlowQueryMonitoring } from './middleware/slowQueryLogger.js';
 // Routes middleware
 mountCustomerServiceInAdmin({app,onError:()=>console.error('Customer service is unavailable while its Supabase connection is verified. Other app routes remain available.')});
+app.use('/api/traceability', traceabilityRoutes);
 app.use('/api/mobile', mobileUpdatesRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users/drivers', driverRoutes); // Allow driver routes under /api/users/drivers

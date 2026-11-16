@@ -17,6 +17,7 @@ import DeliveryDetail from './pages/DeliveryDetail';
 import AddDelivery from './pages/AddDelivery';
 import BagTracking from './pages/BagOperations';
 import Reports from './pages/Reports';
+import Traceability from './pages/Traceability';
 import DriverReports from './pages/DriverReports';
 import CreateDriver from './pages/CreateDriver';
 import DriverMobile from './pages/DriverMobile';
@@ -279,6 +280,7 @@ function App() {
         <AuthBootstrap />
         <div className="App">
           <Routes>
+            <Route path="/traceability" element={<ProtectedRoute><RoleBasedRoute allowedRoles={['super_admin']}><Layout><Traceability /></Layout></RoleBasedRoute></ProtectedRoute>} />
             <Route path="/login" element={<Login />} />
             <Route path="/privacy-policy" element={<PrivacyPolicy />} />
             <Route path="/partner/login" element={<PartnerLogin />} />

@@ -1,6 +1,124 @@
 {
+  "areas": [
+    {
+      "paths": "/api/auth, /api/users, /api/drivers, /api/users/drivers",
+      "meaning": "Staff identity, roles, permissions, driver profiles and positions. The drivers router has two mounts. Staff authentication, authorization and assignment ownership are separate checks. GPS receipt time and device fix time must be read separately."
+    },
+    {
+      "paths": "/api/mobile/update-policy",
+      "meaning": "Client version/update policy. Availability says nothing about a particular device having installed an update."
+    },
+    {
+      "paths": "/api/deliveries",
+      "meaning": "Dispatch tasks, assignments, status, proof, timing and route planning. A Delivery model can represent Delivery, Task or Collection. A plan is a calculated proposal; assignment and driver submission are further operations. A saved delivered status records the app's accepted submission. Physical handover requires its own evidence."
+    },
+    {
+      "paths": "/api/deliveries/delivery-order",
+      "meaning": "Server-owned stop ordering. Revision/assignment checks in the linked handler govern competing edits."
+    },
+    {
+      "paths": "/api/truckoom, /api/vehicles",
+      "meaning": "Tracker observations, recorded history and vehicle/driver mappings. Tracker and phone positions have different provenance. A current mapping does not prove a historical assignment. HTTP 200 can include a tracker warning and phone-only fallback. Missing fix clocks remain missing."
+    },
+    {
+      "paths": "/api/upload",
+      "meaning": "Evidence/image upload. A successful upload does not prove that a later delivery status mutation referenced it or that an image establishes handover."
+    },
+    {
+      "paths": "/api/bags, /api/bag-operations, /api/store-keeper-scans",
+      "meaning": "Bag identities, custody movements, stock counts and scans. Movement event IDs provide existing domain deduplication. Diagnostic request IDs do not replace them. A scan and a completed transfer are distinct stored events."
+    },
+    {
+      "paths": "/api/bag-refunds, /api/bag-followups, /api/bag-notes",
+      "meaning": "Refund records, follow-up work and bag notes. An internal refund status must be reconciled with provider evidence before treating it as money moved."
+    },
+    {
+      "paths": "/api/reports, /api/alerts",
+      "meaning": "Operational aggregations and flagged-customer work. Check date ranges, filters, population and source freshness before interpreting totals. Missing rows are not automatically zeros."
+    },
+    {
+      "paths": "/api/delivery-changes",
+      "meaning": "Imported/manual delivery changes and application of those changes. Pending, accepted and applied describe different stages. The linked handler determines effective date and write effects."
+    },
+    {
+      "paths": "/api/events, /api/handoffs",
+      "meaning": "Event deliveries and van/bike handoff records. A saved handoff plan or status is an operational record with its own actor and revision rules."
+    },
+    {
+      "paths": "/api/communications, /api/incidents, /api/delivery-issues",
+      "meaning": "Staff communication and issue records. Logging a note or issue does not prove a customer notification or operational resolution."
+    },
+    {
+      "paths": "/api/menus, /api/meal-creation, /api/matter-core",
+      "meaning": "Menu catalogues, meal composition, kitchen production, uploaded core data and shared selection links. Effective dates, selected menus, exclusions and entitlements affect kitchen counts. Shared token routes can carry their own access scheme."
+    },
+    {
+      "paths": "/api/customers",
+      "meaning": "Operational customer profiles, addresses, import/matching and reminders. Local customer IDs and Nutrition subscription/customer identifiers belong to different systems. A matching result needs its source and ambiguity checks."
+    },
+    {
+      "paths": "/api/matter",
+      "meaning": "Delivery Admin's Nutrition/platform adapter. Sales snapshots, subscription detail, roster calculations, standardization and delivery import have different read/write and completeness contracts. Upstream Nutrition backend internals are outside this repository."
+    },
+    {
+      "paths": "/api/partner/auth, /api/partner, /api/admin/partners",
+      "meaning": "Partner login, member management, orders, invoices, waste and reports, plus staff administration. Partner authentication is separate from staff authentication. Read effective partner scope in each handler."
+    },
+    {
+      "paths": "/api/member/auth, /api/member, /join/:token",
+      "meaning": "Passwordless member registration and member ordering. The member middleware also supplies partner context for shared portal operations. Invitation validity and membership scope are separate from a browser page loading."
+    },
+    {
+      "paths": "/api/webhooks/customer-event",
+      "meaning": "Incoming source event persistence. A stored event is a receipt and does not by itself prove an effective delivery/subscription change."
+    },
+    {
+      "paths": "/api/employees",
+      "meaning": "Employee and leave-request records. These carry staff privacy requirements and separate permissions."
+    },
+    {
+      "paths": "/api/xero",
+      "meaning": "OAuth connection and invoice integration. Accepted accounting requests require the returned provider state and reconciliation before declaring accounting completion."
+    },
+    {
+      "paths": "/api/yellowblock",
+      "meaning": "Shopify-related orders, products, assets and third-party delivery assignments. Provider errors can surface independently of staff login."
+    },
+    {
+      "paths": "/api/external/deliveries, /api/external/drivers",
+      "meaning": "External read API using static API-key authentication. Its credential scheme is distinct from staff, member and partner tokens."
+    },
+    {
+      "paths": "/api/mcp, /api/mcp/oauth, /.well-known/*",
+      "meaning": "MCP commands, OAuth discovery, authorization, token exchange, registration and consent. A POST can execute a read command or an authorized mutation. Interpret its tool, scope and result in the MCP service. OAuth SDK middleware owns several protocol paths."
+    },
+    {
+      "paths": "/api/customer-service",
+      "meaning": "Canonical Supabase conversations, customer links, issues, episodes, requests, actions, rules, reviews and reporting. A conversation, an issue and a request are different records. Draft, submitted, provider-accepted and resolved states must be interpreted using their workflow contracts. A saved action does not prove a refund, pause or provider delivery."
+    },
+    {
+      "paths": "/api/customer-service-capture",
+      "meaning": "Readiness boundary in this app. The separate Gallabox worker and its instrumentation remain independently owned. The route inventory includes this boundary without asserting that capture endpoints are mounted here."
+    },
+    {
+      "paths": "/api/driver-audits/session, /api/reporting/*, /api/session*, /report-data/*, /report-assets/*",
+      "meaning": "Raw Driver Audit handler and imported reporting runtime. Session compatibility paths differ from app login. Imported/served report generations, source clocks, findings and review decisions each carry their own provenance. Raw dispatch literals/patterns appear separately in the map."
+    },
+    {
+      "paths": "/api/traceability",
+      "meaning": "Super-admin-only source catalogue and recent diagnostic events. A memory window is local to one server process and clears on restart. It supplies no durable cross-process history."
+    },
+    {
+      "paths": "/api/health, /api/test",
+      "meaning": "Process-level diagnostic responses. `/api/health` reports database connection state in its body and can still return HTTP 200 while disconnected. It is insufficient as a readiness or data freshness check."
+    },
+    {
+      "paths": "Browser routes in client/src/App.js",
+      "meaning": "The browser map records page elements and guard attributes. Browser guards control navigation; the API must independently enforce access. Loading the SPA shell is separate from a page's data requests completing."
+    }
+  ],
   "sourceDigests": {
-    "client/src/App.js": "203a0498817b23e0df2a6c6ade0038cf97c0c8b35617832208803f15ebaa2a55",
+    "client/src/App.js": "97ac39b45f6b321fb3cd2048130e899ca4c8a50dd48b9d66d6606a3a4e7a0f01",
     "server/middleware/socketAuth.js": "76bc740c742855ee785f3cd0599d713ebdbfab90225653265c0b16d62eec6949",
     "server/routes/adminPartners.js": "8c1180d373eb5d7ffb8ef26786f0c58ab0dd9dbfd05c8696313da7b94ddcc36a",
     "server/routes/alerts.js": "a9c74c9b94d9f29c8302e2bad9528dbbc762a8d34965d0dffdeb81a08793b460",
@@ -44,6 +162,7 @@
     "server/routes/partnerPortal.js": "6efa0e89af3f3f618d476e12f4e01e3345a2278405772b69cfbdf4898fb3c9a5",
     "server/routes/reports.js": "2f47a5ca54b28ee3dfe8eed0c896590e3411cb2bd85263abcec8e5f1b4254b64",
     "server/routes/storeKeeperScans.js": "53ccdc75bc154610453ecf5890598e70c1a972351e580e1c496ff3fe2c9f0e31",
+    "server/routes/traceability.js": "0880d1965c1f214a4efd244f66baec924a8eb3c318fcd468fdef0bbb85ec0790",
     "server/routes/truckoomApi.js": "e6ce503e456e9371102b13f76c4066fafe980ce82186c063c5b1be8e5a5c5634",
     "server/routes/upload.js": "70d735777f602df261219898f34093b53092ca3cc3e51db8a02795226b960e18",
     "server/routes/users.js": "9d62189cb347a57b6292fccb2c4b80d2da195f7924397aac7bb59af90b145317",
@@ -51,7 +170,7 @@
     "server/routes/webhooks.js": "191a71d5d7831f089fa05421449614342048f1c9e5728ce2869b002a9003a3a1",
     "server/routes/xero.js": "72264b338337eab6945a892300c7424e77f4b4539a0264794471b48fd0d7e5cc",
     "server/routes/yellowblock.js": "7369950e2f9b35759a4bd71678566c3e6b9bb9c2c2109020f2bf8967d03259e4",
-    "server/server.js": "7c26290e4ab98e3ae93f1f94a9218353744bb608a693b9deb1d137b3208448ec",
+    "server/server.js": "4d1d8fc78b425725d9a197275d435d3bd97a98383cf91c952542cfe71fde20ee",
     "server/services/customerServiceAdminMount.js": "ecb83e0ab51bd9ea272ba45bfb7c00409130c845b8003b0ae5bba540cba00b51",
     "server/services/driverAuditIntegration.js": "5c936b88fc70a5ad19fe0a1361255517532aa5a14be8dc532d1b8cebc551c5b9",
     "server/vendor/driver-audits/integration/cloud/cloud-http.mjs": "dbeff48a0a4d9916b5b7c3ae66147c33a5ccf3a7bb839c2cddd18667cd778327"
@@ -1177,6 +1296,44 @@
       "middlewareDeclarations": [
         "protect",
         "loadServiceAccess"
+      ]
+    },
+    {
+      "id": "5717e0752a0dcc37",
+      "method": "GET",
+      "source": "server/routes/traceability.js:22",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [],
+      "path": "/api/traceability/catalog",
+      "middlewareDeclarations": [
+        "authenticate",
+        "authorize"
+      ]
+    },
+    {
+      "id": "d425cd79464544d1",
+      "method": "GET",
+      "source": "server/routes/traceability.js:23",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [],
+      "path": "/api/traceability/events",
+      "middlewareDeclarations": [
+        "authenticate",
+        "authorize"
       ]
     },
     {
@@ -11024,7 +11181,7 @@
     {
       "id": "089abcb7620e7ade",
       "method": "GET",
-      "source": "server/server.js:268",
+      "source": "server/server.js:270",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11052,7 +11209,7 @@
     {
       "id": "c29a469271fd28ce",
       "method": "HEAD",
-      "source": "server/server.js:277",
+      "source": "server/server.js:279",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11075,7 +11232,7 @@
     {
       "id": "6d60c150d6a24c0b",
       "method": "GET",
-      "source": "server/server.js:282",
+      "source": "server/server.js:284",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -11100,7 +11257,7 @@
     {
       "id": "eafb4524ecc7b522",
       "method": "GET",
-      "source": "server/server.js:291",
+      "source": "server/server.js:293",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -11127,7 +11284,7 @@
     {
       "id": "710f3d0488501add",
       "method": "GET",
-      "source": "server/server.js:311",
+      "source": "server/server.js:313",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11150,8 +11307,21 @@
   ],
   "browser": [
     {
+      "path": "/traceability",
+      "source": "client/src/App.js:283",
+      "elements": [
+        "ProtectedRoute",
+        "RoleBasedRoute",
+        "Layout",
+        "Traceability"
+      ],
+      "guardAttributes": [
+        "allowedRoles={['super_admin']}"
+      ]
+    },
+    {
       "path": "/login",
-      "source": "client/src/App.js:282",
+      "source": "client/src/App.js:284",
       "elements": [
         "Login"
       ],
@@ -11159,7 +11329,7 @@
     },
     {
       "path": "/privacy-policy",
-      "source": "client/src/App.js:283",
+      "source": "client/src/App.js:285",
       "elements": [
         "PrivacyPolicy"
       ],
@@ -11167,7 +11337,7 @@
     },
     {
       "path": "/partner/login",
-      "source": "client/src/App.js:284",
+      "source": "client/src/App.js:286",
       "elements": [
         "PartnerLogin"
       ],
@@ -11175,7 +11345,7 @@
     },
     {
       "path": "/partner/portal",
-      "source": "client/src/App.js:285",
+      "source": "client/src/App.js:287",
       "elements": [
         "PartnerRoute",
         "PartnerPortal"
@@ -11184,7 +11354,7 @@
     },
     {
       "path": "/join/:token",
-      "source": "client/src/App.js:286",
+      "source": "client/src/App.js:288",
       "elements": [
         "MemberJoin"
       ],
@@ -11192,7 +11362,7 @@
     },
     {
       "path": "/member/portal",
-      "source": "client/src/App.js:287",
+      "source": "client/src/App.js:289",
       "elements": [
         "MemberRoute",
         "MemberPortal"
@@ -11201,7 +11371,7 @@
     },
     {
       "path": "/",
-      "source": "client/src/App.js:289",
+      "source": "client/src/App.js:291",
       "elements": [
         "ProtectedRoute",
         "Navigate"
@@ -11210,7 +11380,7 @@
     },
     {
       "path": "/dashboard",
-      "source": "client/src/App.js:295",
+      "source": "client/src/App.js:297",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11223,7 +11393,7 @@
     },
     {
       "path": "/drivers",
-      "source": "client/src/App.js:305",
+      "source": "client/src/App.js:307",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11236,7 +11406,7 @@
     },
     {
       "path": "/fleet",
-      "source": "client/src/App.js:315",
+      "source": "client/src/App.js:317",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11249,7 +11419,7 @@
     },
     {
       "path": "/live-tracking",
-      "source": "client/src/App.js:325",
+      "source": "client/src/App.js:327",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11262,7 +11432,7 @@
     },
     {
       "path": "/drivers/create",
-      "source": "client/src/App.js:335",
+      "source": "client/src/App.js:337",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11275,7 +11445,7 @@
     },
     {
       "path": "/drivers/:id",
-      "source": "client/src/App.js:345",
+      "source": "client/src/App.js:347",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11288,7 +11458,7 @@
     },
     {
       "path": "/driver-mobile",
-      "source": "client/src/App.js:354",
+      "source": "client/src/App.js:356",
       "elements": [
         "ProtectedRoute",
         "DriverMobile"
@@ -11299,7 +11469,7 @@
     },
     {
       "path": "/dispatcher",
-      "source": "client/src/App.js:359",
+      "source": "client/src/App.js:361",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -11312,7 +11482,7 @@
     },
     {
       "path": "/dispatcher/driver-routes",
-      "source": "client/src/App.js:366",
+      "source": "client/src/App.js:368",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -11325,7 +11495,7 @@
     },
     {
       "path": "/store-keeper",
-      "source": "client/src/App.js:374",
+      "source": "client/src/App.js:376",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -11340,7 +11510,7 @@
     },
     {
       "path": "/users",
-      "source": "client/src/App.js:384",
+      "source": "client/src/App.js:386",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11353,7 +11523,7 @@
     },
     {
       "path": "/employees",
-      "source": "client/src/App.js:393",
+      "source": "client/src/App.js:395",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11366,7 +11536,7 @@
     },
     {
       "path": "/deliveries",
-      "source": "client/src/App.js:402",
+      "source": "client/src/App.js:404",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11379,7 +11549,7 @@
     },
     {
       "path": "/customers",
-      "source": "client/src/App.js:412",
+      "source": "client/src/App.js:414",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11392,7 +11562,7 @@
     },
     {
       "path": "/events",
-      "source": "client/src/App.js:422",
+      "source": "client/src/App.js:424",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11407,7 +11577,7 @@
     },
     {
       "path": "/dispatcher/events",
-      "source": "client/src/App.js:432",
+      "source": "client/src/App.js:434",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -11420,7 +11590,7 @@
     },
     {
       "path": "/customer-service/*",
-      "source": "client/src/App.js:440",
+      "source": "client/src/App.js:442",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11438,7 +11608,7 @@
     },
     {
       "path": "/complaints",
-      "source": "client/src/App.js:445",
+      "source": "client/src/App.js:447",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11451,7 +11621,7 @@
     },
     {
       "path": "/batch-auto-assign",
-      "source": "client/src/App.js:455",
+      "source": "client/src/App.js:457",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -11464,7 +11634,7 @@
     },
     {
       "path": "/test-api",
-      "source": "client/src/App.js:465",
+      "source": "client/src/App.js:467",
       "elements": [
         "ProtectedRoute",
         "TestAPI"
@@ -11473,7 +11643,7 @@
     },
     {
       "path": "/deliveries/:id",
-      "source": "client/src/App.js:471",
+      "source": "client/src/App.js:473",
       "elements": [
         "ProtectedRoute",
         "Layout",
@@ -11483,7 +11653,7 @@
     },
     {
       "path": "/add-delivery",
-      "source": "client/src/App.js:479",
+      "source": "client/src/App.js:481",
       "elements": [
         "ProtectedRoute",
         "Layout",
@@ -11493,7 +11663,7 @@
     },
     {
       "path": "/bags",
-      "source": "client/src/App.js:487",
+      "source": "client/src/App.js:489",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11506,7 +11676,7 @@
     },
     {
       "path": "/reports",
-      "source": "client/src/App.js:495",
+      "source": "client/src/App.js:497",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11519,7 +11689,7 @@
     },
     {
       "path": "/driver-audits",
-      "source": "client/src/App.js:504",
+      "source": "client/src/App.js:506",
       "elements": [
         "Navigate"
       ],
@@ -11527,7 +11697,7 @@
     },
     {
       "path": "/driver-reports",
-      "source": "client/src/App.js:505",
+      "source": "client/src/App.js:507",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11540,7 +11710,7 @@
     },
     {
       "path": "/subscription",
-      "source": "client/src/App.js:512",
+      "source": "client/src/App.js:514",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11553,7 +11723,7 @@
     },
     {
       "path": "/website-subscriptions",
-      "source": "client/src/App.js:521",
+      "source": "client/src/App.js:523",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11566,7 +11736,7 @@
     },
     {
       "path": "/website-subscriptions/:id",
-      "source": "client/src/App.js:530",
+      "source": "client/src/App.js:532",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11579,7 +11749,7 @@
     },
     {
       "path": "/customer-analytics",
-      "source": "client/src/App.js:539",
+      "source": "client/src/App.js:541",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11592,7 +11762,7 @@
     },
     {
       "path": "/renewal",
-      "source": "client/src/App.js:548",
+      "source": "client/src/App.js:550",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11605,7 +11775,7 @@
     },
     {
       "path": "/delivery-changes",
-      "source": "client/src/App.js:557",
+      "source": "client/src/App.js:559",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11618,7 +11788,7 @@
     },
     {
       "path": "/delivery-changes/add",
-      "source": "client/src/App.js:567",
+      "source": "client/src/App.js:569",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11631,7 +11801,7 @@
     },
     {
       "path": "/admin/meal-selection-v2/*",
-      "source": "client/src/App.js:577",
+      "source": "client/src/App.js:579",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11646,7 +11816,7 @@
     },
     {
       "path": "/menus",
-      "source": "client/src/App.js:587",
+      "source": "client/src/App.js:589",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11659,7 +11829,7 @@
     },
     {
       "path": "/menu-select/:token",
-      "source": "client/src/App.js:597",
+      "source": "client/src/App.js:599",
       "elements": [
         "MenuSelectPage"
       ],
@@ -11667,7 +11837,7 @@
     },
     {
       "path": "/menu-select-v2",
-      "source": "client/src/App.js:603",
+      "source": "client/src/App.js:605",
       "elements": [
         "MenuSelectionLinkPage"
       ],
@@ -11675,7 +11845,7 @@
     },
     {
       "path": "/matter-core",
-      "source": "client/src/App.js:607",
+      "source": "client/src/App.js:609",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11688,7 +11858,7 @@
     },
     {
       "path": "/matter-core/:token",
-      "source": "client/src/App.js:617",
+      "source": "client/src/App.js:619",
       "elements": [
         "MatterCorePdfPage"
       ],
@@ -11696,7 +11866,7 @@
     },
     {
       "path": "/admin/partners",
-      "source": "client/src/App.js:621",
+      "source": "client/src/App.js:623",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11710,7 +11880,7 @@
     },
     {
       "path": "/kitchen-list",
-      "source": "client/src/App.js:631",
+      "source": "client/src/App.js:633",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11724,7 +11894,7 @@
     },
     {
       "path": "/kitchen-counting",
-      "source": "client/src/App.js:641",
+      "source": "client/src/App.js:643",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11738,7 +11908,7 @@
     },
     {
       "path": "/yellowblock/*",
-      "source": "client/src/App.js:651",
+      "source": "client/src/App.js:653",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -11981,12 +12151,12 @@
     {
       "event": "connection",
       "direction": "on",
-      "source": "server/server.js:300"
+      "source": "server/server.js:302"
     },
     {
       "event": "disconnect",
       "direction": "on",
-      "source": "server/server.js:305"
+      "source": "server/server.js:307"
     },
     {
       "event": "driver:join",

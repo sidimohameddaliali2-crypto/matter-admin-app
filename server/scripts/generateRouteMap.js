@@ -407,7 +407,18 @@ const sourceDigests = Object.fromEntries(
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([file, record]) => [file, createHash('sha256').update(record.source).digest('hex')]),
 );
+const guide = readFileSync(path.join(root, 'docs/traceability/README.md'), 'utf8');
+const areaSection =
+  guide.split('## What the app areas mean')[1]?.split('## Data vocabulary')[0] || '';
+const areas = areaSection
+  .split('\n')
+  .filter((line) => line.startsWith('| ') && line.includes('\x60'))
+  .map((line) => {
+    const [, paths, meaning] = line.split('|');
+    return { paths: paths.replaceAll('\x60', '').trim(), meaning: meaning.trim() };
+  });
 const manifest = {
+  areas,
   sourceDigests,
   schemaVersion: 1,
   scope:
