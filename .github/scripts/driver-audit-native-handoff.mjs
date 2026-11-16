@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 
 const exec = promisify(execFile);
 const hash = value => createHash('sha256').update(value).digest('hex');
+let phase = 'checkout';
 
 export function mongoLocation(uri, localAddresses) {
   if (typeof uri !== 'string') return 'unknown';
@@ -19,8 +20,10 @@ export function mongoLocation(uri, localAddresses) {
 }
 
 async function inspect(appRoot) {
+  phase = 'environment';
   const load = name => import(pathToFileURL(path.join(appRoot, 'server', name)).href);
   await load('loadEnv.js');
+  phase = 'processes';
   const { stdout } = await exec('pm2', ['jlist'], { timeout: 5000, maxBuffer: 8 * 1024 * 1024 });
   const entries = JSON.parse(stdout);
   const matching = name => entries.filter(entry => entry.name === name);
@@ -28,6 +31,7 @@ async function inspect(appRoot) {
     throw Error('The managed application and reporting worker are required');
   }
   const [worker] = matching('matter-driver-audit-sync');
+  phase = 'sync-configuration';
   const args = worker.pm2_env?.args;
   if (!Array.isArray(args) || args.length !== 2 || args[0] !== '--config' || !path.isAbsolute(args[1])) {
     throw Error('The managed reporting configuration is required');
@@ -40,6 +44,7 @@ async function inspect(appRoot) {
     throw Error('Unexpected managed reporting root');
   }
   const { default: mongoose } = await load('node_modules/mongoose/index.js');
+  phase = 'database';
   const connection = mongoose.createConnection(process.env.MONGODB_URI, {
     autoCreate: false, autoIndex: false, maxPoolSize: 1, serverSelectionTimeoutMS: 10000,
   });
@@ -49,10 +54,13 @@ async function inspect(appRoot) {
     const { createHostedRpc } = await load('vendor/driver-audits/integration/cloud/rpc.mjs');
     const { createCloudState } = await load('vendor/driver-audits/integration/cloud/cloud-state.mjs');
     const { collectDriverAuditReceiptRoots } = await load('services/driverAuditLiveImport.js');
+    phase = 'source-configuration';
     const secret = process.env.DRIVER_AUDIT_SUPABASE_SECRET || process.env.MATTER_SUPABASE_SECRET;
     if (!secret) throw Error('The existing report source is unavailable');
     const source = createCloudState({ rpc: createHostedRpc({ secret }) });
+    phase = 'source-head';
     const collector = await source.read('collector-state');
+    phase = 'collector-census';
     const census = await collectDriverAuditReceiptRoots({ db: connection.db,
       documents: [{ key: 'collector-state', revision: collector.revision, body_text: collector.body }], syncRoot });
     const after = await source.read('collector-state');
@@ -61,6 +69,7 @@ async function inspect(appRoot) {
       ...Object.values(os.networkInterfaces()).flatMap(rows => (rows || []).map(row => row.address))]);
     const authority = await connection.db.collection('driverAuditNativeControl').findOne({ _id: 'authority' });
     const disk = await fs.statfs(appRoot);
+    phase = 'capacity';
     return { version: 1, status: 'target-inspected', checkedAt: new Date().toISOString(),
       targetDatabase: connection.db.databaseName, mongoLocation: mongoLocation(process.env.MONGODB_URI, locals),
       mongo: await readDriverAuditDataCapacity(connection.db), nodeExecutable: process.execPath, nodeVersion: process.version,
@@ -79,11 +88,27 @@ async function main() {
   if (process.platform !== 'linux' || !/^[a-f0-9]{40}$/.test(expected || '') || stdout.trim() !== expected) {
     throw Error('Unexpected production checkout');
   }
-  if (process.env.NATIVE_HANDOFF_OPERATION !== 'inspect') throw Error('Unsupported handoff operation');
+  const operation = process.env.NATIVE_HANDOFF_OPERATION;
+  if (['pause-builder', 'resume-builder'].includes(operation)) {
+    phase = 'builder-' + operation.split('-')[0];
+    const action = operation === 'pause-builder' ? 'deploy-worker-pause' : 'deploy-worker-resume';
+    const { stdout: result } = await exec(process.execPath, [path.join(appRoot, 'server/scripts/driverAuditDeploy.js'), action], {
+      cwd: appRoot, env: { ...process.env, DRIVER_AUDIT_DEPLOY_SHA: expected }, timeout: 240_000, maxBuffer: 65536,
+    });
+    const status = result.trim();
+    if (!['paused', 'resumed', 'not-registered'].includes(status)) throw Error('Unexpected builder transition');
+    console.log(JSON.stringify({ status, operation, applicationCommit: expected, dataStoreChanged: false }));
+    return;
+  }
+  if (operation !== 'inspect') throw Error('Unsupported handoff operation');
   console.log(JSON.stringify(await inspect(appRoot)));
 }
 
-if (process.argv.includes('--run')) main().catch(() => {
-  console.error('Native handoff inspection stopped; existing report authority is unchanged.');
+if (process.argv.includes('--run')) main().catch(error => {
+  const reason = ['An unresolved staged report must be drained before selecting receipt roots',
+    'Collector root needs a fresh source snapshot', 'Serving and retained workspace collector roots differ',
+    'The managed reporting configuration is required'].includes(error.message) ? '; ' + error.message : '';
+  const status = [400, 401, 403, 404, 409, 429, 500, 503].includes(error.status) ? '; status=' + error.status : '';
+  console.error('Native handoff operation stopped at ' + phase + reason + status + '; existing report authority is unchanged.');
   process.exitCode = 1;
 });
