@@ -4,10 +4,49 @@ import MenuSelectionArchive from '../models/MenuSelectionArchive.js';
 import matter from './matterApiService.js';
 import { excludeRecreatedArchivedAliases } from './archivedMenuAliases.js';
 import { businessDateKeyOf, isDateKey } from '../utils/businessDate.js';
+import { boundedMap } from './boundedMap.js';
 
 const key = value => String(value ?? '').trim();
 const emailKey = value => key(value).toLowerCase();
 const failure = message => Object.assign(new Error(message), { statusCode: 409 });
+const hasMenuChoice = (record, startDate, endDate) => (record.selectedMeals || []).some(meal => {
+  const date = businessDateKeyOf(meal.date);
+  return !meal.isAutoAssigned && Number(meal.quantity ?? 1) > 0 && date && date >= startDate && date <= endDate;
+});
+
+// Legacy rows can retain a previous cycle's subscription and storage email.
+// Resolve that exact subscription to its permanent customer ID before falling
+// back to email. This is a read-only, per-report lookup; never relink records.
+export async function resolveLegacySelectionIdentities(deliveries, records, startDate, endDate) {
+  const owners = new Map();
+  for (const row of deliveries) {
+    const subscription = key(row.subscription_id), customer = key(row.customer_id);
+    if (subscription && customer) owners.set(subscription, new Set([...(owners.get(subscription) || []), customer]));
+  }
+  const legacy = records.filter(record => !key(record.matterCustomerId)
+    && key(record.matterSubscriptionId) && hasMenuChoice(record, startDate, endDate));
+  const subscriptions = [...new Set(legacy.map(record => key(record.matterSubscriptionId)))];
+  const resolved = new Map();
+  await boundedMap(subscriptions, 8, async subscriptionId => {
+    const current = owners.get(subscriptionId);
+    if (current?.size > 1) throw failure('A saved subscription matches more than one Matter customer. Resolve the customer identity before using this list.');
+    if (current?.size === 1) { resolved.set(subscriptionId, [...current][0]); return; }
+    let subscription;
+    try {
+      subscription = (await matter.getSubscription(subscriptionId))?.data;
+    } catch (error) {
+      if (error.response?.status === 404) throw failure('A saved subscription could not be resolved in Matter. Verify the customer identity before using this list.');
+      throw Object.assign(new Error('Could not verify a saved subscription with Matter. Please retry.'), { statusCode: 503 });
+    }
+    if (key(subscription?.subscription_id) !== subscriptionId || !key(subscription?.customer_id)) {
+      throw failure('A saved subscription returned an unverified Matter customer identity. Verify the customer before using this list.');
+    }
+    resolved.set(subscriptionId, key(subscription.customer_id));
+  });
+  return records.map(record => !key(record.matterCustomerId) && hasMenuChoice(record, startDate, endDate)
+    && resolved.has(key(record.matterSubscriptionId))
+    ? { ...record, matterCustomerId: resolved.get(key(record.matterSubscriptionId)) } : record);
+}
 
 export function customersWithoutMenuSelections(deliveries, records, startDate, endDate) {
   const customers = new Map(), emailOwners = new Map(), subscriptionOwners = new Map();
@@ -24,11 +63,7 @@ export function customersWithoutMenuSelections(deliveries, records, startDate, e
   }
   const selected = new Set();
   for (const record of records) {
-    const hasChoice = (record.selectedMeals || []).some(meal => {
-      const date = businessDateKeyOf(meal.date);
-      return !meal.isAutoAssigned && Number(meal.quantity ?? 1) > 0 && date && date >= startDate && date <= endDate;
-    });
-    if (!hasChoice) continue;
+    if (!hasMenuChoice(record, startDate, endDate)) continue;
     // Permanent IDs cannot be overridden by another person's matching email.
     if (key(record.matterCustomerId)) { selected.add(key(record.matterCustomerId)); continue; }
     const exact = subscriptionOwners.get(key(record.matterSubscriptionId));
@@ -56,6 +91,8 @@ export async function getMenuNonSelectors(menuId) {
     .select('weeklyMenuId email matterEmail matterCustomerId matterSubscriptionId selectedMeals skippedDays dayNotes').lean();
   const aliases = records.filter(record => !record.matterCustomerId).map(record => record.email);
   const archives = aliases.length ? await MenuSelectionArchive.find({ 'original.weeklyMenuId': menu._id, 'original.email': { $in: aliases } }).lean() : [];
-  const customers = customersWithoutMenuSelections(deliveries, excludeRecreatedArchivedAliases(records, archives), startDate, endDate);
+  const visible = excludeRecreatedArchivedAliases(records, archives);
+  const resolved = await resolveLegacySelectionIdentities(deliveries, visible, startDate, endDate);
+  const customers = customersWithoutMenuSelections(deliveries, resolved, startDate, endDate);
   return { menuId: String(menu._id), menuTitle: menu.title, startDate, endDate, checkedAt: new Date().toISOString(), customers };
 }

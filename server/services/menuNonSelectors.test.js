@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { customersWithoutMenuSelections, getMenuNonSelectors } from './menuNonSelectors.js';
+import { customersWithoutMenuSelections, getMenuNonSelectors, resolveLegacySelectionIdentities } from './menuNonSelectors.js';
 import Menu from '../models/WeeklyMenu.js';
 import Record from '../models/MenuSelectionRecord.js';
+import Archive from '../models/MenuSelectionArchive.js';
 import matter from './matterApiService.js';
 import router from '../routes/menus.js';
 
@@ -46,6 +47,64 @@ test('legacy records match exact subscription or unique case-insensitive email; 
 
 test('a choice from another menu date range does not hide a non-selector', () => {
   assert.equal(customersWithoutMenuSelections([delivery('one')], [choose('one', [meal('2026-11-15')])], start, end).length, 1);
+});
+
+test('a legacy choice under an old subscription and different email excludes its renewed customer', async (t) => {
+  const rows = [delivery('renewed', start, { subscription_id: 'new-cycle', email: 'new@example.com' }), delivery('none')];
+  const records = [choose(null, [meal()], { weeklyMenuId: 'menu', matterSubscriptionId: 'old-cycle', email: 'old-storage@example.com' })];
+  const before = JSON.stringify(records);
+  t.mock.method(Menu, 'findById', () => ({ select: () => ({ lean: async () => ({ _id: 'menu', title: 'Week', startDate: start, endDate: end }) }) }));
+  t.mock.method(matter, 'findSubscriptionsWithDeliveryInRange', async () => rows);
+  t.mock.method(Record, 'find', () => ({ select: () => ({ lean: async () => records }) }));
+  t.mock.method(Archive, 'find', () => ({ lean: async () => [] }));
+  const lookup = t.mock.method(matter, 'getSubscription', async id => {
+    assert.equal(id, 'old-cycle');
+    return { data: { subscription_id: id, customer_id: 'renewed', email: 'another-old-email@example.com' } };
+  });
+  for (const method of ['updateOne', 'findOneAndUpdate', 'create']) t.mock.method(Record, method, () => assert.fail('Must not relink or write selections'));
+  const result = await getMenuNonSelectors('menu');
+  assert.deepEqual(result.customers.map(c => c.customerId), ['none']);
+  assert.equal(lookup.mock.callCount(), 1);
+  assert.equal(JSON.stringify(records), before);
+});
+
+test('old subscription identity takes precedence over an email now belonging to another customer; duplicate references are fetched once', async (t) => {
+  const rows = [delivery('renewed'), delivery('other', start, { email: 'reused@example.com' })];
+  const records = [choose(null, [meal()], { matterSubscriptionId: 'old', email: 'reused@example.com' }), choose(null, [meal()], { matterSubscriptionId: 'old' })];
+  const lookup = t.mock.method(matter, 'getSubscription', async () => ({ data: { subscription_id: 'old', customer_id: 'renewed' } }));
+  const resolved = await resolveLegacySelectionIdentities(rows, records, start, end);
+  assert.deepEqual(customersWithoutMenuSelections(rows, resolved, start, end).map(c => c.customerId), ['other']);
+  assert.equal(lookup.mock.callCount(), 1);
+});
+
+test('verified IDs, current subscription matches and records without customer choices need no historical lookup', async (t) => {
+  t.mock.method(matter, 'getSubscription', () => assert.fail('No historical lookup needed'));
+  const rows = [delivery('current')];
+  const records = [choose('permanent', [meal()], { matterSubscriptionId: 'old' }), choose(null, [meal()], { matterSubscriptionId: 'sub-current' }),
+    choose(null, [], { matterSubscriptionId: 'skip-only' }), choose(null, [meal(start, { isAutoAssigned: true })], { matterSubscriptionId: 'auto' }),
+    choose(null, [meal('2026-11-15')], { matterSubscriptionId: 'other-menu-range' })];
+  const resolved = await resolveLegacySelectionIdentities(rows, records, start, end);
+  assert.equal(resolved[0].matterCustomerId, 'permanent');
+  assert.equal(resolved[1].matterCustomerId, 'current');
+  assert.deepEqual(customersWithoutMenuSelections(rows, resolved, start, end), []);
+});
+
+test('unresolved historical subscriptions fail visibly rather than guessing an email match', async (t) => {
+  const rows = [delivery('one')], records = [choose(null, [meal()], { matterSubscriptionId: 'old', email: 'one@example.com' })];
+  for (const data of [null, { subscription_id: 'old' }, { subscription_id: 'wrong', customer_id: 'one' }]) {
+    const read = t.mock.method(matter, 'getSubscription', async () => ({ data }));
+    await assert.rejects(resolveLegacySelectionIdentities(rows, records, start, end), { statusCode: 409 });
+    read.mock.restore();
+  }
+  for (const status of [404, 503]) {
+    const read = t.mock.method(matter, 'getSubscription', async () => { throw { response: { status }, config: { headers: { Authorization: 'private' } } }; });
+    await assert.rejects(resolveLegacySelectionIdentities(rows, records, start, end), error => {
+      assert.equal(error.statusCode, status === 404 ? 409 : 503);
+      assert.equal(JSON.stringify(error).includes('private'), false);
+      return true;
+    });
+    read.mock.restore();
+  }
 });
 
 test('reads one fresh whole-menu delivery range before saved choices; never assigns meals or writes records', async (t) => {
