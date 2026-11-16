@@ -42,3 +42,6 @@
 .av2-weekly-board .av2-board.av2-full-week{grid-template-columns:repeat(7,minmax(135px,1fr))}.av2-weekly-board .av2-library{max-height:950px;overflow:auto}.av2-weekly-board .av2-library select{width:100%;min-width:0;font-size:10px;margin-top:8px}.av2-weekly-board .av2-library>small{margin-top:8px}.av2-weekend-toggle{display:flex;align-items:center;gap:7px;color:var(--av2-muted)}.av2-weekend-toggle input{accent-color:#9dd456}.av2-board-empty{padding:8px 2px;font-size:9px!important}.av2-weekly-board .av2-meal-card a{color:inherit;text-decoration:none}.av2-weekly-board .av2-meal-card a:hover{text-decoration:underline}@media(max-width:1100px){.av2-weekly-board .av2-library{display:block;max-height:450px}.av2-weekly-board .av2-library-card{min-width:0}}
 
 .av2 .av2-choice-chips label{display:inline-flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid var(--av2-border);border-radius:6px;cursor:pointer}.av2 .av2-choice-chips input[type=radio]{accent-color:#88bf3e;margin:0;width:16px;height:16px}.av2 .av2-field input[type=checkbox]{accent-color:#88bf3e;margin-right:8px}
+
+/* Keep the meal library in view within the admin's scrolling workspace. */
+@media(min-width:1101px){.av2-weekly-board .av2-library{position:sticky;top:16px;align-self:start;max-height:calc(100dvh - 104px)}}
