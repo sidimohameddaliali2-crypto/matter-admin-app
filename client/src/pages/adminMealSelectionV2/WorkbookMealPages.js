@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Plus, Pencil, ArrowLeft, Upload, FileSpreadsheet, X, Save } from 'lucide-react';
 import { Action, Badge, Panel, SearchBox, Select, Notice, DataTable, Modal } from './components';
@@ -21,6 +21,8 @@ function PageHeading({ title, subtitle, children }) {
 }
 
 export function WorkbookImport({ onClose, onImport }) {
+  const alive = useRef(true);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -38,12 +40,12 @@ export function WorkbookImport({ onClose, onImport }) {
     } catch (err) { setError(err.message || 'Could not read this workbook.'); }
     finally { setLoading(false); }
   };
-  return <Modal title="Import meal cycle" onClose={onClose} footer={<><Action onClick={onClose}>Cancel</Action><Action primary disabled={!result || loading} onClick={() => { onImport(result); onClose(); }}>Replace preview cycle</Action></>}>
+  return <Modal title="Import meal cycle" onClose={onClose} footer={<><Action onClick={onClose}>Cancel</Action><Action primary disabled={!result || loading} onClick={async () => { setLoading(true); try { await onImport(result); if (alive.current) onClose(); } catch (err) { if (alive.current) setError(err.response?.data?.message || err.message || 'Could not save imported meals.'); } finally { if (alive.current) setLoading(false); } }}>Import meals</Action></>}>
     <p>Use the workbook layout: Meals and Components sheets, linked by Meal ID. Both sauces, categories, exclusions and preparation notes are preserved.</p>
-    <label className="av2-upload"><Upload size={20}/><span>Choose workbook<input aria-label="Choose meal cycle workbook" type="file" accept=".xlsx,.xls" onChange={read}/></span></label>
+    <label className="av2-upload"><Upload size={20}/><span>Choose workbook<input aria-label="Choose meal cycle workbook" type="file" accept=".xlsx,.xls" disabled={loading} onChange={read}/></span></label>
     {loading && <p role="status">Reading both sheets…</p>}
     {error && <div role="alert"><Notice tone="red">{error}</Notice></div>}
-    {result && <><Notice tone="green"><strong>{result.meals.length} meals · {result.meals.reduce((sum, m) => sum + m.components.length, 0)} components</strong><p>Matched by Meal ID. This replaces only your local preview cycle.</p></Notice><DataTable headers={['Meal ID', 'Day', 'Meal type', 'Meal name', 'Components']} rows={result.meals.slice(0, 6).map(m => [m.id, m.day, mealType(m) || 'Not selected', m.name, m.components.length])}/><small>Showing the first six meals. All imported meals remain drafts; Supy links and dietary rules need review.</small></>}
+    {result && <><Notice tone="green"><strong>{result.meals.length} meals · {result.meals.reduce((sum, m) => sum + m.components.length, 0)} components</strong><p>Matched by Meal ID. Existing meals and cycle placements are retained.</p></Notice><DataTable headers={['Meal ID', 'Day', 'Meal type', 'Meal name', 'Components']} rows={result.meals.slice(0, 6).map(m => [m.id, m.day, mealType(m) || 'Not selected', m.name, m.components.length])}/><small>Showing the first six meals. All imported meals remain drafts; Supy links and dietary rules need review.</small></>}
   </Modal>;
 }
 
@@ -54,7 +56,7 @@ export function MealLibrary({ meals, source, onImport }) {
   const stats = [[meals.length, 'Meals in cycle'], [meals.reduce((s, m) => s + m.components.length, 0), 'Component entries'], [meals.filter(m => m.components.some(c => c.type === 'Sauce 2')).length, 'Meals with salad dressing'], [new Set(meals.map(m => m.day).filter(Boolean)).size, 'Cycle day groups']];
   return <>
     <PageHeading title="Meals" subtitle="Create meals and assign them in your cycle menu."><Action icon={Upload} onClick={() => setImporting(true)}>Import Excel cycle</Action><Link to={`${BASE}/meals/new`} className="av2-action av2-primary"><Plus size={15}/>Create meal</Link></PageHeading>
-    <div className="av2-source-strip"><FileSpreadsheet size={18}/><div><strong>{source || 'No workbook imported'}</strong><small>Workbook preview · local edits only · Supy recipe links not verified</small></div></div>
+    <div className="av2-source-strip"><FileSpreadsheet size={18}/><div><strong>{source || 'No workbook imported'}</strong><small>Saved meal library · Supy recipe links not verified</small></div></div>
     <div className="av2-stats av2-workbook-stats">{stats.map(([value, label]) => <Panel key={label}><h2>{value}</h2><small>{label}</small></Panel>)}</div>
     {!meals.length && <Panel title="No meals yet"><p>Create your first meal or import your workbook to get started.</p></Panel>}<div className="av2-section-bar"><Link className="av2-text-button" to={`${BASE}/weekly-menu`}>View cycle planner →</Link></div>
     <div className="av2-filters"><SearchBox placeholder="Search meal, component or ID..." value={query} onChange={setQuery}/><Select label="All cycle days" values={CYCLE_DAYS} value={day} onChange={setDay}/><Select label="All meal types" values={MEAL_TYPES} value={category} onChange={setCategory}/><Select label="All temperatures" values={['WARM', 'COLD']} value={temperature} onChange={setTemperature}/></div>
@@ -89,6 +91,7 @@ export function MealComposer({ meal, isNew, onSave }) {
   const kindDrafts = useRef({});
   const [error, setError] = useState('');
   const [adding, setAdding] = useState(false);
+  const [saving, setSaving] = useState(false);
   if (!meal && !isNew) return <Notice>Meal not found. <Link to={`${BASE}/meals`}>Return to meals</Link></Notice>;
   const field = (key, value) => { setError(''); setForm(f => ({ ...f, [key]: value })); };
   const componentField = (id, key, value) => setForm(f => ({ ...f, components: f.components.map(c => c.id === id ? { ...c, [key]: value } : c) }));
@@ -119,14 +122,17 @@ export function MealComposer({ meal, isNew, onSave }) {
     const saladComponent = vegetables.length ? { ...vegetables[0], type: 'Salad', name: vegetables.map(c => c.name).filter(Boolean).join(' + '), exclusions: [...new Set(vegetables.flatMap(c => c.exclusions || []))], notes: vegetables.map(c => c.notes).filter(Boolean).join('\n') } : newComponent('Salad');
     return { ...f, isSaladBase: true, components: [...f.components.filter(c => !['Vegetable', 'Salad'].includes(c.type)), saladComponent, ...(!f.components.some(c => c.type === 'Sauce 2') ? [newComponent('Sauce 2')] : [])] };
   });
-  const save = () => {
+  const save = async () => {
     if (!form.name.trim()) return setError(`Enter a ${isSnack ? 'snack' : 'meal'} name.`);
     if (form.mealKind === 'Main meal' && form.isSaladBase && !salad?.name.trim()) return setError('Enter the salad name or uncheck Includes a salad base.');
     if (form.mealKind === 'Main meal' && !MEAL_TYPES.includes(form.mealType)) return setError('Choose Chicken, Beef or Fish for a main meal.');
     let components = isSnack ? [{ ...(snack || newComponent('Snack')), name: form.name.trim() }] : form.components.filter(c => allowed.includes(c.type) || c.type === 'Extra sauce / topping' || (form.isSaladBase && ['Salad', 'Sauce 2'].includes(c.type)));
     components = components.filter(c => c.type !== 'Sauce 2' || c.name.trim());
     if (!components.length || components.some(c => !c.name.trim())) return setError('Add a name for each component, including the salad when selected.');
-    onSave({ ...form, name: form.name.trim(), mealFormat: isBreakfast ? 'Breakfast' : isSnack ? 'Snack' : 'Main', mealType: form.mealKind === 'Main meal' ? form.mealType : '', isOatmeal: isBreakfast && form.isOatmeal, isSaladBase: form.mealKind === 'Main meal' && form.isSaladBase, status: 'Draft', components: components.map(({ relationship, ...c }) => c.type === 'Sauce 2' ? { ...c, saladComponentId: salad?.id || '' } : c) });
+    setSaving(true);
+    try { await onSave({ ...form, name: form.name.trim(), mealFormat: isBreakfast ? 'Breakfast' : isSnack ? 'Snack' : 'Main', mealType: form.mealKind === 'Main meal' ? form.mealType : '', isOatmeal: isBreakfast && form.isOatmeal, isSaladBase: form.mealKind === 'Main meal' && form.isSaladBase, status: 'Draft', components: components.map(({ relationship, ...c }) => c.type === 'Sauce 2' ? { ...c, saladComponentId: salad?.id || '' } : c) }); }
+    catch (err) { setError(err.response?.data?.message || err.message || 'Could not save the meal.'); }
+    finally { setSaving(false); }
   };
   const renderComponent = c => <Panel className="av2-component-panel" key={c.id} title={componentLabel(c.type)} actions={<button className="av2-icon" aria-label={`Remove ${c.type} component`} onClick={() => field('components', form.components.filter(v => v.id !== c.id))}><X size={16}/></button>}>
     <label className="av2-field">Component / recipe name<input value={c.name} onChange={e => componentField(c.id, 'name', e.target.value)}/></label>
@@ -136,8 +142,9 @@ export function MealComposer({ meal, isNew, onSave }) {
   </Panel>;
   return <>
     <Link className="av2-back" to={`${BASE}/meals`}><ArrowLeft size={15}/>Back to meals</Link>
-    <PageHeading title={isNew ? 'Create Meal' : 'Edit Meal'} subtitle="Main and Sub are assigned when you place a meal in the cycle menu."><Link className="av2-action" to={`${BASE}/meals`}>Cancel</Link><Action primary icon={Save} onClick={save}>Save preview draft</Action></PageHeading>
+    <PageHeading title={isNew ? 'Create Meal' : 'Edit Meal'} subtitle="Main and Sub are assigned when you place a meal in the cycle menu."><Link className="av2-action" to={`${BASE}/meals`}>Cancel</Link><Action primary icon={Save} disabled={saving} onClick={save}>Save draft</Action></PageHeading>
     {error && <div role="alert"><Notice tone="red">{error}</Notice></div>}
+    <fieldset disabled={saving} style={{ display: 'contents' }}>
     <Panel title="Create as"><fieldset className="av2-choice-chips"><legend>Choose what to create</legend>{['Main meal', 'Breakfast', 'Snack'].map(kind => <label key={kind}><input type="radio" name="meal-kind" checked={form.mealKind === kind} onChange={() => changeKind(kind)}/>{kind}</label>)}</fieldset></Panel>
     <Panel title={isSnack ? 'Snack details' : 'Meal details'}>
       <label className="av2-field">{isSnack ? 'Snack name' : 'Meal name'}<input value={form.name} onChange={e => field('name', e.target.value)}/></label>
@@ -159,7 +166,8 @@ export function MealComposer({ meal, isNew, onSave }) {
       {adding && <Modal title="Add meal component" onClose={() => setAdding(false)} footer={<Action onClick={() => setAdding(false)}>Cancel</Action>}><div className="av2-choice-chips">{allowed.map(type => <button key={type} onClick={() => { field('components', [...form.components, newComponent(type)]); setAdding(false); }}>{type}</button>)}</div></Modal>}
       <Panel title="Dietary flags across all components"><Chips values={dietaryFlags(form).filter(Boolean)} tone="amber"/></Panel>
     </>}
+    </fieldset>
   </>;
 }
 
-export function CyclePlanner({ meals, source, onImport }) { return <WeeklyCycleBoard meals={meals} source={source} onImport={onImport} importDialog={(onClose, handleImport) => <WorkbookImport onClose={onClose} onImport={handleImport}/>}/>; }
+export function CyclePlanner({ meals, source, onImport, boards, revision, onSaveBoards }) { return <WeeklyCycleBoard meals={meals} source={source} onImport={onImport} initialBoards={boards} revision={revision} onSaveBoards={onSaveBoards} importDialog={(onClose, handleImport) => <WorkbookImport onClose={onClose} onImport={handleImport}/>}/>; }
