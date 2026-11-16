@@ -36,6 +36,7 @@ import { matterSelectionIdentity, matterSelectionFilter, normalizeMatterEmail } 
 import { resolveMenuAllergyProfile } from '../services/menuAllergyProfileService.js';
 import { validatedMenuSelections } from '../services/menuSelectionValidation.js';
 import { reconcileMenuSkippedDays, restoredMenuSkipDates } from '../services/menuSkipReconciliation.js';
+import { getMenuNonSelectors } from '../services/menuNonSelectors.js';
 import { getPartnerKitchenOrders } from '../services/partnerKitchenOrders.js';
 import { syncMenuSelectionMainMealsToPartnerMenu } from '../services/menuSelectionPartnerSync.js';
 import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, validateRequiredResumeDates, expandSaturdaySkips } from '../services/matterPauseResumeService.js';
@@ -2972,6 +2973,19 @@ router.get('/:id/kitchen-dates', protect, async (req, res) => {
     res.set('Cache-Control', 'no-store');
     return res.json({ success: true, data: kitchenMenuDates(menu, dates.map(row => row._id), uploadedDates) });
   } catch (error) { return res.status(500).json({ success: false, message: error.message }); }
+});
+
+router.get('/:id/did-not-select', protect, (req, res, next) => {
+  if (!effectivePermissions(req.user).menus) return res.status(403).json({ success: false, message: 'Menu access is required.' });
+  next();
+}, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Select a valid menu.' });
+  try {
+    res.json({ success: true, data: await getMenuNonSelectors(req.params.id) });
+  } catch (error) {
+    res.status(error.statusCode || 502).json({ success: false, message: error.statusCode ? error.message : 'Could not check active deliveries with Matter. Please retry.' });
+  }
 });
 
 router.get('/:id/selections', protect, async (req, res) => {
