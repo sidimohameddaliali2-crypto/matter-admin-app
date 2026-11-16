@@ -3,6 +3,8 @@ import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
 export const appendKitchenMeals = async (menuId, email, record, update) => {
   const filter = {
     weeklyMenuId: menuId, email,
+    $nor: [{ kitchenAutoHolds: { $elemMatch: { date: { $in: [...new Set((update.$push?.selectedMeals?.$each || [])
+      .filter(meal => meal.date).map(meal => new Date(meal.date).toISOString().slice(0, 10)))] } } } }],
     ...(record?._id ? { _id: record._id } : {}),
     selectedMeals: record ? (record.selectedMeals || []) : { $size: 0 },
     ...(record ? { $expr: { $eq: [{ $ifNull: ['$skippedDays', []] }, record.skippedDays || []] } } : {}),

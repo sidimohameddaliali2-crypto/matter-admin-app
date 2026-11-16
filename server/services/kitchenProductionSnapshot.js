@@ -88,7 +88,7 @@ export const beginKitchenState = async (menuId, date, prepare, options = {}) => 
       const result = await prepare();
       const before = await sourceVersion(menuId);
       const inputs = await capture(menuId);
-      assertPreparedCoverage({ ...result.data, ...inputs }, date);
+      assertPreparedCoverage({ ...result.data, ...inputs }, date, { allowManualHolds: true });
       if (before !== await sourceVersion(menuId)) throw new Error('Selections changed during preparation. Retry this date.');
       job.payload = { success: true, preparation: 'completed', preparedAt: new Date().toISOString(), snapshotId: String(job._id), data: { ...result.data, ...inputs } };
       job.sourceVersion = before;

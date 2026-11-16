@@ -1,4 +1,5 @@
 import express from 'express';
+import kitchenMealEditsRouter from './kitchenMealEdits.js';
 import crypto from 'crypto';
 import mongoose from 'mongoose';
 import Customer from '../models/Customer.js';
@@ -41,6 +42,7 @@ import { previewSkipPauses, applyConfirmedPauses, resolveSubscriptionContext, va
 
 
 const router = express.Router();
+router.use('/:id/kitchen-customers/:customerId', protect, kitchenMealEditsRouter);
 
 // Read-only production feed for both Kitchen List and Kitchen Counting.
 router.get('/kitchen-partner-orders', protect, (req, res, next) => {
@@ -1574,6 +1576,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
         const writeResult = await MenuSelectionRecord.updateOne(
           {
             _id: record._id,
+            $nor: [{ kitchenAutoHolds: { $elemMatch: { date: dateKey } } }],
             skippedDays: record.skippedDays || [],
             $expr: {
               $eq: [
@@ -1976,7 +1979,7 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
   }
 
   const existingRecords = await MenuSelectionRecord.find({ weeklyMenuId: menuId })
-    .select('email legacyStorageEmail matterEmail matterCustomerId matterSubscriptionId selectedMeals skippedDays').lean();
+    .select('email legacyStorageEmail matterEmail matterCustomerId matterSubscriptionId selectedMeals skippedDays kitchenAutoHolds').lean();
   const matterInputs = subscriptions.map((sub) => sub.kitchen_inputs).filter(Boolean);
   const sourceOptions = { matterInputs };
   let alreadyCovered = 0;
@@ -2993,6 +2996,7 @@ router.get('/:id/selections', protect, async (req, res) => {
         customerId: row.matterCustomerId || null, matterCustomerId: row.matterCustomerId || null,
         matterSubscriptionId: row.matterSubscriptionId || null,
         selectedMeals: row.selectedMeals || [], skippedDays: row.skippedDays || [], dayNotes: row.dayNotes || [],
+        kitchenAutoHolds: row.kitchenAutoHolds || [], kitchenLastMealEdit: row.kitchenLastMealEdit || null,
         lastMenuSelectionDate: row.submittedAt, nutritionStatus: 'missing',
       };
     }) });

@@ -1,4 +1,5 @@
 import KitchenInputWarnings from '../components/KitchenInputWarnings';
+import KitchenMealEditor from '../components/KitchenMealEditor';
 import useKitchenSelectionWindow from '../lib/useKitchenSelectionWindow';
 import { KitchenWorkspaceHeader, KitchenEmptyState } from '../components/KitchenWorkspace';
 import KitchenCustomerBrowser from '../components/KitchenCustomerBrowser';
@@ -2897,7 +2898,8 @@ ${body}
           </div>}
           onShowMore={() => setVisibleCustomers(count => count + 50)}
           renderCustomer={entry => <CustomerCard key={entry.email || entry.customerId} entry={entry} persistMealTypeOverride={persistMealTypeOverride}
-            saveMealRemark={saveMealRemark} savingOverrideKey={savingOverrideKey} saveDayNote={saveDayNote} savingDayNoteKey={savingDayNoteKey} snackPreset={snackPreset} />}
+            saveMealRemark={saveMealRemark} savingOverrideKey={savingOverrideKey} saveDayNote={saveDayNote} savingDayNoteKey={savingDayNoteKey} snackPreset={snackPreset}
+            menuId={selectedMenuId} date={missingCheckDate} canEdit={!!selectionWindow.deadlineAt && !selectionWindow.canAutoAssign} onMealsChanged={loadSelections} />}
         />
         </div>
 
@@ -2918,7 +2920,8 @@ ${body}
 // here (keyed by date only, since email is fixed per card instance) instead
 // of a shared object in the parent, which is what made every card re-render
 // together before.
-const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemark, savingOverrideKey, saveDayNote, savingDayNoteKey, snackPreset }) => {
+const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemark, savingOverrideKey, saveDayNote, savingDayNoteKey, snackPreset, menuId, date, canEdit, onMealsChanged }) => {
+  const [mealIntent, setMealIntent] = useState(null);
   const [localDayNoteDrafts, setLocalDayNoteDrafts] = useState({});
   // Each day's full meal grid starts collapsed — with a realistic customer
   // count (hundreds), rendering every day's meal detail for every customer
@@ -2998,6 +3001,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
           </div>
         )}
       </div>
+      <KitchenMealEditor entry={entry} menuId={menuId} date={date} canEdit={canEdit} intent={mealIntent} onChanged={onMealsChanged} />
       {entry.calculationStatus === 'incomplete' && <div className="kitchen-customer-unavailable" role="note">
         {entry.kitchenProductionExcluded ? <><strong>No active delivery for {formatDateLabel(entry.kitchenExclusionDate)}.</strong><p>Saved choices are shown for reference. This customer is excluded from the kitchen paper and counting for this date.</p></> : <><strong>Weights cannot be calculated until these inputs are resolved:</strong><ul>{(entry.inputErrors || []).map(reason => <li key={reason}>{reason}</li>)}</ul></>}
       </div>}
@@ -3075,6 +3079,10 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
                       <span className="text-sm font-semibold text-slate-900">{getMealLabel(meal).mealType}</span>
                     </div>
                     <span className="text-xs font-semibold text-slate-500">#{index + 1}</span>
+                    {!entry.partner && meal._id && <div className="flex gap-2 text-xs">
+                      <button type="button" disabled={!canEdit || !/^[1-9]\d*$/.test(String(entry.matterCustomerId || ''))} onClick={() => setMealIntent({ action: 'change', mealId: String(meal._id) })}>Change meal</button>
+                      <button type="button" disabled={!canEdit || !/^[1-9]\d*$/.test(String(entry.matterCustomerId || ''))} className="text-rose-700" onClick={() => setMealIntent({ action: 'delete', mealId: String(meal._id) })}>Delete meal</button>
+                    </div>}
                   </div>
                   <div className="mt-2 flex items-center gap-2 text-sm font-medium text-slate-700">
                     <span className="truncate">{getMealLabel(meal).mealName}</span>
