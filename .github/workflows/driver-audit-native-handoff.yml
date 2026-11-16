@@ -1,0 +1,56 @@
+name: Driver Reports native handoff
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Reviewed handoff operation
+        type: choice
+        options:
+          - inspect
+        default: inspect
+      expected_deployed_sha:
+        description: Exact current application commit on the host
+        type: string
+        required: true
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  handoff:
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare reviewed operator
+        id: prepare
+        env:
+          EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ ]]
+          printf 'code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-handoff.mjs)" >> "$GITHUB_OUTPUT"
+      - name: Inspect actual target and collector roots
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
+          EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
+          NATIVE_HANDOFF_OPERATION: ${{ inputs.operation }}
+          NATIVE_HANDOFF_CODE: ${{ steps.prepare.outputs.code }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          command_timeout: 5m
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,NATIVE_HANDOFF_OPERATION,NATIVE_HANDOFF_CODE
+          script: |
+            set -e
+            cd -- "$DO_APP_PATH"
+            printf '%s' "$NATIVE_HANDOFF_CODE" | base64 -d | node --input-type=module - --run
