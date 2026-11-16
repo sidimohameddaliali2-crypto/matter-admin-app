@@ -1,3 +1,4 @@
+import { instrumentAxios } from '../observability/axiosTrace.js';
 import axios from 'axios';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
@@ -126,11 +127,11 @@ class MatterApiService {
       throw new Error('Matter API is not configured (missing MATTER_API_BASE_URL or MATTER_API_TOKEN)');
     }
 
-    return axios.create({
+    return instrumentAxios(axios.create({
       baseURL: this.baseURL,
       headers: { Authorization: `Bearer ${this.token}` },
       timeout: 15000
-    });
+    }), 'matter-nutrition');
   }
 
   /**

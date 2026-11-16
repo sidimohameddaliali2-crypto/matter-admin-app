@@ -1,3 +1,4 @@
+import { traceJob } from '../observability/telemetry.js';
 import { importMatterDeliveriesForDate } from '../services/matterDeliveryImportService.js';
 
 // Owner (2026-09-22, refined same day: "the Wednesday one [should import]
@@ -36,21 +37,23 @@ function tomorrowDateKey() {
 }
 
 export async function runImportMatterDeliveriesOnce(dateKey = tomorrowDateKey()) {
-  try {
-    const summary = await importMatterDeliveriesForDate(dateKey);
-    console.log(
-      `[MatterImport] ${dateKey}: ${summary.created} created, ${summary.alreadyExisted} already imported, ` +
-      `${summary.alreadyHadOtherDelivery} already had a delivery from elsewhere, ` +
-      `${summary.customersCreated} new customer(s), ${summary.discoveryFailed || 0} discovery failure(s), ${summary.writeFailed || 0} write failure(s) (of ${summary.total} subscriptions); complete=${summary.complete !== false}.`
-    );
-    if (summary.failed > 0) {
-      console.error('[MatterImport] Failures:', JSON.stringify(summary.errors.slice(0, 10)));
+  return traceJob('matter-delivery-import', async () => {
+    try {
+      const summary = await importMatterDeliveriesForDate(dateKey);
+      console.log(
+        `[MatterImport] ${dateKey}: ${summary.created} created, ${summary.alreadyExisted} already imported, ` +
+        `${summary.alreadyHadOtherDelivery} already had a delivery from elsewhere, ` +
+        `${summary.customersCreated} new customer(s), ${summary.discoveryFailed || 0} discovery failure(s), ${summary.writeFailed || 0} write failure(s) (of ${summary.total} subscriptions); complete=${summary.complete !== false}.`
+      );
+      if (summary.failed > 0) {
+        console.error('[MatterImport] Failures:', JSON.stringify(summary.errors.slice(0, 10)));
+      }
+      return summary;
+    } catch (err) {
+      console.error('[MatterImport] Error:', err.message);
+      throw err;
     }
-    return summary;
-  } catch (err) {
-    console.error('[MatterImport] Error:', err.message);
-    throw err;
-  }
+  });
 }
 
 export function startImportMatterDeliveriesJob() {

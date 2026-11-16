@@ -5,6 +5,8 @@
 // module imported below sees process.env already populated. See
 // loadEnv.js for the full explanation.
 import './loadEnv.js';
+import { createRequestTrace } from './observability/requestTrace.js';
+import { resolveTraceRoute } from './observability/routeCatalog.js';
 import path from 'path';
 import {mountCustomerServiceInAdmin} from './services/customerServiceAdminMount.js';
 import { fileURLToPath } from 'url';
@@ -14,7 +16,7 @@ const __dirname = path.dirname(__filename);
 
 console.log('🔧 Environment check:', {
   nodeEnv: process.env.NODE_ENV,
-  mongodbUri: process.env.MONGODB_URI?.substring(0, 50) + '...',
+  hasMongoConnection: Boolean(process.env.MONGODB_URI),
   port: process.env.PORT,
   hasSpacesKey: !!process.env.SPACES_KEY,
   hasSpacesSecret: !!process.env.SPACES_SECRET,
@@ -77,6 +79,7 @@ const corsOptions = {
     return callback(null, false);
   },
   credentials: true,
+  exposedHeaders: ['X-Request-ID'],
 };
 
 const io = new Server(server, {
@@ -91,6 +94,7 @@ io.use(authenticateSocket);
 app.set('io', io);
 
 // Middleware
+app.use(createRequestTrace({ resolveRoute: resolveTraceRoute }));
 // This handler owns its raw JSON body and existing reporting security headers.
 const driverAuditIntegration = createDriverAuditIntegration({db:()=>mongoose.connection.db,authenticateStaffToken});
 app.use(driverAuditIntegration);
@@ -336,7 +340,7 @@ app.use((err, req, res, next) => {
 
 // 404 handler for API routes only
 app.use('/api/*', (req, res) => {
-  console.log(`❌ 404 - API Route not found: ${req.method} ${req.originalUrl}`);
+  // The structured completion record carries the safe route and request reference.
   
   res.status(404).json({
     success: false,

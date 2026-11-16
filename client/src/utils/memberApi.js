@@ -1,3 +1,4 @@
+import { attachRequestReference } from './requestReference';
 import axios from 'axios';
 
 const resolveApiBaseUrl = () => {
@@ -45,5 +46,7 @@ memberApi.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+attachRequestReference(memberApi);
 
 export default memberApi;
