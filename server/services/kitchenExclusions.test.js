@@ -17,3 +17,9 @@ test('auto-selection shares whole-word and umbrella matching with customer selec
   assert.deepEqual(kitchenConflictList({ carbIngredients: [{ name: 'Almond' }] }, ['All Nuts']), ['All Nuts']);
   assert.deepEqual(kitchenConflictList({ carbs: 'Gluten Free Flour' }, ['Gluten']), []);
 });
+
+test('Raw Onion does not flag generic or cooked onion in kitchen components', () => {
+  assert.deepEqual(kitchenConflictList({ veg: 'Onion', sauce: 'Cooked Onion', ingredients: ['Caramelized Onion'] }, ['Raw Onion']), []);
+  assert.deepEqual(kitchenConflictFields({ veg: 'Salad with Raw Onion' }, ['Raw Onion']).vegConflict, ['Raw Onion']);
+  assert.deepEqual(kitchenConflictList({ veg: 'Raw Onion' }, ['Onion']), ['Onion']);
+});

@@ -44,6 +44,9 @@ export const exclusionMatchesTerm = (exclusionPhrase, term) => {
   const raw = normalizeTerm(exclusionPhrase);
   const ex = ({ 'dairy-free': 'dairy', 'dairy free': 'dairy', 'gluten-free': 'gluten', 'gluten free': 'gluten', 'egg-free': 'egg', 'egg free': 'egg', 'all seafood': 'all sea food' })[raw] || raw;
   const t = normalizeTerm(term);
+  // Owner: Raw Onion excludes only explicitly raw onion, not generic/cooked onion.
+  // Keep this dietary rule separate from the more conservative allergy matcher.
+  if (ex === 'raw onion') return containsWholePhrase(t, ex);
   // A dietary preference should not warn on the explicit ingredient label
   // "Gluten Free Flour" solely because the word "Gluten" occurs in it.
   if (['gluten', 'dairy', 'milk', 'egg'].includes(ex)
