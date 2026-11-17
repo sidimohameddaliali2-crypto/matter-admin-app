@@ -18,6 +18,7 @@ on:
           - stage-import
           - verify-import
           - stage-builder
+          - stage-source
           - diagnose-roots
         default: inspect
       expected_deployed_sha:
@@ -37,7 +38,7 @@ on:
         description: SHA-256 of the host-created native import profile
         type: string
       diagnostic_page:
-        description: Page of RSA-sealed private control metadata, starting at zero
+        description: Page of RSA-sealed private metadata, starting at zero; all returns at most sixteen pages
         type: string
 
 concurrency:
