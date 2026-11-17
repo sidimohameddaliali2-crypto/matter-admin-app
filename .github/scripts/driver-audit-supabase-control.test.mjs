@@ -4,7 +4,8 @@ import { constants as fsConstants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import test from 'node:test';
 import dotenv from '../../server/node_modules/dotenv/lib/main.js';
@@ -440,6 +441,105 @@ test('prepare-serving uses the actual Sync and Replica to publish current plus p
   const capsule = openTransferSecrets(privateKey,result.capsule), {gunzipSync}=await import('node:zlib');
   const raw=gunzipSync(Buffer.from(capsule.metadataGzipBase64,'base64')); assert.equal(hash(raw),result.metadataSha256);
   assert(!raw.includes(Buffer.from(f.secret))); assert(!JSON.stringify(result).includes(f.appRoot));
+});
+
+async function eventCheckoutFixture(t) {
+  const f = await fixture(t), git = args => promisify(execFile)('git', ['-C', f.appRoot, ...args]);
+  for (const name of ['loadEnv.js', 'package.json', 'package-lock.json', 'services/driverAuditTransferCodec.js', 'vendor/driver-audits/integration/hosted/worker-lock.mjs']) {
+    const file = path.join(f.baseServer, name); try { await fs.access(file); } catch { await write(file, 'fictional tracked fixture'); }
+  }
+  await write(path.join(f.appRoot, '.gitignore'), 'server/.private/\nserver/.env*\nserver/node_modules/\n');
+  await git(['init', '-q']); await git(['add', '.gitignore', 'server']);
+  await git(['-c', 'user.name=Fictional Control Fixture', '-c', 'user.email=fictional@example.invalid', 'commit', '-qm', 'fictional base app']);
+  f.p.base = (await git(['rev-parse', 'HEAD'])).stdout.trim();
+  const prefix = JSON.parse(await fs.readFile(f.prefixFile)); prefix.source.applicationCommit = f.p.base; await write(f.prefixFile, prefix);
+  const original = f.adapters.exec;
+  f.adapters.exec = (file, args, options) => file === 'git' && args[0] === '-C' && args[1] === f.appRoot
+    ? promisify(execFile)(file, args, options) : original(file, args, options);
+  const event = path.join(f.baseServer, 'routes/Event.js'); await write(event, 'throw new Error("Untracked business data must never execute");\n'); await fs.chmod(event, 0o664);
+  return { ...f, event, git };
+}
+
+test('the exact untracked base Event file stays byte and inode identical through actual Git checks and full serving preparation', async t => {
+  const f = await eventCheckoutFixture(t), before = await fs.stat(f.event, { bigint: true }), bytes = await fs.readFile(f.event);
+  assert.equal((await f.git(['status', '--porcelain', '--untracked-files=all', '--', 'server'])).stdout, '?? server/routes/Event.js\n');
+  const load = f.adapters.load; f.adapters.load = (name, ...args) => { assert(!name.includes('routes/Event.js')); return load(name, ...args); };
+  assert.equal((await f.run('prepare-serving')).status, 'serving-prepared');
+  const after = await fs.stat(f.event, { bigint: true });
+  for (const key of ['dev', 'ino', 'mode', 'size', 'mtimeNs', 'ctimeNs', 'nlink']) assert.equal(after[key], before[key]);
+  assert.deepEqual(await fs.readFile(f.event), bytes); assert.equal(after.mode & 0o777n, 0o664n);
+  assert.equal((await f.git(['diff', '--stat', 'HEAD', '--', 'server'])).stdout, '');
+});
+
+test('the Event exception refuses other untracked paths, tracked edits, unsafe files and any in-flight Event identity change', async t => {
+  for (const kind of ['unknown-untracked', 'tracked-edit', 'symlink', 'hardlink', 'oversized', 'unsafe-parent', 'in-flight-change', 'in-flight-parent-mode']) {
+    const f = await eventCheckoutFixture(t), original = await fs.readFile(f.event);
+    if (kind === 'unknown-untracked') await write(path.join(f.baseServer, 'routes/Other.js'), 'preserve other data');
+    if (kind === 'tracked-edit') await fs.appendFile(path.join(f.baseServer, 'package.json'), ' changed');
+    if (kind === 'symlink') { const target = f.event + '.retained'; await fs.rename(f.event, target); await fs.symlink(target, f.event); }
+    if (kind === 'hardlink') await fs.link(f.event, path.join(f.appRoot, 'event-retained.private'));
+    if (kind === 'oversized') await fs.writeFile(f.event, Buffer.alloc(512 * 1024 + 1));
+    if (kind === 'unsafe-parent') await fs.chmod(path.dirname(f.event), 0o777);
+    let reached = false;
+    if (kind.startsWith('in-flight-')) { const load = f.adapters.load;
+      f.adapters.load = async (name, ...args) => { const value = await load(name, ...args);
+        if (name === 'services/driverAuditSupabaseReplica.js' && !reached) {
+          reached = true;
+          if (kind === 'in-flight-change') await fs.appendFile(f.event, 'independent change');
+          else await fs.chmod(path.dirname(f.event), 0o775);
+        }
+        return value;
+      };
+    }
+    await assert.rejects(f.run('prepare-serving'), /Supabase control stopped/);
+    if (kind === 'in-flight-change') { assert(reached); assert.equal(await fs.readFile(f.event, 'utf8'), original.toString() + 'independent change'); }
+    if (kind === 'in-flight-parent-mode') { assert(reached); assert.equal((await fs.stat(path.dirname(f.event))).mode & 0o777, 0o775); }
+    if (kind === 'unknown-untracked') assert.equal(await fs.readFile(path.join(f.baseServer, 'routes/Other.js'), 'utf8'), 'preserve other data');
+    if (!['symlink', 'oversized', 'in-flight-change'].includes(kind)) assert.deepEqual(await fs.readFile(f.event), original);
+  }
+});
+
+test('the base Event allowance retains exact normal modes, refuses a mode race and never applies to the isolated release', async t => {
+  const f = await eventCheckoutFixture(t), checkout = operator.driverAuditSupabaseControlHost.checkout;
+  const exec = (file, args, options) => promisify(execFile)(file, args, options);
+  for (const mode of [0o600, 0o644, 0o664]) {
+    await fs.chmod(f.event, mode);
+    const preserved = await checkout(f.appRoot, f.p.base, exec, ['loadEnv.js'], { preserveBaseEvent: true });
+    assert.equal(preserved.length, 1); assert.equal(preserved[0].path, 'server/routes/Event.js');
+    assert.equal(preserved[0].nlink, '1'); assert.equal(preserved[0].sha256, hash(await fs.readFile(f.event)));
+    assert.equal((await fs.stat(f.event)).mode & 0o777, mode);
+  }
+  for (const mode of [0o666, 0o755, 0o4664]) {
+    await fs.chmod(f.event, mode);
+    await assert.rejects(checkout(f.appRoot, f.p.base, exec, ['loadEnv.js'], { preserveBaseEvent: true }));
+  }
+  await fs.chmod(f.event, 0o664);
+  const original = fs.open; let reached = false;
+  fs.open = async (file, ...args) => {
+    if (!reached && (file === f.event || /^\/proc\/self\/fd\/\d+\/Event\.js$/.test(String(file)))) {
+      reached = true; await fs.chmod(f.event, 0o600);
+    }
+    return original(file, ...args);
+  };
+  try { await assert.rejects(checkout(f.appRoot, f.p.base, exec, ['loadEnv.js'], { preserveBaseEvent: true })); }
+  finally { fs.open = original; }
+  assert(reached); assert.equal((await fs.stat(f.event)).mode & 0o777, 0o600);
+  const mocked = f.adapters.exec;
+  f.adapters.exec = async (file, args, options) => file === 'git' && args[1] === f.releaseRoot && args.includes('status')
+    ? { stdout: '?? server/routes/Event.js\n' } : mocked(file, args, options);
+  await assert.rejects(f.run('prepare-serving'), /Supabase control stopped at checkout/);
+});
+
+test('an initially absent Event file cannot be newly admitted during an ongoing operation', async t => {
+  const f = await eventCheckoutFixture(t), original = await fs.readFile(f.event); await fs.unlink(f.event);
+  let reached = false; const load = f.adapters.load;
+  f.adapters.load = async (name, ...args) => {
+    const value = await load(name, ...args);
+    if (!reached && name === 'services/driverAuditSupabaseReplica.js') { reached = true; await write(f.event, original); }
+    return value;
+  };
+  await assert.rejects(f.run('prepare-serving'), /Supabase control stopped/); assert(reached);
+  assert.deepEqual(await fs.readFile(f.event), original);
 });
 
 async function runtimeParts(f, role, name) {

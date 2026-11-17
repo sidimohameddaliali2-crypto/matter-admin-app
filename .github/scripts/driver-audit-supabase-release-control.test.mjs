@@ -130,7 +130,7 @@ async function actualSourceProofFixture(t) {
   await f.verify(); return f;
 }
 
-async function hostFixture(t) {
+async function hostFixture(t, { largeManifest = false } = {}) {
   const actual = await actualSourceProofFixture(t), appRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'supabase-release-host-')));
   t.after(() => fs.rm(appRoot, { recursive: true, force: true }));
   const h = await loadDriverAuditSupabaseReleaseHost(), server = path.join(appRoot, 'release/server'), oldServer = path.join(appRoot, 'server');
@@ -150,23 +150,57 @@ async function hostFixture(t) {
     'preview-acceptance-hosted-20261109:review-journal', 'preview-acceptance-household-20261109:review-journal',
     'preview-acceptance-reconcile-20261109:review-journal'];
   for (const key of keys) states.set(key, { revision: key === 'collector-state' ? 7 : 1, body: key === 'collector-state' ? collectorBody : reviewBody });
-  const head = { generation: sha('generated'), reportHash: sha('report'), servingPackage: { version: 1, dataStore: 'supabase', collectorRevision: 7,
-    sourceBasis: p.collector.sourceBasis, manifestSha256: sha('generated-manifest') }, previous: { generation: sha('previous') } };
+  const originalManifest = { 'original.private.json': sha('original'), 'second.private.json': sha('second') };
+  if (largeManifest) for (let i = 0; i < 18877; i++) {
+    const hash = sha('fictional-large-manifest-' + i), runtime = i >= 18614;
+    originalManifest[(runtime ? 'report-data-' : 'archive-') + hash + (runtime ? '.json.gz' : '.private.bin')] = runtime ? sha('runtime-value-' + i) : hash;
+  }
+  const manifestBytes = value => {
+    const encoded = json(value); return largeManifest ? Buffer.concat([encoded, Buffer.alloc(2909890 - encoded.length, 32)]) : encoded;
+  };
+  const generatedManifestBytes = manifestBytes(Object.fromEntries(Object.entries(originalManifest).reverse())), generation = sha('generated'), reportHash = sha('report');
+  const fileRef = { version: 1, domain: 'previewRuntime', path: 'original.private.json', kind: 'immutable-evidence',
+    size: 8, sha256: sha('original'), chunks: [{ offset: 0, size: 8, sha256: sha('original') }] };
+  const descriptorFiles = { 'original.private.json': fileRef };
+  if (largeManifest) for (const [name, hash] of Object.entries(originalManifest).filter(([name]) => !name.startsWith('archive-')).slice(1))
+    descriptorFiles[name] = { version: 1, domain: 'previewRuntime', path: name, kind: 'immutable-evidence', size: 8,
+      sha256: hash, chunks: [{ offset: 0, size: 8, sha256: hash }] };
+  const descriptorRaw = json({ version: 1, files: descriptorFiles, sourceManifestSha256: sha(generatedManifestBytes), generation, reportHash });
+  const generatedDescriptorBytes = largeManifest ? Buffer.concat([descriptorRaw, Buffer.alloc(119 * 1024 - descriptorRaw.length, 32)]) : descriptorRaw;
+  const descriptor = { version: 1, domain: 'previewPackage', path: 'descriptor.json', kind: 'immutable-evidence',
+    size: generatedDescriptorBytes.length, sha256: sha(generatedDescriptorBytes),
+    chunks: [{ offset: 0, size: generatedDescriptorBytes.length, sha256: sha(generatedDescriptorBytes) }] };
+  const head = { version: 1, generation, reportHash, descriptor, servingPackage: { version: 1, dataStore: 'supabase', collectorRevision: 7,
+    sourceBasis: p.collector.sourceBasis, manifestSha256: sha(generatedManifestBytes) }, visibleCutoffAt: '2026-11-17T00:00:00.000Z',
+    closureReceipt: { version: 1, fictional: 'original verified closure' }, restore: { version: 1, fictional: 'original verified restore' },
+    previous: { generation: sha('previous') } };
   const headBody = JSON.stringify(head); states.set('app-sidi-report-head', { revision: 2, body: headBody });
   const paid = '{"version":1,"fictional":"paid-original"}'; states.set('photo-grading-budget', { revision: 1, body: paid });
-  const candidate = await write(path.join(syncRoot, 'retained/candidate/server-data/files.private.json'), { 'original.private.json': sha('original') }); p.candidate = candidate.sha256;
+  const candidate = await write(path.join(syncRoot, 'retained/candidate/server-data/files.private.json'), manifestBytes(originalManifest)); p.candidate = candidate.sha256;
+  const generatedRoot = path.join(syncRoot, 'work/attempts/11111111-2222-4333-a444-555555555555');
+  const generatedManifestFile = await write(path.join(generatedRoot, 'server-data/files.private.json'), generatedManifestBytes);
+  const generatedDescriptorFile = await write(path.join(generatedRoot, 'audit-objects', descriptor.sha256 + '.gz'), generatedDescriptorBytes);
+  const generatedSeedFile = await write(path.join(generatedRoot, 'supabase-seed.private.json'), { version: 1, mode: 'sync',
+    collectorRevision: 7, sourceBasis: p.collector.sourceBasis, manifestSha256: generatedManifestFile.sha256,
+    bundleRoot: path.join(generatedRoot, 'audit-objects'), pointer: { version: 1, generation, reportHash, descriptor },
+    visibleCutoffAt: head.visibleCutoffAt, closureReceipt: head.closureReceipt, restore: head.restore });
+  const generatedPointerFile = await write(path.join(syncRoot, 'work/current.private.json'), { version: 1, collectorRevision: 7,
+    sourceBasis: p.collector.sourceBasis, manifestSha256: generatedManifestFile.sha256, privateRoot: path.join(generatedRoot, 'server-data'),
+    verifiedAt: '2026-11-17T00:00:00.000Z' });
   const sourceConfigFile = await h.read(actual.configFile), syncFile = await write(path.join(syncRoot, 'sync.json'), { version: 1, root: syncRoot });
   const envBefore = Buffer.from('DRIVER_AUDIT_ENABLED="0"\nDRIVER_AUDIT_IMPORT_ENABLED="0"\nDRIVER_AUDIT_REPLICA_GC_ENABLED="0"\n');
   const envAfter = Buffer.from(envBefore.toString().replace('ENABLED="0"', 'ENABLED="1"'));
   const envFile = path.join(server, '.env.local'); await write(envFile, envAfter);
-  const prepared = await write(path.join(syncRoot, 'staging.private.json'), { version: 1, fictional: true });
+  const preparedBody = { version: 1, fictional: true, ...(largeManifest ? { fictionalSizePadding: Array.from({ length: 400 }, (_, i) => sha('prepared-' + i)).join('') } : {}) };
+  const prepared = await write(path.join(syncRoot, 'staging.private.json'), preparedBody);
   await write(path.join(controlRoot, 'app-environment.before.private.env'), envBefore); await write(path.join(controlRoot, 'app-environment.after.private.env'), envAfter);
   await write(path.join(controlRoot, 'app-environment-plan.private.json'), { version: 1, kind: 'supabase-report-enable-plan-v1', preparedReceiptSha256: prepared.sha256,
     beforeSha256: sha(envBefore), afterSha256: sha(envAfter), changedKey: 'DRIVER_AUDIT_ENABLED' });
   const oldConfig = { version: 1, root: path.join(oldServer, '.private/driver-audits', 'e'.repeat(64)) };
   const old = await write(path.join(oldConfig.root, 'sync.json'), oldConfig); await write(path.join(syncRoot, 'retained/original-sync.private.json'), old.data);
   const prefix = await write(path.join(syncRoot, 'retained/archive-verification-receipts.private.json'), { version: 1, fictionalPrefix: true });
-  const qualification = await write(path.join(controlRoot, 'host-qualification-pending.private.json'), { version: 1, status: 'verified', fictionalFixture: true });
+  const qualification = await write(path.join(controlRoot, 'host-qualification-pending.private.json'), { version: 1, status: 'verified', fictionalFixture: true,
+    ...(largeManifest ? { fictionalSizePadding: Array.from({ length: 1024 }, (_, i) => sha('qualification-' + i)).join('') } : {}) });
   await fs.rename(qualification.path, path.join(controlRoot, 'host-qualification-' + qualification.sha256 + '.private.json'));
   const npm = { realpath: '/usr/share/nodejs/npm/bin/npm-cli.js', uid: 0, mode: 0o100644, bytes: 20, sha256: sha('npm') };
   npm.identitySha256 = sha(JSON.stringify([npm.realpath, npm.sha256]));
@@ -194,12 +228,12 @@ async function hostFixture(t) {
   const intent = await write(path.join(controlRoot, 'report-once-intents', sha(headBody) + '.private.json'), { version: 1,
     kind: 'supabase-one-report-publication-intent-v1', preparedReceiptSha256: prepared.sha256, releaseSha: p.release,
     sourceManifestSha256: p.source, builderSha256: p.builder, qualificationReceiptSha256: qualification.sha256,
-    source: sourceIdentity, publicationBody: headBody, publicationBodySha256: sha(headBody), businessParity });
+    source: sourceIdentity, expectedServingRevision: 1, publicationBody: headBody, publicationBodySha256: sha(headBody), businessParity });
   const protectedHeads = [{ key: 'review-journal', revision: 1, bodySha256: sha(reviewBody) }];
   const completionIdentity = sha(JSON.stringify([sha(headBody), protectedHeads]));
   await write(path.join(controlRoot, 'report-once-complete-' + completionIdentity + '.private.json'), { version: 1,
     kind: 'supabase-one-report-completion-v1', preparedReceiptSha256: prepared.sha256, qualificationReceiptSha256: qualification.sha256,
-    sourceStarted: false, collectorRevision: 7, source: sourceIdentity, servingHeadBodySha256: sha(headBody), publicationIntentSha256: intent.sha256,
+    sourceStarted: false, collectorRevision: 7, source: sourceIdentity, servingHeadRevision: 2, servingHeadBodySha256: sha(headBody), publicationIntentSha256: intent.sha256,
     protectedHeads, businessParity, generation: head.generation, previousGeneration: head.previous.generation });
   const values = new Map(); values.set('backup.private.json', { ...actual.backup,
     uncertainAttemptsBaseline: { ...actual.backup.uncertainAttemptsBaseline, sha256: sha(paid) } });
@@ -294,8 +328,45 @@ async function hostFixture(t) {
       }
       throw error;
     });
-  return { actual, context, adapters, run, pack, rowsByName, values, states, rows, calls, counts, common, completionIdentity, write, backend };
+  return { actual, context, adapters, run, pack, rowsByName, values, states, rows, calls, counts, common, completionIdentity, write, backend,
+    generatedRoot, generatedManifestFile, generatedDescriptorFile, generatedSeedFile, generatedPointerFile };
 }
+
+test('source-release readbacks preserve the originally captured base Event file and reject later file or parent changes', async t => {
+  for (const change of [null, 'file', 'parent']) {
+    const f = await hostFixture(t), git = args => promisify(execFile)('git', ['-C', f.context.appRoot, ...args]);
+    for (const name of ['loadEnv.js', 'package.json', 'package-lock.json', 'services/driverAuditTransferCodec.js'])
+      await f.write(path.join(f.context.appRoot, 'server', name), Buffer.from('// fictional tracked fixture\n'));
+    await f.write(path.join(f.context.appRoot, '.gitignore'), Buffer.from('server/.private/\n'));
+    await git(['init', '-q']); await git(['add', '.gitignore', 'server']);
+    await git(['-c', 'user.name=Fictional Release Fixture', '-c', 'user.email=fixture@example.invalid',
+      '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fictional preserved base']);
+    f.context.p.base = (await git(['rev-parse', 'HEAD'])).stdout.trim(); f.common.expectedSha = f.context.p.base;
+    const event = path.join(f.context.appRoot, 'server/routes/Event.js'), body = Buffer.from('throw Error("Never execute preserved business data");\n');
+    await f.write(event, body); await fs.chmod(event, 0o664);
+    const original = f.adapters.exec;
+    f.adapters.exec = (file, args, options) => file === 'git' && args[1] === f.context.appRoot
+      ? promisify(execFile)(file, args, options) : original(file, args, options);
+    const h = await loadDriverAuditSupabaseReleaseHost();
+    f.context.preservedBaseFiles = await h.checkout(f.context.appRoot, f.common.expectedSha, f.adapters.exec,
+      ['loadEnv.js'], { preserveBaseEvent: true });
+    const before = await fs.lstat(event, { bigint: true }); let reached = false;
+    if (change) {
+      const qualification = f.adapters.qualification;
+      f.adapters.qualification = async (...args) => { await qualification(...args); reached = true;
+        if (change === 'file') await fs.appendFile(event, 'independent change'); else await fs.chmod(path.dirname(event), 0o775);
+      };
+      await assert.rejects(f.run('export-release-inputs'), /Supabase source release stopped/); assert(reached);
+      assert.equal(await fs.readFile(event, 'utf8'), body.toString() + (change === 'file' ? 'independent change' : ''));
+    } else {
+      assert.equal((await f.run('export-release-inputs')).status, 'supabase-release-inputs-exported');
+      const after = await fs.lstat(event, { bigint: true });
+      for (const key of ['ino', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']) assert.equal(after[key], before[key]);
+      assert.deepEqual(await fs.readFile(event), body);
+    }
+    assert.equal(f.counts.gets, 0);
+  }
+});
 
 test('the fixed read-only export preserves actual artifact bytes and original generation provenance while omitting environment values', async t => {
   const f = await hostFixture(t), result = await f.run('export-release-inputs');
@@ -304,10 +375,98 @@ test('the fixed read-only export preserves actual artifact bytes and original ge
   const raw = gunzipSync(Buffer.concat(pages.map(page => Buffer.from(page.pageGzipBase64, 'base64'))));
   assert.equal(sha(raw), result.metadataSha256); const value = JSON.parse(raw);
   assert.equal(value.exportIsGenerationExecution, false); assert.equal(value.originalGenerationProvenanceRequired, true);
-  assert.equal(value.networkRequests, 0); assert.equal(value.databaseWrites, false); assert.equal(value.artifacts.length, 7);
-  for (const file of value.artifacts) { const bytes = Buffer.from(file.dataBase64, 'base64'); assert.equal(sha(bytes), file.sha256); assert.deepEqual(bytes, await fs.readFile(file.path)); }
+  assert.equal(value.networkRequests, 0); assert.equal(value.databaseWrites, false); assert.equal(value.artifacts.length, 9);
+  assert.deepEqual(value.artifacts.map(file => file.name), ['prepared', 'sourceConfig', 'syncConfig', 'qualification',
+    'publicationIntent', 'completion', 'retainedCandidateManifest', 'generatedCurrentDescriptor', 'generatedCurrentManifest']);
+  for (const file of value.artifacts) {
+    const encoded = Buffer.from(file.dataBase64, 'base64'); assert.equal(encoded.toString('base64'), file.dataBase64);
+    const compressed = ['retainedCandidateManifest', 'generatedCurrentManifest'].includes(file.name);
+    assert.equal(file.dataEncoding, compressed ? 'gzip-base64' : undefined);
+    if (compressed) { assert.equal(encoded.length, file.dataGzipBytes); assert.equal(sha(encoded), file.dataGzipSha256); }
+    else assert.deepEqual(Object.keys(file).sort(), ['name', 'path', 'sha256', 'bytes', 'dataBase64'].sort());
+    const bytes = compressed ? gunzipSync(encoded, { maxOutputLength: 4 * 1024 ** 2 }) : encoded;
+    assert.equal(bytes.length, file.bytes); assert.equal(sha(bytes), file.sha256); assert.deepEqual(bytes, await fs.readFile(file.path));
+  }
   assert(!value.artifacts.some(file => file.path.endsWith('.env.local') || file.path.endsWith('environment.private.json')));
+  const descriptor = value.artifacts.find(file => file.name === 'generatedCurrentDescriptor'), manifest = value.artifacts.find(file => file.name === 'generatedCurrentManifest');
+  assert.equal(descriptor.sha256, f.generatedDescriptorFile.sha256); assert.equal(manifest.sha256, f.generatedManifestFile.sha256);
+  assert.notEqual(manifest.sha256, f.context.p.candidate); assert.deepEqual(JSON.parse(gunzipSync(Buffer.from(manifest.dataBase64, 'base64'))),
+    JSON.parse(gunzipSync(Buffer.from(value.artifacts[6].dataBase64, 'base64'))));
+  assert.equal(value.generatedCurrent.servingHeadBodySha256, sha(f.states.get('app-sidi-report-head').body));
+  assert.equal(value.generatedCurrent.servingHeadRevision, 2);
+  assert.equal(value.generatedCurrent.workPointer.sha256, f.generatedPointerFile.sha256);
+  assert.equal(value.generatedCurrent.directSeed.sha256, f.generatedSeedFile.sha256);
   assert(!f.calls.some(call => call.file === 'pm2' && call.args[0] !== 'jlist'));
+});
+
+test('two real-size 18879-entry manifests retain exact bytes through the actual bounded nine-artifact sealer and receiver', async t => {
+  const f = await hostFixture(t, { largeManifest: true }), result = await f.run('export-release-inputs');
+  assert(result.diagnosticPages <= 64); assert.equal(result.diagnosticPages, result.sealedPages.length);
+  const pages = result.sealedPages.map(capsule => openTransferSecrets(privateKey, capsule));
+  const packed = Buffer.concat(pages.map((page, index) => {
+    assert.equal(page.pageIndex, index); assert.equal(page.pageCount, result.diagnosticPages); assert(page.pageBytes <= 32768);
+    const bytes = Buffer.from(page.pageGzipBase64, 'base64'); assert.equal(sha(bytes), page.pageSha256); return bytes;
+  }));
+  assert(packed.length <= 2 * 1024 ** 2); assert.equal(sha(packed), pages[0].metadataGzipSha256);
+  const raw = gunzipSync(packed, { maxOutputLength: 8 * 1024 ** 2 }); assert.equal(sha(raw), result.metadataSha256);
+  const metadata = JSON.parse(raw); assert.equal(metadata.artifacts.length, 9);
+  for (const name of ['retainedCandidateManifest', 'generatedCurrentManifest']) {
+    const file = metadata.artifacts.find(file => file.name === name), gzip = Buffer.from(file.dataBase64, 'base64');
+    assert.equal(file.dataEncoding, 'gzip-base64'); assert.equal(gzip.toString('base64'), file.dataBase64);
+    assert.equal(gzip.length, file.dataGzipBytes); assert.equal(sha(gzip), file.dataGzipSha256);
+    const bytes = gunzipSync(gzip, { maxOutputLength: 4 * 1024 ** 2 }); assert.equal(bytes.length, 2909890);
+    assert.equal(Object.keys(JSON.parse(bytes)).length, 18879); assert.equal(sha(bytes), file.sha256);
+    assert.deepEqual(bytes, await fs.readFile(file.path));
+  }
+  assert.equal(f.counts.gets, 0); assert.equal(f.counts.privateChecks, 0);
+});
+
+test('generated export requires the exact completed pointer, direct seed, descriptor and generated manifest', async t => {
+  for (const kind of ['missing-descriptor', 'missing-manifest', 'missing-direct-seed', 'foreign-pointer', 'foreign-seed',
+    'changed-descriptor', 'changed-manifest', 'public-boundary', 'exposed-manifest', 'missing-head-revision', 'foreign-head-revision']) {
+    const f = await hostFixture(t);
+    if (kind === 'missing-descriptor') await fs.unlink(f.generatedDescriptorFile.path);
+    if (kind === 'missing-manifest') await fs.unlink(f.generatedManifestFile.path);
+    if (kind === 'missing-direct-seed') await fs.unlink(f.generatedSeedFile.path);
+    if (kind === 'foreign-pointer') {
+      const pointer = JSON.parse(f.generatedPointerFile.data); pointer.collectorRevision++; await f.write(f.generatedPointerFile.path, pointer);
+    }
+    if (kind === 'foreign-seed') {
+      const seed = JSON.parse(f.generatedSeedFile.data); seed.pointer.descriptor.sha256 = 'f'.repeat(64); await f.write(f.generatedSeedFile.path, seed);
+    }
+    if (kind === 'changed-descriptor') await fs.appendFile(f.generatedDescriptorFile.path, ' ');
+    if (kind === 'changed-manifest') await fs.appendFile(f.generatedManifestFile.path, ' ');
+    if (kind === 'public-boundary') await fs.chmod(f.context.syncRoot, 0o755);
+    if (kind === 'exposed-manifest') await fs.chmod(f.generatedManifestFile.path, 0o644);
+    if (kind.endsWith('head-revision')) {
+      const file = path.join(f.context.controlRoot, 'report-once-complete-' + f.completionIdentity + '.private.json'), value = JSON.parse(await fs.readFile(file));
+      if (kind === 'missing-head-revision') delete value.servingHeadRevision; else value.servingHeadRevision++;
+      await f.write(file, value);
+    }
+    await assert.rejects(f.run('export-release-inputs'), /Supabase source release stopped/);
+    assert.equal(f.counts.gets, 0); assert.equal(f.counts.privateChecks, 0); assert.equal(f.counts.sourceChecks, 0);
+    assert(!f.calls.some(call => call.file === 'pm2' && call.args[0] !== 'jlist'));
+  }
+});
+
+test('generated export permits owned normal-mode data directories only behind its unchanged private root', async t => {
+  const f = await hostFixture(t); await fs.chmod(f.generatedRoot, 0o775); await fs.chmod(path.dirname(f.generatedManifestFile.path), 0o775);
+  const result = await f.run('export-release-inputs'); assert.equal(result.status, 'supabase-release-inputs-exported');
+  assert.equal((await fs.stat(f.generatedRoot)).mode & 0o777, 0o775);
+  const moved = f.generatedRoot + '.retained'; await fs.rename(f.generatedRoot, moved); await fs.symlink(moved, f.generatedRoot);
+  await assert.rejects(f.run('export-release-inputs'), /Supabase source release stopped/);
+});
+
+test('a generated file edit during export cannot produce a success or change original generation evidence', async t => {
+  const f = await hostFixture(t), open = fs.open, intent = await fs.readFile(path.join(f.context.controlRoot, 'report-once-intents', sha(f.states.get('app-sidi-report-head').body) + '.private.json'));
+  let reached = false;
+  fs.open = async (file, ...args) => {
+    if (file === f.generatedDescriptorFile.path && !reached) { reached = true; await fs.appendFile(f.generatedManifestFile.path, ' '); }
+    return open(file, ...args);
+  };
+  try { await assert.rejects(f.run('export-release-inputs'), /Supabase source release stopped/); } finally { fs.open = open; }
+  assert(reached); assert.deepEqual(await fs.readFile(path.join(f.context.controlRoot, 'report-once-intents', sha(f.states.get('app-sidi-report-head').body) + '.private.json')), intent);
+  assert.equal(f.counts.gets, 0); assert.equal(f.counts.sourceChecks, 0);
 });
 
 test('proof staging uses the actual application stager and SourceRelease verifier without starting any process or refreshing clocks', async t => {

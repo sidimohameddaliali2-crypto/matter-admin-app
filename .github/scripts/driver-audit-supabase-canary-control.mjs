@@ -386,6 +386,39 @@ async function directory(folder) {
   need(info.isDirectory() && info.uid === BigInt(process.getuid()) && !(Number(info.mode) & 0o077) && await fs.realpath(folder) === folder); return info;
 }
 
+// Observed only in the unchanged legacy701 checkout. Report entry points use
+// explicit tracked imports; this uppercase singular path is never imported.
+// Preserve it byte-for-byte rather than altering an unrelated business file.
+async function preservedLegacyEvent(appRoot) {
+  const relative = 'server/routes/Event.js', file = path.join(appRoot, relative), opened = [];
+  const fileSignature = value => signature(value) + ':' + String(value.nlink);
+  const checkParents = async () => {
+    for (const row of opened) need(signature(await row.fd.stat({ bigint: true })) === signature(row.stat)
+      && signature(await fs.lstat(row.path, { bigint: true })) === signature(row.stat) && await fs.realpath(row.path) === row.path);
+  };
+  try {
+    for (const folder of [appRoot, path.join(appRoot, 'server'), path.join(appRoot, 'server/routes')]) {
+      const stat = await fs.lstat(folder, { bigint: true });
+      need(stat.isDirectory() && stat.uid === BigInt(process.getuid()) && !(Number(stat.mode) & 0o002) && await fs.realpath(folder) === folder);
+      const fd = await fs.open(folder, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      opened.push({ path: folder, stat, fd }); need(signature(await fd.stat({ bigint: true })) === signature(stat));
+    }
+    await checkParents(); const stat = await fs.lstat(file, { bigint: true });
+    need(stat.isFile() && stat.uid === BigInt(process.getuid()) && stat.nlink === 1n
+      && [0o600, 0o644, 0o664].includes(Number(stat.mode) & 0o7777) && stat.size <= 512n * 1024n && await fs.realpath(file) === file);
+    const fd = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      need(fileSignature(await fd.stat({ bigint: true })) === fileSignature(stat)); const bytes = Buffer.alloc(Number(stat.size));
+      for (let offset = 0; offset < bytes.length;) { const row = await fd.read(bytes, offset, bytes.length - offset, offset); need(row.bytesRead > 0); offset += row.bytesRead; }
+      need((await fd.read(Buffer.alloc(1), 0, 1, bytes.length)).bytesRead === 0
+        && fileSignature(await fd.stat({ bigint: true })) === fileSignature(stat) && fileSignature(await fs.lstat(file, { bigint: true })) === fileSignature(stat)
+        && await fs.realpath(file) === file); await checkParents();
+      return { path: relative, sha256: sha(bytes), bytes: bytes.length,
+        signature: signature(stat) + ':' + sha(JSON.stringify(opened.map(row => [path.relative(appRoot, row.path), identity(row.stat)]))), nlink: String(stat.nlink) };
+    } finally { await fd.close(); }
+  } finally { for (const row of opened.reverse()) await row.fd.close(); }
+}
+
 async function inDirectory(folder, operation) {
   const initial = await directory(folder), parent = await fs.open(folder, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   const check = async () => need(identity(await parent.stat({ bigint: true })) === identity(initial)
@@ -559,7 +592,7 @@ export async function runDriverAuditSupabaseCanaryControl(args, adapters = {}) {
   const locks = [], p = adapters.pins ?? pins, exec = adapters.exec ?? promisify(execFile);
   const command = adapters.rootCommand ?? rootCommand;
   const shell = Object.fromEntries(Object.entries(process.env).filter(([name]) => ['HOME', 'PATH', 'USER', 'LOGNAME', 'LANG'].includes(name)));
-  let checkout, verify, operatorFolder, checkedPrivilege, promotionInputs, checkoutAttempt, checkoutDiagnostic;
+  let checkout, verify, operatorFolder, checkedPrivilege, promotionInputs, checkoutAttempt, checkoutDiagnostic, preservedBaseFiles;
   const controller = new AbortController(), interrupt = () => controller.abort(Error('Canary operation cancelled'));
   for (const event of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(event, interrupt);
   adapters.signal?.addEventListener('abort', interrupt);
@@ -635,7 +668,15 @@ export async function runDriverAuditSupabaseCanaryControl(args, adapters = {}) {
       checkoutAttempt.step = 'tracked-code';
       await call('git', ['-C', folder, 'ls-files', '--error-unmatch', ...names.map(name => 'server/' + name)]);
       checkoutAttempt.step = 'server-status';
-      need(!(await call('git', ['-C', folder, 'status', '--porcelain', '--untracked-files=all', '--', 'server'])).stdout.trim());
+      const statusArgs = ['-C', folder, 'status', '--porcelain', '--untracked-files=all', '--', 'server'];
+      const status = (await call('git', statusArgs)).stdout;
+      if (folder === args.appRoot && expected === p.base) {
+        need(status === '' || status === '?? server/routes/Event.js\n');
+        const current = status ? [await preservedLegacyEvent(folder)] : [];
+        if (preservedBaseFiles === undefined) preservedBaseFiles = current;
+        else need(JSON.stringify(current) === JSON.stringify(preservedBaseFiles));
+        need((await call('git', statusArgs)).stdout === status);
+      } else need(status === '');
     };
     checkout = () => checkRepo(args.appRoot, p.base, ['package.json', 'package-lock.json', 'vendor/driver-audits/integration/hosted/worker-lock.mjs']);
     phase = 'checkout'; await checkout();
