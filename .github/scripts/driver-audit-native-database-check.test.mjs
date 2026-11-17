@@ -4,6 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {generateKeyPairSync} from 'node:crypto';
 import test from 'node:test';
+import dotenv from '../../server/node_modules/dotenv/lib/main.js';
 import {openTransferSecrets,sealTransferSecrets} from '../../server/services/driverAuditTransferCodec.js';
 import {driverAuditMongoLocationIdentity,runDriverAuditNativeDatabaseCheck} from './driver-audit-native-database-check.mjs';
 
@@ -17,6 +18,8 @@ const second='mongodb+srv://api-user:second-'+password+'@fictional-cluster.examp
 async function fixture(t,options={}){
  const appRoot=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'native-database-check-')));t.after(()=>fs.rm(appRoot,{recursive:true,force:true}));
  const server=path.join(appRoot,'server');await fs.mkdir(server,{mode:0o700});await fs.writeFile(path.join(server,'server.js'),'// fictional API\n');
+ if(options.baseFile!==undefined)await fs.writeFile(path.join(server,'.env'),options.baseFile,{mode:0o600});
+ if(options.localFile!==undefined)await fs.writeFile(path.join(server,'.env.local'),options.localFile,{mode:0o600});
  const env={MONGODB_URI:options.loadEnvUri===undefined?first:options.loadEnvUri};
  const entries=[{name:'matter-delivery-api',pm_id:1,pid:912,pm2_env:{status:'online',pm_cwd:appRoot,pm_exec_path:'/usr/bin/npm',args:['start','--prefix','server'],pm_uptime:123456,MONGODB_URI:options.apiUri===undefined?second:options.apiUri}}];
  const calls={exec:[],loads:[],connect:[],close:0,commands:[],reads:[]};let processReads=0;
@@ -29,7 +32,7 @@ async function fixture(t,options={}){
  const adapters={platform:'linux',env,attemptTimeoutMs:options.attemptTimeoutMs||1000,
   async systemFile(file){assert.equal(file,'/usr/bin/npm');return{realpath:'/usr/lib/node_modules/npm/bin/npm-cli.js',isFile:true,uid:0,mode:0o100644,bytes:100,sha256:'f'.repeat(64)};},
   async exec(file,args){calls.exec.push({file,args});if(file==='git'){if(options.dirty&&args[0]==='diff')throw Object.assign(Error('dirty '+first),{stdout:first});return{stdout:commit+'\n'};}assert.equal(file,'pm2');assert.deepEqual(args,['jlist']);processReads++;if(options.pm2Error)throw Object.assign(Error('pm2 '+first),{stdout:first,stderr:second});if(options.drift&&processReads===2)entries[0].pid++;return{stdout:JSON.stringify(entries)};},
-  async load(name){calls.loads.push(name);if(name==='loadEnv.js')return{};if(name==='node_modules/mongodb/lib/index.js')return{MongoClient};if(name==='services/driverAuditTransferCodec.js')return{sealTransferSecrets};throw Error('Unexpected module '+name);}};
+  async load(name){calls.loads.push(name);if(name==='loadEnv.js')return{};if(name==='node_modules/dotenv/lib/main.js')return{default:dotenv};if(name==='node_modules/mongodb/lib/index.js')return{MongoClient};if(name==='services/driverAuditTransferCodec.js')return{sealTransferSecrets};throw Error('Unexpected module '+name);}};
  const run=(extra={})=>runDriverAuditNativeDatabaseCheck({operation:'inspect-database-config',appRoot,expectedSha:commit,recipientPublicKey,...extra},adapters);
  return{appRoot,server,env,entries,calls,adapters,run};
 }
@@ -47,7 +50,7 @@ test('fresh failing saved config and successful API snapshot are independently r
  const f=await fixture(t);const result=await f.run();assert.equal(result.status,'database-config-inspected');assert.equal(result.loadEnvAvailable,false);assert.equal(result.apiPm2SnapshotAvailable,true);assert.equal(result.configurationsEqual,false);assert.equal(result.sameCredentialFreeLocation,true);assert.equal(result.readOnly,true);assert.equal(result.authorityChanged,false);
  const evidence=openTransferSecrets(privateKey,result.capsule);assert.equal(evidence.attempts.loadEnv.available,false);assert.equal(evidence.attempts.loadEnv.error.code,8000);assert.equal(evidence.attempts.loadEnv.error.authenticationRejected,true);assert.equal(evidence.attempts.apiPm2Snapshot.available,true);assert.equal(evidence.attempts.apiPm2Snapshot.metadata.nativeFiles,5);assert.equal(evidence.attempts.apiPm2Snapshot.metadata.nativeChunks,6);assert.equal(evidence.attempts.apiPm2Snapshot.metadata.authorityAbsent,true);assert.equal(evidence.apiPm2Snapshot.currentApiDriverConnectionProven,false);assert.equal(f.calls.connect.length,2);assert.equal(f.calls.close,2);
  for(const data of [JSON.stringify(result),JSON.stringify(evidence)])for(const secret of [first,second,password,'saved-user','api-user','fictional-cluster.example.invalid'])assert(!data.includes(secret));
- const allowed=['version','status','applicationCommit','recipientSha256','evidenceSha256','capsule','loadEnvAvailable','apiPm2SnapshotAvailable','apiEnvironmentAmbiguous','configurationsEqual','sameCredentialFreeLocation','readOnly','authorityChanged'];assert(Object.keys(result).every(key=>allowed.includes(key)));
+ const allowed=['version','status','applicationCommit','recipientSha256','evidenceSha256','capsule','loadEnvAvailable','apiPm2SnapshotAvailable','apiEnvironmentAmbiguous','configurationsEqual','sameCredentialFreeLocation','durableMergedAvailable','loadEnvEqualsDurableMerged','readOnly','authorityChanged'];assert(Object.keys(result).every(key=>allowed.includes(key)));
 });
 
 test('the actual declared deployment npm wrapper is accepted with its exact trusted executable and arguments',async t=>{
@@ -95,6 +98,37 @@ test('deadline closes the fresh client and a late connect cannot begin further r
 test('arbitrary database, process and close error messages never appear in the result or sealed evidence',async t=>{
  const f=await fixture(t,{connect:async()=>{throw Object.assign(Error(first+' '+password),{name:first,code:18,codeName:second});},closeError:true});const r=await f.run();const e=openTransferSecrets(privateKey,r.capsule);for(const bytes of [JSON.stringify(r),JSON.stringify(e)])assert(!bytes.includes(password));assert.equal(e.attempts.loadEnv.error.class,'Error');assert.equal(e.attempts.loadEnv.error.code,18);
  const bad=await fixture(t,{pm2Error:true});await assert.rejects(bad.run(),error=>!String(error.stack).includes(password)&&!JSON.stringify(error).includes(first));
+});
+
+test('durable base/local dotenv merge is probed once independently of the bad inherited URI without exporting file hashes',async t=>{
+ const f=await fixture(t,{baseFile:'MONGODB_URI="'+second+'"\nUNRELATED=keep\n',localFile:'OTHER=unchanged\n'});const r=await f.run();assert.equal(r.loadEnvAvailable,false);assert.equal(r.durableMergedAvailable,true);assert.equal(r.loadEnvEqualsDurableMerged,false);assert.equal(f.calls.connect.length,3);assert.equal(f.env.MONGODB_URI,first);const e=openTransferSecrets(privateKey,r.capsule);assert.equal(e.attempts.durableMerged.available,true);assert.equal(e.durableMerged.inheritedEnvironmentIgnored,true);assert.equal(e.durableMerged.currentApiDriverConnectionProven,false);assert.equal(e.durableMerged.physicalConfigIntegrityRechecked,true);assert.equal(e.durableMerged.files.base.mongoKeyPresent,true);assert.equal(e.durableMerged.files.local.mongoKeyPresent,false);assert.equal(e.durableMerged.files.base.modifiedAfterApiStart,true);
+ const privateHashes=[await fs.readFile(path.join(f.server,'.env')),await fs.readFile(path.join(f.server,'.env.local'))];for(const data of [JSON.stringify(r),JSON.stringify(e)]){for(const secret of [password,first,second,'fictional-cluster.example.invalid'])assert(!data.includes(secret));for(const b of privateHashes)assert(!data.includes((await import('node:crypto')).createHash('sha256').update(b).digest('hex')));}
+});
+
+test('real dotenv loadEnv precedence retains inherited values unless the local file explicitly overrides them',async t=>{
+ for(const localOverrides of [false,true]){const f=await fixture(t,{baseFile:'MONGODB_URI="'+second+'"\n',localFile:localOverrides?'MONGODB_URI="'+second+'"\n':'OTHER=keep\n'});const old=f.adapters.load;f.adapters.load=async name=>{if(name==='loadEnv.js'){dotenv.config({path:path.join(f.server,'.env'),processEnv:f.env});dotenv.config({path:path.join(f.server,'.env.local'),override:true,processEnv:f.env});return{};}return old(name);};const r=await f.run();assert.equal(r.durableMergedAvailable,true);assert.equal(r.loadEnvAvailable,localOverrides);assert.equal(r.loadEnvEqualsDurableMerged,localOverrides);}
+});
+
+test('exact dotenv precedence/counting honors multiline quoted values and local overrides, without trying backups',async t=>{
+ const base='MONGODB_URI="'+first+'"\nMONGODB_URI="'+second+'"\nMULTI="line1\nMONGODB_URI=not-a-key\nline2"\n';const local='export MONGODB_URI: '+first+'\nMONGODB_URI="'+second+'"\n';const f=await fixture(t,{baseFile:base,localFile:local});await fs.writeFile(path.join(f.server,'.env.backup'),'MONGODB_URI=mongodb://foreign.invalid/test\n',{mode:0o600});const e=openTransferSecrets(privateKey,(await f.run()).capsule);assert.equal(e.durableMerged.files.base.mongoKeyDefinitions,2);assert.equal(e.durableMerged.files.base.duplicateMongoKeyDefinitions,1);assert.equal(e.durableMerged.files.local.mongoKeyDefinitions,2);assert.equal(e.durableMerged.files.local.duplicateMongoKeyDefinitions,1);assert.equal(e.durableMerged.mongoKeyDefinitions,4);assert.equal(e.durableMerged.duplicateMongoKeyDefinitions,3);assert.equal(e.attempts.durableMerged.available,true);assert.equal(f.calls.connect.length,3);assert.equal(f.calls.connect.at(-1).uri,second);
+});
+
+test('durable file bytes, identity or mtime drift blocks a stale result and leaves every file unchanged by the operator',async t=>{
+ for(const kind of ['bytes','mtime','new-local']){const options={baseFile:'MONGODB_URI="'+second+'"\n'};const f=await fixture(t,options);let changed=false;options.connect=async()=>{if(changed)return;changed=true;if(kind==='bytes')await fs.writeFile(path.join(f.server,'.env'),'MONGODB_URI="'+first+'"\n');else if(kind==='mtime'){const now=new Date(Date.now()+10000);await fs.utimes(path.join(f.server,'.env'),now,now);}else await fs.writeFile(path.join(f.server,'.env.local'),'OTHER=new\n',{mode:0o600});};await assert.rejects(f.run(),error=>error.phase==='recheck'&&!String(error.stack).includes(password));assert.equal(f.calls.close,3);}
+});
+
+test('a symlink, writable or oversized durable environment is rejected before any fresh Mongo attempt',async t=>{
+ for(const kind of ['symlink','writable','oversized']){const f=await fixture(t);const file=path.join(f.server,'.env');if(kind==='symlink'){const outside=path.join(f.appRoot,'unrelated');await fs.writeFile(outside,'MONGODB_URI="'+second+'"\n',{mode:0o600});await fs.symlink(outside,file);}else{await fs.writeFile(file,kind==='oversized'?Buffer.alloc(256*1024+1):'MONGODB_URI="'+second+'"\n',{mode:0o600});if(kind==='writable')await fs.chmod(file,0o666);}await assert.rejects(f.run());assert.equal(f.calls.connect.length,0);}
+});
+
+test('absent files, empty local URI and bad durable auth cannot select a different arbitrary configuration',async t=>{
+ const absent=await fixture(t);const ae=openTransferSecrets(privateKey,(await absent.run()).capsule);assert.equal(ae.durableMerged.files.base.present,false);assert.equal(ae.durableMerged.files.local.present,false);assert.equal(ae.attempts.durableMerged.attempted,false);
+ const empty=await fixture(t,{baseFile:'MONGODB_URI="'+second+'"\n',localFile:'MONGODB_URI=""\n'});const ee=openTransferSecrets(privateKey,(await empty.run()).capsule);assert.equal(ee.durableMerged.files.local.mongoKeyPresent,true);assert.equal(ee.attempts.durableMerged.attempted,false);assert.equal(empty.calls.connect.length,2);
+ const bad=await fixture(t,{baseFile:'MONGODB_URI="'+first+'"\n'});delete bad.entries[0].pm2_env.MONGODB_URI;const br=await bad.run();assert.equal(br.durableMergedAvailable,false);assert.equal(br.loadEnvEqualsDurableMerged,true);assert.equal(bad.calls.connect.length,2);assert(bad.calls.connect.every(c=>c.uri===first));
+});
+
+test('real isolated Mongo rejects inherited credentials while the exact durable dotenv URI remains read-only', {skip:!process.env.MONGO_TEST_URI},async t=>{
+ const {MongoClient}=await import('../../server/node_modules/mongodb/lib/index.js');const parsed=new URL(process.env.MONGO_TEST_URI);assert(['127.0.0.1','localhost','[::1]'].includes(parsed.hostname));const uri='mongodb://'+parsed.host+'/test?directConnection=true',bad='mongodb://fictional-user:'+password+'@'+parsed.host+'/test?authSource=test&directConnection=true';const client=new MongoClient(uri,{serverSelectionTimeoutMS:3000});await client.connect();t.after(()=>client.close());const db=client.db('test'),before=await db.command({dbStats:1});const f=await fixture(t,{loadEnvUri:bad,baseFile:'MONGODB_URI="'+uri+'"\n',localFile:'OTHER=keep\n'});delete f.entries[0].pm2_env.MONGODB_URI;const previousLoad=f.adapters.load;f.adapters.load=async name=>name==='node_modules/mongodb/lib/index.js'?{MongoClient}:previousLoad(name);const r=await f.run();const e=openTransferSecrets(privateKey,r.capsule),after=await db.command({dbStats:1});assert.equal(r.loadEnvAvailable,false);assert.equal(r.durableMergedAvailable,true);assert.equal(r.loadEnvEqualsDurableMerged,false);assert.equal(e.attempts.loadEnv.error.code,18);assert.equal(e.attempts.durableMerged.available,true);for(const key of ['collections','objects','dataSize','storageSize'])assert.equal(after[key],before[key]);for(const data of [JSON.stringify(r),JSON.stringify(e)]){assert(!data.includes(uri));assert(!data.includes(bad));assert(!data.includes(password));assert(!data.includes(parsed.host));}
 });
 
 test('the reviewed bridge selects only the new database-check operator for its explicit diagnostic operation',async()=>{
