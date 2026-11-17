@@ -9,6 +9,7 @@ on:
         options:
           - inspect
           - inspect-bindings
+          - inspect-database-config
           - pause-builder
           - resume-builder
           - prepare-transfer
@@ -80,6 +81,7 @@ jobs:
           [[ "$EXPECTED_DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ ]]
           printf 'code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-handoff.mjs)" >> "$GITHUB_OUTPUT"
           case "$OPERATION" in
+            inspect-database-config) operator=database-check ;;
             plan-native-cleanup|apply-native-cleanup) operator=cleanup ;;
             disable-pruning|prepare-native-settings) operator=settings ;;
             swap-builder-held) operator=builder ;;
