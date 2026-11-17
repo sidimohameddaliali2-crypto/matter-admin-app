@@ -15,6 +15,7 @@ on:
           - inspect-supabase-storage
           - inspect-supabase-disk-usage
           - plan-supabase-log-archive
+          - archive-supabase-closed-logs
           - inspect-supabase-root-access
           - prepare-supabase-host
           - prepare-supabase-serving
@@ -127,6 +128,7 @@ jobs:
             inspect-supabase-host|prepare-supabase-host) operator=supabase-handoff ;;
             inspect-supabase-routing|inspect-supabase-storage|inspect-supabase-disk-usage) operator=supabase-routing ;;
             plan-supabase-log-archive) operator=supabase-log-archive ;;
+            archive-supabase-closed-logs) operator=supabase-log-compact ;;
             prepare-supabase-serving|start-supabase-report|qualify-supabase-source-held|run-supabase-report-once) operator=supabase-control ;;
             probe-supabase-canary|plan-supabase-canary|enable-supabase-canary|seal-supabase-canary-entry|restore-supabase-canary|promote-supabase-report) operator=supabase-canary-control ;;
             export-supabase-release-inputs|export-supabase-previous-manifest|stage-supabase-source-release|start-supabase-source-sync) operator=supabase-release-control ;;
