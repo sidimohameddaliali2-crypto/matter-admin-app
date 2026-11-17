@@ -10,6 +10,7 @@ import {
   DollarSign, AlertCircle, RefreshCw, Users
 } from 'lucide-react';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 import { partnerAdminOrderStatus, canInvoicePartnerOrder } from '../utils/partnerOrderStatus';
 import { groupExclusions } from '../constants/exclusionList';
 
@@ -134,7 +135,7 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
                 <input type="file" accept="image/*" className="hidden" onChange={uploadPicture} disabled={uploadingPicture} />
               </label>
               {form.profilePicture && !uploadingPicture && (
-                <button type="button" onClick={() => setForm((p) => ({ ...p, profilePicture: '' }))} className="block text-xs text-[#c9bfae] hover:text-[#ff3b00] mt-0.5">
+                <button type="button" onClick={() => { recordActivityChange({ field: 'Partner profile image', form: `${isEdit ? 'Edit' : 'Add'} partner · ${form.businessName || 'New partner'}`, before: 'Picture selected', after: 'No picture' }); setForm((p) => ({ ...p, profilePicture: '' })); }} className="block text-xs text-[#c9bfae] hover:text-[#ff3b00] mt-0.5">
                   Remove
                 </button>
               )}

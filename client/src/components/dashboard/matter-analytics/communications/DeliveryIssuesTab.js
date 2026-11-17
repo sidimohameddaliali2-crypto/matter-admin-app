@@ -4,6 +4,7 @@ import api from '../../../../utils/api';
 import { ISSUE_TYPE_LABELS, PRIORITY_CONFIG, formatDate } from './constants';
 import ReportIssueForm from './ReportIssueForm';
 import ResolveModal from './ResolveModal';
+import { recordActivityChange } from '../../../../utils/activityCapture';
 
 function DeliveryIssuesTab() {
   const { user } = useSelector(state => state.auth);
@@ -13,6 +14,7 @@ function DeliveryIssuesTab() {
   const [loadingIssues, setLoadingIssues] = useState(false);
   const [filter, setFilter] = useState('all');
   const [resolveTarget, setResolveTarget] = useState(null);
+  const selectIssue = (issue, element) => {recordActivityChange({field:'Selected delivery issue',before:resolveTarget?._id||'',after:issue?._id||'',form:'Delivery issues',element,private:true});setResolveTarget(issue);};
 
   const fetchIssues = useCallback(async () => {
     setLoadingIssues(true);
@@ -34,7 +36,7 @@ function DeliveryIssuesTab() {
   return (
     <div className="p-6">
       {resolveTarget && (
-        <ResolveModal issue={resolveTarget} onClose={() => setResolveTarget(null)} onResolved={() => { setResolveTarget(null); fetchIssues(); }} />
+        <ResolveModal issue={resolveTarget} onClose={() => selectIssue(null)} onResolved={() => { setResolveTarget(null); fetchIssues(); }} />
       )}
       <div className="flex items-center justify-between mb-6">
         <div>
@@ -48,7 +50,7 @@ function DeliveryIssuesTab() {
         <div className="lg:col-span-2">
           <div className="flex gap-1 mb-4 bg-gray-100 rounded-lg p-1">
             {['all', 'open', 'resolved'].map(f => (
-              <button key={f} onClick={() => setFilter(f)} className={`flex-1 py-1.5 text-xs font-medium rounded-md capitalize transition-colors ${filter === f ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+              <button key={f} onClick={event => {const label=value=>value[0].toUpperCase()+value.slice(1);recordActivityChange({field:'Delivery issue filter',before:label(filter),after:label(f),form:'Delivery issues',element:event.currentTarget});setFilter(f);}} className={`flex-1 py-1.5 text-xs font-medium rounded-md capitalize transition-colors ${filter === f ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
                 {f === 'all' ? `All (${issues.length})` : f === 'open' ? `Open (${issues.filter(i => i.status === 'open').length})` : `Resolved (${issues.filter(i => i.status === 'resolved').length})`}
               </button>
             ))}
@@ -63,7 +65,7 @@ function DeliveryIssuesTab() {
               </div>
             ) : (
               filteredIssues.map(issue => (
-                <div key={issue._id} onClick={() => canResolve && setResolveTarget(issue)} className={`bg-white border border-gray-200 rounded-lg p-3 hover:border-blue-300 ${canResolve ? 'cursor-pointer' : ''}`}>
+                <div key={issue._id} onClick={event => canResolve && selectIssue(issue,event.currentTarget)} className={`bg-white border border-gray-200 rounded-lg p-3 hover:border-blue-300 ${canResolve ? 'cursor-pointer' : ''}`}>
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">
                       <p className="font-medium text-gray-900 text-sm truncate">{issue.customerName}</p>

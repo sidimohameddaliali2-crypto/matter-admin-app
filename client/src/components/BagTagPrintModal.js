@@ -2,6 +2,7 @@ import React, { useState, useMemo, useEffect, useImperativeHandle, forwardRef } 
 import api from '../utils/api';
 import { X, Printer, Upload, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { recordActivityChange } from '../utils/activityCapture';
 
 const BagTagPrintModal = forwardRef(({
   deliveries,
@@ -725,6 +726,7 @@ const BagTagPrintModal = forwardRef(({
                     <img src={logoPreview} alt="Logo preview" className="h-12 w-12 object-contain border border-gray-300 rounded p-1" />
                     <button
                       onClick={() => {
+                        recordActivityChange({ field: 'Bag tag logo', form: 'Bag tag print settings', before: 'Logo selected', after: 'No logo' });
                         setLogoUrl('');
                         setLogoPreview('');
                         setSelectedLogoFile(null);
@@ -796,7 +798,9 @@ const BagTagPrintModal = forwardRef(({
                 <input
                   type="number"
                   value={customWidth}
+                  data-activity-label="Bag tag width"
                   onChange={(e) => {
+                    recordActivityChange({ field: 'Bag tag size mode', form: 'Bag tag print settings', before: stickerSize, after: 'custom' });
                     setStickerSize('custom');
                     setCustomWidth(Math.max(10, parseFloat(e.target.value) || 0));
                   }}
@@ -815,7 +819,9 @@ const BagTagPrintModal = forwardRef(({
                 <input
                   type="number"
                   value={customHeight}
+                  data-activity-label="Bag tag height"
                   onChange={(e) => {
+                    recordActivityChange({ field: 'Bag tag size mode', form: 'Bag tag print settings', before: stickerSize, after: 'custom' });
                     setStickerSize('custom');
                     setCustomHeight(Math.max(10, parseFloat(e.target.value) || 0));
                   }}

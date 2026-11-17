@@ -1,9 +1,12 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 
 export default function DeliveryOrderModal({ date, drivers, onClose }) {
   const [driverId, setDriverId] = useState('');
   const [rows, setRows] = useState([]);
+  const latestRows = useRef(rows);
+  latestRows.current = rows;
   const [revision, setRevision] = useState(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -21,12 +24,16 @@ export default function DeliveryOrderModal({ date, drivers, onClose }) {
     return () => { active = false; };
   }, [driverId, date, reload]);
   const move = (index, delta) => {
+    const current = latestRows.current;
+    if (index < 0 || index + delta < 0 || index + delta >= current.length) return;
     setMessage('');
-    setRows(previous => {
-      const next = [...previous];
+      const next = [...current];
       [next[index], next[index + delta]] = [next[index + delta], next[index]];
-      return next;
-    });
+      const driver = drivers.find(item => item._id === driverId);
+      const labels = values => values.map(row => !row.customerName || current.filter(item => item.customerName === row.customerName).length > 1 ? `${row.customerName || 'Customer'} (${row._id})` : row.customerName);
+      recordActivityChange({ field: `Stop order for ${[driver?.profile?.firstName, driver?.profile?.lastName].filter(Boolean).join(' ') || driver?.name || 'Driver'} on ${date}`, form: 'Delivery order', before: labels(current), after: labels(next) });
+      latestRows.current = next;
+      setRows(next);
   };
   const save = async () => {
     setSaving(true); setMessage('');

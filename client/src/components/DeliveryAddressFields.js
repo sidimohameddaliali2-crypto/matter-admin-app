@@ -1,9 +1,11 @@
 import React from 'react';
 import { parseGPSFromLink } from '../utils/gpsParsing';
+import { recordActivityChange } from '../utils/activityCapture';
 
 export default function DeliveryAddressFields({ value, onChange, inputCls, labelCls }) {
   const update = patch => onChange({ ...value, ...patch });
   const villa = value.category === 'villa';
+  const observe = (field, before, after, element) => recordActivityChange({ field, form: 'Delivery address', before: before ?? '', after: after ?? '', element });
   const field = (key, label, required = true) => (
     <div key={key}>
       <label className={labelCls} htmlFor={`delivery-address-${key}`}>{label}{required ? ' *' : ''}</label>
@@ -18,7 +20,12 @@ export default function DeliveryAddressFields({ value, onChange, inputCls, label
         {['villa', 'apartment', 'office'].map(category => <label key={category} className="flex items-center gap-2 text-sm">
           <input type="radio" name="delivery-address-category" value={category} required
             checked={value.category === category}
-            onChange={() => update({ category, building: '', floor: '', unit: '' })} />
+            onChange={event => {
+              observe('Building Name', value.building, '', event.currentTarget);
+              observe('Floor', value.floor, '', event.currentTarget);
+              observe(villa ? 'Villa Number' : 'Apartment Number', value.unit, '', event.currentTarget);
+              update({ category, building: '', floor: '', unit: '' });
+            }} />
           {category[0].toUpperCase() + category.slice(1)}
         </label>)}
       </div>
@@ -37,6 +44,8 @@ export default function DeliveryAddressFields({ value, onChange, inputCls, label
           onChange={e => {
             const link = e.target.value;
             const pin = parseGPSFromLink(link);
+            observe('Latitude', value.coordinates?.lat, pin?.lat ?? '', e.currentTarget);
+            observe('Longitude', value.coordinates?.lng, pin?.lng ?? '', e.currentTarget);
             update({ link, coordinates: pin ? { lat: pin.lat, lng: pin.lng } : { lat: '', lng: '' } });
           }} />
       </label>
@@ -44,7 +53,10 @@ export default function DeliveryAddressFields({ value, onChange, inputCls, label
         {['lat', 'lng'].map(key => <label key={key} className="text-sm">{key === 'lat' ? 'Latitude' : 'Longitude'} *
           <input type="number" step="any" required min={key === 'lat' ? -90 : -180} max={key === 'lat' ? 90 : 180}
             className={inputCls} value={value.coordinates?.[key] ?? ''}
-            onChange={e => update({ link: '', coordinates: { ...value.coordinates, [key]: e.target.value } })} />
+            onChange={e => {
+              observe('Map link', value.link, '', e.currentTarget);
+              update({ link: '', coordinates: { ...value.coordinates, [key]: e.target.value } });
+            }} />
         </label>)}
       </div>
       <p className="text-xs text-gray-500">If the link does not contain coordinates, enter the exact pin latitude and longitude.</p>
