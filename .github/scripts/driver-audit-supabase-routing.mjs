@@ -370,3 +370,150 @@ export async function runDriverAuditSupabaseStorageInspection(args, adapters = {
   } catch { throw Object.assign(Error('Supabase storage inspection stopped at ' + phase), { phase }); }
   finally { try { await lock?.release(); } catch { throw Object.assign(Error('Supabase storage inspection stopped at cleanup'), { phase: 'cleanup' }); } }
 }
+
+async function fixedDuExecutable() {
+  const file = '/usr/bin/du', before = await fs.lstat(file, { bigint: true });
+  need(before.isFile() && !before.isSymbolicLink() && before.uid === 0n && !(Number(before.mode) & 0o6022)
+    && Number(before.mode) & 0o111 && before.size > 0n && before.size <= 1024n ** 2n && await fs.realpath(file) === file);
+  const verify = async () => need(storageSignature(await fs.lstat(file, { bigint: true })) === storageSignature(before)
+    && await fs.realpath(file) === file);
+  await verify(); return { metadata: { path: file, realpath: file, stat: storageMetadata(before) }, verify };
+}
+
+function duRows(bytes, folder, maximumBytes, maximumRows) {
+  need(Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= maximumBytes && bytes.at(-1) === 0
+    && Buffer.from(bytes.toString('utf8')).equals(bytes));
+  const rows = bytes.toString('utf8').slice(0, -1).split('\0'); need(rows.length <= maximumRows);
+  const seen = new Set();
+  return rows.map(row => {
+    const tab = row.indexOf('\t'), size = row.slice(0, tab), file = row.slice(tab + 1);
+    need(tab > 0 && /^(?:0|[1-9][0-9]{0,31})$/.test(size) && file.length <= 4096 && path.isAbsolute(file)
+      && path.normalize(file) === file && (file === folder || file.startsWith(folder + '/')) && !seen.has(file));
+    const relative = path.relative(folder, file); need(!relative || relative.split('/').length <= 3);
+    seen.add(file); return { path: file, bytes: size };
+  });
+}
+
+function duErrorText(value) {
+  const bytes = Buffer.isBuffer(value) ? value : Buffer.from(typeof value === 'string' ? value : '');
+  let text = bytes.subarray(0, 2048).toString('utf8');
+  while (Buffer.byteLength(text) > 2048) text = text.slice(0, -1);
+  return { text, bytes: bytes.length, truncated: bytes.length > Buffer.byteLength(text) };
+}
+
+// Usage attribution is deliberately separate from the fixed cache inventory.
+// du observes changing filesystem metadata; it does not prove reclaimability.
+export async function runDriverAuditSupabaseDiskUsage(args, adapters = {}) {
+  let phase = 'inputs', lock; const handles = [], rootGuards = [];
+  const exec = adapters.exec ?? ((file, argv, options = {}) => execute(file, argv,
+    { cwd: args.appRoot, timeout: 10000, maxBuffer: 4 * 1024 ** 2, ...options }));
+  const load = adapters.load ?? (name => import(pathToFileURL(path.join(args.appRoot, 'server', name)).href));
+  try {
+    need(args && Object.keys(args).sort().join(',') === 'appRoot,expectedSha,operation,recipientPublicKey'
+      && args.operation === 'inspect-supabase-disk-usage' && args.expectedSha === applicationCommit
+      && (adapters.platform ?? process.platform) === 'linux');
+    const home = adapters.storageHomeRoot ?? '/home/matter';
+    need(path.isAbsolute(home) && path.resolve(home) === home && args.appRoot === path.join(home, 'matter-delivery-tracker')
+      && await fs.realpath(args.appRoot) === args.appRoot);
+    const key = recipient(args.recipientPublicKey), filesystem = adapters.storageFilesystem ?? fs, server = path.join(args.appRoot, 'server');
+    const checkout = async () => {
+      need((await exec('git', ['rev-parse', 'HEAD'])).stdout.trim() === args.expectedSha);
+      await exec('git', ['ls-files', '--error-unmatch', ...codeFiles]);
+      await exec('git', ['diff', '--quiet', 'HEAD', '--', 'server']);
+    };
+    phase = 'checkout'; await checkout();
+    const inspectWorkers = async () => workers(JSON.parse((await exec('pm2', ['jlist'])).stdout), args.appRoot, adapters.systemFile ?? systemFile);
+    phase = 'workers'; const beforeWorkers = await inspectWorkers();
+    phase = 'lock'; const lockRoot = path.join(server, '.private/driver-report-supabase-handoff'); await existingLockFiles(lockRoot);
+    const { acquireWorkerLock } = await load('vendor/driver-audits/integration/hosted/worker-lock.mjs');
+    lock = await acquireWorkerLock(path.join(lockRoot, 'operator.lock'));
+    phase = 'executable'; const executable = await fixedDuExecutable();
+    const definitions = [
+      { id: 'pm2-logs', path: path.join(home, '.pm2/logs'), classification: 'active-process-logs-protected' },
+      { id: 'client-build-cache', path: path.join(args.appRoot, 'client/node_modules/.cache'), classification: 'generated-build-cache-review-only' },
+      { id: 'client-build', path: path.join(args.appRoot, 'client/build'), classification: 'current-client-build-protected' },
+      { id: 'reporting-private', path: path.join(server, '.private'), classification: 'original-report-source-review-history-controls-protected' },
+      { id: 'original-uploads', path: path.join(server, 'uploads'), classification: 'original-uploads-protected' },
+      { id: 'home-cache', path: path.join(home, '.cache'), classification: 'unclassified-cache-review-only' },
+      { id: 'original-report-attempts', path: path.join(server, '.private/driver-audits/a9d21452a101850150b84fa4b5a15ea165490e2fc7bcb9a56482269c00897d61/work/attempts'),
+        classification: 'original-derived-workspaces-protected' },
+    ];
+    const startedAt = new Date().toISOString(), diskBefore = await storageDisk(filesystem, home, server), observations = [];
+    for (const definition of definitions) {
+      phase = 'roots'; const boundary = await storageBoundary(filesystem, home, definition.path);
+      const maximumBytes = (definition.id === 'original-report-attempts' ? 2 * 1024 : 512) * 1024;
+      const maximumRows = definition.id === 'original-report-attempts' ? 16384 : 4096;
+      const basic = { ...definition, rootBytes: null, complete: false, deletionAuthorized: false,
+        reclaimableBytesProven: false, fileContentsRead: 0, stdoutMaximumBytes: maximumBytes, maximumRows };
+      if (boundary.status !== 'present') {
+        observations.push({ ...basic, status: boundary.status, recordsObserved: null, entries: [], entriesOmitted: false,
+          ...(boundary.stat ? { stat: boundary.stat, unsafeAt: boundary.unsafeAt } : {}) }); continue;
+      }
+      const before = await filesystem.lstat(definition.path, { bigint: true });
+      const fd = await filesystem.open(definition.path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); handles.push(fd);
+      const check = async () => {
+        await boundary.verify();
+        need(statIdentity(await fd.stat({ bigint: true })) === statIdentity(before)
+          && statIdentity(await filesystem.lstat(definition.path, { bigint: true })) === statIdentity(before)
+          && await filesystem.realpath(definition.path) === definition.path);
+      };
+      rootGuards.push(check); await check(); await executable.verify();
+      const commandStartedAt = new Date().toISOString(); let result, failure;
+      phase = 'du';
+      try {
+        result = await exec('/usr/bin/du', ['--one-file-system', '--block-size=1', '--max-depth=3', '--null', '--', definition.path],
+          { encoding: 'buffer', timeout: 60000, maxBuffer: maximumBytes,
+            env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' } });
+      } catch (error) { failure = error; result = error; }
+      const commandCompletedAt = new Date().toISOString(); await check(); await executable.verify();
+      const stdout = Buffer.isBuffer(result?.stdout) ? result.stdout : Buffer.from(typeof result?.stdout === 'string' ? result.stdout : '');
+      let rows = [], valid = false;
+      try { rows = duRows(stdout, definition.path, maximumBytes, maximumRows); valid = true; } catch { /* An incomplete or invalid stream is never a complete usage claim. */ }
+      const rootBytes = rows.find(row => row.path === definition.path)?.bytes ?? null;
+      const complete = !failure && valid && rootBytes !== null;
+      const selected = [...rows].sort((a, b) => BigInt(a.bytes) === BigInt(b.bytes) ? a.path < b.path ? -1 : 1 : BigInt(a.bytes) > BigInt(b.bytes) ? -1 : 1).slice(0, 32);
+      observations.push({ ...basic, status: complete ? 'measured' : !valid && stdout.length ? 'invalid-output' : failure ? 'partial' : 'invalid-output',
+        rootBytes: valid ? rootBytes : null, complete, recordsObserved: valid ? rows.length : null, entries: selected,
+        entriesOmitted: valid && rows.length > selected.length, rowsSha256: valid ? sha(JSON.stringify(rows)) : null,
+        stdoutSha256: sha(stdout), stdoutBytes: stdout.length, commandStartedAt, commandCompletedAt,
+        rootBefore: storageMetadata(before), rootAfter: storageMetadata(await filesystem.lstat(definition.path, { bigint: true })),
+        diagnostic: duErrorText(result?.stderr), exitCode: failure && Number.isSafeInteger(failure.code) ? failure.code : failure ? null : 0,
+        signal: typeof failure?.signal === 'string' && /^[A-Z0-9]{1,32}$/.test(failure.signal) ? failure.signal : null,
+        commandErrorCode: typeof failure?.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(failure.code) ? failure.code : null });
+    }
+    const verify = async () => {
+      await checkout(); need(JSON.stringify(await inspectWorkers()) === JSON.stringify(beforeWorkers));
+      await executable.verify(); for (const check of rootGuards) await check();
+    };
+    phase = 'readback'; await verify();
+    const metadata = { version: 1, kind: 'supabase-disk-usage-inspection-v1', applicationCommit: args.expectedSha,
+      startedAt, completedAt: new Date().toISOString(), duExecutable: executable.metadata,
+      commandFlags: ['--one-file-system', '--block-size=1', '--max-depth=3', '--null', '--'],
+      observations, workers: beforeWorkers, disk: { before: diskBefore, after: await storageDisk(filesystem, home, server) },
+      fileContentsRead: 0, deletionAuthorized: false, reclaimableBytesProven: false, oneGiBSeedReserveUnchanged: true,
+      usageSnapshotAtomic: false, hardlinkAndOverlappingRootAttributionMayDiffer: true,
+      scope: 'Fixed filesystem usage observations only; not source parity, cleanup authorization or seed readiness' };
+    let bytes, packed;
+    for (let shrink = 0; shrink < 7; shrink++) {
+      bytes = Buffer.from(JSON.stringify(metadata)); packed = gzipSync(bytes);
+      if (bytes.length <= 384 * 1024 && packed.length <= 40 * 1024) break;
+      for (const row of observations) if (row.entries.length) {
+        row.entries = row.entries.slice(0, Math.floor(row.entries.length / 2)); row.entriesOmitted = true;
+      }
+    }
+    need(bytes.length <= 384 * 1024 && packed.length <= 40 * 1024);
+    phase = 'seal'; const { sealTransferSecrets } = await load('services/driverAuditTransferCodec.js');
+    const capsule = sealTransferSecrets(key, { version: 1, kind: 'supabase-disk-usage-inspection-capsule-v1', applicationCommit: args.expectedSha,
+      metadataSha256: sha(bytes), metadataGzipSha256: sha(packed), metadataGzipBase64: packed.toString('base64') });
+    phase = 'readback'; await verify();
+    return { status: 'supabase-disk-usage-inspected', operation: args.operation, applicationCommit: args.expectedSha,
+      metadataSha256: sha(bytes), recipientSha256: sha(args.recipientPublicKey), capsule,
+      readOnly: true, deletedFiles: 0, workersStarted: false, routingChanged: false, applicationDatabaseConnections: 0, networkRequests: 0 };
+  } catch { throw Object.assign(Error('Supabase disk usage inspection stopped at ' + phase), { phase }); }
+  finally {
+    let failure = false;
+    for (const handle of handles.reverse()) try { await handle.close(); } catch { failure = true; }
+    try { await lock?.release(); } catch { failure = true; }
+    if (failure) throw Object.assign(Error('Supabase disk usage inspection stopped at cleanup'), { phase: 'cleanup' });
+  }
+}

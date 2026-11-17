@@ -13,6 +13,7 @@ on:
           - inspect-supabase-host
           - inspect-supabase-routing
           - inspect-supabase-storage
+          - inspect-supabase-disk-usage
           - inspect-supabase-root-access
           - prepare-supabase-host
           - prepare-supabase-serving
@@ -123,7 +124,7 @@ jobs:
           printf 'code=%s\n' "$(gzip -cn .github/scripts/driver-audit-native-handoff.mjs | base64 -w0)" >> "$GITHUB_OUTPUT"
           case "$OPERATION" in
             inspect-supabase-host|prepare-supabase-host) operator=supabase-handoff ;;
-            inspect-supabase-routing|inspect-supabase-storage) operator=supabase-routing ;;
+            inspect-supabase-routing|inspect-supabase-storage|inspect-supabase-disk-usage) operator=supabase-routing ;;
             prepare-supabase-serving|start-supabase-report|qualify-supabase-source-held|run-supabase-report-once) operator=supabase-control ;;
             probe-supabase-canary|plan-supabase-canary|enable-supabase-canary|seal-supabase-canary-entry|restore-supabase-canary|promote-supabase-report) operator=supabase-canary-control ;;
             export-supabase-release-inputs|export-supabase-previous-manifest|stage-supabase-source-release|start-supabase-source-sync) operator=supabase-release-control ;;
