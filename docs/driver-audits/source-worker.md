@@ -20,6 +20,8 @@ The reviewed handoff workflow provides `inspect-supabase-host` and stage-only `p
 
 Preparation leaves the effective seed and current pointer absent, the new HTTP service disabled, workers unregistered/stopped and public routing unchanged. It does not reset or restart the business API or open MongoDB. Keep the complete private bootstrap and rebased source environment independently backed up; verify actual host receipts and Linux dependency installation before continuing. A successful preparation is not source qualification or a report switchover.
 
+Retained package verification reads the existing object bundle first. If a declared runtime chunk is missing there, it can read the exact descriptor-bound extent of the same hash-verified local runtime file. This creates no extra object copy or remote request. Full package, deferred-data and GPS verification still applies; missing or changed bytes stop preparation.
+
 The selected follow-up operations use the [Supabase control operator](../../.github/scripts/driver-audit-supabase-control.mjs). Their exact public `transfer_plan_b64` schema contains the temporary RSA recipient and the actual staging-receipt hash; qualification also pins the original fixture and independently read-back environment-backup proof. A controlled build additionally pins the fresh actual Linux qualification receipt. No caller supplies server paths, commands, credentials or environment overrides.
 
 | Operation | Effect and boundary |

@@ -404,7 +404,7 @@ async function packageFiles(root, expectedManifest, { objects = false, archiveBa
   }
   missingArchiveReferences.sort();
   phase('inventory'); const inventorySha256 = sha(JSON.stringify(files.map(({ name, sha256, bytes }) => ({ name, sha256, bytes }))));
-  return { root, files, bytes: total, inventorySha256, manifestSha256: manifest?.sha256 ?? null,
+  return { root, files, declared, bytes: total, inventorySha256, manifestSha256: manifest?.sha256 ?? null,
     archiveBackedManifest, privateDirectoryBoundary, declaredFiles: declared ? Object.keys(declared).length : 0, missingArchiveReferences,
     missingArchiveReferencesSha256: sha(JSON.stringify(missingArchiveReferences)) };
   };
@@ -459,6 +459,60 @@ async function linkPackage(saved, target, presenceFile, targetBoundary) {
     manifestSha256: checked.manifestSha256, ...(archiveReferences ? { archiveBackedManifest: true,
       privateDirectoryBoundary: checked.privateDirectoryBoundary, declaredFiles: checked.declaredFiles,
       missingArchiveReferencesSha256: checked.missingArchiveReferencesSha256, archiveReferences } : {}) };
+}
+
+function localServingArchive({ head, objectsRoot, runtimeRoot, sourcePackage, boundary }) {
+  let descriptor, extents;
+  const runtime = new Map(sourcePackage.files.map(row => [row.name, row]));
+  const fallbackExtent = (key, size) => {
+    if (!extents) {
+      need(descriptor && typeof descriptor.files === 'object' && !Array.isArray(descriptor.files)); extents = new Map();
+      for (const [name, ref] of Object.entries(descriptor.files)) {
+        const saved = runtime.get(name);
+        if (!saved || sourcePackage.declared?.[name] !== ref.sha256 || saved.sha256 !== ref.sha256 || saved.bytes !== ref.size) continue;
+        need(Array.isArray(ref.chunks));
+        for (const chunk of ref.chunks) {
+          need(digest(chunk.sha256) && Number.isSafeInteger(chunk.offset) && chunk.offset >= 0
+            && Number.isSafeInteger(chunk.size) && chunk.size > 0 && chunk.size <= 8 * 1024 ** 2
+            && chunk.offset + chunk.size <= saved.bytes);
+          const key = chunk.sha256 + '.gz', prior = extents.get(key); need(!prior || prior.size === chunk.size);
+          if (!prior) extents.set(key, { name, saved, offset: chunk.offset, size: chunk.size });
+        }
+      }
+    }
+    const found = extents.get(key); need(found && found.size === size); return found;
+  };
+  return { async readObject(key, { maxBytes }) {
+    need(/^[a-f0-9]{64}\.gz$/.test(key) && Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 8 * 1024 ** 2);
+    let bytes;
+    try { bytes = (await read(path.join(objectsRoot, key), { maximum: maxBytes })).data; }
+    catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      const extent = fallbackExtent(key, maxBytes), file = path.join(runtimeRoot, extent.name);
+      bytes = await withPrivatePackageDirectory(path.dirname(file), boundary, async () => {
+        const before = await fs.lstat(file, { bigint: true });
+        need(before.isFile() && before.uid === BigInt(process.getuid()) && !(Number(before.mode) & 0o077)
+          && await fs.realpath(file) === file && before.dev === extent.saved.stat.dev && before.ino === extent.saved.stat.ino
+          && before.size === BigInt(extent.saved.bytes) && before.mtimeNs === extent.saved.stat.mtimeNs);
+        const f = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+        try {
+          need(signature(await f.stat({ bigint: true })) === signature(before));
+          const value = Buffer.alloc(extent.size);
+          for (let offset = 0; offset < value.length;) {
+            const got = await f.read(value, offset, value.length - offset, extent.offset + offset); need(got.bytesRead > 0); offset += got.bytesRead;
+          }
+          need(sha(value) === key.slice(0, 64) && signature(await f.stat({ bigint: true })) === signature(before)
+            && signature(await fs.lstat(file, { bigint: true })) === signature(before) && await fs.realpath(file) === file);
+          return value;
+        } finally { await f.close(); }
+      });
+    }
+    // The real verifier validates this descriptor and every declared reference.
+    // A legacy object bundle may omit bytes still present in the pinned runtime;
+    // those exact extents are read in place, never copied or remotely fetched.
+    if (key === head.descriptor.sha256 + '.gz') descriptor = JSON.parse(bytes);
+    return [bytes];
+  } };
 }
 
 function codeArchive(ref, expectedManifest, name, count) {
@@ -996,10 +1050,8 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
         sourceBasis: value.sourceBasis, manifestSha256: value.manifestSha256 }, visibleCutoffAt: value.visibleCutoffAt,
       closureReceipt: value.closureReceipt, restore: value.restore, previous: value.pointer.previous ?? null };
       const verify = adapters.verifyPackage ?? (await releaseLoad('services/driverAuditSupabaseReplica.js')).verifyDriverAuditSupabaseServingPackage;
-      await verify({ head, archive: { async readObject(key, { maxBytes }) {
-        need(/^[a-f0-9]{64}\.gz$/.test(key) && Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 8 * 1024 ** 2);
-        return [(await read(path.join(objects.root, key), { maximum: maxBytes })).data];
-      } } }); descriptorVerified = true;
+      await verify({ head, archive: localServingArchive({ head, objectsRoot: objects.root, runtimeRoot: data.root,
+        sourcePackage: row.files, boundary: syncRoot }) }); descriptorVerified = true;
     }
     packages.push({ role: row.value.role, collectorRevision: row.value.collectorRevision, sourceBasis: row.value.sourceBasis,
       ...data, originalAcceptedSha256: row.accepted?.sha256 ?? null, originalDirectSeedSha256: row.seed?.sha256 ?? null,

@@ -559,7 +559,7 @@ export async function runDriverAuditSupabaseCanaryControl(args, adapters = {}) {
   const locks = [], p = adapters.pins ?? pins, exec = adapters.exec ?? promisify(execFile);
   const command = adapters.rootCommand ?? rootCommand;
   const shell = Object.fromEntries(Object.entries(process.env).filter(([name]) => ['HOME', 'PATH', 'USER', 'LOGNAME', 'LANG'].includes(name)));
-  let checkout, verify, operatorFolder, checkedPrivilege, promotionInputs;
+  let checkout, verify, operatorFolder, checkedPrivilege, promotionInputs, checkoutAttempt, checkoutDiagnostic;
   const controller = new AbortController(), interrupt = () => controller.abort(Error('Canary operation cancelled'));
   for (const event of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(event, interrupt);
   adapters.signal?.addEventListener('abort', interrupt);
@@ -596,10 +596,45 @@ export async function runDriverAuditSupabaseCanaryControl(args, adapters = {}) {
     const key = createPublicKey(args.recipientPublicKey); need(key.asymmetricKeyType === 'rsa' && key.asymmetricKeyDetails.modulusLength >= 3072);
     driverAuditSupabaseCanarySource();
     const call = (file, argv) => exec(file, argv, { cwd: args.appRoot, env: shell, timeout: 10000, maxBuffer: 8 * 1024 ** 2 });
+    checkoutDiagnostic = async () => {
+      const { folder, expected, names, step } = checkoutAttempt;
+      const commands = [];
+      for (const [name, arguments_] of [['head', ['rev-parse', 'HEAD']], ['toplevel', ['rev-parse', '--show-toplevel']],
+        ['tracked-code', ['ls-files', '--error-unmatch', ...names.map(value => 'server/' + value)]],
+        ['server-status', ['status', '--porcelain', '--untracked-files=all', '--', 'server']],
+        ['server-diffstat', ['diff', '--no-ext-diff', '--no-textconv', '--stat', 'HEAD', '--', 'server']]]) {
+        let result, error;
+        try { result = await exec('git', ['-C', folder, '--no-optional-locks', '-c', 'core.fsmonitor=false',
+          '-c', 'core.hooksPath=/dev/null', ...arguments_], { cwd: args.appRoot, env: shell, timeout: 3000, maxBuffer: 16 * 1024 }); }
+        catch (failure) { error = failure; result = failure; }
+        const bounded = value => {
+          const raw = Buffer.isBuffer(value) ? value : typeof value === 'string' ? Buffer.from(value) : Buffer.alloc(0);
+          let text = raw.subarray(0, 2048).toString('utf8'), shortened = false;
+          while (Buffer.byteLength(text) > 2048) { text = text.slice(0, -1); shortened = true; }
+          return { text, bytes: raw.length, truncated: raw.length > 2048 || shortened };
+        };
+        const stdout = bounded(result?.stdout), stderr = bounded(result?.stderr);
+        commands.push({ step: name, exitCode: !error ? 0 : Number.isSafeInteger(error.code) && error.code >= 0 && error.code <= 255 ? error.code : null,
+          signal: ['SIGTERM', 'SIGKILL', 'SIGINT', 'SIGHUP'].includes(error?.signal) ? error.signal : null,
+          stdout: stdout.text, stderr: stderr.text, stdoutBytes: stdout.bytes, stderrBytes: stderr.bytes,
+          stdoutTruncated: stdout.truncated, stderrTruncated: stderr.truncated });
+      }
+      const metadata = Buffer.from(JSON.stringify({ version: 1, kind: 'supabase-canary-checkout-first-failure-v1',
+        operation: args.operation, applicationCommit: args.expectedSha, operatorPhase: 'checkout',
+        repositoryRole: folder === args.appRoot ? 'base' : 'release', repositoryRoot: folder, expectedCommit: expected, failedStep: step,
+        commands, readOnly: true, guardChanged: false, acceptedAsVerified: false, sourceStarted: false, syncStarted: false, routingChanged: false }));
+      need(metadata.length <= 24 * 1024); const packed = gzipSync(metadata);
+      return { status: 'supabase-control-stopped', applicationCommit: args.expectedSha, operatorPhase: 'checkout', metadataSha256: sha(metadata),
+        capsule: sealRoot(args.recipientPublicKey, { version: 1, kind: 'supabase-canary-checkout-failure-capsule-v1',
+          applicationCommit: args.expectedSha, metadataSha256: sha(metadata), metadataGzipSha256: sha(packed), metadataGzipBase64: packed.toString('base64') }) };
+    };
     const checkRepo = async (folder, expected, names) => {
-      need((await call('git', ['-C', folder, 'rev-parse', 'HEAD'])).stdout.trim() === expected
-        && (await call('git', ['-C', folder, 'rev-parse', '--show-toplevel'])).stdout.trim() === folder);
+      checkoutAttempt = { folder, expected, names, step: 'head' };
+      need((await call('git', ['-C', folder, 'rev-parse', 'HEAD'])).stdout.trim() === expected);
+      checkoutAttempt.step = 'toplevel'; need((await call('git', ['-C', folder, 'rev-parse', '--show-toplevel'])).stdout.trim() === folder);
+      checkoutAttempt.step = 'tracked-code';
       await call('git', ['-C', folder, 'ls-files', '--error-unmatch', ...names.map(name => 'server/' + name)]);
+      checkoutAttempt.step = 'server-status';
       need(!(await call('git', ['-C', folder, 'status', '--porcelain', '--untracked-files=all', '--', 'server'])).stdout.trim());
     };
     checkout = () => checkRepo(args.appRoot, p.base, ['package.json', 'package-lock.json', 'vendor/driver-audits/integration/hosted/worker-lock.mjs']);
@@ -764,7 +799,11 @@ export async function runDriverAuditSupabaseCanaryControl(args, adapters = {}) {
       sourceStarted: false, syncStarted: false, staffAuthorizationGranted: false, liveBrowserVerified: false };
   } catch {
     await recover(); if (controller.signal.aborted) phase = 'cancelled';
-    outward = Object.assign(Error('Supabase canary control stopped at ' + phase), { phase, rollbackRestored }); throw outward;
+    outward = Object.assign(Error('Supabase canary control stopped at ' + phase), { phase, rollbackRestored });
+    if (phase === 'checkout' && checkoutAttempt && checkoutDiagnostic) try {
+      Object.defineProperty(outward, 'supabaseControlStopped', { value: await checkoutDiagnostic() });
+    } catch { /* Diagnostics cannot replace or open the original closed guard. */ }
+    throw outward;
   } finally {
     await cancelled();
     let failed = false;
