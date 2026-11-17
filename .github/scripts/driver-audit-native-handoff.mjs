@@ -249,14 +249,56 @@ async function main() {
   }
   if (['prepare-transfer', 'receive-transfer'].includes(operation)) {
     phase = 'encrypted-native-transfer';
-    const { stdout: result } = await exec(process.execPath, [path.join(appRoot, 'server/scripts/driverAuditNativeTransfer.js')], {
-      cwd: appRoot, env: process.env, timeout: 55 * 60 * 1000, maxBuffer: 256 * 1024,
-    });
-    const values = result.trim().split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line));
-    const receipt = values.find(value => /^transfer-(?:prepared|received|already-received)$/.test(value.status || ''));
-    if (!receipt) throw Error('Native transfer receipt is unavailable');
-    console.log(JSON.stringify(receipt));
-    return;
+    const load = name => import(pathToFileURL(path.join(appRoot, 'server', name)).href);
+    await load('loadEnv.js');
+    const { validateDriverAuditTransferPlan } = await load('services/driverAuditTransferSession.js');
+    let request;
+    if (process.env.NATIVE_TRANSFER_PLAN_B64) {
+      const encoded = process.env.NATIVE_TRANSFER_PLAN_B64;
+      if (encoded.length > 24576 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Bounded public transfer plan required');
+      request = validateDriverAuditTransferPlan(JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')));
+    }
+    if (operation === 'prepare-transfer' && !request) throw Error('Bounded public transfer plan required');
+    const { runDriverAuditNativeTransfer } = await load('scripts/driverAuditNativeTransfer.js');
+    try {
+      const receipt = await runDriverAuditNativeTransfer({ operation, request,
+        sessionId: process.env.NATIVE_TRANSFER_SESSION_ID, expectedSha: expected, appRoot });
+      if (!/^transfer-(?:prepared|received|already-received)$/.test(receipt?.status || '')) throw Error('Native transfer receipt unavailable');
+      console.log(JSON.stringify(receipt)); return;
+    } catch (error) {
+      // Private failure text may contain service details. Only the selected RSA
+      // recipient can read it; stdout never contains an unsealed exception.
+      if (request) {
+        let mongo = { available: false }, connection;
+        try {
+          const { default: mongoose } = await load('node_modules/mongoose/index.js');
+          connection = mongoose.createConnection(process.env.MONGODB_URI, {
+            autoCreate: false, autoIndex: false, maxPoolSize: 1, serverSelectionTimeoutMS: 5000 });
+          await connection.asPromise(); const db = connection.db;
+          if (db.databaseName !== request.targetDatabase) throw Error('Diagnostic target differs');
+          const stats = await db.command({ dbStats: 1, scale: 1 });
+          const capacity = await db.collection('driverAuditNativeControl').findOne({ _id: 'capacity' });
+          const authority = await db.collection('driverAuditNativeControl').findOne({ _id: 'authority' });
+          const files = await db.collection('driverAuditNativeFiles').countDocuments();
+          mongo = { available: true, targetDatabase: db.databaseName, files,
+            nativeUsedBytes: capacity?.usedBytes, nativeLimitBytes: capacity?.limitBytes,
+            nativeAuthorityStatus: authority?.status || null,
+            dataSize: stats.dataSize, storageSize: stats.storageSize, indexSize: stats.indexSize, totalSize: stats.totalSize,
+            fsUsedSize: stats.fsUsedSize, fsTotalSize: stats.fsTotalSize };
+        } catch { /* The original transfer error is retained independently. */ }
+        finally { await connection?.close().catch(() => {}); }
+        const { sealTransferSecrets } = await load('services/driverAuditTransferCodec.js');
+        const capsule = sealTransferSecrets(request.recipientPublicKey, { version: 1,
+          sessionId: process.env.NATIVE_TRANSFER_SESSION_ID, applicationCommit: expected, checkedAt: new Date().toISOString(),
+          error: { name: String(error.name || '').slice(0, 128), code: error.code, codeName: error.codeName,
+            message: String(error.message || '').slice(0, 8192), stack: String(error.stack || '').slice(0, 8192),
+            cause: error.cause ? { name: error.cause.name, code: error.cause.code,
+              message: String(error.cause.message || '').slice(0, 4096) } : undefined }, mongo });
+        console.log(JSON.stringify({ status: 'transfer-diagnostic', applicationCommit: expected,
+          sessionId: process.env.NATIVE_TRANSFER_SESSION_ID, recipientSha256: hash(request.recipientPublicKey), capsule }));
+      }
+      throw Error('Native encrypted staging stopped; inspect its sealed diagnostic');
+    }
   }
   if (['pause-builder', 'resume-builder'].includes(operation)) {
     phase = 'builder-' + operation.split('-')[0];
