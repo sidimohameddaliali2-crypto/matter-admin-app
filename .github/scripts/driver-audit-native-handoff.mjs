@@ -157,6 +157,44 @@ async function main() {
     const config = JSON.parse(await readPrivateDriverAuditSource(args[1], 1024 * 1024));
     if (config.root !== syncRoot || config.codeRoot !== path.join(syncRoot, 'builder')) throw Error('Unexpected managed reporting configuration');
     const seed = JSON.parse(await readPrivateDriverAuditSource(path.join(syncRoot, 'seed.json'), 1024 * 1024));
+    if (process.env.NATIVE_DIAGNOSTIC_PAGE === 'builder-all') {
+      phase = 'private-builder-code';
+      if (workers[0].pm2_env?.status !== 'stopped'
+          || entries.filter(row => row.name === 'matter-driver-audit-source').some(row => row.pm2_env?.status !== 'stopped')) {
+        throw Error('Stop reporting workers before exporting their exact builder');
+      }
+      await requirePrivateDriverAuditSourceDirectory(config.codeRoot);
+      const { verifyAuditBuilder } = await load('vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs');
+      await verifyAuditBuilder(config.codeRoot, config.builderSha256);
+      const manifestBytes = await readPrivateDriverAuditSource(path.join(config.codeRoot, 'runtime-manifest.json'), 128 * 1024);
+      if (hash(manifestBytes) !== config.builderSha256) throw Error('Actual builder manifest differs');
+      const manifest = JSON.parse(manifestBytes), files = [];
+      if (manifest.version !== 1 || !manifest.files || Object.keys(manifest.files).length > 4096) throw Error('Actual builder inventory differs');
+      let total = manifestBytes.length;
+      for (const [name, expectedFile] of Object.entries(manifest.files)) {
+        const bytes = await readPrivateDriverAuditSource(path.join(config.codeRoot, name), 8 * 1024 * 1024);
+        total += bytes.length;
+        if (hash(bytes) !== expectedFile || total > 16 * 1024 * 1024) throw Error('Actual builder bytes differ');
+        files.push({ path: name, dataBase64: bytes.toString('base64') });
+      }
+      await verifyAuditBuilder(config.codeRoot, config.builderSha256);
+      const afterConfig = JSON.parse(await readPrivateDriverAuditSource(args[1], 1024 * 1024));
+      if (JSON.stringify(afterConfig) !== JSON.stringify(config)) throw Error('Managed builder configuration changed');
+      const raw = Buffer.from(JSON.stringify({ version: 1, builderSha256: config.builderSha256,
+        manifestBase64: manifestBytes.toString('base64'), files }));
+      const { gzipSync } = await import('node:zlib');
+      const compressed = gzipSync(raw), chunkBytes = 32 * 1024, pages = Math.ceil(compressed.length / chunkBytes);
+      if (pages < 1 || pages > 64) throw Error('Actual builder export exceeds its bounded envelope');
+      for (let page = 0; page < pages; page++) {
+        const capsule = sealTransferSecrets(request.recipientPublicKey, { version: 1, page, pages,
+          metadataSha256: hash(raw), gzipSha256: hash(compressed), metadataBytes: raw.length, gzipBytes: compressed.length,
+          gzipChunkBase64: compressed.subarray(page * chunkBytes, (page + 1) * chunkBytes).toString('base64') });
+        console.log(JSON.stringify({ status: 'private-builder-inspected', applicationCommit: expected,
+          builderSha256: config.builderSha256, files: files.length, codeBytes: total, page, pages,
+          metadataSha256: hash(raw), gzipSha256: hash(compressed), recipientSha256: hash(request.recipientPublicKey), capsule }));
+      }
+      return;
+    }
     const capsule = sealTransferSecrets(request.recipientPublicKey, { version: 1, applicationCommit: expected,
       appRoot, syncRoot, host: checked, bootstrap: { collectorRevision: seed.collectorRevision, manifestSha256: seed.manifestSha256 },
       checkedAt: new Date().toISOString() });
