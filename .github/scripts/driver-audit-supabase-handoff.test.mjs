@@ -210,7 +210,7 @@ test('the host bridge dispatches Supabase inspection without loading any native 
     ');process.argv.push("--run");await import(' + JSON.stringify(script) + ');';
   const output = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', source], { env: {
     PATH: bin, EXPECTED_DEPLOYED_SHA: commit, NATIVE_HANDOFF_OPERATION: 'inspect-supabase-host',
-    NATIVE_IMPORT_CODE: Buffer.from(code).toString('base64'),
+    NATIVE_IMPORT_CODE: gzipSync(Buffer.from(code)).toString('base64'), NATIVE_IMPORT_COMPRESSION: 'gzip-v1',
     NATIVE_TRANSFER_PLAN_B64: Buffer.from(JSON.stringify({ version: 1, recipientPublicKey })).toString('base64'),
   } });
   assert.deepEqual(JSON.parse(output.stdout), { status: 'supabase-host-inspected', readOnly: true, mongoConnections: 0 });

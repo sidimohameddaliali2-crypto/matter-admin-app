@@ -5,10 +5,22 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
+import { gunzipSync } from 'node:zlib';
 
 const exec = promisify(execFile);
 const hash = value => createHash('sha256').update(value).digest('hex');
 let phase = 'checkout';
+
+export function decodeDriverAuditOperator(encoded, compression) {
+  if (typeof encoded !== 'string' || !encoded.length || encoded.length > 256 * 1024
+    || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
+  const transported = Buffer.from(encoded, 'base64');
+  if (transported.toString('base64') !== encoded) throw Error('Reviewed import operator encoding differs');
+  if (compression !== undefined && compression !== 'gzip-v1') throw Error('Reviewed import operator compression differs');
+  const code = compression === 'gzip-v1' ? gunzipSync(transported, { maxOutputLength: 192 * 1024 }) : transported;
+  if (!code.length || code.length > 192 * 1024) throw Error('Reviewed import operator size differs');
+  return code;
+}
 
 export function driverAuditSupabaseStoppedReceipt(value, applicationCommit, operatorPhase) {
   const exact = (item, fields) => item && typeof item === 'object' && !Array.isArray(item)
@@ -226,10 +238,7 @@ async function main() {
     'plan-native-cleanup', 'apply-native-cleanup', 'inspect-database-config',
     'prepare-object-store', 'externalize-native-archive', 'inspect-supabase-host', 'prepare-supabase-host', 'inspect-supabase-routing'].includes(operation)) {
     phase = 'native-' + operation;
-    const encoded = process.env.NATIVE_IMPORT_CODE;
-    if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
-    const code = Buffer.from(encoded, 'base64');
-    if (code.toString('base64') !== encoded) throw Error('Reviewed import operator encoding differs');
+    const code = decodeDriverAuditOperator(process.env.NATIVE_IMPORT_CODE, process.env.NATIVE_IMPORT_COMPRESSION);
     const load = name => import(pathToFileURL(path.join(appRoot, 'server', name)).href);
     const { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory } = await load('services/driverAuditSource.js');
     const operators = path.join(appRoot, 'server/.private/driver-audit-native-operators');
