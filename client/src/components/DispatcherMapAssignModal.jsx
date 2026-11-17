@@ -177,7 +177,12 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
   const drawingGestureRef = useRef(0);
   const selectionRef = useRef(selectedDeliveryIds);
   selectionRef.current = selectedDeliveryIds;
-  const deliveryRef = id => deliveries.find(delivery => (delivery._id || delivery.id) === id)?.customerId || `Delivery ${id}`;
+  const deliveryRef = id => {
+    const delivery = deliveries.find(item => (item._id || item.id) === id);
+    const name = String(delivery?.customerName || 'Delivery').slice(0, 45);
+    const customer = delivery?.customerId ? ` · ${String(delivery.customerId).slice(0, 20)}` : '';
+    return `${name}${customer} (${id})`;
+  };
   const selectionRefs = ids => ids.map(deliveryRef);
   const changeSelection = next => {
     recordActivityChange({ field: 'Selected deliveries', before: selectionRefs(selectionRef.current), after: selectionRefs(next), form: 'Map assignment' });

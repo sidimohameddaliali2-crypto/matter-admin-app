@@ -264,42 +264,82 @@ function fitMapTo(map, pts) {
   );
 }
 
-const safeDestroy = (obj) => { try { obj?.destroy(); } catch (_) { /* already gone */ } };
+const markerDragCleanups = new WeakMap();
+const safeDestroy = (obj) => {
+  try { markerDragCleanups.get(obj)?.(); obj?.destroy(); } catch (_) { /* already gone */ }
+};
 
 // 2GIS's HtmlMarker has no built-in "draggable" option, but it does give us
 // the two primitives needed to build one: setCoordinates on the marker, and
 // map.unproject to turn a pointer's pixel position into a real [lng, lat].
 // Only attached to a marker's own HTML content, so it never fights with the
 // map's own pan/zoom gestures happening elsewhere on the canvas.
-function makeMarkerDraggable(marker, map, container, onDrop) {
+function makeMarkerDraggable(marker, map, container, onDrop, readStart) {
+  markerDragCleanups.get(marker)?.();
   const el = marker.getContent();
   const toLngLat = (evt) => {
     const rect = container.getBoundingClientRect();
     return map.unproject([evt.clientX - rect.left, evt.clientY - rect.top]);
   };
   let dragging = false;
+  let disposed = false;
+  let session = null;
+  let startValue;
+  const readSession = () => {
+    try { return { token: window.localStorage.getItem('token'), page: window.location.href }; }
+    catch (_) { return null; }
+  };
+  const sameSession = () => {
+    const current = readSession();
+    return !disposed && el.isConnected && container.isConnected && session?.token && current?.token === session.token && current?.page === session.page;
+  };
+  const cancel = () => {
+    dragging = false;
+    session = null;
+    startValue = undefined;
+    el.style.cursor = 'grab';
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', cancel);
+  };
   const onMove = (evt) => {
     if (!dragging) return;
+    if (!sameSession()) { cancel(); return; }
     marker.setCoordinates(toLngLat(evt));
   };
   const onUp = (evt) => {
     if (!dragging) return;
-    dragging = false;
-    el.style.cursor = 'grab';
-    window.removeEventListener('pointermove', onMove);
-    window.removeEventListener('pointerup', onUp);
-    onDrop(toLngLat(evt));
+    if (!sameSession()) { cancel(); return; }
+    const before = startValue;
+    const coordinates = toLngLat(evt);
+    cancel();
+    onDrop(coordinates, before);
   };
   const onDown = (evt) => {
+    if (disposed || !el.isConnected || !container.isConnected) return;
+    cancel();
+    session = readSession();
+    if (!session?.token) return;
+    const before = readStart?.();
+    startValue = before ? { ...before } : before;
     evt.stopPropagation();
     dragging = true;
     el.style.cursor = 'grabbing';
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', cancel);
   };
   el.style.cursor = 'grab';
   el.title = 'Drag to correct this location';
   el.addEventListener('pointerdown', onDown);
+  const cleanup = () => {
+    disposed = true;
+    cancel();
+    el.removeEventListener('pointerdown', onDown);
+    markerDragCleanups.delete(marker);
+  };
+  markerDragCleanups.set(marker, cleanup);
+  return cleanup;
 }
 
 // Destroying a mapgl.Map shortly after creating it (closing the modal before
@@ -629,9 +669,9 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   // driver's finger by the time this fires), reverted on failure. Reuses the
   // same endpoint the dispatcher's Map tool already saves manual pins
   // through, so it also updates the customer's cached geocode for next time.
-  const handlePinDrop = useCallback(async (stop, [lng, lat]) => {
+  const handlePinDrop = useCallback(async (stop, [lng, lat], dragStart) => {
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
-    const old = latestPins.current[stop._id] || stop.coords || getDeliveryLatLng(stop);
+    const old = dragStart === undefined ? latestPins.current[stop._id] || stop.coords || getDeliveryLatLng(stop) : dragStart;
     if (old?.lat === lat && old?.lng === lng) return;
     const describe = point => point ? `${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}` : 'Not set';
     recordActivityChange({ field: `Proposed location for ${stop.customerName || 'Customer'} (${stop._id})`, form: 'Driver Routes location edit', before: describe(old), after: describe({ lat, lng }) });
@@ -1062,7 +1102,8 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         marker.getContent().setAttribute('data-delivery-id', stop._id);
         marker.getContent().addEventListener('click', () => setActiveId(stop._id));
         if (editMode && container) {
-          makeMarkerDraggable(marker, map, container, (lngLat) => handlePinDrop(stop, lngLat));
+          makeMarkerDraggable(marker, map, container, (lngLat, before) => handlePinDrop(stop, lngLat, before),
+            () => latestPins.current[stop._id] || stop.coords || getDeliveryLatLng(stop));
         }
         markersRef.current.push(marker);
 
@@ -1132,12 +1173,11 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         });
         marker.getContent().setAttribute('data-hub-van-id', driverId);
         if (container) {
-          makeMarkerDraggable(marker, map, container, ([lng, lat]) => {
-            const old = latestSimulation.current.locations[driverId];
+          makeMarkerDraggable(marker, map, container, ([lng, lat], old) => {
             recordActivityChange({ field: `Hub location for ${driverDisplayName(van)}`, form: 'Route simulation proposal', before: old ? `${old.lat.toFixed(6)}, ${old.lng.toFixed(6)}` : 'Use route stop', after: `${lat.toFixed(6)}, ${lng.toFixed(6)}` });
             latestSimulation.current.locations = { ...latestSimulation.current.locations, [driverId]: { lat, lng } };
             setSimHubLocation((prev) => ({ ...prev, [driverId]: { lat, lng } }));
-          });
+          }, () => latestSimulation.current.locations[driverId] || null);
         }
         markersRef.current.push(marker);
       });

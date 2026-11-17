@@ -108,8 +108,12 @@ function focusCustomDifference(before, after, a, b) {
   let start = 0;
   if (Array.isArray(before) && Array.isArray(after)) {
     while (start < Math.min(before.length, after.length) && Object.is(before[start], after[start])) start += 1;
-    const excerpt = value => shorten(`${value.length} items · from position ${start + 1}: ${customText(value.slice(start)) || 'None'}`);
-    a.value = excerpt(before); b.value = excerpt(after);
+    const oldText = customText(before.slice(start)), newText = customText(after.slice(start));
+    let character = 0;
+    while (character < Math.min(oldText.length, newText.length) && oldText[character] === newText[character]) character += 1;
+    character = Math.max(0, character - 60);
+    const excerpt = (value, text) => shorten(`${value.length} items · from position ${start + 1}${character ? `, character ${character + 1}` : ''}: ${text.slice(character) || 'None'}`);
+    a.value = excerpt(before, oldText); b.value = excerpt(after, newText);
   } else {
     const oldText = customText(before), newText = customText(after);
     while (start < Math.min(oldText.length, newText.length) && oldText[start] === newText[start]) start += 1;

@@ -133,7 +133,12 @@ const DispatcherMobile = () => {
     'Unassigned deliveries only': showUnassignedOnly, 'Collection deliveries only': showCollectionsOnly,
     'Selected deliveries': selectedDeliveryIds, 'Delivery date': selectedDate, 'Scanned bags': scannedBagIds
   };
-  const deliveryRefs = ids => ids.map(id => deliveries.find(delivery => delivery._id === id)?.customerId || ('Delivery ' + id));
+  const deliveryRefs = ids => ids.map(id => {
+    const delivery = deliveries.find(item => item._id === id);
+    const name = String(delivery?.customerName || 'Delivery').slice(0, 45);
+    const customer = delivery?.customerId ? ` · ${String(delivery.customerId).slice(0, 20)}` : '';
+    return `${name}${customer} (${id})`;
+  });
   const driverRefs = ids => ids.map(id => {
     if (id === 'unassigned') return 'Unassigned';
     const driver = drivers.find(item => item._id === id);

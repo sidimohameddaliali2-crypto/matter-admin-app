@@ -103,6 +103,14 @@ test('custom list changes after a long unchanged prefix are retained with the ch
   expect(sent()[0].changes[0].before).toContain('Fixture stop 40');
   expect(sent()[0].changes[0].after).toContain('Replacement last stop');
 });
+test('a long changed list item retains its changed suffix, not only its unchanged name', async () => {
+  const name = 'A long ingredient name '.repeat(24);
+  recordActivityChange({ field: 'Ingredients', before: [`${name} (shown to customer)`], after: [`${name} (backend only)`] });
+  await deliver(); expect(sent()).toHaveLength(1);
+  expect(sent()[0].changes[0].before).toContain('(shown to customer)');
+  expect(sent()[0].changes[0].after).toContain('(backend only)');
+  expect(sent()[0].changes[0].before).not.toBe(sent()[0].changes[0].after);
+});
 test('comma-containing custom choices do not collapse distinct selections', async () => {
   recordActivityChange({ field: 'Options', before: ['A', 'B'], after: ['A, B'] });
   await deliver(); expect(sent()).toHaveLength(1);

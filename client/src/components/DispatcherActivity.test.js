@@ -7,7 +7,7 @@ const DispatcherMapAssignModal = require('./DispatcherMapAssignModal').default;
 const DispatcherDesktop = require('../pages/DispatcherDesktop').default;
 const DispatcherMobile = require('../pages/DispatcherMobile').default;
 
-jest.mock('../utils/activityCapture', () => ({ recordActivityChange: jest.fn() }));
+jest.mock('../utils/activityCapture', () => ({ ...jest.requireActual('../utils/activityCapture'), recordActivityChange: jest.fn(change => jest.requireActual('../utils/activityCapture').recordActivityChange(change)) }));
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), patch: jest.fn(), post: jest.fn() } }));
 const mockDispatch = jest.fn();
 const fixture = [{ _id: 'a', customerId: 'D-101', customerName: 'Aster', zone: 'Marina', addressDetails: { city: 'Dubai' }, gpsLocation: { lat: 25, lng: 55 }, status: 'pending' }, { _id: 'b', customerId: 'D-102', customerName: 'Birch', zone: 'JVC', addressDetails: { city: 'Abu Dhabi' }, gpsLocation: { lat: 26, lng: 56 }, status: 'pending' }];
@@ -47,11 +47,11 @@ test('map selection records only gestures, including geometry and reset, before 
   await render(<DispatcherMapAssignModal open deliveries={fixture} drivers={[]}/>);
   expect(changes()).toEqual([]);
   await click('Map marker');
-  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: [], after: ['D-101'] }));
+  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: [], after: ['Aster · D-101 (a)'] }));
   await click('Reset');
-  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: ['D-101'], after: [] }));
+  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: ['Aster · D-101 (a)'], after: [] }));
   act(() => mockDrawing.onOverlayComplete({ type: 'circle', overlay: { getCenter: () => ({ lat: () => 26, lng: () => 56 }), getRadius: () => 100, setMap: jest.fn() } }));
-  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: [], after: ['D-102'] }));
+  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: [], after: ['Birch · D-102 (b)'] }));
   const count = changes().length;
   await render(<DispatcherMapAssignModal open deliveries={[...fixture]} drivers={[]}/>);
   expect(changes()).toHaveLength(count);
@@ -64,7 +64,7 @@ test('polygon gestures report selected references while automatic drawing callba
   expect(changes()).toEqual([]);
   const points = [{ lat: () => 24.9, lng: () => 54.9 }, { lat: () => 25.1, lng: () => 54.9 }, { lat: () => 25.1, lng: () => 55.1 }, { lat: () => 24.9, lng: () => 55.1 }];
   act(() => mockDrawing.onOverlayComplete({ type: 'polygon', overlay: { getPath: () => ({ getArray: () => points }), setMap: jest.fn() } }));
-  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: [], after: ['D-101'] }));
+  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: [], after: ['Aster · D-101 (a)'] }));
 });
 
 test('failed map pin writes still retain the attempted before and after coordinates', async () => {
@@ -74,7 +74,7 @@ test('failed map pin writes still retain the attempted before and after coordina
   await render(<DispatcherMapAssignModal open deliveries={[delivery]} drivers={[]}/>);
   await click('Pin');
   await act(async () => mockMap.onClick({ latLng: { lat: () => 25.2, lng: () => 55.3 } }));
-  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Location for D-101', before: 'Not set', after: '25.200000, 55.300000' }));
+  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Location for Aster · D-101 (a)', before: 'Not set', after: '25.200000, 55.300000' }));
   expect(api.patch).toHaveBeenCalledWith('/deliveries/a', { gpsLocation: { lat: 25.2, lng: 55.3 } });
   error.mockRestore();
 });
@@ -104,9 +104,9 @@ test.each([DispatcherDesktop, DispatcherMobile])('area choices retain rapid togg
 test('mobile select-all and clear report actual delivery references', async () => {
   await render(<DispatcherMobile/>);
   await click('Select All');
-  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: [], after: ['D-101', 'D-102'] }));
+  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: [], after: ['Aster · D-101 (a)', 'Birch · D-102 (b)'] }));
   await click('Deselect');
-  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: ['D-101', 'D-102'], after: [] }));
+  expect(changes()).toContainEqual(expect.objectContaining({ field: 'Selected deliveries', before: ['Aster · D-101 (a)', 'Birch · D-102 (b)'], after: [] }));
 });
 
 test('mobile bag scans and removal record unsaved bag selections', async () => {
@@ -118,4 +118,23 @@ test('mobile bag scans and removal record unsaved bag selections', async () => {
   act(() => host.querySelector('button[title="Remove"]').click());
   expect(changes()).toContainEqual(expect.objectContaining({ field: 'Scanned bags', before: ['BAG-001'], after: [] }));
   expect(api.post).not.toHaveBeenCalled();
+});
+test('map choices distinguish two deliveries belonging to the same customer in the real queue', async () => {
+  const deliveries = fixture.map(delivery => ({ ...delivery, customerId: 'CUST-1', customerName: 'Same customer', addressDetails: { city: 'Dubai' } }));
+  recordActivityChange.mockImplementation(change => jest.requireActual('../utils/activityCapture').recordActivityChange(change));
+  const capture = jest.fn().mockResolvedValue({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({ success: true }) });
+  const oldFetch = window.fetch, warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); window.fetch = capture;
+  localStorage.setItem('token', 'fixture-session'); window.history.replaceState({}, '', '/dispatcher');
+  const cleanup = jest.requireActual('../utils/activityCapture').installActivityCapture();
+  try {
+    await render(<DispatcherMapAssignModal open deliveries={deliveries} drivers={[]}/>);
+    const circle = (lat, lng) => ({ type: 'circle', overlay: { getCenter: () => ({ lat: () => lat, lng: () => lng }), getRadius: () => 100, setMap: jest.fn() } });
+    act(() => mockDrawing.onOverlayComplete(circle(25, 55)));
+    act(() => mockDrawing.onOverlayComplete(circle(26, 56)));
+    await act(async () => window.dispatchEvent(new Event('pagehide')));
+    const events = capture.mock.calls.flatMap(([, options]) => JSON.parse(options.body).events).filter(event => event.form.field === 'Selected deliveries');
+    expect(events).toHaveLength(2);
+    expect(events[0].changes[0].after).toContain('(a)');
+    expect(events[1].changes[0].before).toContain('(a)'); expect(events[1].changes[0].after).toContain('(b)');
+  } finally { cleanup(); window.fetch = oldFetch; localStorage.clear(); warn.mockRestore(); }
 });
