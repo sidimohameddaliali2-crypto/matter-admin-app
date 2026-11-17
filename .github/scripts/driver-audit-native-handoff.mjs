@@ -10,6 +10,24 @@ const exec = promisify(execFile);
 const hash = value => createHash('sha256').update(value).digest('hex');
 let phase = 'checkout';
 
+export function driverAuditSupabaseStoppedReceipt(value, applicationCommit, operatorPhase) {
+  const exact = (item, fields) => item && typeof item === 'object' && !Array.isArray(item)
+    && Object.keys(item).length === fields.length && fields.every(field => Object.hasOwn(item, field));
+  if (!exact(value, ['status', 'applicationCommit', 'operatorPhase', 'metadataSha256', 'capsule'])
+    || value.status !== 'supabase-host-stopped' || value.applicationCommit !== applicationCommit
+    || value.operatorPhase !== operatorPhase || !/^prepare-(?:baseline|candidate|serving-current|serving-previous)-[a-z-]+$/.test(operatorPhase)
+    || operatorPhase.length > 79 || !/^[a-f0-9]{64}$/.test(value.metadataSha256 || '')
+    || !exact(value.capsule, ['version', 'key', 'iv', 'tag', 'data']) || value.capsule.version !== 1) return null;
+  const encoded = (text, maximum, size) => typeof text === 'string' && text.length > 0 && text.length <= maximum
+    && /^[A-Za-z0-9+/]+=*$/.test(text) && Buffer.from(text, 'base64').toString('base64') === text
+    && (size === undefined || Buffer.from(text, 'base64').length === size);
+  const capsule = value.capsule;
+  if (!encoded(capsule.key, 2048) || Buffer.from(capsule.key, 'base64').length < 384
+    || !encoded(capsule.iv, 16, 12) || !encoded(capsule.tag, 24, 16) || !encoded(capsule.data, 32768)) return null;
+  return { status: value.status, applicationCommit, operatorPhase, metadataSha256: value.metadataSha256,
+    capsule: { version: 1, key: capsule.key, iv: capsule.iv, tag: capsule.tag, data: capsule.data } };
+}
+
 export function mongoLocation(uri, localAddresses) {
   if (typeof uri !== 'string') return 'unknown';
   if (uri.startsWith('mongodb+srv://')) return 'remote';
@@ -233,9 +251,15 @@ async function main() {
       const bootstrapSha256 = process.env.SUPABASE_BOOTSTRAP_SHA256;
       if (operation === 'prepare-supabase-host' && !/^[a-f0-9]{64}$/.test(bootstrapSha256 || ''))
         throw Error('An exact private Supabase bootstrap hash is required');
-      console.log(JSON.stringify(await operator.runDriverAuditSupabaseHandoff({ operation, appRoot,
-        expectedSha: expected, recipientPublicKey: request.recipientPublicKey,
-        ...(operation === 'prepare-supabase-host' ? { bootstrapSha256 } : {}) })));
+      try {
+        console.log(JSON.stringify(await operator.runDriverAuditSupabaseHandoff({ operation, appRoot,
+          expectedSha: expected, recipientPublicKey: request.recipientPublicKey,
+          ...(operation === 'prepare-supabase-host' ? { bootstrapSha256 } : {}) })));
+      } catch (error) {
+        const stopped = driverAuditSupabaseStoppedReceipt(error.supabaseHostStopped, expected, error.phase);
+        if (stopped) console.log(JSON.stringify(stopped));
+        throw error;
+      }
       return;
     }
     let recipientPublicKey;

@@ -14,6 +14,7 @@ import { acquireWorkerLock } from '../../server/vendor/driver-audits/integration
 import { stageDriverAuditSource } from '../../server/scripts/driverAuditSourceStage.js';
 import { archiveBytes } from '../../server/vendor/driver-audits/integration/cloud/repository.mjs';
 import { verifyDriverAuditSupabaseServingPackage } from '../../server/services/driverAuditSupabaseReplica.js';
+import { driverAuditSupabaseStoppedReceipt } from './driver-audit-native-handoff.mjs';
 
 const operator = await import('./driver-audit-supabase-handoff.mjs').catch(error => {
   if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
@@ -780,4 +781,112 @@ test('a preexisting dependency symlink is rejected before any install or modific
   await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-dependencies');
   assert(!f.commands.some(row => row.file === '/usr/bin/npm'));
   assert.equal(hash(await fs.readFile(original.path)), original.sha256);
+});
+
+test('retained-package diagnostics identify only fixed role and read boundaries without exposing private names', async t => {
+  for (const [change, phase] of [
+    [f => fs.chmod(path.join(f.root, 'baseline/input.private.json'), 0o644), 'prepare-baseline-file-metadata'],
+    [f => fs.mkdir(path.join(f.root, 'baseline/unlisted-directory'), { mode: 0o755 }), 'prepare-baseline-directory-metadata'],
+    [f => fs.unlink(path.join(f.root, 'baseline/input.private.json')), 'prepare-baseline-manifest-members'],
+    [f => f.write(path.join(path.dirname(f.bootstrap.retained[0].privateRoot), 'accepted.private.json'), '{"private":"' + f.secret + '"}'),
+      'prepare-serving-current-accepted-pin'],
+    [async f => {
+      const row = f.bootstrap.retained[0], value = await directSeed(f, row);
+      await f.write(path.join(value.seed.bundleRoot, 'unlisted-object'), 'fictional private body');
+    }, 'prepare-serving-current-audit-objects-object-identity'],
+  ]) {
+    const f = await preparationFixture(t); await change(f);
+    await assert.rejects(f.runPrepare(), error => error.phase === phase && error.message === 'Supabase handoff stopped at ' + phase
+      && !JSON.stringify(error).includes(f.root) && !JSON.stringify(error).includes(f.secret));
+    assert(!f.commands.some(row => row.args[0] === 'clone'));
+  }
+});
+
+test('the first package failure seals bounded metadata and never opens an unsafe owner, mode or symlink target', async t => {
+  for (const kind of ['mode', 'owner', 'symlink']) {
+    const f = await preparationFixture(t), file = path.join(f.root, 'baseline/input.private.json');
+    const declared = hash(await fs.readFile(file));
+    let outside;
+    if (kind === 'mode') await fs.chmod(file, 0o644);
+    if (kind === 'symlink') {
+      outside = (await f.write(path.join(f.appRoot, 'outside-private-body'), f.secret)).path;
+      await fs.unlink(file); await fs.symlink(outside, file);
+    }
+    const open = fs.open, lstat = fs.lstat; let unsafeOpens = 0, failure;
+    fs.open = async (name, ...args) => {
+      if (name === file || name === outside) { unsafeOpens++; throw Error('An unsafe private body must not be opened'); }
+      return open(name, ...args);
+    };
+    if (kind === 'owner') fs.lstat = async (name, options) => {
+      const info = await lstat(name, options);
+      if (name === file) info.uid = options?.bigint ? 99999n : 99999;
+      return info;
+    };
+    try { await assert.rejects(f.runPrepare(), error => { failure = error; return error.phase === 'prepare-baseline-file-metadata'; }); }
+    finally { fs.open = open; fs.lstat = lstat; }
+    assert.equal(unsafeOpens, 0); assert(!f.commands.some(row => row.args[0] === 'clone'));
+    const receipt = failure.supabaseHostStopped;
+    assert.equal(receipt.status, 'supabase-host-stopped'); assert.equal(receipt.applicationCommit, commit);
+    assert.deepEqual(driverAuditSupabaseStoppedReceipt(receipt, commit, failure.phase), receipt);
+    const value = openTransferSecrets(privateKey, receipt.capsule), { gunzipSync } = await import('node:zlib');
+    const packed = Buffer.from(value.metadataGzipBase64, 'base64'), bytes = gunzipSync(packed), metadata = JSON.parse(bytes);
+    assert(bytes.length <= 8192); assert.equal(hash(bytes), receipt.metadataSha256); assert.equal(hash(packed), value.metadataGzipSha256);
+    assert.equal(metadata.relativePath, 'input.private.json'); assert.equal(metadata.role, 'baseline');
+    assert.equal(metadata.declaredSha256, declared); assert.equal(metadata.alreadyReadSha256, null);
+    assert.equal(metadata.statKind, kind === 'symlink' ? 'symbolic-link' : 'regular-file');
+    assert.equal(metadata.realpathMatches, kind !== 'symlink');
+    if (kind === 'mode') assert.equal(metadata.mode, 0o644);
+    if (kind === 'owner') assert.equal(metadata.ownerUid, 99999);
+    assert(!bytes.includes(Buffer.from(f.secret))); assert(!JSON.stringify(receipt).includes(f.root));
+    assert(!Object.keys(metadata).some(key => /error|message|body|content|environment/i.test(key)));
+  }
+});
+
+test('the core stopped-receipt allowlist rejects plaintext additions, wrong bindings and noncanonical ciphertext', () => {
+  const capsule = sealTransferSecrets(recipientPublicKey, { fictional: true });
+  const receipt = { status: 'supabase-host-stopped', applicationCommit: commit, operatorPhase: 'prepare-baseline-file-metadata',
+    metadataSha256: hash('fictional metadata'), capsule };
+  assert.deepEqual(driverAuditSupabaseStoppedReceipt(receipt, commit, receipt.operatorPhase), receipt);
+  for (const changed of [{ ...receipt, message: 'NEVER-PRINT-PRIVATE-ERROR' }, { ...receipt, applicationCommit: 'f'.repeat(40) },
+    { ...receipt, operatorPhase: 'prepare-private/customer' }, { ...receipt, metadataSha256: 'private text' },
+    { ...receipt, capsule: { ...capsule, privatePath: '/fictional/private' } },
+    { ...receipt, capsule: { ...capsule, data: 'non canonical ciphertext' } },
+    { ...receipt, capsule: { ...capsule, data: Buffer.alloc(25000).toString('base64') } }]) {
+    assert.equal(driverAuditSupabaseStoppedReceipt(changed, commit, receipt.operatorPhase), null);
+  }
+});
+
+test('a completed permitted file read can report its differing hash while retaining the private body', async t => {
+  const f = await preparationFixture(t), file = path.join(f.root, 'baseline/input.private.json');
+  const declared = hash(await fs.readFile(file)), changed = Buffer.from(f.secret); await f.write(file, changed);
+  let failure;
+  await assert.rejects(f.runPrepare(), error => { failure = error; return error.phase === 'prepare-baseline-manifest-members'; });
+  const value = openTransferSecrets(privateKey, failure.supabaseHostStopped.capsule), { gunzipSync } = await import('node:zlib');
+  const raw = gunzipSync(Buffer.from(value.metadataGzipBase64, 'base64')), metadata = JSON.parse(raw);
+  assert.equal(metadata.declaredSha256, declared); assert.equal(metadata.alreadyReadSha256, hash(changed));
+  assert.equal(metadata.bytes, changed.length); assert(!raw.includes(changed));
+  assert(!f.commands.some(row => row.args[0] === 'clone'));
+});
+
+test('the actual host bridge prints only the encrypted stopped schema and exits unsuccessfully', async t => {
+  const f = await fixture(t), bin = path.join(f.appRoot, 'bin'); await fs.mkdir(bin);
+  await fs.writeFile(path.join(bin, 'git'), '#!/bin/sh\nprintf "%s\\n" ' + commit + '\n', { mode: 0o700 });
+  await fs.mkdir(path.join(f.server, 'services'), { recursive: true });
+  await fs.writeFile(path.join(f.server, 'package.json'), '{"type":"module"}');
+  await fs.copyFile(fileURLToPath(new URL('../../server/services/driverAuditSource.js', import.meta.url)), path.join(f.server, 'services/driverAuditSource.js'));
+  const receipt = { status: 'supabase-host-stopped', applicationCommit: commit, operatorPhase: 'prepare-baseline-file-metadata',
+    metadataSha256: hash('fictional diagnostic'), capsule: sealTransferSecrets(recipientPublicKey, { relativePath: 'fictional-private-file' }) };
+  const code = 'export async function runDriverAuditSupabaseHandoff(){throw Object.assign(Error("NEVER-PRINT-PRIVATE-FAILURE"),' +
+    JSON.stringify({ phase: receipt.operatorPhase, supabaseHostStopped: receipt }) + ');}';
+  const script = fileURLToPath(new URL('./driver-audit-native-handoff.mjs', import.meta.url));
+  const source = 'Object.defineProperty(process,"platform",{value:"linux"});process.chdir(' + JSON.stringify(f.appRoot) +
+    ');process.argv.push("--run");await import(' + JSON.stringify(script) + ');';
+  await assert.rejects(promisify(execFile)(process.execPath, ['--input-type=module', '-e', source], { env: { PATH: bin,
+    EXPECTED_DEPLOYED_SHA: commit, NATIVE_HANDOFF_OPERATION: 'prepare-supabase-host', SUPABASE_BOOTSTRAP_SHA256: 'e'.repeat(64),
+    NATIVE_IMPORT_CODE: Buffer.from(code).toString('base64'),
+    NATIVE_TRANSFER_PLAN_B64: Buffer.from(JSON.stringify({ version: 1, recipientPublicKey })).toString('base64') } }), error => {
+    assert.equal(error.code, 1); assert.deepEqual(JSON.parse(error.stdout.trim()), receipt);
+    assert(!error.stdout.includes('fictional-private-file')); assert(!error.stderr.includes('NEVER-PRINT'));
+    assert(error.stderr.includes('operatorPhase=' + receipt.operatorPhase)); return true;
+  });
 });

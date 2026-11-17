@@ -292,56 +292,78 @@ async function writeOnce(file, bytes) {
   need((await read(file, { maximum: Math.max(bytes.length, 1) })).data.equals(bytes));
 }
 
-async function fileHash(file, { maximum = 512 * 1024 ** 2, privateMode = true } = {}) {
+async function fileHash(file, { maximum = 512 * 1024 ** 2, privateMode = true, phase = () => {} } = {}) {
+  phase('metadata');
   const before = await fs.lstat(file, { bigint: true });
   need(before.isFile() && !before.isSymbolicLink() && before.size <= BigInt(maximum)
     && (before.uid === BigInt(process.getuid()) || !privateMode && before.uid === 0n)
     && !(Number(before.mode) & (privateMode ? 0o077 : 0o022)) && await fs.realpath(file) === file);
+  phase('open');
   const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW), hash = createHash('sha256');
   try {
     need(signature(await handle.stat({ bigint: true })) === signature(before));
-    const chunk = Buffer.alloc(1024 * 1024); let offset = 0;
+    phase('read'); const chunk = Buffer.alloc(1024 * 1024); let offset = 0;
     while (offset < Number(before.size)) {
       const { bytesRead } = await handle.read(chunk, 0, Math.min(chunk.length, Number(before.size) - offset), offset);
       need(bytesRead > 0); hash.update(chunk.subarray(0, bytesRead)); offset += bytesRead;
     }
-    need((await handle.read(chunk, 0, 1, offset)).bytesRead === 0
+    phase('readback'); need((await handle.read(chunk, 0, 1, offset)).bytesRead === 0
       && signature(await handle.stat({ bigint: true })) === signature(before)
       && signature(await fs.lstat(file, { bigint: true })) === signature(before) && await fs.realpath(file) === file);
     return { path: file, sha256: hash.digest('hex'), bytes: offset, stat: before };
   } finally { await handle.close(); }
 }
 
-async function packageFiles(root, expectedManifest, { objects = false } = {}) {
+async function packageFiles(root, expectedManifest, { objects = false, phase = () => {}, observe = () => {} } = {}) {
+  const observing = (file, declaredSha256 = null, alreadyReadSha256 = null) => observe({ root, file, declaredSha256, alreadyReadSha256 });
+  phase('root');
+  observing(root);
   await directory(root);
   let manifest = null;
   if (!objects) {
+    phase('manifest-read');
+    observing(path.join(root, 'files.private.json'), expectedManifest);
     manifest = await read(path.join(root, 'files.private.json'), { maximum: 8 * 1024 ** 2 });
+    observing(manifest.path, expectedManifest, manifest.sha256);
+    phase('manifest-pin');
     need(manifest.sha256 === expectedManifest);
   }
-  const declared = manifest ? JSON.parse(manifest.data) : null;
+  phase('manifest-schema'); const declared = manifest ? JSON.parse(manifest.data) : null;
   need(!declared || typeof declared === 'object' && !Array.isArray(declared) && Object.keys(declared).length <= 100000
     && Object.entries(declared).every(([name, hash]) => relative(name) && digest(hash)));
   const files = []; let total = 0;
   async function visit(folder, prefix = '') {
+    phase('directory-metadata');
+    observing(folder);
     await directory(folder);
+    phase('directory-listing');
     const names = (await fs.readdir(folder, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
     need(names.length <= 100000);
     for (const entry of names) {
+      phase('entry-name');
       need(relative(entry.name) && !entry.name.includes('/'));
       const name = prefix ? prefix + '/' + entry.name : entry.name, file = path.join(folder, entry.name);
       if (entry.isDirectory()) { need(!objects); await visit(file, name); }
       else {
-        const saved = await fileHash(file);
+        const expectedHash = declared?.[name] ?? (objects && /^[a-f0-9]{64}\.gz$/.test(name) ? name.slice(0, 64)
+          : name === 'files.private.json' ? expectedManifest : null);
+        observing(file, expectedHash);
+        const saved = await fileHash(file, { phase: name => phase('file-' + name) });
+        observing(file, expectedHash, saved.sha256);
+        phase('file-bounds');
         need(files.length < 100000 && (total += saved.bytes) <= 16 * 1024 ** 3);
-        if (objects) need(/^[a-f0-9]{64}\.gz$/.test(name) && name === saved.sha256 + '.gz' && saved.bytes <= 8 * 1024 ** 2);
+        if (objects) { phase('object-identity'); need(/^[a-f0-9]{64}\.gz$/.test(name) && name === saved.sha256 + '.gz' && saved.bytes <= 8 * 1024 ** 2); }
         files.push({ name, ...saved });
       }
     }
   }
   await visit(root);
-  if (declared) for (const [name, hash] of Object.entries(declared)) need(files.some(row => row.name === name && row.sha256 === hash));
-  const inventorySha256 = sha(JSON.stringify(files.map(({ name, sha256, bytes }) => ({ name, sha256, bytes }))));
+  phase('manifest-members');
+  if (declared) for (const [name, hash] of Object.entries(declared)) {
+    const actual = files.find(row => row.name === name); observing(path.join(root, name), hash, actual?.sha256 ?? null);
+    need(actual?.sha256 === hash);
+  }
+  phase('inventory'); const inventorySha256 = sha(JSON.stringify(files.map(({ name, sha256, bytes }) => ({ name, sha256, bytes }))));
   return { root, files, bytes: total, inventorySha256, manifestSha256: manifest?.sha256 ?? null };
 }
 
@@ -469,7 +491,7 @@ async function prepareDependencies({ targetServer, packageLockSha256, npmIdentit
       && (await read(receiptFile)).data.equals(bytes)); } };
 }
 
-async function prepareHost({ appRoot, server, before, environment, bootstrapSha256, exec, load, adapters, setPhase }) {
+async function prepareHost({ appRoot, server, before, environment, bootstrapSha256, exec, load, adapters, setPhase, observeFailure }) {
   const pins = adapters.pins ?? preparationPins;
   setPhase('source-credentials');
   const oldSource = before.metadata.source.releases.find(row => row.manifestSha256 === pins.oldSource); need(oldSource);
@@ -512,29 +534,45 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
     && sourceConfig.nodeVersion === node.version);
   const nodeProof = adapters.node ?? await fileHash(node.executable, { maximum: 256 * 1024 ** 2, privateMode: false });
   if (!adapters.node) need(nodeProof.stat.uid === 0n && !(Number(nodeProof.stat.mode) & 0o022) && await fs.realpath('/proc/self/exe') === node.executable);
-  setPhase('retained-packages');
-  const baseline = await packageFiles(sync.config.baselineRoot, pins.baseline);
+  const packagePhase = prefix => name => setPhase(prefix + '-' + name);
+  const observeRole = role => value => observeFailure({ role, ...value });
+  const baseline = await packageFiles(sync.config.baselineRoot, pins.baseline,
+    { phase: packagePhase('baseline'), observe: observeRole('baseline') });
   const retained = [];
   for (const row of [candidate, ...bootstrap.retained]) {
-    const parent = path.dirname(row.privateRoot), accepted = await read(path.join(parent, 'accepted.private.json'), { optional: true });
+    need(['candidate', 'serving-current', 'serving-previous'].includes(row.role));
+    setPhase(row.role + '-accepted-read');
+    const parent = path.dirname(row.privateRoot), acceptedPath = path.join(parent, 'accepted.private.json');
+    observeRole(row.role)({ root: parent, file: acceptedPath, declaredSha256: row.acceptedSha256 });
+    const accepted = await read(acceptedPath, { optional: true });
+    observeRole(row.role)({ root: parent, file: acceptedPath, declaredSha256: row.acceptedSha256, alreadyReadSha256: accepted?.sha256 });
+    setPhase(row.role + '-accepted-pin');
     if (row.role !== 'candidate') need(accepted?.sha256 === row.acceptedSha256);
     if (accepted) {
+      setPhase(row.role + '-accepted-validation');
       const value = JSON.parse(accepted.data);
       need(value.version === 1 && value.privateRoot === row.privateRoot && value.collectorRevision === row.collectorRevision
         && value.manifestSha256 === row.manifestSha256 && value.sourceBasis === row.sourceBasis);
     }
-    const seed = await read(path.join(parent, 'direct-seed.private.json'), { maximum: 1024 * 1024, optional: true });
+    setPhase(row.role + '-direct-seed-read');
+    const seedPath = path.join(parent, 'direct-seed.private.json');
+    observeRole(row.role)({ root: parent, file: seedPath, declaredSha256: row.directSeedSha256 });
+    const seed = await read(seedPath, { maximum: 1024 * 1024, optional: true });
+    observeRole(row.role)({ root: parent, file: seedPath, declaredSha256: row.directSeedSha256, alreadyReadSha256: seed?.sha256 });
+    setPhase(row.role + '-direct-seed-pin');
     if (row.role !== 'candidate') need((seed?.sha256 ?? null) === row.directSeedSha256);
     let objects = null;
     if (seed) {
+      setPhase(row.role + '-direct-seed-validation');
       const value = JSON.parse(seed.data);
       need(value.version === 1 && value.mode === 'sync' && value.collectorRevision === row.collectorRevision
         && value.manifestSha256 === row.manifestSha256 && value.sourceBasis === row.sourceBasis
         && value.bundleRoot === path.join(parent, 'audit-objects') && digest(value.pointer?.generation) && digest(value.pointer?.reportHash)
         && (!row.generation || value.pointer.generation === row.generation) && (!row.reportHash || value.pointer.reportHash === row.reportHash));
-      objects = await packageFiles(value.bundleRoot, null, { objects: true });
+      objects = await packageFiles(value.bundleRoot, null, { objects: true, phase: packagePhase(row.role + '-audit-objects'), observe: observeRole(row.role) });
     }
-    retained.push({ value: row, files: await packageFiles(row.privateRoot, row.manifestSha256), accepted, seed, objects });
+    retained.push({ value: row, files: await packageFiles(row.privateRoot, row.manifestSha256,
+      { phase: packagePhase(row.role + '-package'), observe: observeRole(row.role) }), accepted, seed, objects });
   }
   setPhase('release');
   const rootId = sha(JSON.stringify(['driver-reports-supabase-sync-v1', bootstrap.releaseSha, pins.source, pins.builder, pins.baseline, pins.candidate]));
@@ -675,8 +713,39 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
   return prepared;
 }
 
+async function sealedPackageFailure({ target, phase, operation, expectedSha, recipientKey, exec, load }) {
+  if (!target || !recipientKey || !/^prepare-(?:baseline|candidate|serving-current|serving-previous)-[a-z-]+$/.test(phase)) return null;
+  const relativePath = path.relative(target.root, target.file);
+  if (!['baseline', 'candidate', 'serving-current', 'serving-previous'].includes(target.role)
+    || relativePath && !relative(relativePath) || !path.isAbsolute(target.root)
+    || target.file !== target.root && !target.file.startsWith(target.root + path.sep)) return null;
+  let info, statKind = 'unavailable', realpathMatches = null;
+  try {
+    info = await fs.lstat(target.file);
+    statKind = info.isSymbolicLink() ? 'symbolic-link' : info.isFile() ? 'regular-file' : info.isDirectory() ? 'directory' : 'other';
+    realpathMatches = await fs.realpath(target.file).then(value => value === target.file, () => null);
+  } catch (error) { if (error.code === 'ENOENT') statKind = 'missing'; }
+  const value = { version: 1, kind: 'supabase-package-first-failure-v1', applicationCommit: expectedSha,
+    operation, operatorPhase: phase, role: target.role, relativePath, statKind,
+    ownerUid: Number.isSafeInteger(info?.uid) ? info.uid : null, mode: info ? info.mode & 0o7777 : null,
+    bytes: Number.isSafeInteger(info?.size) ? info.size : null, realpathMatches,
+    declaredSha256: digest(target.declaredSha256) ? target.declaredSha256 : null,
+    alreadyReadSha256: digest(target.alreadyReadSha256) ? target.alreadyReadSha256 : null };
+  const raw = Buffer.from(JSON.stringify(value)); if (raw.length > 8192) return null;
+  // No unsafe file is opened for diagnostics. A hash can only have come from
+  // the already completed, guarded reader; this branch reads metadata only.
+  if ((await exec('git', ['rev-parse', 'HEAD'])).stdout.trim() !== expectedSha) return null;
+  await exec('git', ['ls-files', '--error-unmatch', 'server/services/driverAuditTransferCodec.js']);
+  await exec('git', ['diff', '--quiet', 'HEAD', '--', 'server/services/driverAuditTransferCodec.js']);
+  const packed = gzipSync(raw), { sealTransferSecrets } = await load('services/driverAuditTransferCodec.js');
+  const metadataSha256 = sha(raw);
+  const capsule = sealTransferSecrets(recipientKey, { version: 1, kind: 'supabase-package-first-failure-capsule-v1',
+    applicationCommit: expectedSha, metadataSha256, metadataGzipSha256: sha(packed), metadataGzipBase64: packed.toString('base64') });
+  return { status: 'supabase-host-stopped', applicationCommit: expectedSha, operatorPhase: phase, metadataSha256, capsule };
+}
+
 export async function runDriverAuditSupabaseHandoff({ operation, appRoot, expectedSha, recipientPublicKey, bootstrapSha256 }, adapters = {}) {
-  let phase = 'inputs'; const locks = [];
+  let phase = 'inputs', failureTarget, recipientKey; const locks = [];
   const exec = adapters.exec ?? ((file, args, options = {}) => execute(file, args,
     { cwd: appRoot, timeout: 10_000, maxBuffer: 8 * 1024 ** 2, ...options }));
   const load = adapters.load ?? (name => import(pathToFileURL(path.join(appRoot, 'server', name)).href));
@@ -684,7 +753,7 @@ export async function runDriverAuditSupabaseHandoff({ operation, appRoot, expect
     need(['inspect-supabase-host', 'prepare-supabase-host'].includes(operation) && (adapters.platform ?? process.platform) === 'linux' && commit(expectedSha)
       && (operation !== 'prepare-supabase-host' || digest(bootstrapSha256))
       && path.isAbsolute(appRoot) && await fs.realpath(appRoot) === appRoot);
-    const key = recipient(recipientPublicKey), server = path.join(appRoot, 'server');
+    const key = recipient(recipientPublicKey), server = path.join(appRoot, 'server'); recipientKey = key;
     const checkout = async () => {
       need((await exec('git', ['rev-parse', 'HEAD'])).stdout.trim() === expectedSha);
       await exec('git', ['ls-files', '--error-unmatch', ...codeFiles]);
@@ -729,7 +798,7 @@ export async function runDriverAuditSupabaseHandoff({ operation, appRoot, expect
       phase = 'bootstrap-reader-checkout';
       await exec('git', ['ls-files', '--error-unmatch', 'server/vendor/driver-audits/integration/hosted/supabase-archive.mjs']);
       preparation = await prepareHost({ appRoot, server, before, environment: effectiveEnvironment, bootstrapSha256, exec, load, adapters,
-        setPhase: name => { phase = 'prepare-' + name; } });
+        setPhase: name => { phase = 'prepare-' + name; }, observeFailure: value => { failureTarget = { ...value }; } });
     }
     const after = await collect('readback');
     phase = 'readback-checkout'; await checkout();
@@ -750,7 +819,14 @@ export async function runDriverAuditSupabaseHandoff({ operation, appRoot, expect
         builderSha256: preparation.builderSha256, seedSelected: false } : {}),
       recipientSha256: sha(recipientPublicKey), capsule, readOnly: !preparation,
       ...(preparation ? { stagingOnly: true, databaseWrites: false } : {}), workersStarted: false, routingChanged: false };
-  } catch { throw Object.assign(Error('Supabase handoff stopped at ' + phase), { phase }); }
+  } catch {
+    const failure = Object.assign(Error('Supabase handoff stopped at ' + phase), { phase });
+    try {
+      const receipt = await sealedPackageFailure({ target: failureTarget, phase, operation, expectedSha, recipientKey, exec, load });
+      if (receipt) Object.defineProperty(failure, 'supabaseHostStopped', { value: receipt });
+    } catch { /* Preserve the original closed guard if private sealing fails. */ }
+    throw failure;
+  }
   finally {
     let failed = false;
     for (const lock of locks.reverse()) try { await lock.release(); } catch { failed = true; }
