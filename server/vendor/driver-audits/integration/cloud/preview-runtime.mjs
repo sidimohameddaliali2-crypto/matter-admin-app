@@ -30,11 +30,13 @@ export function createImportedAuditRuntime(options){
  const url=new URL(options.origin);if(url.origin!==options.origin||!(url.protocol==='https:'||url.hostname==='127.0.0.1'&&url.protocol==='http:'))throw Error('Invalid audit integration origin');
  return buildPreviewRuntime({...options,roadsKey:null},true);
 }
-async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allowedEmail,additionalAllowedEmails=[],privateRoot,packageOverride,authOverride,stateOverride,transportOverride,roadsKey=process.env.MATTER_PREVIEW_ROADS_KEY,local=false,reviewNamespace=PREVIEW_NAMESPACE,afterResponse,automaticFeed=false,automaticRefresh=false,onAuthenticatedRequest,auditImportStatus,auditSyncStatus,publicPathPrefix='',staffRenderer,remoteReadsBudgeted=false,staffReportFrame=false},staffIntegration){
+async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allowedEmail,additionalAllowedEmails=[],privateRoot,packageOverride,authOverride,stateOverride,rpcOverride,transportOverride,reviewContextOverride,roadsKey=process.env.MATTER_PREVIEW_ROADS_KEY,local=false,reviewNamespace=PREVIEW_NAMESPACE,afterResponse,automaticFeed=false,automaticRefresh=false,onAuthenticatedRequest,auditImportStatus,auditSyncStatus,publicPathPrefix='',staffRenderer,remoteReadsBudgeted=false,staffReportFrame=false,isRetiredAuditGeneration},staffIntegration){
  if(typeof staffReportFrame!=='boolean'||staffReportFrame&&(!staffIntegration||publicPathPrefix!=='/api/reporting'))throw Error('Trusted staff report frame required');
  if(typeof remoteReadsBudgeted!=='boolean'||remoteReadsBudgeted&&!staffIntegration)throw Error('Trusted remote archive accounting required');
  if(auditImportStatus!==undefined&&(!staffIntegration||typeof auditImportStatus!=='function'))throw Error('Trusted audit import status required');
  if(auditSyncStatus!==undefined&&(!staffIntegration||typeof auditSyncStatus!=='function'))throw Error('Trusted audit sync status required');
+ if(rpcOverride!==undefined&&(!staffIntegration||typeof rpcOverride!=='function'))throw Error('Trusted audit data transport required');
+ if(reviewContextOverride!==undefined&&(!staffIntegration||typeof reviewContextOverride!=='function'))throw Error('Trusted original review contexts required');
  if(publicPathPrefix!==''&&(!staffIntegration||publicPathPrefix!=='/api/reporting'))throw Error('Trusted audit route prefix required');
  if(automaticFeed&&!local&&!packageOverride)throw Error('Automatic hosted feed requires a verified package');
  if(local&&!/^http:\/\/127\.0\.0\.1:\d+$/.test(origin))throw Error('Local test must stay loopback-only');
@@ -48,8 +50,9 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
  const readAsync=async name=>{if(!has(name)||!Object.hasOwn(manifest,name))throw Error('File outside preview manifest');const bytes=packageOverride?await packageOverride.readAsync(name):read(name);if(!Buffer.isBuffer(bytes)||sha(bytes)!==manifest[name])throw Error('Preview file integrity failure');return bytes;};
  const json=name=>JSON.parse(read(name)),publication=json('publication.private.json'),identity=json('identities.private.json'),index=JSON.parse(gunzipSync(read('gps-index.private.json.gz'))),maps=json('maps.private.json');
  if(packageOverride&&(packageOverride.generation&&packageOverride.generation!==publication.head.manifest.sha256||packageOverride.reportHash&&packageOverride.reportHash!==publication.head.reportHash))throw Error('Preview package head mismatch');
- const rpc=createHostedRpc({secret}),rawState=stateOverride||createCloudState({rpc}),state=namespaceState(rawState,reviewNamespace),transport=previewArchiveTransport({remote:transportOverride||createSupabaseArchiveTransport({secret}),has,read,readAsync});
- const repository=await createCloudRepository({stateStore:{read:async()=>({revision:publication.revision||0,body:JSON.stringify(publication)})},transport,key:'frozen-preview',cacheBytes:96*1024*1024}).pin(),head=await repository.getHead();
+ const rpc=rpcOverride||createHostedRpc({secret}),rawState=stateOverride||createCloudState({rpc}),state=namespaceState(rawState,reviewNamespace),transport=previewArchiveTransport({remote:transportOverride||createSupabaseArchiveTransport({secret}),has,read,readAsync});
+ const pinnedRepository=await createCloudRepository({stateStore:{read:async()=>({revision:publication.revision||0,body:JSON.stringify(publication)})},transport,key:'frozen-preview',cacheBytes:96*1024*1024}).pin();
+ const repository=reviewContextOverride?reviewContextOverride(pinnedRepository):pinnedRepository,head=await repository.getHead();
  const access=createHostedAccess({rpc}),auth=authOverride||createHostedAuth({supabaseUrl:'https://trhhjfgfmxofxhnzocks.supabase.co',publishableKey,cookieKey,membership:access.membership,sessionActive:access.sessionActive,cookieName:'__Host-matter_preview'});
  const login=createPasswordLogin({supabaseUrl:'https://trhhjfgfmxofxhnzocks.supabase.co',publishableKey,allowedEmail,additionalAllowedEmails,throttle:createLoginThrottle({stateStore:state})});
  const readView=JSON.parse(gunzipSync(read('preview-read-view.private.json.gz')));
@@ -100,9 +103,11 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
 
  .mm-workspace-shell > .mm-content, .mm-workspace-shell > .mm-snapshot-foot { margin-left: 0 !important; }
  </style><script>window.addEventListener('matter-session-expired',()=>parent.postMessage('matter-audit-session-expired',location.origin));</script>`;
- return createCloudHttp({auth,service:report,origin,login,loginPage:passwordLoginHtml,compressPreviewReads:true,frozenEvidenceOverlay:staffIntegration,localFontAssets:staffIntegration,staffReportFrame,afterResponse,onAuthenticatedRequest,mapsEnabled:maps.enabled===true,readerBudget:local||remoteReadsBudgeted?undefined:createReaderBudgetPool({stateStore:rawState}),renderer:async(_actor,_service,url,framed)=>{
+ // Staff can select and copy report text without the captured dashboard's AI popup.
+ const selectionStyle=staffIntegration?'<style data-matter-driver-report-selection>.dashboard-ask-anchor[data-source="selection"]:has(> .dashboard-ask-panel:not([data-exploration])){display:none!important}</style>':'';
+ return createCloudHttp({auth,service:report,origin,login,loginPage:passwordLoginHtml,compressPreviewReads:true,frozenEvidenceOverlay:staffIntegration,localFontAssets:staffIntegration,staffReportFrame,afterResponse,onAuthenticatedRequest,isRetiredAuditGeneration,mapsEnabled:maps.enabled===true,readerBudget:local||remoteReadsBudgeted?undefined:createReaderBudgetPool({stateStore:rawState}),renderer:async(_actor,_service,url,framed)=>{
   if(!html){let source=fonts.html.replace(build.snapshot.path,'report-data/snapshot-'+build.snapshot.sha256+'.json');source=cloudHtml({html:initializeReportTab(source),priorManifest:build.snapshot,head:{...head,manifest:await report.browserManifest()},generation:head.manifest.sha256,publicPathPrefix});html=addCasePrefetch(addBrowserReadCache(addBrowserRequestQueue(addPrivateEvidenceCache(source.replace('</head>','<script>window.__matterPrivatePreview=true;window.__matterGpsPreview=true;window.__matterAutomaticPreview='+JSON.stringify(automaticRefresh||automaticFeed)+';</script></head>')))));html=addPreviewStartup(addStatusFlight(html),{...(await report.browserManifest()),generation:head.manifest.sha256,publicPathPrefix});}
-  const document=framed?html.replace('<head>','<head>'+frameHead):html;
+  const document=(framed?html.replace('<head>','<head>'+frameHead):html).replace('</head>',selectionStyle+'</head>');
   const page=prioritizePreviewStartup(addPreviewPhotoPrime(document,photoHints,url));
   return auditSyncStatus?addDriverAuditSyncStatus(page,framed?null:await syncStatus()):page;
  }});

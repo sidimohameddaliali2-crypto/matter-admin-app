@@ -1,3 +1,4 @@
+import { traceJob } from '../observability/telemetry.js';
 import truckoomApiService from '../services/truckoomApiService.js';
 import User from '../models/User.js';
 import { createVehicleLocationRecorder } from '../services/vehicleLocationCapture.js';
@@ -22,6 +23,7 @@ export function startRecordVehicleLocationsJob(intervalMs = RECORD_INTERVAL_MS) 
     })),
     onError: error => console.error('Vehicle location recording error', /^[A-Z0-9_]{1,64}$/.test(error.code || '') ? error.code : 'CAPTURE_FAILED'),
   });
-  recordOnce();
-  return setInterval(recordOnce, intervalMs);
+  const run = () => traceJob('vehicle-location-capture', recordOnce);
+  run();
+  return setInterval(run, intervalMs);
 }

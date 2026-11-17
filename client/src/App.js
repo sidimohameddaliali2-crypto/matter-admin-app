@@ -3,7 +3,8 @@ import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate, useLocat
 import { Provider, useDispatch, useSelector } from 'react-redux';
 import { store } from './store/store';
 import { Toaster } from './components/ui/toaster';
-import { refreshCurrentUser, logout } from './store/slices/authSlice';
+import { logout } from './store/slices/authSlice';
+import ActivityHistoryRoute, { AuthBootstrap } from './components/ActivityHistoryAccess';
 
 // Pages
 import Login from './pages/Login';
@@ -17,6 +18,7 @@ import DeliveryDetail from './pages/DeliveryDetail';
 import AddDelivery from './pages/AddDelivery';
 import BagTracking from './pages/BagOperations';
 import Reports from './pages/Reports';
+import Traceability from './pages/Traceability';
 import DriverReports from './pages/DriverReports';
 import CreateDriver from './pages/CreateDriver';
 import DriverMobile from './pages/DriverMobile';
@@ -160,20 +162,6 @@ const getFirstAvailablePath = (user) => {
   return firstAllowed?.path || '/no-access';
 };
 
-const AuthBootstrap = () => {
-  const dispatch = useDispatch();
-  const authToken = useSelector((state) => state.auth.token);
-
-  React.useEffect(() => {
-    const token = authToken || localStorage.getItem('token');
-    if (token) {
-      dispatch(refreshCurrentUser());
-    }
-  }, [authToken, dispatch]);
-
-  return null;
-};
-
 const BagOperationsRoute = ({warehouse=false}) => {
   const user = useSelector(state => state.auth.user) || safeGetUser();
   const dispatch = useDispatch();
@@ -279,6 +267,15 @@ function App() {
         <AuthBootstrap />
         <div className="App">
           <Routes>
+            <Route path="/traceability" element={
+              <ProtectedRoute>
+                <ActivityHistoryRoute fallback={
+                  <AccessDenied redirectPath="/" title="No access" message="Your account does not have access to Activity history." ctaLabel="Go back" />
+                }>
+                  <Layout><Traceability /></Layout>
+                </ActivityHistoryRoute>
+              </ProtectedRoute>
+            } />
             <Route path="/login" element={<Login />} />
             <Route path="/privacy-policy" element={<PrivacyPolicy />} />
             <Route path="/partner/login" element={<PartnerLogin />} />

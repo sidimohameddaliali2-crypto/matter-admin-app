@@ -29,7 +29,7 @@ on:
         default: false
 
       reclaim_archived_reporting_workspace:
-        description: Plan or reclaim verified workspace copies, or plan and move retired build scratch
+        description: Plan or reclaim verified workspace copies or disposable client build dependencies
         type: string
 
       verify_reporting_renderer:

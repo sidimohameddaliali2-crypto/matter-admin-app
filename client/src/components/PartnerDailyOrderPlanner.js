@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import partnerApi from '../utils/partnerApi';
 import PartnerOrderCalendar from './PartnerOrderCalendar';
 import PartnerDailyMenu from './PartnerDailyMenu';
+import { recordActivityChange, activityReference } from '../utils/activityCapture';
 import { DELIVERY_WINDOWS, deliveryDays, makePlanDay, dayTotal, dayQuantity, assertDayReady, assertAcceptedPlanDayMatches, quotePlanDay, submitPlanDay, dateClosed } from '../utils/partnerDailyPlan';
 
 const heading = { fontFamily: "'Archivo Black', sans-serif" };
@@ -79,6 +80,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
   }, [active?.date, plan.phase, reload]);
 
   const updateDay = patch => {
+    if (Object.prototype.hasOwnProperty.call(patch, 'window')) recordActivityChange({ field: `Delivery window on ${active.date}`, form: 'Daily order plan', before: active.window, after: patch.window });
     setError('');
     setPlan(p => ({ ...p, days: p.days.map((d, i) => i === p.index ? { ...d, ...patch, reviewed: false, skipped: false, error: '' } : d) }));
   };
@@ -114,7 +116,10 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
   };
   const changeQuantity = (item, delta) => {
     const items = { ...active.items };
-    const quantity = Math.max(0, (items[item._id]?.quantity || 0) + delta);
+    const before = items[item._id]?.quantity || 0;
+    const quantity = Math.max(0, before + delta);
+    if (quantity === before) return;
+    recordActivityChange({ field: `${activityReference(item.name, item._id)} quantity on ${active.date}`, form: 'Daily order plan', before, after: quantity });
     if (quantity) items[item._id] = { id: item._id, name: item.name, price: Number(item.price), quantity };
     else delete items[item._id];
     updateDay({ items });

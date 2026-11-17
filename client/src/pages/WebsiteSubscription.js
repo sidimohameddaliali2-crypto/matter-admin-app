@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { Search, Package, PauseCircle, Receipt, CheckCircle2, X } from 'lucide-react';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 import DeliveryCalendar from '../components/DeliveryCalendar';
 import { matchLabels } from '../components/subscriptionUi';
 import { formatDate, formatMoney, isCycleEnded, daysUntil } from '../utils/subscriptionFormat';
@@ -304,6 +305,17 @@ function PauseModal({ subscriptionId, cycleEndDate, onClose, onSuccess }) {
   const [mode, setMode] = useState('pause');
   const [pauseDates, setPauseDates] = useState([]);
   const [returnDates, setReturnDates] = useState([]);
+  const latestDates = useRef({ pauseDates, returnDates });
+  latestDates.current = { pauseDates, returnDates };
+  const changeDates = (field, next) => {
+    recordActivityChange({ field: field === 'pauseDates' ? 'Pause days' : 'Return days', form: `Subscription pause · ${subscriptionId}`, before: latestDates.current[field], after: next });
+    latestDates.current = { ...latestDates.current, [field]: next };
+    (field === 'pauseDates' ? setPauseDates : setReturnDates)(next);
+  };
+  const changeMode = next => {
+    recordActivityChange({ field: 'Calendar selection mode', form: `Subscription pause · ${subscriptionId}`, before: mode, after: next });
+    setMode(next);
+  };
   const [reason, setReason] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -319,16 +331,18 @@ function PauseModal({ subscriptionId, cycleEndDate, onClose, onSuccess }) {
   const toggleDate = (iso) => {
     if (isDisabled(iso)) return;
     if (mode === 'pause') {
-      setReturnDates((prev) => prev.filter((d) => d !== iso));
-      setPauseDates((prev) => (prev.includes(iso) ? prev.filter((d) => d !== iso) : [...prev, iso].sort()));
+      changeDates('returnDates', latestDates.current.returnDates.filter(d => d !== iso));
+      const dates = latestDates.current.pauseDates;
+      changeDates('pauseDates', dates.includes(iso) ? dates.filter(d => d !== iso) : [...dates, iso].sort());
     } else {
-      setPauseDates((prev) => prev.filter((d) => d !== iso));
-      setReturnDates((prev) => (prev.includes(iso) ? prev.filter((d) => d !== iso) : [...prev, iso].sort()));
+      changeDates('pauseDates', latestDates.current.pauseDates.filter(d => d !== iso));
+      const dates = latestDates.current.returnDates;
+      changeDates('returnDates', dates.includes(iso) ? dates.filter(d => d !== iso) : [...dates, iso].sort());
     }
   };
 
-  const removePauseDate = (iso) => setPauseDates((prev) => prev.filter((d) => d !== iso));
-  const removeReturnDate = (iso) => setReturnDates((prev) => prev.filter((d) => d !== iso));
+  const removePauseDate = (iso) => changeDates('pauseDates', latestDates.current.pauseDates.filter(d => d !== iso));
+  const removeReturnDate = (iso) => changeDates('returnDates', latestDates.current.returnDates.filter(d => d !== iso));
 
   const dayClassName = (iso) => {
     if (pauseDates.includes(iso)) return 'bg-matter-purple text-white hover:opacity-90';
@@ -399,14 +413,14 @@ function PauseModal({ subscriptionId, cycleEndDate, onClose, onSuccess }) {
           <div className="inline-flex rounded-lg border border-gray-200 p-1 bg-gray-50">
             <button
               type="button"
-              onClick={() => setMode('pause')}
+              onClick={() => changeMode('pause')}
               className={`px-3 py-1.5 rounded-md text-sm font-semibold transition ${mode === 'pause' ? 'bg-matter-purple text-white' : 'text-gray-600 hover:bg-gray-100'}`}
             >
               Select pause days
             </button>
             <button
               type="button"
-              onClick={() => setMode('return')}
+              onClick={() => changeMode('return')}
               className={`px-3 py-1.5 rounded-md text-sm font-semibold transition ${mode === 'return' ? 'bg-matter-green text-matter-navy' : 'text-gray-600 hover:bg-gray-100'}`}
             >
               Select return days
@@ -461,7 +475,7 @@ function PauseModal({ subscriptionId, cycleEndDate, onClose, onSuccess }) {
                   {pauseDates.map((iso) => (
                     <span key={iso} className="inline-flex items-center gap-1 text-xs bg-matter-purple/10 text-matter-purple rounded-full px-2 py-1">
                       {formatDate(iso)}
-                      <button type="button" onClick={() => removePauseDate(iso)}><X className="w-3 h-3" /></button>
+                      <button type="button" aria-label={`Remove pause day ${iso}`} onClick={() => removePauseDate(iso)}><X className="w-3 h-3" /></button>
                     </span>
                   ))}
                 </div>
@@ -478,7 +492,7 @@ function PauseModal({ subscriptionId, cycleEndDate, onClose, onSuccess }) {
                   {returnDates.map((iso) => (
                     <span key={iso} className="inline-flex items-center gap-1 text-xs bg-matter-green/20 text-matter-navy rounded-full px-2 py-1">
                       {formatDate(iso)}
-                      <button type="button" onClick={() => removeReturnDate(iso)}><X className="w-3 h-3" /></button>
+                      <button type="button" aria-label={`Remove return day ${iso}`} onClick={() => removeReturnDate(iso)}><X className="w-3 h-3" /></button>
                     </span>
                   ))}
                 </div>

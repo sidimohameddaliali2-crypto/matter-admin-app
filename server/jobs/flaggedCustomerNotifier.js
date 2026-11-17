@@ -1,3 +1,4 @@
+import { traceJob } from '../observability/telemetry.js';
 import axios from 'axios';
 import mongoose from 'mongoose';
 import Bag from '../models/Bag.js';
@@ -82,53 +83,55 @@ async function sendSlackMessage(payloadText) {
 }
 
 export async function runFlaggedNotifierOnce(threshold = DEFAULT_THRESHOLD) {
-  try {
-    const flagged = await findFlaggedCustomers(threshold);
-    if (!Array.isArray(flagged) || flagged.length === 0) return { sent: 0 };
+  return traceJob('flagged-customer-notifier', async () => {
+    try {
+      const flagged = await findFlaggedCustomers(threshold);
+      if (!Array.isArray(flagged) || flagged.length === 0) return { sent: 0 };
 
-    let sentCount = 0;
+      let sentCount = 0;
 
-    for (const c of flagged) {
-      const key = c.key;
+      for (const c of flagged) {
+        const key = c.key;
 
-      // check if a collection task already exists for this customer
-      const assigned = await hasCollectionAssignedForCustomer(key);
-      if (assigned) continue; // skip sending
+        // check if a collection task already exists for this customer
+        const assigned = await hasCollectionAssignedForCustomer(key);
+        if (assigned) continue; // skip sending
 
-      // check last sent timestamp
-      const existing = await FlaggedAlert.findOne({ key }).exec();
-      const today = new Date();
-      const alreadySentToday = existing && existing.lastSent && existing.lastSent.toDateString() === today.toDateString();
-      if (alreadySentToday) continue; // already sent today
+        // check last sent timestamp
+        const existing = await FlaggedAlert.findOne({ key }).exec();
+        const today = new Date();
+        const alreadySentToday = existing && existing.lastSent && existing.lastSent.toDateString() === today.toDateString();
+        if (alreadySentToday) continue; // already sent today
 
-      // Prepare payload
-      const name = existing?.customerName || c.bags[0]?.assignedTo?.customer?.customerName || null;
-      const id = existing?.customerId || c.bags[0]?.assignedTo?.customer?.customerId || null;
-      const bagIds = c.bagIds || [];
+        // Prepare payload
+        const name = existing?.customerName || c.bags[0]?.assignedTo?.customer?.customerName || null;
+        const id = existing?.customerId || c.bags[0]?.assignedTo?.customer?.customerId || null;
+        const bagIds = c.bagIds || [];
 
-      const textLines = [];
-      textLines.push('*Flagged Customer - Automatic Daily Alert*');
-      if (name) textLines.push(`*Name:* ${name}`);
-      if (id) textLines.push(`*Customer ID:* ${id}`);
-      textLines.push(`*Bags:* ${c.bagCount}`);
-      if (bagIds.length > 0) textLines.push(`*Bag IDs:* ${bagIds.slice(0, 20).join(', ')}${bagIds.length > 20 ? ' (and more...)' : ''}`);
+        const textLines = [];
+        textLines.push('*Flagged Customer - Automatic Daily Alert*');
+        if (name) textLines.push(`*Name:* ${name}`);
+        if (id) textLines.push(`*Customer ID:* ${id}`);
+        textLines.push(`*Bags:* ${c.bagCount}`);
+        if (bagIds.length > 0) textLines.push(`*Bag IDs:* ${bagIds.slice(0, 20).join(', ')}${bagIds.length > 20 ? ' (and more...)' : ''}`);
 
-      try {
-        await sendSlackMessage(textLines.join('\n'));
-        sentCount++;
+        try {
+          await sendSlackMessage(textLines.join('\n'));
+          sentCount++;
 
-        // upsert flagged alert record
-        await FlaggedAlert.findOneAndUpdate({ key }, { key, customerName: name, customerId: id, lastSent: new Date() }, { upsert: true }).exec();
-      } catch (err) {
-        console.error('Failed to send Slack alert for', key, err.message);
+          // upsert flagged alert record
+          await FlaggedAlert.findOneAndUpdate({ key }, { key, customerName: name, customerId: id, lastSent: new Date() }, { upsert: true }).exec();
+        } catch (err) {
+          console.error('Failed to send Slack alert for', key, err.message);
+        }
       }
-    }
 
-    return { sent: sentCount };
-  } catch (err) {
-    console.error('Error in flagged notifier:', err.message);
-    throw err;
-  }
+      return { sent: sentCount };
+    } catch (err) {
+      console.error('Error in flagged notifier:', err.message);
+      throw err;
+    }
+  });
 }
 
 export function startFlaggedNotifier(intervalMs = 24 * 60 * 60 * 1000, threshold = DEFAULT_THRESHOLD) {

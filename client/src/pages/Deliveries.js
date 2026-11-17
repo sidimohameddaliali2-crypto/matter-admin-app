@@ -7,6 +7,7 @@ import PrintConfigModal from '../components/deliveries/PrintConfigModal';
 import DeliveryDetailModal from '../components/deliveries/DeliveryDetailModal';
 import { toBusinessComponents, businessComponentsToUtcDate, formatBusinessDateInput } from '../utils/businessTime';
 import { useSocket } from '../contexts/SocketContext';
+import { recordActivityChange } from '../utils/activityCapture';
 
 const COMPLETED_STATUSES = ['delivered', 'completed', 'collected'];
 const PENDING_STATUSES = ['pending', 'assigned', 'on_route', 'picked_up'];
@@ -122,6 +123,8 @@ const Deliveries = () => {
   const [matterSyncError, setMatterSyncError] = useState('');
   const [refreshVersion, setRefreshVersion] = useState(0);
   const [selectedDeliveries, setSelectedDeliveries] = useState(() => new Set());
+  const selectionRef = React.useRef(selectedDeliveries);
+  useEffect(() => { selectionRef.current = selectedDeliveries; }, [selectedDeliveries]);
   const [allDrivers, setAllDrivers] = useState([]);
   const [isPrintConfigOpen, setIsPrintConfigOpen] = useState(false);
   const [isImportingFromMatter, setIsImportingFromMatter] = useState(false);
@@ -336,6 +339,9 @@ const Deliveries = () => {
   const hasSelections = selectedCount > 0;
 
   const handleToggleDeliverySelection = (id) => {
+    const next = new Set(selectionRef.current);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    traceSelection(next);
     setSelectedDeliveries((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
@@ -344,6 +350,10 @@ const Deliveries = () => {
   };
 
   const handleToggleSelectAllOnPage = () => {
+    const next = new Set(selectionRef.current);
+    if (allFilteredSelected) filteredDeliveryIds.forEach(id => next.delete(id));
+    else filteredDeliveryIds.forEach(id => next.add(id));
+    traceSelection(next);
     setSelectedDeliveries((prev) => {
       const next = new Set(prev);
       if (allFilteredSelected) filteredDeliveryIds.forEach((id) => next.delete(id));
@@ -352,7 +362,23 @@ const Deliveries = () => {
     });
   };
 
+  function traceSelection(next) {
+    const labels = values => Array.from(values).map(id => `${deliveries.find(delivery => delivery._id === id)?.customerName || 'Delivery'} (${id})`);
+    recordActivityChange({ field: 'Selected delivery records', form: 'Delivery selection', before: labels(selectionRef.current), after: labels(next) });
+    selectionRef.current = next;
+  }
+
   const handleClearFilters = () => {
+    const filters = [
+      ['Search', searchTerm, ''],
+      ['Status filter', STATUS_STYLES[statusFilter]?.label || 'All', 'All'],
+      ['Type filter', typeFilter === 'all' ? 'All' : typeFilter, 'All'],
+      ['Area filter', areaFilter === 'all' ? 'All' : areaFilter, 'All'],
+      ['Emirate filter', emirateFilter === 'all' ? 'All' : emirateFilter, 'All'],
+      ['Driver filter', driverFilter === 'all' ? 'All' : driverOptions.find(([id]) => id === driverFilter)?.[1] || 'Recorded driver', 'All'],
+      ['Timing filter', timingFilter === 'all' ? 'All' : timingFilter === 'late' ? 'Late Only' : 'Early Only', 'All'],
+    ];
+    filters.forEach(([field, before, after]) => recordActivityChange({ field, form: 'Delivery filters', before, after, ...(field === 'Search' ? { private: true } : {}) }));
     setSearchTerm('');
     setStatusFilter('all');
     setTypeFilter('all');
@@ -569,6 +595,7 @@ const Deliveries = () => {
         <input
           type="text"
           placeholder="Search customer, driver, zone…"
+          data-activity-label="Delivery search"
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
           className="w-full pl-10 pr-4 py-2 bg-white border border-gray-200 rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
@@ -584,11 +611,12 @@ const Deliveries = () => {
         </div>
         <input
           type="date"
+          data-activity-label="Delivery date"
           value={selectedDate || ''}
           onChange={(e) => setSelectedDate(e.target.value)}
           className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none"
         />
-        <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
+        <select data-activity-label="Status filter" value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
           <option value="all">Status: All</option>
           <option value="pending">Pending</option>
           <option value="assigned">Assigned</option>
@@ -596,31 +624,31 @@ const Deliveries = () => {
           <option value="collected">Collected</option>
           <option value="cancelled">Cancelled</option>
         </select>
-        <select value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
+        <select data-activity-label="Type filter" value={typeFilter} onChange={(e) => setTypeFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
           <option value="all">Type: All</option>
           <option value="Delivery">Delivery</option>
           <option value="Task">Task</option>
           <option value="Collection">Collection</option>
         </select>
         {areaOptions.length > 0 && (
-          <select value={areaFilter} onChange={(e) => setAreaFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
+          <select data-activity-label="Area filter" value={areaFilter} onChange={(e) => setAreaFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
             <option value="all">Area: All</option>
             {areaOptions.map((area) => <option key={area} value={area}>{area}</option>)}
           </select>
         )}
         {emirateOptions.length > 0 && (
-          <select value={emirateFilter} onChange={(e) => setEmirateFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
+          <select data-activity-label="Emirate filter" value={emirateFilter} onChange={(e) => setEmirateFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
             <option value="all">Emirate: All</option>
             {emirateOptions.map((emirate) => <option key={emirate} value={emirate}>{emirate}</option>)}
           </select>
         )}
-        <select value={timingFilter} onChange={(e) => setTimingFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
+        <select data-activity-label="Timing filter" value={timingFilter} onChange={(e) => setTimingFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
           <option value="all">Timing: All</option>
           <option value="late">Late Only</option>
           <option value="early">Early Only</option>
         </select>
         {driverOptions.length > 0 && (
-          <select value={driverFilter} onChange={(e) => setDriverFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
+          <select data-activity-label="Driver filter" value={driverFilter} onChange={(e) => setDriverFilter(e.target.value)} className="flex-shrink-0 px-3 py-1.5 border border-gray-200 rounded text-sm bg-white focus:ring-1 focus:ring-blue-500 focus:border-blue-500 focus:outline-none">
             <option value="all">Driver: All</option>
             {driverOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
           </select>

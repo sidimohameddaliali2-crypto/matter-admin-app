@@ -3,6 +3,7 @@ import { X } from 'lucide-react';
 import Conversation from './Conversation';
 import ReviewHistory from './ReviewHistory';
 import {conversationHistory,conversationPreview} from './conversationHistory';
+import {recordActivityChange} from '../../utils/activityCapture';
 import { categoryLabels, filterParams, formatDubai, idOf, prettyStatus, ResourceState, useServiceResource } from './serviceUtils';
 
 const subscriptionDate = value => {
@@ -17,6 +18,7 @@ export function SubscriptionList({subscriptions = [], compact = false}) {
 function CustomerContext({ customerId, customerName, issues = [], categories = [], capabilities, currentUserId, matchState, filters = {} }) {
   const context = useServiceResource(customerId ? `/customers/${encodeURIComponent(customerId)}/context` : null, filterParams({from:filters.from,to:filters.to,categoryId:filters.categoryId}));
   const [selectedIssue, setSelectedIssue] = useState(null);
+  const selectIssue = (next,element) => {recordActivityChange({field:'Selected historical issue',before:selectedIssue||'',after:next||'',form:'Customer context',element,private:true});setSelectedIssue(next);};
   const conversation = useServiceResource(selectedIssue ? `/issues/${encodeURIComponent(selectedIssue)}` : null);
   const data = context.data;
   const scopedIssues = data?.issues || issues;
@@ -29,14 +31,14 @@ function CustomerContext({ customerId, customerName, issues = [], categories = [
     {!customerId && <div className="cs-notice">Unmatched contact. No identity is guessed.</div>}
     {data && <><details><summary>Source details · {prettyStatus(sourceState)}</summary><div>{data.source?.message || data.message || (sourceState === 'available' ? 'Available customer context loaded.' : 'Current source context is unavailable.')}</div></details>{sourceState !== 'available' && <p className="cs-notice">{sourceState === 'partial' ? data.source?.message || data.message || 'API updated · database unavailable' : 'Saved data · source unavailable.'}</p>}<dl className="cs-context-list"><dt>Source state</dt><dd>{prettyStatus(sourceState)}</dd><dt>Observed at</dt><dd>{formatDubai(observedAt)}</dd>{data.customer?.email && <><dt>Email</dt><dd>{data.customer.email}</dd></>}{data.customer?.phone && <><dt>Phone</dt><dd>{data.customer.phone}</dd></>}</dl><h3 style={{marginTop:16}}>Subscriptions</h3><SubscriptionList subscriptions={subscriptions}/></>}
     <p className="cs-muted" style={{ marginTop: 16 }}>Read-only</p></section>
-    <section className="cs-card"><h3>Conversation history</h3>{selectedIssue ? <button onClick={()=>setSelectedIssue(null)}>‹ Back to conversation history</button> : history.length ? history.map(chat => <article className="cs-history-entry" key={chat.conversationId}>
+    <section className="cs-card"><h3>Conversation history</h3>{selectedIssue ? <button onClick={event=>selectIssue(null,event.currentTarget)}>‹ Back to conversation history</button> : history.length ? history.map(chat => <article className="cs-history-entry" key={chat.conversationId}>
       <strong>{chat.startedAt ? `Started ${formatDubai(chat.startedAt)}` : chat.firstMessageAt ? `First captured ${formatDubai(chat.firstMessageAt)}` : chat.lastMessageAt ? `Last message ${formatDubai(chat.lastMessageAt)}` : 'Captured conversation'}</strong>
       {chat.closedAt&&<p className="cs-muted">Conversation resolved · {formatDubai(chat.closedAt)}{chat.closedBy?` · ${chat.closedBy}`:''}</p>}
       <p className="cs-history-preview">{conversationPreview(chat.preview)}</p>
       <p className="cs-muted">{chat.source === 'gallabox_history' ? 'Historical transcript · grouping unverified' : chat.source === 'gallabox' ? 'Gallabox' : 'Captured source'}{Number.isFinite(chat.messageCount) ? ` · ${chat.messageCount} captured messages` : ''}</p>
       {chat.issues.filter(issue=>issue.boundaryState==='confirmed' && issue.summary).map(issue=><p key={idOf(issue)}><strong>{issue.summary}</strong>{issue.categoryIds?.length>0 && <span> · {categoryLabels(issue.categoryIds,categories)}</span>}{['open','resolved'].includes(issue.outcome) && <span> · Recorded outcome: {prettyStatus(issue.outcome)}</span>}</p>)}
-      <button aria-pressed={chat.issues.some(issue=>idOf(issue)===selectedIssue)} onClick={() => setSelectedIssue(idOf(chat.issues[0]))}>View conversation</button>
-      {chat.issues.length>1 && <details><summary>Saved issue reviews ({chat.issues.length})</summary>{chat.issues.map(issue=><button key={idOf(issue)} onClick={()=>setSelectedIssue(idOf(issue))}>{issue.summary||'View saved review'}</button>)}</details>}
+      <button aria-pressed={chat.issues.some(issue=>idOf(issue)===selectedIssue)} onClick={event => selectIssue(idOf(chat.issues[0]),event.currentTarget)}>View conversation</button>
+      {chat.issues.length>1 && <details><summary>Saved issue reviews ({chat.issues.length})</summary>{chat.issues.map(issue=><button key={idOf(issue)} onClick={event=>selectIssue(idOf(issue),event.currentTarget)}>{issue.summary||'View saved review'}</button>)}</details>}
     </article>) : <p className="cs-muted">No conversations in this scope.</p>}</section>
     {selectedIssue && <section aria-label="Selected conversation"><ResourceState loading={conversation.loading} error={conversation.error}/>{conversation.error&&<button onClick={conversation.refresh}>Retry conversation</button>}{!conversation.loading&&!conversation.error&&conversation.data && <><Conversation issue={conversation.data.issue} messages={conversation.data.messages || []}/>{conversation.data.reviews?.some(review=>review.revisions?.length||Object.keys(review.draft||{}).length>0) && <ReviewHistory reviews={conversation.data.reviews} capabilities={capabilities} currentUserId={currentUserId} onChanged={conversation.refresh}/>}</>}</section>}
   </>;

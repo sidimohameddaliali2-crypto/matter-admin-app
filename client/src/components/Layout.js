@@ -64,6 +64,7 @@ const NAV_ITEMS = [
 
   { name: 'Partners', href: '/admin/partners', icon: Building2, permission: 'partners', group: 'Partners' },
 
+  { name: 'Activity history', href: '/traceability', icon: Radar, activityHistory: true, group: 'Admin' },
   { name: 'Users', href: '/users', icon: Users, permission: 'users', group: 'Admin' },
   { name: 'Employees', href: '/employees', icon: Briefcase, permission: 'employees', group: 'Admin' },
 
@@ -112,6 +113,7 @@ const Layout = ({ children }) => {
   // explicitly granted (server sends the effective set). Items with no permission
   // key (e.g. Store Keeper) fall back to their `roles` list.
   const isNavItemVisible = (item) => {
+    if (item.activityHistory) return user?.canViewActivityHistory === true;
     if (user?.role === 'super_admin') return true;
     if (item.permission) {
       if (user?.role === 'yellowblock_user' && item.permission === 'events') return true;

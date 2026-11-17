@@ -2,6 +2,7 @@ import React from 'react';
 import { MapContainer, TileLayer, Marker, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { recordActivityChange } from '../utils/activityCapture';
 
 const pinIcon = new L.Icon({
   iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
@@ -25,9 +26,14 @@ function ClickHandler({ onPick }) {
 
 // Draggable-pin location editor. lat/lng/onChange are controlled by the parent;
 // dragging the marker or clicking anywhere on the map calls onChange(lat, lng).
-function LocationPinPicker({ lat, lng, onChange, height = 240 }) {
+function LocationPinPicker({ lat, lng, onChange, height = 240, activityLabel = 'Delivery location pin' }) {
   const hasPosition = Number.isFinite(lat) && Number.isFinite(lng);
   const position = hasPosition ? [lat, lng] : DEFAULT_CENTER;
+  const pick = (newLat, newLng) => {
+    if (!Number.isFinite(newLat) || !Number.isFinite(newLng) || (lat === newLat && lng === newLng)) return;
+    recordActivityChange({ field: activityLabel, form: 'Edit delivery', before: hasPosition ? `${lat.toFixed(6)}, ${lng.toFixed(6)}` : 'Not set', after: `${newLat.toFixed(6)}, ${newLng.toFixed(6)}` });
+    onChange(newLat, newLng);
+  };
 
   return (
     <div style={{ height }} className="rounded-lg overflow-hidden border border-gray-200">
@@ -43,11 +49,11 @@ function LocationPinPicker({ lat, lng, onChange, height = 240 }) {
           eventHandlers={{
             dragend: (e) => {
               const { lat: newLat, lng: newLng } = e.target.getLatLng();
-              onChange(newLat, newLng);
+              pick(newLat, newLng);
             },
           }}
         />
-        <ClickHandler onPick={onChange} />
+        <ClickHandler onPick={pick} />
       </MapContainer>
     </div>
   );

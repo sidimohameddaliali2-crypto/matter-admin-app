@@ -13,11 +13,12 @@ const safeInput=value=>{const {actor,authorName,...input}=value;return input;};
 const fontRoute=/^\/report-assets\/font-[a-f0-9]{64}\.(woff2?|ttf|otf)$/;
 const diagnosticCategory=error=>{const allowed=new Set(['state-timeout','state-transport','state-rate-limit','state-server-error','state-contention','state-rejected','state-invalid-response','identity-timeout','identity-transport','identity-rate-limit','identity-server-error','identity-rejected','identity-invalid-response']);for(let e=error,n=0;e&&n<5;e=e.cause,n++)if(allowed.has(e.diagnosticCategory))return e.diagnosticCategory;if(error?.status===409||error?.cause?.status===409)return 'state-contention';const code=error?.code||error?.cause?.code;if(code==='ENOENT')return 'missing-file';if(code==='storage_timeout')return 'archive-timeout';if(code==='storage_unavailable')return 'archive-unavailable';if(code==='storage_rate_limit')return 'archive-rate-limit';if(code==='storage_rejected')return 'archive-rejected';if(code==='ERR_STREAM_PREMATURE_CLOSE'||code==='ECONNRESET'||code==='EPIPE')return 'client-disconnect';const msg=typeof error?.message==='string'?error.message.slice(0,256):'';if(/integrity|digest|hash|mismatch/i.test(msg))return 'integrity';if(/exceed|too large|size limit/i.test(msg))return 'size-limit';if(/budget/i.test(msg))return 'budget';if(/timed? ?out|timeout/i.test(msg))return 'timeout';if(error instanceof SyntaxError||/invalid.*json|unexpected token/i.test(msg))return 'invalid-data';return 'unclassified';};
 const defaultDiagnostic=entry=>console.error(JSON.stringify(entry));
-export function createCloudHttp({auth,service,origin,renderer,login,requestCode,loginPage,readerBudget,readerMaxBodyBytes=MAX_READER_BODY_BYTES,diagnostic=defaultDiagnostic,mapsEnabled=false,compressPreviewReads=false,localFontAssets=false,afterResponse,onAuthenticatedRequest,staffReportFrame=false,frozenEvidenceOverlay=false}){
+export function createCloudHttp({auth,service,origin,renderer,login,requestCode,loginPage,readerBudget,readerMaxBodyBytes=MAX_READER_BODY_BYTES,diagnostic=defaultDiagnostic,mapsEnabled=false,compressPreviewReads=false,localFontAssets=false,afterResponse,onAuthenticatedRequest,staffReportFrame=false,frozenEvidenceOverlay=false,isRetiredAuditGeneration}){
  const site=new URL(origin);if(!(site.protocol==='https:'||site.protocol==='http:'&&site.hostname==='127.0.0.1')||site.origin!==origin||site.username||site.password||typeof renderer!=='function'||!auth||!service)throw Error('Invalid hosted report configuration');
  if(typeof diagnostic!=='function'||readerBudget&&(!readerBudget.reserve||!readerBudget.settle)||!Number.isSafeInteger(readerMaxBodyBytes)||readerMaxBodyBytes<1||readerMaxBodyBytes>MAX_READER_BODY_BYTES)throw Error('Invalid reader budget');
  // Only trusted staff hosts opt in for hash-checked fonts from their local package.
  if(typeof staffReportFrame!=='boolean'||staffReportFrame&&!localFontAssets)throw Error('Trusted staff frame configuration required');
+ if(isRetiredAuditGeneration!==undefined&&(!staffReportFrame||typeof isRetiredAuditGeneration!=='function'))throw Error('Trusted audit generation lookup required');
  if(typeof localFontAssets!=='boolean')throw Error('Invalid local font configuration');
  if(typeof frozenEvidenceOverlay!=='boolean'||frozenEvidenceOverlay&&!compressPreviewReads)throw Error('Invalid frozen overlay configuration');
  const compressionCacheBytes=96*1024*1024;
@@ -83,7 +84,22 @@ export function createCloudHttp({auth,service,origin,renderer,login,requestCode,
     }:{};
     return await send(200,html,'text/html; charset=utf-8',frameHeaders);
    }
-   if(/^\/report-data\/(detail|history|query|archive|snapshot)-[a-f0-9]{64}\.json$/.test(url.pathname)){phase='resource';const entries=[...url.searchParams.entries()];if(entries.length>1||entries.some(([key,value])=>key!=='generation'||!/^[a-f0-9]{64}$/.test(value)))throw httpError(400);const value=await requestService.resource(url.pathname.slice(1),{...(entries.length?{generation:entries[0][1]}:{}),acceptEncoding:req.headers['accept-encoding']||''},actor);return await send(200,value.body??value,'application/json',{...(value.encoding==='br'?{'Content-Encoding':'br',Vary:'Accept-Encoding'}:value.gzip?{'Content-Encoding':'gzip'}:{}),...(Number.isSafeInteger(value.decodedBytes)&&value.decodedBytes>=0?{'X-Report-Bytes':String(value.decodedBytes)}:{})},value.encodedBytes);}
+   if(/^\/report-data\/(detail|history|query|archive|snapshot)-[a-f0-9]{64}\.json$/.test(url.pathname)){
+    phase='resource';
+    const entries=[...url.searchParams.entries()];
+    if(entries.length>1||entries.some(([key,value])=>key!=='generation'||!/^[a-f0-9]{64}$/.test(value)))throw httpError(400);
+    const generation=entries[0]?.[1];
+    let value;
+    try{
+     value=await requestService.resource(url.pathname.slice(1),{generation,acceptEncoding:req.headers['accept-encoding']||''},actor);
+    }catch(error){
+     // Frozen catalogs may still name an old selector after its derived bytes move to recovery.
+     const missing=error?.status===404||error?.code==='ENOENT'||error?.code==='storage_not_found';
+     if(generation&&missing&&isRetiredAuditGeneration&&await isRetiredAuditGeneration(generation))throw httpError(409);
+     throw error;
+    }
+    return await send(200,value.body??value,'application/json',{...(value.encoding==='br'?{'Content-Encoding':'br',Vary:'Accept-Encoding'}:value.gzip?{'Content-Encoding':'gzip'}:{}),...(Number.isSafeInteger(value.decodedBytes)&&value.decodedBytes>=0?{'X-Report-Bytes':String(value.decodedBytes)}:{})},value.encodedBytes);
+   }
    if(fontRoute.test(url.pathname)&&typeof requestService.fontAsset==='function'){phase='font';const value=requestService.fontAsset(url.pathname);return await send(200,value.bytes,value.mime);}
    if(url.pathname==='/api/reporting/status'){phase='status';const status=await requestService.status(actor);return await send(200,{...status,token:session.csrf});}
    if(url.pathname==='/api/reporting/reviews'){phase='reviews';return await send(200,{state:await requestService.reviews(actor)});}

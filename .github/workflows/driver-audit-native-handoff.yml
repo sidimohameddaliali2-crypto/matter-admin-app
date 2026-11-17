@@ -1,0 +1,90 @@
+name: Driver Reports native handoff
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Reviewed handoff operation
+        type: choice
+        options:
+          - inspect
+          - inspect-bindings
+          - pause-builder
+          - resume-builder
+          - prepare-transfer
+          - receive-transfer
+          - create-profile
+          - plan-import
+          - stage-import
+          - verify-import
+          - stage-builder
+          - stage-source
+          - diagnose-roots
+        default: inspect
+      expected_deployed_sha:
+        description: Exact current application commit on the host
+        type: string
+        required: true
+      transfer_plan_b64:
+        description: Public inventory totals, target and one-use RSA public recipient, encoded as base64 JSON
+        type: string
+      transfer_session_id:
+        description: Prepared encrypted transfer session UUID
+        type: string
+      import_template_sha256:
+        description: SHA-256 of the received private import template
+        type: string
+      import_profile_sha256:
+        description: SHA-256 of the host-created native import profile
+        type: string
+      diagnostic_page:
+        description: Page of RSA-sealed private metadata, starting at zero; all returns at most sixteen pages
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  handoff:
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare reviewed operator
+        id: prepare
+        env:
+          EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ ]]
+          printf 'code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-handoff.mjs)" >> "$GITHUB_OUTPUT"
+          printf 'import_code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-import.mjs)" >> "$GITHUB_OUTPUT"
+      - name: Run reviewed handoff operation
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
+          EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
+          NATIVE_HANDOFF_OPERATION: ${{ inputs.operation }}
+          NATIVE_HANDOFF_CODE: ${{ steps.prepare.outputs.code }}
+          NATIVE_TRANSFER_PLAN_B64: ${{ inputs.transfer_plan_b64 }}
+          NATIVE_TRANSFER_SESSION_ID: ${{ inputs.transfer_session_id }}
+          NATIVE_IMPORT_CODE: ${{ steps.prepare.outputs.import_code }}
+          NATIVE_IMPORT_TEMPLATE_SHA256: ${{ inputs.import_template_sha256 }}
+          NATIVE_IMPORT_PROFILE_SHA256: ${{ inputs.import_profile_sha256 }}
+          NATIVE_DIAGNOSTIC_PAGE: ${{ inputs.diagnostic_page }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          command_timeout: 60m
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,NATIVE_HANDOFF_OPERATION,NATIVE_HANDOFF_CODE,NATIVE_TRANSFER_PLAN_B64,NATIVE_TRANSFER_SESSION_ID,NATIVE_IMPORT_CODE,NATIVE_IMPORT_TEMPLATE_SHA256,NATIVE_IMPORT_PROFILE_SHA256,NATIVE_DIAGNOSTIC_PAGE
+          script: |
+            set -e
+            cd -- "$DO_APP_PATH"
+            printf '%s' "$NATIVE_HANDOFF_CODE" | base64 -d | node --input-type=module - --run

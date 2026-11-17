@@ -16,6 +16,7 @@ import {
 } from '@mui/material';
 import { clearError, clearSuccess } from '../../store/slices/userSlice';
 import { PERMISSION_GROUPS, PERMISSION_KEYS, getDefaultPermissions } from '../../constants/permissions';
+import { recordActivityChange } from '../../utils/activityCapture';
 
 // Build a clean permissions object containing only the canonical page keys.
 const pickPageKeys = (source = {}) => {
@@ -52,9 +53,14 @@ const UserPermissionsModal = ({ isOpen, onClose, user, onSubmit, currentUser }) 
   };
 
   const handleRoleChange = (newRole) => {
+    if (newRole === role) return;
+    const nextPermissions = pickPageKeys(getDefaultPermissions(newRole));
+    const labels = values => PERMISSION_GROUPS.flatMap(group => group.items.filter(({ key }) => values[key]).map(({ label }) => label));
+    recordActivityChange({ field: 'User role', form: 'User permissions', before: role, after: newRole });
+    recordActivityChange({ field: 'Page permissions', form: 'User permissions', before: labels(permissions), after: labels(nextPermissions) });
     setRole(newRole);
     // Reset the toggles to the new role's defaults.
-    setPermissions(pickPageKeys(getDefaultPermissions(newRole)));
+    setPermissions(nextPermissions);
   };
 
 
@@ -231,6 +237,7 @@ const UserPermissionsModal = ({ isOpen, onClose, user, onSubmit, currentUser }) 
                                       control={
                                         <Switch
                                           checked={enabled}
+                                          inputProps={{ 'aria-label': `${label} permission` }}
                                           onChange={() => handlePermissionChange(key)}
                                           color="success"
                                           size="small"

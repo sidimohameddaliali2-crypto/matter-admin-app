@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useSelector } from 'react-redux';
 import api from '../utils/api';
+import { activityReference, recordActivityChange } from '../utils/activityCapture';
 import DeliveryAddressFields from '../components/DeliveryAddressFields';
 import * as XLSX from 'xlsx';
 import { parseGPSFromLink as enhancedParseGPSFromLink } from '../utils/gpsParsing';
@@ -303,6 +304,14 @@ const AddDelivery = () => {
   const [drivers, setDrivers] = useState([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [importData, setImportData] = useState([]);
+  const latestImportRows = React.useRef(importData);
+  latestImportRows.current = importData;
+  const importFileRequest = React.useRef(0);
+  const importMounted = React.useRef(true);
+  useEffect(() => {
+    importMounted.current = true;
+    return () => { importMounted.current = false; importFileRequest.current += 1; };
+  }, []);
   const [validationErrors, setValidationErrors] = useState([]);
   const [fileName, setFileName] = useState('');
   const [importProgress, setImportProgress] = useState({
@@ -340,6 +349,8 @@ const AddDelivery = () => {
   });
 
   const [todoInput, setTodoInput] = useState('');
+  const latestForm = React.useRef(formData);
+  latestForm.current = formData;
 
   // Collection state
   const [collectionBagIds, setCollectionBagIds] = useState(['']);
@@ -349,6 +360,8 @@ const AddDelivery = () => {
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
   const customerCacheRef = React.useRef(null);
   const searchDebounceRef = React.useRef(null);
+  const collectionLocationRequest = React.useRef(0);
+  useEffect(() => () => { collectionLocationRequest.current += 1; }, []);
 
   useEffect(() => {
     fetchDrivers();
@@ -482,6 +495,7 @@ const AddDelivery = () => {
 
   const addTodoItem = () => {
     if (todoInput.trim()) {
+      recordActivityChange({ field: 'Task items', form: 'Add task', before: formData.todoList.map(item => item.text), after: [...formData.todoList.map(item => item.text), todoInput.trim()], private: true });
       setFormData(prev => ({
         ...prev,
         todoList: [...prev.todoList, { text: todoInput.trim(), completed: false }]
@@ -491,6 +505,7 @@ const AddDelivery = () => {
   };
 
   const removeTodoItem = (index) => {
+    recordActivityChange({ field: 'Task items', form: 'Add task', before: formData.todoList.map(item => item.text), after: formData.todoList.filter((_, i) => i !== index).map(item => item.text), private: true });
     setFormData(prev => ({
       ...prev,
       todoList: prev.todoList.filter((_, i) => i !== index)
@@ -498,6 +513,12 @@ const AddDelivery = () => {
   };
 
   const handleTabChange = (tab) => {
+    recordActivityChange({ field: 'Delivery entry method', form: 'Add delivery', before: activeTab, after: tab });
+    recordActivityChange({ field: 'Delivery type', form: 'Add delivery', before: formData.type, after: tab === 'task' ? 'Task' : tab === 'collection' ? 'Collection' : 'Delivery' });
+    if (tab !== activeTab) {
+      collectionLocationRequest.current += 1;
+      importFileRequest.current += 1;
+    }
     setActiveTab(tab);
     // Set type based on active tab
     if (tab === 'manual') {
@@ -555,7 +576,12 @@ const AddDelivery = () => {
   };
 
   const selectCustomer = (customer) => {
+    const locationRequest = ++collectionLocationRequest.current;
+    const initiatingToken = localStorage.getItem('token');
+    const initiatingPage = window.location.pathname;
     const name = `${customer.firstName || ''} ${customer.lastName || ''}`.trim();
+    const label = (customerName, customerId) => customerName ? activityReference(customerName, customerId) : 'Not selected';
+    recordActivityChange({ field: 'Collection customer', form: 'Add collection', before: label(formData.customerName, formData.customerId === 'CUST-' ? '' : formData.customerId), after: label(name || 'Customer', customer.customerId) });
     setFormData(prev => ({
       ...prev,
       customerId: customer.customerId || '',
@@ -570,7 +596,15 @@ const AddDelivery = () => {
       api.get(`/customers/${encodeURIComponent(customer.customerId)}/location`)
         .then(res => {
           const loc = res?.data?.data;
-          if (!loc) return;
+          if (!loc || collectionLocationRequest.current !== locationRequest || localStorage.getItem('token') !== initiatingToken || window.location.pathname !== initiatingPage || latestForm.current.customerId !== customer.customerId) return;
+          const current = latestForm.current;
+          const nextGps = loc.gpsLocation ? { lat: loc.gpsLocation.lat || '', lng: loc.gpsLocation.lng || '', link: loc.gpsLocation.link || '' } : current.gpsLocation;
+          const coordinates = point => point && point.lat !== '' && point.lng !== '' && Number.isFinite(Number(point.lat)) && Number.isFinite(Number(point.lng)) ? `${Number(point.lat).toFixed(6)}, ${Number(point.lng).toFixed(6)}` : 'Not set';
+          const captureForm = `Add collection · ${name || customer.customerId}`;
+          recordActivityChange({ field: 'Collection address', form: captureForm, before: current.address, after: loc.address || current.address });
+          recordActivityChange({ field: 'Collection area', form: captureForm, before: current.zone, after: loc.zone || current.zone });
+          recordActivityChange({ field: 'Collection coordinates', form: captureForm, before: coordinates(current.gpsLocation), after: coordinates(nextGps) });
+          recordActivityChange({ field: 'Collection map link', form: captureForm, before: current.gpsLocation?.link || '', after: nextGps?.link || '' });
           setFormData(prev => ({
             ...prev,
             address: loc.address || prev.address,
@@ -584,16 +618,34 @@ const AddDelivery = () => {
     }
   };
 
-  const addBagIdField = () => setCollectionBagIds(prev => [...prev, '']);
-  const removeBagIdField = (index) => setCollectionBagIds(prev => prev.filter((_, i) => i !== index));
+  const bagRowLabels = values => values.map((value, index) => value || `Empty bag row ${index + 1}`);
+  const addBagIdField = () => { recordActivityChange({ field: 'Collection bags', form: 'Add collection', before: bagRowLabels(collectionBagIds), after: bagRowLabels([...collectionBagIds, '']) }); setCollectionBagIds(prev => [...prev, '']); };
+  const removeBagIdField = (index) => { recordActivityChange({ field: 'Collection bags', form: 'Add collection', before: bagRowLabels(collectionBagIds), after: bagRowLabels(collectionBagIds.filter((_, i) => i !== index)) }); setCollectionBagIds(prev => prev.filter((_, i) => i !== index)); };
   const updateBagId = (index, value) => setCollectionBagIds(prev => prev.map((b, i) => i === index ? value : b));
+
+  const observeImportRows = (next, element) => {
+    const before = latestImportRows.current;
+    const describe = rows => rows.slice(0, 5).map((row, index) => {
+      const sourceIndex = /^temp-(\d+)$/.exec(row._id || '');
+      return `Row ${sourceIndex ? Number(sourceIndex[1]) + 2 : index + 2} · ${activityReference(row.customerName || 'Not named', row.customerId)}`;
+    });
+    recordActivityChange({ field: 'Imported row count', form: 'Bulk delivery import', before: before.length, after: next.length, element });
+    recordActivityChange({ field: 'Imported rows (first 5)', form: 'Bulk delivery import', before: describe(before), after: describe(next), element });
+    latestImportRows.current = next;
+  };
 
   const handleFileUpload = e => {
     const file = e.target.files[0];
     if (!file) return;
+    const fileInput = e.currentTarget;
+    const request = ++importFileRequest.current;
+    const initiatingToken = localStorage.getItem('token');
+    const initiatingPage = window.location.pathname;
+    const currentFile = () => importMounted.current && importFileRequest.current === request && localStorage.getItem('token') === initiatingToken && window.location.pathname === initiatingPage;
 
     setFileName(file.name);
     setValidationErrors([]);
+    observeImportRows([], fileInput);
     setImportData([]);
     setImportProgress({
       total: 0,
@@ -606,6 +658,7 @@ const AddDelivery = () => {
     const reader = new FileReader();
 
     reader.onload = event => {
+      if (!currentFile()) return;
       try {
         const data = new Uint8Array(event.target.result);
         const workbook = XLSX.read(data, { type: 'array' });
@@ -617,7 +670,7 @@ const AddDelivery = () => {
           return;
         }
 
-        processImportedData(jsonData);
+        processImportedData(jsonData, fileInput);
       } catch (errorReading) {
         console.error('Error reading file:', errorReading);
         setValidationErrors(["Error reading file. Please make sure it's a valid Excel file."]);
@@ -625,6 +678,7 @@ const AddDelivery = () => {
     };
 
     reader.onerror = () => {
+      if (!currentFile()) return;
       setValidationErrors(['Error reading file']);
     };
 
@@ -665,7 +719,7 @@ const AddDelivery = () => {
     return '';
   };
 
-  const processImportedData = data => {
+  const processImportedData = (data, element) => {
     const headers = data[0].map(h => h?.toString().trim().toLowerCase() || '');
     const rows = data.slice(1);
     const processedData = [];
@@ -844,6 +898,7 @@ const AddDelivery = () => {
       }
     });
 
+    observeImportRows(processedData, element);
     setImportData(processedData);
     setValidationErrors(errors);
 
@@ -952,6 +1007,7 @@ const AddDelivery = () => {
         alert(successMessage);
 
         // Clear import data after successful import
+        latestImportRows.current = [];
         setImportData([]);
         setPastedData('');
         setValidationErrors([]);
@@ -1062,7 +1118,13 @@ const AddDelivery = () => {
   };
 
   const clearImport = () => {
+    importFileRequest.current += 1;
+    const fileInput = document.getElementById('file-upload');
+    observeImportRows([], fileInput);
+    recordActivityChange({ field: 'Import file', form: 'Bulk delivery import', before: fileName ? '1 file' : '0 files', after: '0 files', element: fileInput });
+    recordActivityChange({ field: 'Pasted delivery data', form: 'Bulk delivery import', before: pastedData, after: '', private: true, element: fileInput });
     setImportData([]);
+    setPastedData('');
     setValidationErrors([]);
     setFileName('');
     setImportProgress({
@@ -1072,7 +1134,6 @@ const AddDelivery = () => {
       error: 0,
       inProgress: false
     });
-    const fileInput = document.getElementById('file-upload');
     if (fileInput) fileInput.value = '';
   };
 
@@ -1362,6 +1423,7 @@ const AddDelivery = () => {
             <input
               type="file"
               id="file-upload"
+              data-activity-label="Import file"
               accept=".xlsx,.xls,.csv"
               onChange={handleFileUpload}
               className="hidden"
@@ -1654,6 +1716,7 @@ const AddDelivery = () => {
                     <input
                       type="text"
                       value={bagId}
+                      data-activity-label={`Collection bag ${index + 1}`}
                       onChange={e => updateBagId(index, e.target.value)}
                       placeholder={`Bag ID ${index + 1}`}
                       className={`flex-1 ${inputCls}`}
@@ -1917,16 +1980,23 @@ const AddDelivery = () => {
                 type="text"
                 name="gpsLocation.link"
                 value={formData.gpsLocation?.link || ''}
-                onChange={e =>
+                onChange={e => {
+                  const link = e.target.value;
+                  const parsed = enhancedParseGPSFromLink(link);
+                  const current = latestForm.current.gpsLocation || {};
+                  if (parsed) {
+                    recordActivityChange({ field: 'Task latitude', form: 'Add task', before: current.lat ?? '', after: parsed.lat, element: e.currentTarget });
+                    recordActivityChange({ field: 'Task longitude', form: 'Add task', before: current.lng ?? '', after: parsed.lng, element: e.currentTarget });
+                  }
                   setFormData(prev => ({
                     ...prev,
                     gpsLocation: {
                       ...prev.gpsLocation,
-                      link: e.target.value,
-                      ...enhancedParseGPSFromLink(e.target.value)
+                      link,
+                      ...parsed
                     }
-                  }))
-                }
+                  }));
+                }}
                 className={inputCls}
                 placeholder="Paste Google Maps or Apple Maps link"
               />

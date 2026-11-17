@@ -1,3 +1,4 @@
+import { traceDependency } from '../observability/telemetry.js';
 import { CUSTOMER_RADIUS_METRES } from './truckoomVisitRules.js';
 import axios from 'axios';
 import dotenv from 'dotenv';
@@ -55,8 +56,8 @@ class TruckoomApiService {
     if (this.accessToken && Date.now() < this.accessTokenExpiresAt) return this.accessToken;
     if (this.accessTokenPromise) return this.accessTokenPromise;
     this.accessTokenPromise = (async () => {
-      const { data } = await axios.post(`${this.baseURL}?token=generateAccessToken`,
-        { username: this.username, password: this.password }, { timeout: 15000 });
+      const { data } = await traceDependency('truckoom', 'post', () => axios.post(`${this.baseURL}?token=generateAccessToken`,
+        { username: this.username, password: this.password }, { timeout: 15000 }));
       const token = data?.data?.token || data?.token;
       if (Number(data?.result) !== 1 || !token) throw new Error('Truckoom token request failed');
       this.accessToken = token;
@@ -70,9 +71,9 @@ class TruckoomApiService {
     const token = await this.getAccessToken();
     if (beforeDispatch) await beforeDispatch(body);
     const requestStartedAt = new Date();
-    const { data } = await axios.post(`${this.baseURL}?token=${method}`, body,
+    const { data } = await traceDependency('truckoom', 'post', () => axios.post(`${this.baseURL}?token=${method}`, body,
       { headers: { 'auth-code': token }, timeout: 15000,
-        ...(method === 'getVehicleTrackLogs' ? { maxContentLength: 32 * 1024 * 1024 } : {}) });
+        ...(method === 'getVehicleTrackLogs' ? { maxContentLength: 32 * 1024 * 1024 } : {}) }));
     const sourceReceipt = afterResponse ? await afterResponse(data, requestStartedAt, new Date(), body) : null;
     if (Number(data?.result) !== 1) {
       if (retry && /token|auth-code/i.test(data?.message || '')) {
@@ -107,9 +108,9 @@ class TruckoomApiService {
   async getGeofenceAlerts(date, retry = true) {
     this.assertConfigured();
     try {
-      const { data } = await axios.get(this.baseURL, { params: {
+      const { data } = await traceDependency('truckoom', 'get', () => axios.get(this.baseURL, { params: {
         token: 'getGeofenceAlerts', user: this.username, pass: this.password, Date: date,
-      }, timeout: 20000 });
+      }, timeout: 20000 }));
       if (!Array.isArray(data)) throw Object.assign(new Error('Truckoom geofence alerts request failed'), { code: 'TRUCKOOM_INVALID_RESPONSE' });
       return data;
     } catch (error) {
@@ -126,10 +127,10 @@ class TruckoomApiService {
       throw new RangeError('Alert data requires an explicit range of at most 24 hours');
     }
     const token = await this.getAccessToken();
-    const { data } = await axios.post(`${this.baseURL}?token=getAlertData`, {
+    const { data } = await traceDependency('truckoom', 'post', () => axios.post(`${this.baseURL}?token=getAlertData`, {
       access_token: token, username: this.username, password: this.password,
       format: 'json', from, to,
-    }, { timeout: 25000 });
+    }, { timeout: 25000 }));
     const envelopes = Array.isArray(data) ? data : [data];
     if (retry && envelopes.some(item => Number(item?.result ?? item?.status) === 0
       && /token.*(?:invalid|expired)|(?:invalid|expired).*token/i.test(item?.message || ''))) {
@@ -155,11 +156,11 @@ class TruckoomApiService {
   /** Every vehicle registered under the company — vehicle_no, imei, device_name. */
   async getCompanyVehicles() {
     this.assertConfigured();
-    const response = await axios.post(
+    const response = await traceDependency('truckoom', 'post', () => axios.post(
       `${this.baseURL}?token=getCompanyWiseVehicleData`,
       { username: this.username, password: this.password, company_name: this.companyName },
       { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
-    );
+    ));
     if (response.data?.result !== 1) {
       throw new Error(response.data?.message || 'Failed to fetch Truckoom vehicle list');
     }
@@ -179,8 +180,8 @@ class TruckoomApiService {
       const token = await this.getAccessToken();
       await beforeDispatch?.();
       const requestStartedAt = new Date();
-      const { data } = await axios.post(`${this.baseURL}?token=getTokenBaseLiveData&ProjectId=49`,
-        { company_names: '', format: 'json' }, { headers: { 'auth-code': token }, timeout: 20000, maxContentLength: 32 * 1024 * 1024 });
+      const { data } = await traceDependency('truckoom', 'post', () => axios.post(`${this.baseURL}?token=getTokenBaseLiveData&ProjectId=49`,
+        { company_names: '', format: 'json' }, { headers: { 'auth-code': token }, timeout: 20000, maxContentLength: 32 * 1024 * 1024 }));
       if (/token|auth-code/i.test(data?.root?.error || '')) this.accessToken = null;
       let sourceReceipt = null;
       try {

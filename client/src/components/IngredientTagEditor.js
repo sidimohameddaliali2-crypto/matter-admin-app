@@ -1,22 +1,28 @@
 import React, { useState } from 'react';
 import { X } from 'lucide-react';
+import { recordActivityChange } from '../utils/activityCapture';
 
 // One ingredient tag per item: click the tag to toggle it between "shown to
 // the customer" (filled/green) and "backend only" (outlined/muted) — used
 // for exclusion/allergen matching either way, since hiding an ingredient
 // from display must never hide it from a safety check. The × removes it
 // entirely, and the small input below adds one not pulled from Supy.
-const IngredientTagEditor = ({ value, onChange }) => {
+const IngredientTagEditor = ({ value, onChange, activityLabel = 'Ingredients' }) => {
   const [draft, setDraft] = useState('');
   const tags = Array.isArray(value) ? value : [];
-
-  const toggleVisible = (index) => {
-    const next = tags.map((tag, i) => (i === index ? { ...tag, visible: !tag.visible } : tag));
+  const changeTags = (next) => {
+    const describe = items => items.map(tag => `${tag.name} (${tag.visible ? 'shown to customer' : 'backend only'})`);
+    recordActivityChange({ field: activityLabel, form: 'Weekly menu meal', before: describe(tags), after: describe(next) });
     onChange(next);
   };
 
+  const toggleVisible = (index) => {
+    const next = tags.map((tag, i) => (i === index ? { ...tag, visible: !tag.visible } : tag));
+    changeTags(next);
+  };
+
   const removeTag = (index) => {
-    onChange(tags.filter((_, i) => i !== index));
+    changeTags(tags.filter((_, i) => i !== index));
   };
 
   // A comma always splits into separate tags — typing "Salt, Pepper" commits
@@ -25,7 +31,7 @@ const IngredientTagEditor = ({ value, onChange }) => {
   const commitNames = (text) => {
     const names = text.split(',').map((s) => s.trim()).filter(Boolean);
     if (names.length === 0) return;
-    onChange([...tags, ...names.map((name) => ({ name, visible: true }))]);
+    changeTags([...tags, ...names.map((name) => ({ name, visible: true }))]);
   };
 
   const handleDraftChange = (e) => {
@@ -82,6 +88,7 @@ const IngredientTagEditor = ({ value, onChange }) => {
       <div className="flex gap-1.5">
         <input
           type="text"
+          data-activity-label={`${activityLabel} draft`}
           value={draft}
           onChange={handleDraftChange}
           onKeyDown={(e) => {

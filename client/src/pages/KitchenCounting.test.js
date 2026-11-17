@@ -2,9 +2,13 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import api from '../utils/api';
 import KitchenCounting from './KitchenCounting';
+import { installActivityCapture } from '../utils/activityCapture';
 
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn() } }));
-jest.mock('../components/PartnerKitchenOrders', () => () => null);
+jest.mock('../contexts/SocketContext', () => ({useSocket: () => ({socket: null})}));
+const mockCountingSave = jest.fn();
+const mockCountingRows = jest.fn(rows => rows);
+jest.mock('xlsx', () => ({utils: {book_new: () => ({}), json_to_sheet: rows => mockCountingRows(rows), book_append_sheet: () => {}}, writeFile: (...args) => mockCountingSave(...args)}));
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
 const A = '2026-10-20', B = '2026-10-21';
@@ -27,6 +31,7 @@ beforeEach(async () => {
   pending = {}; fail = false;
   api.post.mockImplementation(async () => ({ data: { success: true, preparation: 'completed' } }));
   api.get.mockImplementation(async (path, config) => {
+    if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}};
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', startDate: A, endDate: B }] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [entry] } };
     if (path.includes('kitchen-inputs')) return { data: { data: { plan_name: 'Custom', macros: { carbohydrates: 60, protein: 60, fat: 20 }, active_delivery_dates: [A, B] } } };
@@ -52,6 +57,21 @@ test('before choosing a date, date discovery needs one small request and no comp
   expect(api.get.mock.calls.filter(([url])=>url.endsWith('/kitchen-dates'))).toHaveLength(1);
   expect(api.get.mock.calls.filter(([url])=>url.endsWith('/selections'))).toHaveLength(0);
   expect(api.get.mock.calls.filter(([url])=>/\/(main-meal-options|breakfast-options|snack-options)$/.test(url))).toHaveLength(0);
+});
+
+test('a kitchen date chip records its unsaved selection with no automatic-load edit', async () => {
+  localStorage.setItem('token', 'fixture-session'); window.history.replaceState({}, '', '/kitchen-counting');
+  const previousFetch = window.fetch, warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const capture = jest.fn().mockResolvedValue({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({ success: true }) }); window.fetch = capture;
+  const cleanup = installActivityCapture();
+  try {
+    const chip = container.querySelector('[aria-label="Delivery dates"] button'); expect(chip).toBeTruthy();
+    await act(async () => chip.click()); await act(async () => window.dispatchEvent(new Event('pagehide')));
+    const events = capture.mock.calls.flatMap(([, options]) => JSON.parse(options.body).events);
+    expect(events).toHaveLength(1);
+    expect(events[0].changes[0]).toEqual({ field: 'Delivery date', before: '', after: A, redacted: false });
+    expect(events[0].stage).toBe('form_edited');
+  } finally { cleanup(); window.fetch = previousFetch; localStorage.clear(); warn.mockRestore(); }
 });
 
 test('obsolete date A cannot overwrite date B, and a failed refresh cannot export B as current', async () => {
@@ -143,4 +163,84 @@ test('clicking the current date during loading keeps the request alive and clear
   expect(exportButton().disabled).toBe(false);
   expect(api.get).toHaveBeenCalledTimes(reads);
   expect(api.post).toHaveBeenCalledTimes(preparations);
+});
+
+
+test('Partner order is inline below cook groups and included in the main Excel export', async () => {
+  const originalGet = api.get.getMockImplementation();
+  const item = {itemId: 'partner-meal', name: 'Partner Bowl', mealType: 'bowl', quantity: 7};
+  api.get.mockImplementation(async (path, config) => path === '/menus/kitchen-partner-orders'
+    ? {data: {success: true, data: {date: config.params.date, orders: [{id: 'po', lines: [item]}], counts: [item], orderCount: 1, totalQuantity: 7}}}
+    : originalGet(path, config));
+  await select(1, A);
+  await act(async () => pending[A]({data: {success: true, data: [{email: entry.email}]}}));
+  const section = container.querySelector('[aria-label="Partner order"]');
+  expect(section.textContent).toContain('Partner Bowl');
+  expect(section.closest('details')).toBeNull();
+  expect(container.querySelector('.kitchen-count-groups').compareDocumentPosition(section) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel')).click());
+  expect(mockCountingSave).toHaveBeenCalledWith(expect.anything(), `kitchen-counting-${A}.xlsx`);
+  expect(mockCountingRows.mock.calls.at(-1)[0].at(-1)).toMatchObject({Category: 'Partner order', 'Meal Name': 'Partner Bowl', Count: 7, 'Total Protein Weight (g)': ''});
+  api.get.mockImplementation(async (path, config) => {if (path === '/menus/kitchen-partner-orders') throw new Error('Partner feed failed'); return originalGet(path, config);});
+  const saved = mockCountingSave.mock.calls.length;
+  await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel')).click());
+  expect(mockCountingSave).toHaveBeenCalledTimes(saved);
+  expect(container.textContent).toContain('Partner feed failed');
+});
+
+
+test('a partner-only cooking day can use the main Excel download', async () => {
+  const originalGet = api.get.getMockImplementation();
+  const item = {itemId: 'po', name: 'Partner-only bowl', mealType: 'bowl', quantity: 3};
+  api.get.mockImplementation(async (path, config) => {
+    if (path.endsWith('/selections')) return {data: {success: true, data: []}};
+    if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [{id: 'po', lines: [item]}], counts: [item], orderCount: 1, totalQuantity: 3}}};
+    return originalGet(path, config);
+  });
+  await select(1, A);
+  await act(async () => pending[A]({data: {success: true, data: []}}));
+  const button = [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel'));
+  expect(button.disabled).toBe(false);
+  await act(async () => button.click());
+  expect(mockCountingRows.mock.calls.at(-1)[0]).toEqual([expect.objectContaining({Category: 'Partner order', Count: 3})]);
+});
+
+test('a date change while partner export verification is pending cannot download the old date', async () => {
+  await select(1, A);
+  await act(async () => pending[A]({data: {success: true, data: [{email: entry.email}]}}));
+  const originalGet = api.get.getMockImplementation();
+  let resolvePartner;
+  api.get.mockImplementation((path, config) => path === '/menus/kitchen-partner-orders' && config.params.date === A
+    ? new Promise(resolve => {resolvePartner = resolve;}) : originalGet(path, config));
+  await act(async () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel')).click());
+  await select(1, B);
+  await act(async () => resolvePartner({data: {success: true, data: {date: A, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}}));
+  expect(mockCountingSave).not.toHaveBeenCalled();
+});
+
+
+test.each([false, true])('independent partner dates outside customer menus stay visible and exportable (no menus=%s)', async noMenus => {
+  const outside = '2026-11-17';
+  const item = {itemId: 'po', name: 'Outside-menu bowl', mealType: 'bowl', quantity: 4};
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => {
+    if (path.startsWith('/menus?') && noMenus) return {data: {success: true, data: []}};
+    if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [{id: 'po', lines: [item]}], counts: [item], orderCount: 1, totalQuantity: 4}}};
+    return originalGet(path, config);
+  });
+  if (noMenus) {await act(async () => root.unmount()); root = createRoot(container); await act(async () => root.render(<KitchenCounting />));}
+  const writes = api.post.mock.calls.length;
+  await act(async () => {
+    const field = container.querySelector('[aria-label="Partner-only delivery date"]');
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, outside);
+    field.dispatchEvent(new Event('change', {bubbles: true}));
+  });
+  expect(container.querySelector('[aria-label="Partner order"]').textContent).toContain('Outside-menu bowl');
+  expect(container.querySelector('.kitchen-count-groups')).toBeNull();
+  const button = [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel'));
+  expect(button.disabled).toBe(false);
+  await act(async () => button.click());
+  expect(mockCountingSave).toHaveBeenCalledWith(expect.anything(), `kitchen-counting-${outside}.xlsx`);
+  expect(mockCountingRows.mock.calls.at(-1)[0]).toEqual([expect.objectContaining({Category: 'Partner order', Count: 4})]);
+  expect(api.post).toHaveBeenCalledTimes(writes);
 });

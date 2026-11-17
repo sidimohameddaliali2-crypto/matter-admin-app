@@ -2,13 +2,15 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import api from '../utils/api';
 import KitchenList from './KitchenList';
+import { installActivityCapture } from '../utils/activityCapture';
 
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn(), patch: jest.fn(), put: jest.fn() } }));
-jest.mock('../components/PartnerKitchenOrders', () => () => null);
 jest.mock('../lib/kitchenDayScope', () => ({ ...jest.requireActual('../lib/kitchenDayScope'), kitchenToday: () => '2026-10-22' }));
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
 const mockPdfSave = jest.fn();
+const mockPdfText = jest.fn();
+const mockPdfTable = jest.fn();
 const mockExcelSave = jest.fn();
 const mockExcelRows = jest.fn((rows) => rows);
 jest.mock('jspdf', () => ({ __esModule: true, default: function FixturePDF() {
@@ -17,9 +19,10 @@ jest.mock('jspdf', () => ({ __esModule: true, default: function FixturePDF() {
     save: (...args) => mockPdfSave(...args),
   };
   ['addPage', 'rect', 'roundedRect', 'setFillColor', 'setFont', 'setFontSize', 'setPage', 'setTextColor', 'text'].forEach((key) => { doc[key] = () => {}; });
+  doc.text = (...args) => mockPdfText(...args);
   return doc;
 } }));
-jest.mock('jspdf-autotable', () => ({ __esModule: true, default: (doc) => { doc.lastAutoTable = { finalY: 140 }; } }));
+jest.mock('jspdf-autotable', () => ({ __esModule: true, default: (doc, options) => { mockPdfTable(options); doc.lastAutoTable = { finalY: 140 }; } }));
 jest.mock('xlsx', () => ({ utils: { book_new: () => ({}), json_to_sheet: (rows) => mockExcelRows(rows), book_append_sheet: () => {} }, writeFile: (...args) => mockExcelSave(...args) }));
 
 
@@ -83,9 +86,12 @@ test.each(['main', 'snack'])('open-date %s-only partial selection stays in Missi
 });
 
 beforeEach(async () => {
+  if (!URL.createObjectURL) URL.createObjectURL = jest.fn(() => 'blob:fixture');
+  if (!URL.revokeObjectURL) URL.revokeObjectURL = jest.fn();
   localStorage.clear();
   mockExcelRows.mockImplementation((rows) => rows);
-  api.get.mockImplementation(async (path) => {
+  api.get.mockImplementation(async (path, config) => {
+    if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}};
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', isActive: true, isPublished: true, startDate: thursday, endDate: friday }, { _id: 'old-menu', title: 'Old menu', isActive: false, isPublished: true, startDate: thursday, endDate: friday }] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [{ email, firstName: 'Internal stale name', matterCustomerId: 'permanent', mealPerDay: 9, skippedDays: [{ date: thursday, pauseStatus: 'success' }], selectedMeals: [thursday, friday].map((date) => ({ date, mealType: 'main', mealName: 'Fixture dish' })) }] } };
     if (path.includes('/matter/')) throw new Error('Duplicate Matter lookup');
@@ -358,4 +364,114 @@ test('a failed snack edit keeps its editor open and does not report a completed 
   await act(async () => save.click());
   expect([...container.querySelectorAll('button')].some(button => button.textContent.trim() === 'Save')).toBe(true);
   expect([...container.querySelectorAll('input[type="number"]')].some(input => input.value === '15')).toBe(true);
+});
+
+test('custom kitchen filter choices are traced without a save', async () => {
+  localStorage.setItem('token', 'fixture-session'); window.history.replaceState({}, '', '/kitchen-list');
+  const previousFetch = window.fetch, warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const capture = jest.fn().mockResolvedValue({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({ success: true }) }); window.fetch = capture;
+  const cleanup = installActivityCapture();
+  try {
+    const filters = container.querySelector('[aria-label="Customer status filter"]');
+    await act(async () => [...filters.querySelectorAll('button')].find(button => button.textContent === 'Missing').click());
+    await act(async () => [...filters.querySelectorAll('button')].find(button => button.textContent === 'Needs attention').click());
+    await act(async () => window.dispatchEvent(new Event('pagehide')));
+    const events = capture.mock.calls.flatMap(([, options]) => JSON.parse(options.body).events);
+    expect(events.map(event => event.changes[0])).toEqual([
+      { field: 'Customer status filter', before: 'All', after: 'Missing', redacted: false },
+      { field: 'Customer status filter', before: 'Missing', after: 'Needs attention', redacted: false },
+    ]);
+    expect(events.every(event => event.stage === 'form_edited' && !event.actor)).toBe(true);
+  } finally { cleanup(); window.fetch = previousFetch; warn.mockRestore(); }
+});
+
+
+test('day paper appends Partner orders in Excel, PDF and Word without showing the old panel', async () => {
+  const originalGet = api.get.getMockImplementation();
+  const item = {itemId: 'partner-meal', name: 'Partner Bowl', mealType: 'bowl', quantity: 7};
+  api.get.mockImplementation(async (path, config) => path === '/menus/kitchen-partner-orders'
+    ? {data: {success: true, data: {date: config.params.date, orders: [{id: 'po', partnerName: 'Cafe Fixture', reference: 'PO-123', deliveryTime: 'Morning', notes: 'Reception', lines: [item]}], counts: [item], orderCount: 1, totalQuantity: 7}}}
+    : originalGet(path, config));
+  await select(paperSelect(), friday);
+  expect(container.textContent).not.toContain('Partner orders for the kitchen');
+  await act(async () => downloadButton('Download Day Excel').click());
+  const rows = mockExcelRows.mock.calls.at(-1)[0];
+  expect(rows[0]).toMatchObject({Customer: 'Matter Fixture'});
+  expect(rows.at(-1)).toMatchObject({Section: 'Partner', Customer: 'Cafe Fixture', Meal: 'Partner Bowl', Quantity: 7, Order: 'PO-123'});
+  await act(async () => downloadButton('Download Day PDF').click());
+  expect(mockPdfText).toHaveBeenCalledWith('Partner', 14, 20);
+  expect(mockPdfTable.mock.calls.at(-1)[0].body).toEqual([['Cafe Fixture', 'PO-123 / Morning', 'Bowl', 'Partner Bowl', 7, 'Reception']]);
+  const priorCreate = URL.createObjectURL, priorRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = jest.fn(() => 'blob:fixture'); URL.revokeObjectURL = jest.fn();
+  const click = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  try {
+    await act(async () => downloadButton('Download Day Word').click());
+    const blob = URL.createObjectURL.mock.calls.at(-1)[0];
+    const html = await new Promise(resolve => {const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(blob);});
+    expect(html).toContain('<h2>Partner</h2>');
+    expect(html.indexOf('<h2>Partner</h2>')).toBeGreaterThan(html.indexOf('Matter Fixture'));
+    expect(html).toContain('Partner Bowl');
+  } finally {click.mockRestore(); URL.createObjectURL = priorCreate; URL.revokeObjectURL = priorRevoke;}
+});
+
+test('day paper blocks incomplete downloads when partner orders cannot be verified', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => {if (path === '/menus/kitchen-partner-orders') throw new Error('Partner verification failed'); return originalGet(path, config);});
+  await select(paperSelect(), friday);
+  await act(async () => downloadButton('Download Day Excel').click());
+  expect(mockExcelSave).not.toHaveBeenCalled();
+  expect(container.textContent).toContain('Partner verification failed');
+});
+
+
+const choosePartnerPaperDate = async date => act(async () => {
+  const field = container.querySelector('[aria-label="Partner-only paper date"]');
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(field, date);
+  field.dispatchEvent(new Event('change', {bubbles: true}));
+});
+
+test.each([false, true])('independent partner papers outside all menus support every format (no menus=%s)', async noMenus => {
+  const outside = '2026-11-17';
+  const item = {itemId: 'po', name: 'Outside-menu bowl', mealType: 'bowl', quantity: 4};
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => {
+    if (path.startsWith('/menus?') && noMenus) return {data: {success: true, data: []}};
+    if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [{id: 'po', partnerName: 'Cafe', reference: 'PO-5', lines: [item]}], counts: [item], orderCount: 1, totalQuantity: 4}}};
+    return originalGet(path, config);
+  });
+  if (noMenus) {await act(async () => root.unmount()); root = createRoot(container); await act(async () => root.render(<KitchenList />));}
+  const writes = api.post.mock.calls.length;
+  await choosePartnerPaperDate(outside);
+  expect(container.textContent).not.toContain('Outside-menu bowl');
+  expect(downloadButton('Download Day Excel').disabled).toBe(false);
+  await act(async () => downloadButton('Download Day Excel').click());
+  expect(mockExcelSave).toHaveBeenCalledWith(expect.anything(), `kitchen-paper-${outside}.xlsx`);
+  expect(mockExcelRows.mock.calls.at(-1)[0]).toHaveLength(1);
+  expect(mockExcelRows.mock.calls.at(-1)[0][0]).toMatchObject({Section: 'Partner', Meal: 'Outside-menu bowl', Quantity: 4});
+  await act(async () => downloadButton('Download Day PDF').click());
+  expect(mockPdfSave).toHaveBeenCalledWith(`kitchen-paper-${outside}.pdf`);
+  expect(mockPdfTable.mock.calls.at(-1)[0].body[0]).toContain('Outside-menu bowl');
+  const priorCreate = URL.createObjectURL, priorRevoke = URL.revokeObjectURL;
+  URL.createObjectURL = jest.fn(() => 'blob:fixture'); URL.revokeObjectURL = jest.fn();
+  const click = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  try {
+    await act(async () => downloadButton('Download Day Word').click());
+    const blob = URL.createObjectURL.mock.calls.at(-1)[0];
+    const html = await new Promise(resolve => {const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.readAsText(blob);});
+    expect(html).toContain('<h2>Partner</h2>'); expect(html).toContain('Outside-menu bowl');
+  } finally {click.mockRestore(); URL.createObjectURL = priorCreate; URL.revokeObjectURL = priorRevoke;}
+  expect(api.post).toHaveBeenCalledTimes(writes);
+});
+
+test('changing the independent partner paper date rejects an obsolete download', async () => {
+  const first = '2026-11-17', second = '2026-11-18';
+  let finish;
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation((path, config) => path === '/menus/kitchen-partner-orders'
+    ? new Promise(resolve => {finish = resolve;}) : originalGet(path, config));
+  await choosePartnerPaperDate(first);
+  await act(async () => downloadButton('Download Day Excel').click());
+  await choosePartnerPaperDate(second);
+  await act(async () => finish({data: {success: true, data: {date: first, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}}));
+  expect(mockExcelSave).not.toHaveBeenCalled();
 });

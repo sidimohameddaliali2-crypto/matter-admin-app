@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import api from '../../../../utils/api';
 import { ISSUE_TYPES } from './constants';
+import { recordActivityChange } from '../../../../utils/activityCapture';
 
 const PRIORITY_OPTIONS = [
   { value: 'low', label: 'Low' },
@@ -72,10 +73,12 @@ function QuickReportForm({ onSubmitted, onCancel }) {
   const inputCls = 'w-full px-3 py-2.5 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:bg-white transition-colors';
 
   return (
-    <div className="space-y-4">
+    <div role="form" aria-label="New communication" className="space-y-4">
       <Field label="Customer Name">
         <input
           type="text"
+          aria-label="Customer name"
+          data-activity-private="true"
           value={customerName}
           onChange={(e) => setCustomerName(e.target.value)}
           placeholder="Enter name"
@@ -84,7 +87,7 @@ function QuickReportForm({ onSubmitted, onCancel }) {
       </Field>
 
       <Field label="Issue Type">
-        <select value={issueType} onChange={(e) => setIssueType(e.target.value)} className={`${inputCls} text-blue-600 font-medium`}>
+        <select aria-label="Issue type" value={issueType} onChange={(e) => setIssueType(e.target.value)} className={`${inputCls} text-blue-600 font-medium`}>
           {ISSUE_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
         </select>
       </Field>
@@ -95,7 +98,7 @@ function QuickReportForm({ onSubmitted, onCancel }) {
             <button
               key={p.value}
               type="button"
-              onClick={() => setPriority(p.value)}
+              onClick={event => {recordActivityChange({field:'Priority',before:PRIORITY_OPTIONS.find(option=>option.value===priority)?.label||'',after:p.label,form:'New communication',element:event.currentTarget});setPriority(p.value);}}
               className={`py-2 rounded-lg text-sm font-semibold border transition-colors ${
                 priority === p.value
                   ? 'border-blue-600 bg-blue-50 text-blue-600'
@@ -110,6 +113,8 @@ function QuickReportForm({ onSubmitted, onCancel }) {
 
       <Field label="Description">
         <textarea
+          aria-label="Communication description"
+          data-activity-private="true"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           rows={3}
@@ -127,7 +132,7 @@ function QuickReportForm({ onSubmitted, onCancel }) {
               {!uploadingPhoto && photoUrl && <span className="text-xs text-emerald-600">Uploaded</span>}
               <button
                 type="button"
-                onClick={() => { setPhotoPreview(null); setPhotoUrl(''); }}
+                onClick={event => {recordActivityChange({field:'Selected files',before:photoPreview?1:0,after:0,form:'New communication',element:event.currentTarget});setPhotoPreview(null); setPhotoUrl(''); }}
                 className="text-xs text-red-500 hover:text-red-700 self-start"
               >
                 Remove
@@ -138,7 +143,7 @@ function QuickReportForm({ onSubmitted, onCancel }) {
           <label className="flex flex-col items-center justify-center gap-1.5 border-2 border-dashed border-gray-200 rounded-lg py-6 cursor-pointer hover:border-blue-400 hover:bg-blue-50/40 transition-colors">
             <span className="material-symbols-outlined text-gray-400">upload_file</span>
             <span className="text-sm text-gray-500">Click to upload images</span>
-            <input type="file" accept="image/*" onChange={handlePhotoChange} className="hidden" />
+            <input type="file" aria-label="Selected files" data-activity-label="Selected files" accept="image/*" onChange={handlePhotoChange} className="hidden" />
           </label>
         )}
       </Field>

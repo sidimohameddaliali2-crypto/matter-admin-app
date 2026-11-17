@@ -5,6 +5,7 @@ import {
   Phone, MessageSquare, X, ChevronUp, ChevronDown
 } from 'lucide-react';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 
 const fmt = (n) => Number(n || 0).toFixed(0);
 
@@ -33,6 +34,11 @@ export default function Renewal() {
   const [waState,        setWaState]        = useState({});
   const [lastUpdated,    setLastUpdated]    = useState(null);
   const [monthFilter,    setMonthFilter]    = useState('');
+
+  const urgencyLabel = value => URGENCY.find(item => item.key === value)?.label || value;
+  const changeUrgency = next => { recordActivityChange({ field: 'Renewal urgency', before: urgencyLabel(filter), after: urgencyLabel(next), form: 'Renewal filters' }); setFilter(next); };
+  const clearSearch = () => { recordActivityChange({ field: 'Renewal search', before: search, after: '', private: true, form: 'Renewal filters' }); setSearch(''); };
+  const clearFilters = () => { changeUrgency('all'); recordActivityChange({ field: 'Renewal month', before: monthFilter || 'All months', after: 'All months', form: 'Renewal filters' }); setMonthFilter(''); };
 
   const fetchData = useCallback(async () => {
     setLoading(true); setError(null);
@@ -207,9 +213,7 @@ export default function Renewal() {
     return list;
   }, [customers, filter, search, sort, monthFilter]);
 
-  const toggleSort = (key) => setSort(s =>
-    s.key === key ? { key, dir: s.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }
-  );
+  const toggleSort = key => { const next = sort.key === key ? { key, dir: sort.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }; recordActivityChange({ field: 'Renewal sort', before: sort.key + ' ' + sort.dir, after: next.key + ' ' + next.dir, form: 'Renewal filters' }); setSort(next); };
 
   const lastDayOf = (remaining) => {
     const d = new Date();
@@ -334,7 +338,7 @@ export default function Renewal() {
       {/* KPI cards */}
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-6">
         {URGENCY.map(u => (
-          <button key={u.key} onClick={() => setFilter(u.key)}
+          <button key={u.key} onClick={() => changeUrgency(u.key)}
             className={`rounded-xl border p-4 text-left transition-all ${kpiColor[u.key]} ${filter === u.key ? 'ring-2 ring-offset-1 ring-indigo-400' : 'hover:opacity-80'}`}>
             <p className="text-xs font-semibold text-gray-500 mb-1">{u.label}</p>
             <p className={`text-3xl font-bold ${kpiText[u.key]}`}>{counts[u.key]}</p>
@@ -353,7 +357,7 @@ export default function Renewal() {
             placeholder="Search by name, ID or phone…"
             className="w-full pl-9 pr-4 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 focus:outline-none" />
           {search && (
-            <button onClick={() => setSearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
+            <button onClick={clearSearch} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600">
               <X className="w-4 h-4" />
             </button>
           )}
@@ -372,7 +376,7 @@ export default function Renewal() {
         </select>
 
         {(filter !== 'all' || monthFilter) && (
-          <button onClick={() => { setFilter('all'); setMonthFilter(''); }}
+          <button onClick={clearFilters}
             className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700 border border-gray-300 rounded-lg px-3 py-2 bg-white">
             <X className="w-3.5 h-3.5" />
             Clear filters

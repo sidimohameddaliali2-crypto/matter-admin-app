@@ -30,6 +30,65 @@ const iso = value => typeof value === 'string' && value.length <= 40 && Number.i
 const allowed = (value, list) => list.includes(value) ? value : null;
 const byteCount = value => Number.isSafeInteger(value) && value >= 0;
 
+export async function releaseClientBuildDependencies({ appRoot, apply = false, verifyHealth }) {
+  const ownedDirectory = async directory => {
+    const info = await fs.lstat(directory);
+    if (!info.isDirectory() || info.uid !== process.getuid() || await fs.realpath(directory) !== directory) {
+      throw Error('Expected an owned standalone client build directory');
+    }
+  };
+  const client = path.join(appRoot, 'client'), server = path.join(appRoot, 'server');
+  const build = path.join(client, 'build'), dependencies = path.join(client, 'node_modules');
+  for (const directory of [appRoot, client, server, build, path.join(server, 'node_modules')]) await ownedDirectory(directory);
+  const clientPackage = JSON.parse(await fs.readFile(path.join(client, 'package.json'), 'utf8'));
+  const serverLock = JSON.parse(await fs.readFile(path.join(server, 'package-lock.json'), 'utf8'));
+  if (clientPackage.scripts?.build !== 'react-scripts build' || clientPackage.workspaces ||
+      Object.values(serverLock.packages || {}).some(value => value.link)) {
+    throw Error('Expected independently installed server dependencies and a static client build');
+  }
+  const manifestBytes = await fs.readFile(path.join(build, 'asset-manifest.json'));
+  const assets = JSON.parse(manifestBytes.toString('utf8')).files;
+  if (!assets?.['main.js']) throw Error('The completed client build is unavailable');
+  const preserve = [path.join(build, 'asset-manifest.json'), path.join(build, 'index.html'),
+    ...['package.json', 'package-lock.json'].flatMap(name => [path.join(client, name), path.join(server, name)])];
+  for (const asset of Object.values(assets)) {
+    if (typeof asset !== 'string' || !/^\/?[A-Za-z0-9_./-]+$/.test(asset)) throw Error('Unsafe client build asset');
+    const relative = asset.replace(/^\//, '');
+    if (relative.split('/').some(part => !part || part === '.' || part === '..')) throw Error('Unsafe client build asset');
+    preserve.push(path.join(build, relative));
+  }
+  const fingerprints = async () => {
+    const hashes = [];
+    for (const file of new Set(preserve)) {
+      const info = await fs.lstat(file);
+      if (!info.isFile() || info.size < 1 || info.size > 128 * 1024 * 1024 || await fs.realpath(file) !== file) {
+        throw Error('The completed client build has an unavailable asset');
+      }
+      hashes.push(createHash('sha256').update(await fs.readFile(file)).digest('hex'));
+    }
+    return createHash('sha256').update(hashes.join('\n')).digest('hex');
+  };
+  const preservedSha256 = await fingerprints();
+  const before = await fs.statfs(appRoot);
+  const info = await stat(dependencies);
+  let allocatedBytes = 0;
+  if (info) {
+    await ownedDirectory(dependencies);
+    const { stdout } = await exec('/usr/bin/du', ['-sk', dependencies], { timeout: 20_000, maxBuffer: 1024 });
+    allocatedBytes = Number(stdout.split(/\s+/, 1)[0]) * 1024;
+    if (!byteCount(allocatedBytes)) throw Error('Client dependency size is unavailable');
+    if (apply) {
+      await verifyHealth();
+      await fs.rm(dependencies, { recursive: true });
+    }
+  }
+  if (await fingerprints() !== preservedSha256) throw Error('The static client build or package locks changed');
+  if (apply) await verifyHealth();
+  const after = await fs.statfs(appRoot);
+  return { clientBuildDependencies: true, applied: apply, allocatedBytes, preservedSha256,
+    beforeBytes: before.bavail * before.bsize, afterBytes: after.bavail * after.bsize };
+}
+
 export async function reclaimReportingMetadata(work) {
   const directory = path.join(work, 'metadata');
   const freeBytes = async () => {
@@ -743,7 +802,7 @@ async function main() {
   if (reclaimArchived && !['plan','apply','offload','scratch-plan','scratch-offload','bundle-plan','bundle-release',
     'bundle-previous-plan','bundle-previous-release','bundle-baseline-plan','bundle-baseline-release',
     'inventory','original-backup-plan','original-backup-offload','heap-plan','heap-resume',
-    'log-plan','log-compact','bundle-compact-release'].includes(reclaimArchived)) {
+    'log-plan','log-compact','bundle-compact-release','client-dependencies-plan','client-dependencies-release'].includes(reclaimArchived)) {
     throw Error('Invalid archive reclamation mode');
   }
   const deployAccounting = process.env.DEPLOY_REPORTING_ACCOUNTING === 'true';
@@ -808,6 +867,20 @@ async function main() {
     return;
   }
   if (reclaimArchived) {
+    if (reclaimArchived.startsWith('client-dependencies-')) {
+      if (process.platform !== 'linux' || !entry) throw Error('The registered Linux reporting worker is required');
+      syncRoot(appRoot, entry);
+      await import(pathToFileURL(path.join(appRoot, 'server/loadEnv.js')).href);
+      const verifyHealth = async () => {
+        const port = process.env.PORT || '5000';
+        if (!/^\d{1,5}$/.test(port)) throw Error('The application port is unavailable');
+        const response = await fetch('http://127.0.0.1:' + port + '/api/health', { signal: AbortSignal.timeout(5000) });
+        if (!response.ok || (await response.json()).success !== true) throw Error('The existing application is not healthy');
+      };
+      console.log(JSON.stringify(await releaseClientBuildDependencies({ appRoot,
+        apply: reclaimArchived === 'client-dependencies-release', verifyHealth })));
+      return;
+    }
     if (reclaimArchived.startsWith('log-')) {
       const apply = reclaimArchived==='log-compact';
       if (process.platform!=='linux' || expected!=='9699b53ac9c69758f125f129fb4e2e7588db8af0' ||
@@ -825,7 +898,7 @@ async function main() {
       return;
     }
     if (reclaimArchived === 'inventory') {
-      if (process.platform !== 'linux' || expected !== '9699b53ac9c69758f125f129fb4e2e7588db8af0' || !entry) {
+      if (process.platform !== 'linux' || !entry) {
         throw Error('The reviewed Linux reporting worker is required');
       }
       const root = syncRoot(appRoot, entry), work = path.join(root, 'work');
@@ -836,6 +909,9 @@ async function main() {
         reportReceipts:path.join(root, 'archive-receipts'),
         reportMetadata:path.join(work, 'metadata'),
         packageCache:path.join(os.homedir(), '.npm', '_cacache'),
+        clientDependencies:path.join(appRoot, 'client/node_modules'),
+        serverDependencies:path.join(appRoot, 'server/node_modules'),
+        clientBuild:path.join(appRoot, 'client/build'),
       }).map(async ([key, directory]) => {
         if (!(await stat(directory))?.isDirectory() || await fs.realpath(directory) !== directory) return [key, null];
         const {stdout} = await exec('/usr/bin/du', ['-sxB1', '--', directory], {timeout:20_000, maxBuffer:1024});

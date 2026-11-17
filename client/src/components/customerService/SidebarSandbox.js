@@ -1,6 +1,7 @@
 import React,{useRef,useState} from 'react';
 import api from '../../utils/api';
 import {servicePath,unpack,errorMessage,useServiceResource} from './serviceUtils';
+import {recordActivityChange} from '../../utils/activityCapture';
 
 export default function SidebarSandbox({conversationId,epoch,onOpen,onRefresh}){
  const state=useServiceResource('/sandbox/state',{conversationId},epoch);
@@ -11,7 +12,7 @@ export default function SidebarSandbox({conversationId,epoch,onOpen,onRefresh}){
  async function perform(action){if(saving.current)return;saving.current=true;setBusy(true);setError('');try{await action();}catch(e){setError(errorMessage(e));}finally{saving.current=false;setBusy(false);}}
  return <section className="cs-qa-toolbar" aria-label="QA playground">
   <strong>QA playground <span>Fictional data</span></strong>
-  <label className="cs-sr-only" htmlFor="qa-topic">Practice topic</label><select id="qa-topic" aria-label="Practice topic" value={topic} onChange={e=>{setTopic(e.target.value);setDetail(topics.find(t=>t.id===e.target.value)?.includes[0]?.id||'');}}>{topics.map(t=><option key={t.id} value={t.id}>{t.label}</option>)}</select>
+  <label className="cs-sr-only" htmlFor="qa-topic">Practice topic</label><select id="qa-topic" aria-label="Practice topic" value={topic} onChange={e=>{const next=topics.find(t=>t.id===e.target.value)?.includes[0];recordActivityChange({field:'Practice detail',before:detail?reasons.find(reason=>reason.id===detail)?.label||'Previous practice detail':'',after:next?.label||'',form:'QA playground',element:e.currentTarget});setTopic(e.target.value);setDetail(next?.id||'');}}>{topics.map(t=><option key={t.id} value={t.id}>{t.label}</option>)}</select>
   <label className="cs-sr-only" htmlFor="qa-detail">Practice detail</label><select id="qa-detail" aria-label="Practice detail" value={detail} onChange={e=>setDetail(e.target.value)}>{reasons.map(d=><option key={d.id} value={d.id}>{d.label}</option>)}</select>
   <button className="cs-primary" disabled={busy||state.loading||!detail} onClick={()=>perform(async()=>{const result=unpack(await api.post(servicePath+'/sandbox/cases',{topic,detail}));onOpen(result.conversationId);onRefresh();setGuide(true);})}>{busy?'Working…':'New practice case'}</button>
   <button aria-expanded={guide} onClick={()=>setGuide(!guide)}>Practice guide</button>

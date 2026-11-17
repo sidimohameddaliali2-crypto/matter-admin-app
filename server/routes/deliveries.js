@@ -2005,6 +2005,7 @@ router.patch('/assign-driver', [
 
     const updatedDeliveries = [];
     const driverName = resolveUserDisplayName(driver) || driver.email || driver._id.toString();
+    req.activityTargetName = resolveUserDisplayName(driver) || 'the selected driver';
     const reassignments = [];
 
     for (const delivery of deliveries) {

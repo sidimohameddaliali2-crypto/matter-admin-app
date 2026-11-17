@@ -34,3 +34,6 @@ Thumbs.db
 tmp/
 .private/
 work/
+
+# Private activity journal awaiting database delivery
+server/.activity-journal/

@@ -1,6 +1,7 @@
 import React, { useEffect, useImperativeHandle, useMemo, useState, forwardRef } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { X, Printer, RefreshCw, Palette, Grid } from 'lucide-react';
+import { recordActivityChange } from '../../utils/activityCapture';
 
 const DEFAULT_CONFIG = {
   columns: 3,
@@ -427,7 +428,8 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
     return Array.from(legend.values());
   }, [filteredDeliveries]);
 
-  const handleConfigChange = (key, value) => {
+  const handleConfigChange = (key, value, observe = false) => {
+    if (observe) recordActivityChange({ field: key === 'borderStyle' ? 'Sticker border' : 'Driver color mode', form: 'Sticker design', before: config[key], after: value });
     setConfig((prev) => ({
       ...prev,
       [key]: value,
@@ -454,10 +456,12 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
   };
 
   const handleIncludeAllZones = () => {
+    recordActivityChange({ field: 'Excluded areas', form: 'Sticker design', before: config.excludedZones || [], after: [] });
     setConfig((prev) => ({ ...prev, excludedZones: [] }));
   };
 
   const handleExcludeAllZones = () => {
+    recordActivityChange({ field: 'Excluded areas', form: 'Sticker design', before: config.excludedZones || [], after: availableZones });
     setConfig((prev) => ({ ...prev, excludedZones: [...availableZones] }));
   };
 
@@ -474,14 +478,20 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
   };
 
   const handleIncludeAllCompanies = () => {
+    recordActivityChange({ field: 'Excluded companies', form: 'Sticker design', before: config.excludedCompanies || [], after: [] });
     setConfig((prev) => ({ ...prev, excludedCompanies: [] }));
   };
 
   const handleExcludeAllCompanies = () => {
+    recordActivityChange({ field: 'Excluded companies', form: 'Sticker design', before: config.excludedCompanies || [], after: availableCompanies });
     setConfig((prev) => ({ ...prev, excludedCompanies: [...availableCompanies] }));
   };
 
   const toggleStickerSelection = (stickerId) => {
+    const labels = ids => [...ids].map(id => { const delivery = filteredDeliveries.find(item => getDeliveryId(item) === id); return `${delivery?.customerName || 'Delivery'} (${id})`; });
+    const nextSelection = new Set(selectedStickerIds);
+    if (nextSelection.has(stickerId)) nextSelection.delete(stickerId); else nextSelection.add(stickerId);
+    recordActivityChange({ field: 'Selected stickers', form: 'Sticker design', before: labels(selectedStickerIds), after: labels(nextSelection) });
     setSelectedStickerIds((prev) => {
       const next = new Set(prev);
       if (next.has(stickerId)) {
@@ -494,6 +504,7 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
   };
 
   const clearStickerSelection = () => {
+    recordActivityChange({ field: 'Selected stickers', form: 'Sticker design', before: [...selectedStickerIds].map(id => `Delivery (${id})`), after: [] });
     setSelectedStickerIds(new Set());
   };
 
@@ -781,6 +792,7 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
   };
 
   const handleReset = () => {
+    Object.entries(DEFAULT_CONFIG).forEach(([key, value]) => recordActivityChange({ field: key, form: 'Reset sticker design', before: config[key], after: value }));
     setConfig(DEFAULT_CONFIG);
     setSelectedStickerIds(new Set());
   };
@@ -852,7 +864,7 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
                     {logoDataUrl && (
                       <div className="mt-2 flex items-center gap-2">
                         <img src={logoDataUrl} alt="Logo preview" style={{ maxWidth: 60, maxHeight: 40, objectFit: 'contain', borderRadius: 6, border: '1px solid #eee' }} />
-                        <button type="button" className="text-xs text-blue-600 underline" onClick={() => setLogoDataUrl(null)}>Remove</button>
+                        <button type="button" className="text-xs text-blue-600 underline" onClick={() => { recordActivityChange({ field: 'Sticker logo', form: 'Sticker design', before: 'Logo selected', after: 'No logo' }); setLogoDataUrl(null); }}>Remove</button>
                       </div>
                     )}
                     <label className="flex items-center gap-2 mt-2 text-xs text-gray-500">
@@ -1025,7 +1037,7 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
                     {['band', 'badge'].map((mode) => (
                       <button
                         key={mode}
-                        onClick={() => handleConfigChange('driverColorMode', mode)}
+                        onClick={() => handleConfigChange('driverColorMode', mode, true)}
                         className={`px-3 py-1.5 rounded-lg text-sm ${
                           config.driverColorMode === mode
                             ? 'bg-blue-600 text-white'
@@ -1044,7 +1056,7 @@ const StickerDesignerModal = forwardRef(({ isOpen, onClose, deliveries = [], ini
                     {['rounded', 'square', 'pill'].map((style) => (
                       <button
                         key={style}
-                        onClick={() => handleConfigChange('borderStyle', style)}
+                        onClick={() => handleConfigChange('borderStyle', style, true)}
                         className={`px-3 py-1.5 rounded-lg text-sm ${
                           config.borderStyle === style
                             ? 'bg-blue-600 text-white'

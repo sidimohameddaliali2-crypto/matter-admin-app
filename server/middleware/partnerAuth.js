@@ -1,3 +1,4 @@
+import { activityActor } from '../observability/activityPolicy.js';
 import jwt from 'jsonwebtoken';
 import Partner from '../models/Partner.js';
 
@@ -23,6 +24,7 @@ export const partnerProtect = async (req, res, next) => {
       return res.status(401).json({ success: false, message: 'Partner account is deactivated' });
     }
     req.partner = partner;
+    req.activityActor ||= Object.freeze(activityActor(req));
     next();
   } catch (error) {
     return res.status(401).json({ success: false, message: 'Not authorized, token failed' });

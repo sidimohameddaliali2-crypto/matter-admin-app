@@ -3,6 +3,8 @@ import jwt from 'jsonwebtoken';
 import { body, validationResult } from 'express-validator';
 import User, { effectivePermissions } from '../models/User.js';
 import { authenticate, admin } from '../middleware/auth.js';
+import { hasActivityHistoryAccess } from '../observability/activityAccess.js';
+import { activityActor } from '../observability/activityPolicy.js';
 
 const router = express.Router();
 
@@ -143,6 +145,8 @@ router.post('/login', [
     }
 
     // Update last login
+    req.activityVerifiedLogin = user;
+    req.activityActor = Object.freeze(activityActor(req));
     user.lastLogin = new Date();
     await user.save();
 
@@ -159,7 +163,8 @@ router.post('/login', [
           email: user.email,
           role: user.role,
           profile: user.profile,
-          permissions: effectivePermissions(user)
+          permissions: effectivePermissions(user),
+          canViewActivityHistory: hasActivityHistoryAccess(user)
         },
         token
       }
@@ -191,6 +196,7 @@ router.get('/me', authenticate, async (req, res) => {
           role: user.role,
           profile: user.profile,
           permissions: effectivePermissions(user),
+          canViewActivityHistory: hasActivityHistoryAccess(user),
           kpi: user.kpi
         }
       }
