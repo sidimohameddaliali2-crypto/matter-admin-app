@@ -40,7 +40,7 @@ const initials = (s = '') =>
 const titleCase = (s = '') => String(s).trim().toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
 // Category display order: Oats, Wraps/Buns, Snack, Bowl, Main (Bowl wasn't
 // in the list given — placed just before Main since it's not mentioned).
-const MEAL_TYPE_LABEL = { oats: 'Oats', 'wraps-buns': 'Wraps/Buns', snack: 'Snack', bowl: 'Bowl', main: 'Main' };
+const MEAL_TYPE_LABEL = { breakfast: 'Breakfast of the day', oats: 'Oats', 'wraps-buns': 'Wraps/Buns', snack: 'Snack', bowl: 'Bowl', main: 'Main' };
 // Main meals are further split by protein (the category tag set by the Menu
 // Selection sync) so a partner can jump straight to chicken/beef/fish.
 const MAIN_PROTEIN_ORDER = ['Chicken', 'Beef', 'Fish'];

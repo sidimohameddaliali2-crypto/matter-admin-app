@@ -4,7 +4,7 @@ const partnerMenuItemSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   mealType: {
     type: String,
-    enum: ['main', 'snack', 'bowl', 'wraps-buns', 'oats'],
+    enum: ['breakfast', 'main', 'snack', 'bowl', 'wraps-buns', 'oats'],
     required: true
   },
   description: { type: String, default: '' },
@@ -15,6 +15,10 @@ const partnerMenuItemSchema = new mongoose.Schema({
   isAvailable: { type: Boolean, default: true },
   availableFrom: { type: Date, default: null },
   availableTo: { type: Date, default: null },
+  // Synced breakfasts use exact serving dates; an envelope alone would also
+  // offer a repeated Monday/Friday dish on the intervening days.
+  availableDates: { type: [Date], default: undefined },
+  menuSelectionDatesByMenu: { type: Map, of: [Date], default: undefined },
   category: { type: String, default: '' },
   ingredients: { type: [String], default: [] },
   sortOrder: { type: Number, default: 0 },

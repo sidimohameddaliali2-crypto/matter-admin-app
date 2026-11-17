@@ -1,3 +1,4 @@
+import { syncMenuSelectionBreakfastsToPartnerMenu } from '../services/partnerBreakfastMenuSync.js';
 import express from 'express';
 import kitchenMealEditsRouter from './kitchenMealEdits.js';
 import crypto from 'crypto';
@@ -1420,13 +1421,18 @@ router.put('/:id/breakfast-options', protect, async (req, res) => {
     }
 
     await menu.save();
+    const warnings = [];
+    if (menu.isPublished) {
+      try { await syncMenuSelectionBreakfastsToPartnerMenu(menu); }
+      catch (error) { console.error('Partner breakfast sync failed:', error.message); warnings.push('Breakfast options saved. Partner synchronization failed; save again to retry.'); }
+    }
 
     const optionsByDate = {};
     for (const [key, opts] of menu.breakfastOptionsByDate.entries()) {
       optionsByDate[key] = opts || [];
     }
 
-    res.json({ success: true, data: optionsByDate });
+    res.json({ success: true, data: optionsByDate, warnings });
   } catch (error) {
     console.error('Error saving breakfast options:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -2853,7 +2859,10 @@ const saveMenuResponse = async (req, res, creating) => {
       catch { warnings.push('Menu saved, but its public cache could not be refreshed. Retry the public menu shortly.'); }
     }
     if (menu.isPublished) {
-      try { await syncMenuSelectionMainMealsToPartnerMenu(menu); }
+      try {
+        await syncMenuSelectionMainMealsToPartnerMenu(menu);
+        await syncMenuSelectionBreakfastsToPartnerMenu(menu);
+      }
       catch (error) {
         console.error('Partner menu sync failed after menu commit:', error.message);
         warnings.push('Menu saved. Partner synchronization failed; retry publishing to synchronize partner dishes.');

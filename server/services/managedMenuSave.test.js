@@ -238,6 +238,7 @@ test('the API synchronizes partner dishes only after a published menu commits, a
   const { store } = fixture(t);
   const events = [];
   t.mock.method(PartnerItem, 'findOne', () => ({ sort: async () => { assert.equal(store.committed, true); events.push('partner-read-after-commit'); return null; } }));
+  t.mock.method(PartnerItem, 'find', () => ({lean: async () => {assert.equal(store.committed, true); events.push('breakfast-read-after-commit'); return [];}}));
   t.mock.method(PartnerItem, 'create', async () => ({ _id: new mongoose.Types.ObjectId() }));
   t.mock.method(Partner, 'find', () => ({ select() { return this; }, lean: async () => [] }));
   t.mock.method(console, 'error', () => {});
@@ -245,12 +246,12 @@ test('the API synchronizes partner dishes only after a published menu commits, a
   const res = response();
   await handler('/:id', 'put')(request, res);
   assert.equal(res.statusCode, 200); assert.deepEqual(res.body.warnings, []);
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
   t.mock.method(Menu.prototype, 'save', async () => { throw new Error('Database save failed'); });
   const failed = response();
   await handler('/:id', 'put')(request, failed);
   assert.equal(failed.statusCode, 503); assert.equal(failed.body.success, false);
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
 });
 
 test('partner-sync failure after commit reports a saved-menu warning instead of implying the menu rolled back', async (t) => {

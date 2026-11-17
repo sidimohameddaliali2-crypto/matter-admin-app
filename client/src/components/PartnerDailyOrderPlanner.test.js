@@ -513,3 +513,18 @@ test('continuing to the next day clears unfinished choices while confirmed days 
   await click('Place all daily orders');
   expect(api.post.mock.calls.filter(([path]) => path === '/partner/orders').map(([, body]) => ({date: body.deliveryDate, lines: body.lines}))).toEqual([A, B, C].map(date => ({date, lines: [{menuItemId: 'a', quantity: 1}]})));
 });
+
+
+test('Breakfast of the day is the first category and can be selected independently from main meals', async () => {
+  const meals = [{_id: 'main', name: 'Chicken Rice', mealType: 'main', category: 'Chicken', price: 28},
+    {_id: 'breakfast', name: 'Egg Toast', mealType: 'breakfast', price: 12}];
+  api.get.mockImplementation(async path => ({data: {success: true, data: path === '/partner/orders' ? [] : meals}}));
+  await render(); await begin(A);
+  const categories = container.querySelector('[aria-label="Meal categories"]');
+  expect([...categories.querySelectorAll('button')].map(button => button.getAttribute('aria-label'))).toEqual(['Filter All', 'Filter Breakfast of the day', 'Filter Main']);
+  expect(container.querySelector('[aria-label="Breakfast of the day meals"]').compareDocumentPosition(container.querySelector('[aria-label="Main meals"]')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  await click('Filter Breakfast of the day');
+  expect(button('Add Chicken Rice')).toBeUndefined();
+  await click('Add Egg Toast'); await click('Confirm day & continue'); await click('Place all daily orders');
+  expect(api.post).toHaveBeenCalledWith('/partner/orders', expect.objectContaining({lines: [{menuItemId: 'breakfast', quantity: 1}]}));
+});
