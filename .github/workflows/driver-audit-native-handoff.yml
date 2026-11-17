@@ -10,6 +10,7 @@ on:
           - inspect
           - inspect-bindings
           - inspect-database-config
+          - inspect-supabase-host
           - pause-builder
           - resume-builder
           - prepare-transfer
@@ -83,6 +84,7 @@ jobs:
           [[ "$EXPECTED_DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ ]]
           printf 'code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-handoff.mjs)" >> "$GITHUB_OUTPUT"
           case "$OPERATION" in
+            inspect-supabase-host) operator=supabase-handoff ;;
             inspect-database-config) operator=database-check ;;
             prepare-object-store|externalize-native-archive) operator=object-store ;;
             plan-native-cleanup|apply-native-cleanup) operator=cleanup ;;
@@ -93,7 +95,12 @@ jobs:
             stage-native-proofs|export-native-controls) operator=proofs ;;
             *) operator=import ;;
           esac
-          printf 'import_code=%s\n' "$(base64 -w0 ".github/scripts/driver-audit-native-$operator.mjs")" >> "$GITHUB_OUTPUT"
+          if [[ "$operator" == supabase-handoff ]]; then
+            operator_file=.github/scripts/driver-audit-supabase-handoff.mjs
+          else
+            operator_file=".github/scripts/driver-audit-native-$operator.mjs"
+          fi
+          printf 'import_code=%s\n' "$(base64 -w0 "$operator_file")" >> "$GITHUB_OUTPUT"
       - name: Run reviewed handoff operation
         uses: appleboy/ssh-action@v1.2.0
         env:

@@ -206,7 +206,7 @@ async function main() {
     'diagnose-roots', 'disable-pruning', 'prepare-native-settings', 'swap-builder-held', 'verify-native-parity',
     'activate-native', 'start-native', 'stage-native-proofs', 'export-native-controls',
     'plan-native-cleanup', 'apply-native-cleanup', 'inspect-database-config',
-    'prepare-object-store', 'externalize-native-archive'].includes(operation)) {
+    'prepare-object-store', 'externalize-native-archive', 'inspect-supabase-host'].includes(operation)) {
     phase = 'native-' + operation;
     const encoded = process.env.NATIVE_IMPORT_CODE;
     if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
@@ -222,6 +222,18 @@ async function main() {
     catch (error) { if (error.code !== 'EEXIST') throw error; }
     if (hash(await readPrivateDriverAuditSource(filename, 256 * 1024)) !== hash(code)) throw Error('Reviewed import operator hash differs');
     const operator = await import(pathToFileURL(filename).href);
+    if (operation === 'inspect-supabase-host') {
+      const encodedPlan = process.env.NATIVE_TRANSFER_PLAN_B64;
+      if (!encodedPlan || encodedPlan.length > 24576 || !/^[A-Za-z0-9+/]+=*$/.test(encodedPlan)) throw Error('Bounded public Supabase recipient required');
+      const bytes = Buffer.from(encodedPlan, 'base64');
+      if (bytes.toString('base64') !== encodedPlan) throw Error('Public Supabase recipient encoding differs');
+      const request = JSON.parse(bytes);
+      if (request?.version !== 1 || Object.keys(request).length !== 2 || typeof request.recipientPublicKey !== 'string')
+        throw Error('An exact public Supabase recipient is required');
+      console.log(JSON.stringify(await operator.runDriverAuditSupabaseHandoff({ operation, appRoot,
+        expectedSha: expected, recipientPublicKey: request.recipientPublicKey })));
+      return;
+    }
     let recipientPublicKey;
     if (['diagnose-roots', 'export-native-controls', 'verify-native-parity', 'inspect-database-config'].includes(operation) && process.env.NATIVE_TRANSFER_PLAN_B64) {
       const encodedPlan = process.env.NATIVE_TRANSFER_PLAN_B64;
