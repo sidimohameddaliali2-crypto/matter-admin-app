@@ -170,10 +170,20 @@ async function hostFixture(t, { largeManifest = false } = {}) {
   const descriptor = { version: 1, domain: 'previewPackage', path: 'descriptor.json', kind: 'immutable-evidence',
     size: generatedDescriptorBytes.length, sha256: sha(generatedDescriptorBytes),
     chunks: [{ offset: 0, size: generatedDescriptorBytes.length, sha256: sha(generatedDescriptorBytes) }] };
+  const previousBytes = largeManifest ? manifestBytes(originalManifest) : json({ 'previous.private.json': sha('original previous report') });
+  p.current = { revision: 6, generation: sha('previous'), manifest: sha(previousBytes) };
+  const previousRoot = path.join(syncRoot, 'retained/serving-current/server-data');
+  const previousManifest = await write(path.join(previousRoot, 'files.private.json'), previousBytes);
+  const previousHead = { version: 1, generation: p.current.generation, reportHash: sha('previous report'),
+    servingPackage: { version: 1, dataStore: 'supabase', collectorRevision: p.current.revision,
+      sourceBasis: sha('previous basis'), manifestSha256: p.current.manifest } };
+  const previousSeed = await write(path.join(path.dirname(previousRoot), 'direct-seed.original.private.json'), {
+    version: 1, mode: 'sync', collectorRevision: p.current.revision, sourceBasis: previousHead.servingPackage.sourceBasis,
+    manifestSha256: p.current.manifest, pointer: { version: 1, generation: previousHead.generation, reportHash: previousHead.reportHash } });
   const head = { version: 1, generation, reportHash, descriptor, servingPackage: { version: 1, dataStore: 'supabase', collectorRevision: 7,
     sourceBasis: p.collector.sourceBasis, manifestSha256: sha(generatedManifestBytes) }, visibleCutoffAt: '2026-11-17T00:00:00.000Z',
     closureReceipt: { version: 1, fictional: 'original verified closure' }, restore: { version: 1, fictional: 'original verified restore' },
-    previous: { generation: sha('previous') } };
+    previous: previousHead };
   const headBody = JSON.stringify(head); states.set('app-sidi-report-head', { revision: 2, body: headBody });
   const paid = '{"version":1,"fictional":"paid-original"}'; states.set('photo-grading-budget', { revision: 1, body: paid });
   const candidate = await write(path.join(syncRoot, 'retained/candidate/server-data/files.private.json'), manifestBytes(originalManifest)); p.candidate = candidate.sha256;
@@ -212,6 +222,9 @@ async function hostFixture(t, { largeManifest = false } = {}) {
     args: [], exec_interpreter: process.execPath, node_args: [] } }];
   const context = { p, appRoot, server, releaseRoot, syncRoot, sourceRoot, controlRoot, preparedReceiptSha256: prepared.sha256,
     receiptFile: prepared.path, receipt: { sourceConfig: sourceConfigFile.path, syncConfig: syncFile.path, appEnvironmentSha256: sha(envBefore),
+      packages: [{ role: 'serving-current', root: previousRoot, manifestSha256: p.current.manifest, privateDirectoryBoundary: syncRoot,
+        collectorRevision: p.current.revision, sourceBasis: previousHead.servingPackage.sourceBasis,
+        originalDirectSeedSha256: previousSeed.sha256, descriptorVerified: true }],
       dependencies: { path: path.join(server, 'node_modules'), inventory: await h.dependencyInventory(path.join(server, 'node_modules')) } },
     bootstrap: { expected: { syncConfigSha256: old.sha256 } }, node: { executable: process.execPath, version: process.version, sha256: sha('node') }, npm,
     env: { DRIVER_AUDIT_EXECUTION_HOST: 'sidi', DRIVER_AUDIT_DATA_STORE: 'supabase', DRIVER_AUDIT_ENABLED: '1' }, envFile,
@@ -319,7 +332,8 @@ async function hostFixture(t, { largeManifest = false } = {}) {
   };
   const common = { appRoot, expectedSha: p.base, preparedReceiptSha256: prepared.sha256, qualificationReceiptSha256: qualification.sha256, recipientPublicKey };
   const run = (operation, extra = {}) => runDriverAuditSupabaseReleaseControl({ ...common, operation,
-    ...(operation === 'export-release-inputs' ? { reportCompletionIdentitySha256: completionIdentity } : { releasePackSha256: sha(pack()) }), ...extra }, adapters)
+    ...(['export-release-inputs', 'export-previous-manifest'].includes(operation)
+      ? { reportCompletionIdentitySha256: completionIdentity } : { releasePackSha256: sha(pack()) }), ...extra }, adapters)
     .catch(error => {
       if (error.supabaseControlStopped) {
         const sealed = openTransferSecrets(privateKey, error.supabaseControlStopped.capsule);
@@ -329,8 +343,103 @@ async function hostFixture(t, { largeManifest = false } = {}) {
       throw error;
     });
   return { actual, context, adapters, run, pack, rowsByName, values, states, rows, calls, counts, common, completionIdentity, write, backend,
-    generatedRoot, generatedManifestFile, generatedDescriptorFile, generatedSeedFile, generatedPointerFile };
+    generatedRoot, generatedManifestFile, generatedDescriptorFile, generatedSeedFile, generatedPointerFile, previousManifest, previousHead, previousSeed };
 }
+
+test('the separate retained previous manifest export binds exact prepared5463 and original publication.previous without changing the nine-artifact export', async t => {
+  const f = await hostFixture(t), result = await f.run('export-previous-manifest');
+  assert.equal(result.operation, 'export-previous-manifest'); assert.equal(result.status, 'supabase-previous-manifest-exported');
+  assert.equal(result.sourceStarted, false); assert.equal(result.syncSteadyStarted, false);
+  const pages = result.sealedPages.map(page => openTransferSecrets(privateKey, page));
+  const raw = gunzipSync(Buffer.concat(pages.map(page => Buffer.from(page.pageGzipBase64, 'base64'))));
+  assert.equal(sha(raw), result.metadataSha256); const value = JSON.parse(raw);
+  assert.equal(value.kind, 'supabase-retained-previous-manifest-export-v1'); assert.equal(value.artifacts.length, 1);
+  const [artifact] = value.artifacts;
+  assert.equal(artifact.name, 'retainedPreviousManifest'); assert.equal(artifact.path, f.previousManifest.path);
+  assert.equal(artifact.dataEncoding, 'gzip-base64'); const packed = Buffer.from(artifact.dataBase64, 'base64');
+  assert.equal(packed.toString('base64'), artifact.dataBase64); assert.equal(packed.length, artifact.dataGzipBytes);
+  assert.equal(sha(packed), artifact.dataGzipSha256); const bytes = gunzipSync(packed);
+  assert.deepEqual(bytes, f.previousManifest.data); assert.equal(artifact.sha256, f.context.p.current.manifest); assert.equal(bytes.length, artifact.bytes);
+  assert.equal(value.retainedPrevious.collectorRevision, f.context.p.current.revision);
+  assert.equal(value.retainedPrevious.generation, f.previousHead.generation); assert.equal(value.retainedPrevious.sourceBasis, f.previousHead.servingPackage.sourceBasis);
+  assert.equal(value.retainedPrevious.preparedPackageRole, 'serving-current'); assert.equal(value.retainedPrevious.freshServingHeadRead, false);
+  assert.equal(value.exportIsGenerationExecution, false); assert.equal(value.originalGenerationProvenanceRequired, true);
+  assert.equal(value.networkRequests, 0); assert.equal(value.databaseWrites, false);
+  assert.equal(f.counts.gets, 0); assert.equal(f.counts.privateChecks, 0); assert.equal(f.calls.filter(call => call.file === 'pm2' && call.args[0] !== 'jlist').length, 0);
+  assert.deepEqual(await fs.readFile(f.previousManifest.path), bytes);
+  await fs.chmod(path.dirname(f.previousManifest.path), 0o775);
+  assert.equal((await f.run('export-previous-manifest')).status, 'supabase-previous-manifest-exported');
+  const normal = await f.run('export-release-inputs');
+  const standard = JSON.parse(gunzipSync(Buffer.concat(normal.sealedPages.map(page => Buffer.from(openTransferSecrets(privateKey, page).pageGzipBase64, 'base64')))));
+  assert.equal(standard.artifacts.length, 9); assert(!standard.artifacts.some(file => file.name === 'retainedPreviousManifest'));
+});
+
+test('a representative18879-entry retained previous manifest round-trips its exact2909890 bytes within the unchanged paged limits', async t => {
+  const f = await hostFixture(t, { largeManifest: true }), result = await f.run('export-previous-manifest');
+  assert(result.diagnosticPages > 1 && result.diagnosticPages <= 64);
+  const pages = result.sealedPages.map(page => openTransferSecrets(privateKey, page));
+  const packed = Buffer.concat(pages.map(page => Buffer.from(page.pageGzipBase64, 'base64')));
+  assert(packed.length <= 2 * 1024 ** 2); const raw = gunzipSync(packed, { maxOutputLength: 8 * 1024 ** 2 });
+  assert.equal(sha(raw), result.metadataSha256); const artifact = JSON.parse(raw).artifacts[0];
+  const bytes = gunzipSync(Buffer.from(artifact.dataBase64, 'base64'), { maxOutputLength: 4 * 1024 ** 2 });
+  assert.equal(bytes.length, 2909890); assert.equal(Object.keys(JSON.parse(bytes)).length, 18879);
+  assert.equal(sha(bytes), artifact.sha256); assert.deepEqual(bytes, f.previousManifest.data); assert.equal(f.counts.gets, 0);
+});
+
+test('previous-manifest export rejects foreign prepared roles, original previous identity, qualification, raw bytes and physical drift', async t => {
+  for (const kind of ['missing', 'raw-hash', 'prepared-root', 'prepared-manifest', 'prepared-basis', 'duplicate-role', 'missing-seed', 'seed-hash',
+    'seed-basis', 'previous-revision', 'previous-generation', 'previous-manifest', 'previous-basis', 'previous-report-hash',
+    'wrong-qualification', 'exposed-leaf', 'symlink', 'parent-drift', 'late-file-drift']) {
+    const f = await hostFixture(t), p = f.context.p; const extra = {};
+    if (kind === 'missing') await fs.unlink(f.previousManifest.path);
+    if (kind === 'raw-hash') await fs.appendFile(f.previousManifest.path, ' ');
+    if (kind === 'prepared-root') f.context.receipt.packages[0].root += '-other';
+    if (kind === 'prepared-manifest') f.context.receipt.packages[0].manifestSha256 = 'f'.repeat(64);
+    if (kind === 'prepared-basis') f.context.receipt.packages[0].sourceBasis = sha('different prepared basis');
+    if (kind === 'missing-seed') await fs.unlink(f.previousSeed.path);
+    if (kind === 'seed-hash') f.context.receipt.packages[0].originalDirectSeedSha256 = 'f'.repeat(64);
+    if (kind === 'seed-basis') {
+      const seed = JSON.parse(f.previousSeed.data); seed.sourceBasis = sha('different original seed basis');
+      f.context.receipt.packages[0].originalDirectSeedSha256 = (await f.write(f.previousSeed.path, seed)).sha256;
+    }
+    if (kind === 'duplicate-role') f.context.receipt.packages.push({ ...f.context.receipt.packages[0] });
+    if (kind.startsWith('previous-')) {
+      const context = f.context, identity = f.completionIdentity;
+      const completionFile = path.join(context.controlRoot, 'report-once-complete-' + identity + '.private.json');
+      const completion = JSON.parse(await fs.readFile(completionFile));
+      const intentFile = path.join(context.controlRoot, 'report-once-intents', completion.servingHeadBodySha256 + '.private.json');
+      const intent = JSON.parse(await fs.readFile(intentFile)), publication = JSON.parse(intent.publicationBody);
+      if (kind === 'previous-revision') publication.previous.servingPackage.collectorRevision++;
+      if (kind === 'previous-generation') { publication.previous.generation = sha('foreign previous'); completion.previousGeneration = publication.previous.generation; }
+      if (kind === 'previous-manifest') publication.previous.servingPackage.manifestSha256 = sha('foreign previous');
+      if (kind === 'previous-basis') publication.previous.servingPackage.sourceBasis = sha('valid but foreign original basis');
+      if (kind === 'previous-report-hash') publication.previous.reportHash = sha('valid but foreign original report');
+      intent.publicationBody = JSON.stringify(publication); intent.publicationBodySha256 = sha(intent.publicationBody);
+      const next = path.join(context.controlRoot, 'report-once-intents', intent.publicationBodySha256 + '.private.json');
+      completion.servingHeadBodySha256 = intent.publicationBodySha256; completion.publicationIntentSha256 = (await f.write(next, intent)).sha256;
+      const newIdentity = sha(JSON.stringify([completion.servingHeadBodySha256, completion.protectedHeads]));
+      await f.write(path.join(context.controlRoot, 'report-once-complete-' + newIdentity + '.private.json'), completion);
+      extra.reportCompletionIdentitySha256 = newIdentity;
+    }
+    if (kind === 'exposed-leaf') await fs.chmod(f.previousManifest.path, 0o644);
+    if (kind === 'symlink') { await fs.rename(f.previousManifest.path, f.previousManifest.path + '.original'); await fs.symlink(f.previousManifest.path + '.original', f.previousManifest.path); }
+    let reached = false;
+    if (kind === 'parent-drift' || kind === 'late-file-drift') {
+      const open = fs.open;
+      fs.open = async (file, ...args) => {
+        const handle = await open(file, ...args);
+        if (!reached && file === f.previousManifest.path) { reached = true;
+          if (kind === 'parent-drift') await fs.chmod(path.dirname(file), 0o775); else await fs.appendFile(file, ' ');
+        }
+        return handle;
+      };
+      try { await assert.rejects(f.run('export-previous-manifest'), /Supabase source release stopped/); }
+      finally { fs.open = open; }
+      assert(reached);
+    } else await assert.rejects(f.run('export-previous-manifest', kind === 'wrong-qualification' ? { qualificationReceiptSha256: 'f'.repeat(64) } : extra), /Supabase source release stopped/, kind);
+    assert.equal(f.counts.gets, 0); assert.equal(f.counts.privateChecks, 0); assert.equal(p.current.revision, 6);
+  }
+});
 
 test('source-release readbacks preserve the originally captured base Event file and reject later file or parent changes', async t => {
   for (const change of [null, 'file', 'parent']) {

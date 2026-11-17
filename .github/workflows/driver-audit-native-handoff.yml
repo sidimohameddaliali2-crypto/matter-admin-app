@@ -24,6 +24,7 @@ on:
           - restore-supabase-canary
           - promote-supabase-report
           - export-supabase-release-inputs
+          - export-supabase-previous-manifest
           - stage-supabase-source-release
           - start-supabase-source-sync
           - pause-builder
@@ -106,7 +107,7 @@ jobs:
             inspect-supabase-routing) operator=supabase-routing ;;
             prepare-supabase-serving|start-supabase-report|qualify-supabase-source-held|run-supabase-report-once) operator=supabase-control ;;
             probe-supabase-canary|plan-supabase-canary|enable-supabase-canary|seal-supabase-canary-entry|restore-supabase-canary|promote-supabase-report) operator=supabase-canary-control ;;
-            export-supabase-release-inputs|stage-supabase-source-release|start-supabase-source-sync) operator=supabase-release-control ;;
+            export-supabase-release-inputs|export-supabase-previous-manifest|stage-supabase-source-release|start-supabase-source-sync) operator=supabase-release-control ;;
             inspect-database-config) operator=database-check ;;
             prepare-object-store|externalize-native-archive) operator=object-store ;;
             plan-native-cleanup|apply-native-cleanup) operator=cleanup ;;

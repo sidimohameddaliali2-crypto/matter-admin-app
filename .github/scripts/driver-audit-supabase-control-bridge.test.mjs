@@ -82,14 +82,15 @@ const canaryOperations = [
 ];
 const releaseOperations = [
   ['export-supabase-release-inputs', 'export-release-inputs'], ['stage-supabase-source-release', 'stage-source-release'],
-  ['start-supabase-source-sync', 'start-source-sync'],
+  ['start-supabase-source-sync', 'start-source-sync'], ['export-supabase-previous-manifest', 'export-previous-manifest'],
 ];
 const canaryInput = internal => ({ version: 1, recipientPublicKey: 'fixture public recipient',
   ...(internal === 'probe' ? {} : { preparedReceiptSha256: hash }),
   ...(['enable', 'seal-entry', 'restore', 'promote'].includes(internal) ? { planSha256: hash } : {}),
   ...(internal === 'promote' ? { canaryAcceptanceSha256: hash, canaryAcceptanceObjectSha256: hash } : {}) });
 const releaseInput = internal => ({ version: 1, recipientPublicKey: 'fixture public recipient', preparedReceiptSha256: hash,
-  qualificationReceiptSha256: hash, ...(internal === 'export-release-inputs' ? { reportCompletionIdentitySha256: hash } : { releasePackSha256: hash }) });
+  qualificationReceiptSha256: hash, ...(['export-release-inputs', 'export-previous-manifest'].includes(internal)
+    ? { reportCompletionIdentitySha256: hash } : { releasePackSha256: hash }) });
 
 test('canary and source release operations admit only exact typed phase-specific public hashes', () => {
   for (const [list, inputFor, parse] of [[canaryOperations, canaryInput, driverAuditSupabaseCanaryRequest],
@@ -112,8 +113,9 @@ test('canary and source release operations admit only exact typed phase-specific
 });
 
 function releaseResult(args, capsule) {
-  const exporting = args.operation === 'export-release-inputs', starting = args.operation === 'start-source-sync';
-  return { status: exporting ? 'supabase-release-inputs-exported' : starting ? 'supabase-source-sync-started' : 'supabase-source-release-staged',
+  const exporting = ['export-release-inputs', 'export-previous-manifest'].includes(args.operation), starting = args.operation === 'start-source-sync';
+  return { status: args.operation === 'export-previous-manifest' ? 'supabase-previous-manifest-exported'
+    : exporting ? 'supabase-release-inputs-exported' : starting ? 'supabase-source-sync-started' : 'supabase-source-release-staged',
     operation: args.operation, applicationCommit: commit, releaseCommit: '4a00becfe4954b8139df6ac3c6058c2a592484d2',
     preparedReceiptSha256: args.preparedReceiptSha256, qualificationReceiptSha256: args.qualificationReceiptSha256,
     ...(exporting ? { reportCompletionIdentitySha256: args.reportCompletionIdentitySha256 } : { releasePackSha256: args.releasePackSha256 }),
@@ -155,6 +157,20 @@ test('encrypted release output rejects plaintext, changed bindings, malformed pa
     { ...valid, sealedPages: [{ ...capsule, data: 'not canonical ciphertext' }] },
     { ...valid, sealedPages: [{ ...capsule, data: Buffer.alloc(50000).toString('base64') }] }])
     assert.throws(() => driverAuditSupabaseReleaseReceipts(changed, args, commit));
+});
+
+test('the fixed previous-manifest export cannot claim complete release inputs or a lifecycle transition', () => {
+  const { publicKey } = generateKeyPairSync('rsa', { modulusLength: 3072 });
+  const capsule = sealTransferSecrets(publicKey, { fictional: true });
+  const args = driverAuditSupabaseReleaseRequest('export-supabase-previous-manifest', encode(releaseInput('export-previous-manifest')));
+  const valid = releaseResult(args, capsule), rows = driverAuditSupabaseReleaseReceipts(valid, args, commit);
+  assert.equal(rows.at(-1).status, 'supabase-previous-manifest-exported');
+  assert.equal(rows.at(-1).reportCompletionIdentitySha256, hash);
+  assert.equal(rows.at(-1).sourceStarted, false);
+  for (const status of ['supabase-release-inputs-exported', 'supabase-source-release-staged', 'supabase-source-sync-started'])
+    assert.throws(() => driverAuditSupabaseReleaseReceipts({ ...valid, status }, args, commit));
+  assert.throws(() => driverAuditSupabaseReleaseReceipts({ ...valid, operation: 'export-release-inputs' }, args, commit));
+  assert.throws(() => driverAuditSupabaseReleaseReceipts({ ...valid, sourceStarted: true }, args, commit));
 });
 
 test('large real encrypted exports are emitted as bounded separate lines with one final summary', async t => {

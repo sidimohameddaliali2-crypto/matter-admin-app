@@ -95,7 +95,7 @@ export async function validateAutomaticCandidate(candidate){const bytes=await fs
 `,
 };
 
-async function reportPackage(directory, revision, { largeRuntime = false } = {}) {
+async function reportPackage(directory, revision, { largeRuntime = false, largeManifest = false } = {}) {
   const blobs = new Map(), files = {};
   const local = { async putVerifiedObject(key, body) {
     blobs.set(key, Buffer.from(body));
@@ -132,7 +132,9 @@ async function reportPackage(directory, revision, { largeRuntime = false } = {})
     const name = 'archive-' + key.slice(0, 64) + '.private.bin';
     await write(path.join(directory, name), body); files[name] = sha(body);
   }
-  const manifestBytes = Buffer.from(JSON.stringify(files)), manifestSha256 = sha(manifestBytes);
+  const manifestJson = Buffer.from(JSON.stringify(files));
+  const manifestBytes = largeManifest ? Buffer.concat([manifestJson, Buffer.alloc(2856283 - manifestJson.length, 32)]) : manifestJson;
+  const manifestSha256 = sha(manifestBytes);
   await write(path.join(directory, 'files.private.json'), manifestBytes);
   const bundleRoot = path.join(path.dirname(directory), 'objects');
   const prepared = await prepareRemotePreviewPackage({ privateRoot: directory, validation: { ok: true, manifestSha256 },
@@ -147,7 +149,7 @@ async function reportPackage(directory, revision, { largeRuntime = false } = {})
 }
 
 
-async function fixture(t, { largeRuntime = false } = {}) {
+async function fixture(t, { largeRuntime = false, largeManifest = false } = {}) {
   const appRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'supabase-control-')));
   let stopModel = async () => {};
   t.after(async () => { await stopModel(); await fs.rm(appRoot, { recursive: true, force: true }); });
@@ -167,7 +169,7 @@ async function fixture(t, { largeRuntime = false } = {}) {
   const packageRoot = path.join(appRoot, 'original-packages');
   const baseline = await reportPackage(path.join(packageRoot, 'baseline/server-data'), 4);
   const candidate = await reportPackage(path.join(packageRoot, 'candidate/server-data'), 7);
-  const current = await reportPackage(path.join(packageRoot, 'current/server-data'), 6, { largeRuntime });
+  const current = await reportPackage(path.join(packageRoot, 'current/server-data'), 6, { largeRuntime, largeManifest });
   const previous = await reportPackage(path.join(packageRoot, 'previous/server-data'), 5);
   p.baseline = baseline.seed.manifestSha256; p.candidate = candidate.seed.manifestSha256;
   p.current = { revision: 6, manifest: current.seed.manifestSha256, generation: current.seed.pointer.generation };
@@ -441,6 +443,71 @@ test('prepare-serving uses the actual Sync and Replica to publish current plus p
   const capsule = openTransferSecrets(privateKey,result.capsule), {gunzipSync}=await import('node:zlib');
   const raw=gunzipSync(Buffer.from(capsule.metadataGzipBase64,'base64')); assert.equal(hash(raw),result.metadataSha256);
   assert(!raw.includes(Buffer.from(f.secret))); assert(!JSON.stringify(result).includes(f.appRoot));
+});
+
+test('a verified2856283-byte manifest seeds both genuine heads through the actual Sync and retains its exact bytes on retry', async t => {
+  const f = await fixture(t, { largeManifest: true }), row = f.receipt.packages.find(row => row.role === 'serving-current');
+  const original = await fs.readFile(path.join(row.root, 'files.private.json')); assert.equal(original.length, 2856283);
+  const protectedSource = structuredClone(f.states.get('collector-state'));
+  assert.equal((await f.run('prepare-serving')).status, 'serving-prepared');
+  const pointer = JSON.parse(await fs.readFile(path.join(f.syncRoot, 'work/current.private.json')));
+  const selected = await fs.readFile(path.join(pointer.privateRoot, 'files.private.json'));
+  assert.deepEqual(selected, original); assert.equal(hash(selected), f.p.current.manifest);
+  const head = structuredClone(f.states.get('app-sidi-report-head')); assert.equal(JSON.parse(head.body).servingPackage.collectorRevision, 6);
+  assert.equal(JSON.parse(head.body).previous.servingPackage.collectorRevision, 5);
+  assert.equal((await f.run('prepare-serving')).status, 'serving-prepared'); assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.deepEqual(f.states.get('collector-state'), protectedSource); assert.deepEqual(await fs.readFile(path.join(row.root, 'files.private.json')), original);
+  assert(f.commands.some(row => row.args.includes('--seed-only'))); assert.equal(f.calls.filter(row => row.name === 'matter_hosted_state_cas').length, 1);
+});
+
+test('ordinary post-admission failures return bounded encrypted diagnostics without exposing private causes or changing held workers', async t => {
+  for (const binary of [false, true]) {
+    const f = await fixture(t), before = structuredClone(f.rows), exec = f.adapters.exec;
+    const privateCause = 'fictional private failure ' + f.secret;
+    f.adapters.exec = async (file, args, options) => {
+      if (args.includes('--seed-only')) throw Object.assign(Error(privateCause), { code: 'FICTIONAL_PRIVATE',
+        stdout: binary ? Buffer.alloc(256 * 1024, 0xff) : '\0'.repeat(100000),
+        stderr: binary ? Buffer.concat([Buffer.from(f.secret), Buffer.alloc(256 * 1024, 0xff)]) : (privateCause + '\n').repeat(10000) });
+      return exec(file, args, options);
+    };
+    let failure; await assert.rejects(f.run('prepare-serving'), error => { failure = error; return error.phase === 'seed-cli'; });
+    const receipt = failure.supabaseControlStopped; assert(receipt);
+    assert.deepEqual(Object.keys(receipt).sort(), ['status', 'applicationCommit', 'operatorPhase', 'metadataSha256', 'capsule'].sort());
+    assert(!JSON.stringify(failure).includes(f.secret)); assert(!JSON.stringify(receipt).includes(f.secret));
+    const opened = openTransferSecrets(privateKey, receipt.capsule), packed = Buffer.from(opened.metadataGzipBase64, 'base64');
+    assert.equal(hash(packed), opened.metadataGzipSha256); const raw = gunzipSync(packed, { maxOutputLength: 24 * 1024 });
+    assert.equal(hash(raw), receipt.metadataSha256); const details = JSON.parse(raw);
+    assert.equal(details.kind, 'supabase-host-control-failure-v1'); assert.equal(details.acceptedAsVerified, false);
+    assert.equal(details.cause.code, 'FICTIONAL_PRIVATE'); assert(details.cause.message.includes(f.secret));
+    assert(details.cause.stdoutTruncated); assert(details.cause.stderrTruncated);
+    assert.equal(details.child, null); assert.deepEqual(f.rows, before); assert.equal(f.states.has('app-sidi-report-head'), false);
+    const lock = await acquireWorkerLock(path.join(f.baseServer, '.private/driver-report-supabase-handoff/operator.lock')); await lock.release();
+  }
+});
+
+test('a failed selected-manifest write returns its encrypted cause and retries the retained partial workspace without changing the original package', async t => {
+  const f = await fixture(t, { largeManifest: true }), originalOpen = fs.open;
+  const row = f.receipt.packages.find(row => row.role === 'serving-current'), original = await fs.readFile(path.join(row.root, 'files.private.json'));
+  let reached = false, failure;
+  fs.open = async (file, ...args) => {
+    if (!reached && path.basename(String(file)) === 'files.private.json' && typeof args[0] === 'number' && (args[0] & fsConstants.O_WRONLY)) {
+      const parent = await fs.realpath(path.dirname(String(file)));
+      if (parent.startsWith(path.join(f.syncRoot, 'work/attempts') + path.sep)) {
+        reached = true; throw Object.assign(Error('Fictional selected-write cause ' + f.secret), { code: 'EIO' });
+      }
+    }
+    return originalOpen(file, ...args);
+  };
+  try { await assert.rejects(f.run('prepare-serving'), error => { failure = error; return error.phase === 'select-local-seed'; }); }
+  finally { fs.open = originalOpen; }
+  assert(reached); assert(failure.supabaseControlStopped); assert.equal(f.states.has('app-sidi-report-head'), false);
+  const sealed = openTransferSecrets(privateKey, failure.supabaseControlStopped.capsule);
+  const detail = JSON.parse(gunzipSync(Buffer.from(sealed.metadataGzipBase64, 'base64')));
+  assert.equal(detail.cause.code, 'EIO'); assert(detail.cause.message.includes(f.secret));
+  assert(!JSON.stringify(failure).includes(f.secret)); assert.deepEqual(await fs.readFile(path.join(row.root, 'files.private.json')), original);
+  assert.equal((await f.run('prepare-serving')).status, 'serving-prepared');
+  assert.equal(f.calls.filter(row => row.name === 'matter_hosted_state_cas').length, 1);
+  assert.deepEqual(await fs.readFile(path.join(row.root, 'files.private.json')), original);
 });
 
 async function eventCheckoutFixture(t) {

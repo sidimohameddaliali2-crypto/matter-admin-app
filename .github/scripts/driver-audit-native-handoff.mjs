@@ -34,7 +34,7 @@ const supabaseCanaryOperations = Object.freeze({
 });
 const supabaseReleaseOperations = Object.freeze({
   'export-supabase-release-inputs': 'export-release-inputs', 'stage-supabase-source-release': 'stage-source-release',
-  'start-supabase-source-sync': 'start-source-sync',
+  'start-supabase-source-sync': 'start-source-sync', 'export-supabase-previous-manifest': 'export-previous-manifest',
 });
 
 function boundedSupabasePublicPlan(operation, encoded, choices, hashes) {
@@ -64,18 +64,20 @@ export function driverAuditSupabaseCanaryRequest(operation, encoded) {
 export function driverAuditSupabaseReleaseRequest(operation, encoded) {
   return boundedSupabasePublicPlan(operation, encoded, supabaseReleaseOperations,
     ['preparedReceiptSha256', 'qualificationReceiptSha256',
-      ...(supabaseReleaseOperations[operation] === 'export-release-inputs' ? ['reportCompletionIdentitySha256'] : ['releasePackSha256'])]);
+      ...(['export-release-inputs', 'export-previous-manifest'].includes(supabaseReleaseOperations[operation])
+        ? ['reportCompletionIdentitySha256'] : ['releasePackSha256'])]);
 }
 
 export function driverAuditSupabaseReleaseReceipts(value, args, applicationCommit) {
   const hex = text => typeof text === 'string' && /^[a-f0-9]{64}$/.test(text);
   const exact = (item, keys) => item && typeof item === 'object' && !Array.isArray(item)
     && Object.keys(item).length === keys.length && keys.every(key => Object.hasOwn(item, key));
-  const exporting = args.operation === 'export-release-inputs', starting = args.operation === 'start-source-sync';
+  const exporting = ['export-release-inputs', 'export-previous-manifest'].includes(args.operation), starting = args.operation === 'start-source-sync';
   const specific = exporting ? 'reportCompletionIdentitySha256' : 'releasePackSha256';
   const fields = ['status', 'operation', 'applicationCommit', 'releaseCommit', 'preparedReceiptSha256', 'qualificationReceiptSha256', specific,
     'dataStore', 'sourceStarted', 'syncSteadyStarted', 'routingChanged', 'recipientSha256', 'metadataSha256', 'diagnosticPages', 'sealedPages'];
-  if (!exact(value, fields) || value.status !== (exporting ? 'supabase-release-inputs-exported'
+  if (!exact(value, fields) || value.status !== (args.operation === 'export-previous-manifest' ? 'supabase-previous-manifest-exported'
+    : exporting ? 'supabase-release-inputs-exported'
     : starting ? 'supabase-source-sync-started' : 'supabase-source-release-staged') || value.operation !== args.operation
     || value.applicationCommit !== applicationCommit || value.releaseCommit !== '4a00becfe4954b8139df6ac3c6058c2a592484d2'
     || value.preparedReceiptSha256 !== args.preparedReceiptSha256 || value.qualificationReceiptSha256 !== args.qualificationReceiptSha256
