@@ -813,7 +813,11 @@ async function prepareServing(context, controls) {
     for (const file of data.files) {
       const target = path.join(inputs.paths.privateRoot, file.name); await mkdirPrivate(path.dirname(target));
       await withPrivatePackageDirectory(path.dirname(file.path), context.syncRoot, async () => {
-        if (file.name === 'files.private.json') await writeOnce(target, (await read(file.path)).data);
+        if (file.name === 'files.private.json') {
+          need(file.bytes > 0 && file.bytes <= 8 * 1024 ** 2 && file.sha256 === row.manifestSha256);
+          const manifest = await read(file.path, { maximum: file.bytes });
+          need(manifest.bytes === file.bytes && manifest.sha256 === file.sha256); await writeOnce(target, manifest.data);
+        }
         else await linkImmutable(file.path, target, file.sha256, file.bytes);
       });
     }
@@ -1501,6 +1505,24 @@ async function runReportOnce(context, controls, args) {
   } finally { await backend.close?.(); }
 }
 
+function boundedFailureText(value, maximum) {
+  const bytes = Buffer.isBuffer(value) ? value.length : typeof value === 'string' ? Buffer.byteLength(value) : 0;
+  const raw = Buffer.isBuffer(value) ? value.subarray(0, maximum) : Buffer.from(typeof value === 'string' ? value.slice(0, maximum) : '');
+  let text = raw.subarray(0, maximum).toString('utf8');
+  while (Buffer.byteLength(text) > maximum) text = text.slice(0, -1);
+  return { text, bytes, truncated: bytes > Buffer.byteLength(text) };
+}
+
+function boundedFailureCause(cause) {
+  const result = {};
+  for (const [name, maximum] of [['name', 128], ['code', 128], ['message', 2048], ['stack', 4096], ['stdout', 2048], ['stderr', 4096]]) {
+    let value; try { value = cause?.[name]; if (name === 'code' && Number.isSafeInteger(value)) value = String(value); } catch { /* Optional error getters cannot replace the stopped result. */ }
+    const part = boundedFailureText(value, maximum); result[name] = part.text;
+    if (!['name', 'code'].includes(name)) { result[name + 'Bytes'] = part.bytes; result[name + 'Truncated'] = part.truncated; }
+  }
+  return result;
+}
+
 export async function runDriverAuditSupabaseControl(args = {}, adapters = {}) {
   let phase = 'inputs', context, controls, key, outwardFailure; const locks = new Map(), listeners = [];
   const controller = new AbortController();
@@ -1638,15 +1660,28 @@ export async function runDriverAuditSupabaseControl(args = {}, adapters = {}) {
     return { status: result.status, operation: args.operation, applicationCommit: args.expectedSha, releaseCommit: context.p.release,
       dataStore: 'supabase', sourceStarted: false, syncSteadyStarted: false, routingChanged: false,
       sourceReleasePending: true, metadataSha256: sha(metadata), capsule };
-  } catch {
+  } catch (cause) {
     const failure = Object.assign(Error('Supabase control stopped at ' + phase), { phase });
     outwardFailure = failure;
-    if (context?.privateFailure && key) try {
+    if (context && key) try {
       await checkout(context.releaseRoot, context.p.release, exec, ['services/driverAuditTransferCodec.js']);
-      const metadata = Buffer.from(JSON.stringify({ version: 1, kind: 'supabase-host-control-failure-v1',
+      const details = { version: 1, kind: 'supabase-host-control-failure-v1',
         operation: args.operation, applicationCommit: args.expectedSha, releaseCommit: context.p.release,
-        preparedReceiptSha256: context.preparedReceiptSha256, operatorPhase: phase, child: context.privateFailure,
-        sourceStarted: false, syncSteadyStarted: false, routingChanged: false, acceptedAsVerified: false }));
+        preparedReceiptSha256: context.preparedReceiptSha256, operatorPhase: phase, child: context.privateFailure ?? null,
+        cause: boundedFailureCause(cause), sourceStarted: false, syncSteadyStarted: false, routingChanged: false, acceptedAsVerified: false };
+      let metadata = Buffer.from(JSON.stringify(details));
+      for (let shrink = 0; metadata.length > 24 * 1024 && shrink < 16; shrink++) {
+        for (const name of ['stdout', 'stderr', 'stack', ...(shrink >= 8 ? ['message'] : [])]) {
+          details.cause[name] = details.cause[name].slice(0, Math.floor(details.cause[name].length / 2));
+          details.cause[name + 'Truncated'] = true;
+        }
+        metadata = Buffer.from(JSON.stringify(details));
+      }
+      if (metadata.length > 24 * 1024 && context.privateFailure) {
+        details.child = { ...select(context.privateFailure, ['path', 'sha256', 'bytes', 'exit', 'overflow', 'forced']),
+          diagnosticExcerptOmitted: true };
+        metadata = Buffer.from(JSON.stringify(details));
+      }
       need(metadata.length <= 24 * 1024); const packed = gzipSync(metadata);
       const { sealTransferSecrets } = await context.load('services/driverAuditTransferCodec.js');
       const capsule = sealTransferSecrets(key, { version: 1, kind: 'supabase-host-control-capsule-v1', applicationCommit: args.expectedSha,
