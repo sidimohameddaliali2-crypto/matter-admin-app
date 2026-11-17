@@ -214,6 +214,52 @@ jobs:
             exit 1
           fi
 
+      - name: Set up website build runtime
+        if: (github.event_name == 'push' || inputs.operation == 'deploy') && vars.ATOMIC_WEBSITE_DEPLOY == '1'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Build and seal website away from the live server
+        id: website
+        if: (github.event_name == 'push' || inputs.operation == 'deploy') && vars.ATOMIC_WEBSITE_DEPLOY == '1'
+        shell: bash
+        env:
+          REACT_APP_2GIS_API_KEY: ${{ vars.REACT_APP_2GIS_API_KEY }}
+          REACT_APP_API_URL: ${{ vars.REACT_APP_API_URL }}
+          REACT_APP_SOCKET_URL: ${{ vars.REACT_APP_SOCKET_URL }}
+          REACT_APP_LOCAL_TIMEZONE_OFFSET_MINUTES: ${{ vars.REACT_APP_LOCAL_TIMEZONE_OFFSET_MINUTES }}
+          REACT_APP_ENABLE_EARLY_NEXT_DAY: ${{ vars.REACT_APP_ENABLE_EARLY_NEXT_DAY }}
+          REACT_APP_NEXT_DAY_AVAILABLE_HOUR: ${{ vars.REACT_APP_NEXT_DAY_AVAILABLE_HOUR }}
+          REACT_APP_MENU_SELECTION_V2_TOKENS: ${{ vars.REACT_APP_MENU_SELECTION_V2_TOKENS }}
+          REACT_APP_GOOGLE_MAPS_API_KEY: ${{ vars.REACT_APP_GOOGLE_MAPS_API_KEY }}
+          REACT_APP_GOOGLE_GEOCODING_API_KEY: ${{ vars.REACT_APP_GOOGLE_GEOCODING_API_KEY }}
+        run: |
+          set -euo pipefail
+          node --test .github/scripts/website-release.test.mjs
+          release_id="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cd client
+          npm ci
+          PUBLIC_URL="/website-releases/$release_id" npm run build
+          cd ..
+          node .github/scripts/website-release.mjs seal client/build "$release_id"
+          tar -czf website-build.tar.gz -C client/build .
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum website-build.tar.gz | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload immutable website candidate
+        if: (github.event_name == 'push' || inputs.operation == 'deploy') && vars.ATOMIC_WEBSITE_DEPLOY == '1'
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          source: website-build.tar.gz
+          target: ${{ secrets.DO_APP_PATH }}/.website/incoming/${{ steps.website.outputs.release_id }}
+
       - name: Deploy over SSH
         if: github.event_name == 'push' || inputs.operation == 'deploy'
         uses: appleboy/ssh-action@v1.2.0
@@ -222,12 +268,15 @@ jobs:
           MATTER_ACTIVITY_READER_EMAILS: ${{ secrets.MATTER_ACTIVITY_READER_EMAILS }}
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
           DEPLOY_SHA: ${{ github.sha }}
+          ATOMIC_WEBSITE_DEPLOY: ${{ vars.ATOMIC_WEBSITE_DEPLOY || '0' }}
+          WEBSITE_RELEASE_ID: ${{ steps.website.outputs.release_id }}
+          WEBSITE_ARCHIVE_SHA256: ${{ steps.website.outputs.sha256 }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
-          envs: MATTER_CS_RUNTIME_B64,MATTER_ACTIVITY_READER_EMAILS,DO_APP_PATH,DEPLOY_SHA
+          envs: MATTER_CS_RUNTIME_B64,MATTER_ACTIVITY_READER_EMAILS,DO_APP_PATH,DEPLOY_SHA,ATOMIC_WEBSITE_DEPLOY,WEBSITE_RELEASE_ID,WEBSITE_ARCHIVE_SHA256
           script: |
             set -e
             cd -- "$DO_APP_PATH"
@@ -244,6 +293,22 @@ jobs:
             git fetch --all --prune
             if [ "$(git rev-parse origin/main)" != "$DEPLOY_SHA" ]; then
               echo "Main advanced since this deployment was selected. Use the run for the reviewed current commit."
+              exit 1
+            fi
+
+            if [ "$ATOMIC_WEBSITE_DEPLOY" = 1 ]; then
+              case "$WEBSITE_RELEASE_ID" in "$DEPLOY_SHA"-[0-9]*-[0-9]*) ;; *) echo "Invalid website release identity"; exit 1 ;; esac
+              website_incoming="$DO_APP_PATH/.website/incoming/$WEBSITE_RELEASE_ID"
+              git show "$DEPLOY_SHA:.github/scripts/website-release.mjs" > "$website_incoming/publisher.mjs"
+              node "$website_incoming/publisher.mjs" check "$DO_APP_PATH/.website/current" https://matterapp.online
+              printf '%s  %s\n' "$WEBSITE_ARCHIVE_SHA256" "$website_incoming/website-build.tar.gz" | sha256sum --check -
+              mkdir "$website_incoming/build"
+              tar -xzf "$website_incoming/website-build.tar.gz" -C "$website_incoming/build" --no-same-owner --no-same-permissions
+              node "$website_incoming/publisher.mjs" verify "$website_incoming/build" "$WEBSITE_RELEASE_ID"
+            elif [ "$ATOMIC_WEBSITE_DEPLOY" != 0 ]; then
+              echo "ATOMIC_WEBSITE_DEPLOY must be 0 or 1"; exit 1
+            elif [ -L "$DO_APP_PATH/.website/current" ]; then
+              echo "Website bootstrap exists. Complete atomic activation or explicitly restore legacy routing before disabling the mode."
               exit 1
             fi
 
@@ -269,6 +334,7 @@ jobs:
             cd ..
 
             echo "[5/7] Install and build client"
+            if [ "$ATOMIC_WEBSITE_DEPLOY" = 0 ]; then
             cd client
             npm ci
             npm run build
@@ -286,6 +352,9 @@ jobs:
             };
             console.log(JSON.stringify(await releaseClientBuildDependencies({appRoot:process.cwd(),apply:true,verifyHealth})));
             NODE
+            else
+              echo "Website candidate was built and verified separately; live website files are unchanged."
+            fi
 
             echo "[5/7] Verify canonical Customer Service and existing staff access"
             node server/scripts/customerServiceDeploy.js --apply
@@ -310,6 +379,10 @@ jobs:
             if [ "$source_paused" = 1 ]; then
               DRIVER_AUDIT_DEPLOY_SHA="$DEPLOY_SHA" node server/scripts/driverAuditSourceDeploy.js deploy-source-resume
               source_paused=0
+            fi
+
+            if [ "$ATOMIC_WEBSITE_DEPLOY" = 1 ]; then
+              node .github/scripts/website-release.mjs publish "$DO_APP_PATH" "$website_incoming/build" "$WEBSITE_RELEASE_ID" https://matterapp.online
             fi
 
       - name: Prepare private source transfer
