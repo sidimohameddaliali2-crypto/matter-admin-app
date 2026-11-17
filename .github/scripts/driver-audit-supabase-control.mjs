@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import { constants } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { createHash, createPublicKey } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { gzipSync, gunzipSync } from 'node:zlib';
@@ -246,7 +246,7 @@ async function packageFiles(root, expectedManifest, { objects = false, archiveBa
   }
   missingArchiveReferences.sort();
   phase('inventory'); const inventorySha256 = sha(JSON.stringify(files.map(({ name, sha256, bytes }) => ({ name, sha256, bytes }))));
-  return { root, files, bytes: total, inventorySha256, manifestSha256: manifest?.sha256 ?? null,
+  return { root, files, declared, bytes: total, inventorySha256, manifestSha256: manifest?.sha256 ?? null,
     archiveBackedManifest, privateDirectoryBoundary, declaredFiles: declared ? Object.keys(declared).length : 0, missingArchiveReferences,
     missingArchiveReferencesSha256: sha(JSON.stringify(missingArchiveReferences)) };
   };
@@ -571,7 +571,7 @@ async function admittedContext(args, adapters, exec, setPhase) {
     && same(dependencyReceipt.inventory, dependencies.inventory));
   setPhase('retained-packages');
   need(Array.isArray(receipt.packages) && receipt.packages.length === 4);
-  const presenceFiles = [];
+  const presenceFiles = [], retainedPackages = new Map();
   for (const [role, expectedRoot, manifest] of [
     ['baseline-builder-input', path.join(syncRoot, 'baseline'), p.baseline],
     ['candidate', path.join(syncRoot, 'retained/candidate/server-data'), p.candidate],
@@ -589,6 +589,7 @@ async function admittedContext(args, adapters, exec, setPhase) {
       && actual.declaredFiles === row.declaredFiles && actual.missingArchiveReferences.length === row.archiveReferences.locallyMissing
       && mask.sha256 === row.archiveReferences.sha256 && mask.bytes === row.archiveReferences.bytes
       && sameArchiveMask(JSON.parse(mask.data), actual));
+    if (role.startsWith('serving-')) retainedPackages.set(role, actual);
   }
   const bootstrapFile = await read(path.join(syncRoot, 'retained/bootstrap.private.json.gz'));
   need(bootstrapFile.sha256 === p.bootstrap && bootstrapFile.bytes === p.bootstrapBytes);
@@ -596,7 +597,7 @@ async function admittedContext(args, adapters, exec, setPhase) {
   need(bootstrap.version === 1 && bootstrap.releaseSha === p.release && bootstrap.packageLockSha256 === lock.sha256);
   const controlRoot = path.join(syncRoot, 'controls');
   return { p, appRoot, releaseRoot, server, syncRoot, sourceRoot, controlRoot, receipt, receiptFile, preparedReceiptSha256,
-    node, npm, load, env, envFile, envBytes, sourceEnvironment, config, source, sync, syncFile, bootstrap,
+    node, npm, load, env, envFile, envBytes, sourceEnvironment, config, source, sync, syncFile, bootstrap, retainedPackages,
     fixedFiles: [saved, configFile, sourceEnvironment, syncFile, builderFile, sourceManifest, bootstrapFile, dependencyBytes, lock, ...presenceFiles] };
 }
 
@@ -620,6 +621,73 @@ function comparableHead(head) {
   return { ...value, ...(previous ? { previous: comparableHead(previous) } : {}) };
 }
 
+async function readRuntimeExtent(extent, boundary) {
+  return withPrivatePackageDirectory(path.dirname(extent.path), boundary, async () => {
+    const before = await fs.lstat(extent.path, { bigint: true }), original = extent.saved.stat;
+    need(before.isFile() && before.uid === BigInt(process.getuid()) && !(Number(before.mode) & 0o077)
+      && await fs.realpath(extent.path) === extent.path && before.dev === original.dev && before.ino === original.ino
+      && before.size === BigInt(extent.saved.bytes) && before.mtimeNs === original.mtimeNs);
+    const fd = await fs.open(extent.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      need(signature(await fd.stat({ bigint: true })) === signature(before));
+      const bytes = Buffer.alloc(extent.size);
+      for (let offset = 0; offset < bytes.length;) {
+        const result = await fd.read(bytes, offset, bytes.length - offset, extent.offset + offset);
+        need(result.bytesRead > 0); offset += result.bytesRead;
+      }
+      need(sha(bytes) === extent.sha256 && signature(await fd.stat({ bigint: true })) === signature(before)
+        && signature(await fs.lstat(extent.path, { bigint: true })) === signature(before) && await fs.realpath(extent.path) === extent.path);
+      return bytes;
+    } finally { await fd.close(); }
+  });
+}
+
+function localServingArchive({ head, folder, sourcePackage, boundary }) {
+  need(sourcePackage?.declared && Array.isArray(sourcePackage.files));
+  let descriptor, extents;
+  const runtime = new Map(sourcePackage.files.map(row => [row.name, row]));
+  const runtimeExtent = (key, size) => {
+    if (!extents) {
+      need(descriptor && typeof descriptor.files === 'object' && !Array.isArray(descriptor.files)); extents = new Map();
+      for (const [name, ref] of Object.entries(descriptor.files)) {
+        const saved = runtime.get(name);
+        if (!saved || sourcePackage.declared[name] !== ref.sha256 || saved.sha256 !== ref.sha256 || saved.bytes !== ref.size) continue;
+        need(Array.isArray(ref.chunks));
+        for (const chunk of ref.chunks) {
+          need(digest(chunk.sha256) && Number.isSafeInteger(chunk.offset) && chunk.offset >= 0
+            && Number.isSafeInteger(chunk.size) && chunk.size > 0 && chunk.size <= 8 * 1024 ** 2
+            && chunk.offset + chunk.size <= saved.bytes);
+          const chunkKey = chunk.sha256 + '.gz', prior = extents.get(chunkKey); need(!prior || prior.size === chunk.size);
+          const whole = chunk.offset === 0 && chunk.size === saved.bytes && chunk.sha256 === saved.sha256;
+          if (!prior || whole && prior.kind !== 'whole-runtime') extents.set(chunkKey,
+            { kind: whole ? 'whole-runtime' : 'partial-runtime', path: path.join(sourcePackage.root, name),
+              saved, offset: chunk.offset, size: chunk.size, sha256: chunk.sha256 });
+        }
+      }
+    }
+    const found = extents.get(key); need(found && found.size === size); return found;
+  };
+  const locate = async (key, maxBytes) => {
+    need(/^[a-f0-9]{64}\.gz$/.test(key) && Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 8 * 1024 ** 2);
+    try {
+      const file = await read(path.join(folder, 'audit-objects', key), { maximum: maxBytes });
+      need(file.bytes === maxBytes && file.sha256 === key.slice(0, 64));
+      return { kind: 'bundle', path: file.path, size: file.bytes, sha256: file.sha256, data: file.data };
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    const extent = runtimeExtent(key, maxBytes); return { ...extent, data: await readRuntimeExtent(extent, boundary) };
+  };
+  return {
+    async readObject(key, { maxBytes }) {
+      const value = await locate(key, maxBytes);
+      if (key === head.descriptor.sha256 + '.gz') descriptor = JSON.parse(value.data);
+      return [value.data];
+    },
+    async source(key, size) {
+      const { data, ...record } = await locate(key, size); return record;
+    },
+  };
+}
+
 async function seedInputs(context) {
   const { p, syncRoot, load, receipt } = context, seeds = [], proofs = [];
   const verify = (await load('services/driverAuditSupabaseReplica.js')).verifyDriverAuditSupabaseServingPackage;
@@ -630,11 +698,9 @@ async function seedInputs(context) {
     const seed = JSON.parse(original.data);
     need(seed.version === 1 && ['bootstrap', 'sync'].includes(seed.mode) && seed.collectorRevision === pin.revision
       && seed.manifestSha256 === pin.manifest && seed.pointer.generation === pin.generation && seed.sourceBasis === row.sourceBasis);
-    const head = headFromSeed(seed), archive = { async readObject(key, { maxBytes }) {
-      need(/^[a-f0-9]{64}\.gz$/.test(key) && Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 8 * 1024 ** 2);
-      return [(await read(path.join(folder, 'audit-objects', key), { maximum: maxBytes })).data];
-    } };
-    proofs.push({ role, folder, original, proof: await verify({ head, archive }) }); seeds.push(seed);
+    const head = headFromSeed(seed), archive = localServingArchive({ head, folder,
+      sourcePackage: context.retainedPackages.get(role), boundary: syncRoot });
+    proofs.push({ role, folder, original, archive, proof: await verify({ head, archive }) }); seeds.push(seed);
   }
   const paths = selectedPaths(context), previous = headFromSeed(seeds[1]), current = headFromSeed(seeds[0]);
   current.previous = previous;
@@ -648,8 +714,9 @@ async function seedInputs(context) {
   return { paths, proofs, seed, head: current, pointer };
 }
 
-async function linkImmutable(source, target, expectedHash, expectedBytes) {
+async function linkImmutable(source, target, expectedHash, expectedBytes, expectedStat) {
   const before = await fileHash(source); need(before.sha256 === expectedHash && (expectedBytes === undefined || before.bytes === expectedBytes));
+  if (expectedStat) need(before.stat.dev === expectedStat.dev && before.stat.ino === expectedStat.ino && before.stat.mtimeNs === expectedStat.mtimeNs);
   await mkdirPrivate(path.dirname(target));
   await inDirectory(path.dirname(target), async anchor => {
     try { await fs.link(source, path.join(anchor, path.basename(target))); } catch (error) { if (error.code !== 'EEXIST') throw error; }
@@ -657,6 +724,26 @@ async function linkImmutable(source, target, expectedHash, expectedBytes) {
   const after = await fileHash(target);
   need(after.sha256 === before.sha256 && after.bytes === before.bytes && after.stat.ino === before.stat.ino
     && after.stat.dev === before.stat.dev && after.stat.mtimeNs === before.stat.mtimeNs);
+}
+
+async function derivedServingChunk(file, bytes) {
+  need(bytes.length > 0 && bytes.length <= 8 * 1024 ** 2 && path.basename(file) === sha(bytes) + '.gz');
+  try { const present = await read(file, { maximum: bytes.length }); need(present.data.equals(bytes)); return; }
+  catch (error) { if (error.code !== 'ENOENT') throw error; }
+  await inDirectory(path.dirname(file), async anchored => {
+    const entries = await fs.readdir(anchored);
+    need(entries.length <= 8200 && entries.filter(name => /^\.runtime-derived-[a-f0-9]{32}\.tmp$/.test(name)).length < 8);
+    const temporary = '.runtime-derived-' + randomBytes(16).toString('hex') + '.tmp', temp = path.join(anchored, temporary);
+    let fd, created = false;
+    try {
+      fd = await fs.open(temp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      created = true; await fd.writeFile(bytes); await fd.sync(); await fd.close(); fd = null;
+      const checked = await read(path.join(path.dirname(file), temporary), { maximum: bytes.length }); need(checked.data.equals(bytes));
+      try { await fs.link(temp, path.join(anchored, path.basename(file))); }
+      catch (error) { if (error.code !== 'EEXIST') throw error; }
+      need((await read(file, { maximum: bytes.length })).data.equals(bytes));
+    } finally { await fd?.close(); if (created) await fs.unlink(temp); }
+  });
 }
 
 async function openHead(context) {
@@ -687,14 +774,31 @@ async function prepareServing(context, controls) {
     for (const item of inputs.proofs) {
       const head = item.role === 'serving-current' ? inputs.head : inputs.head.previous;
       for (const ref of [head.descriptor, ...Object.values(item.proof.descriptor.files)]) for (const chunk of ref.chunks) {
-        const key = chunk.sha256 + '.gz', old = objects.get(key);
-        need(!old || old.bytes === chunk.size);
-        const source = path.join(item.folder, 'audit-objects', key);
-        if (!old) { objects.set(key, { source, bytes: chunk.size }); }
+        const key = chunk.sha256 + '.gz', old = objects.get(key), source = await item.archive.source(key, chunk.size);
+        need(!old || old.size === chunk.size);
+        const priority = value => ['bundle', 'whole-runtime', 'partial-runtime'].indexOf(value.kind);
+        if (!old || priority(source) < priority(old)) objects.set(key, source);
       }
     }
-    need(objects.size <= 8192 && [...objects.values()].reduce((sum, item) => sum + item.bytes, 0) <= 2 * 1024 ** 3);
-    for (const [key, item] of objects) await linkImmutable(item.source, path.join(inputs.paths.bundleRoot, key), key.slice(0, 64), item.bytes);
+    need(objects.size <= 8192 && [...objects.values()].reduce((sum, item) => sum + item.size, 0) <= 2 * 1024 ** 3);
+    const derivedBytes = [...objects.values()].filter(item => item.kind === 'partial-runtime').reduce((sum, item) => sum + item.size, 0);
+    need(derivedBytes <= 256 * 1024 ** 2);
+    let additionalBytes = 0;
+    for (const [key, item] of objects) if (item.kind === 'partial-runtime') {
+      const existing = await read(path.join(inputs.paths.bundleRoot, key), { maximum: item.size, optional: true });
+      if (existing) need(existing.bytes === item.size && existing.sha256 === key.slice(0, 64));
+      else additionalBytes += item.size;
+    }
+    if (additionalBytes) {
+      const disk = await fs.statfs(inputs.paths.bundleRoot, { bigint: true });
+      need(disk.bavail >= 0n && disk.bsize > 0n && disk.bavail * disk.bsize >= BigInt(1024 ** 3 + additionalBytes));
+    }
+    for (const [key, item] of objects) {
+      const target = path.join(inputs.paths.bundleRoot, key);
+      if (item.kind === 'partial-runtime') await derivedServingChunk(target, await readRuntimeExtent(item, context.syncRoot));
+      else await withPrivatePackageDirectory(path.dirname(item.path), context.syncRoot,
+        () => linkImmutable(item.path, target, key.slice(0, 64), item.size, item.saved?.stat));
+    }
     await writeOnce(path.join(context.syncRoot, 'seed.json'), Buffer.from(JSON.stringify(inputs.seed)));
     await writeOnce(path.join(context.syncRoot, 'work/current.private.json'), Buffer.from(JSON.stringify(inputs.pointer)));
     const selected = { version: 1, kind: 'supabase-serving-selection-v1', preparedReceiptSha256: context.preparedReceiptSha256,
