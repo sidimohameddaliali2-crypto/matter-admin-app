@@ -237,6 +237,56 @@ test('the host probes first, checks only loopback health and keeps an owner-priv
   assert.equal(f.held.size, 0); assert(f.commands.every(([file, args]) => file === 'git' || file === 'pm2' && JSON.stringify(args) === '["jlist"]'));
 });
 
+test('a failed initial checkout retains the same guard and returns only bounded RSA-sealed read-only Git diagnostics', async t => {
+  const f = await hostFixture(t), original = f.adapters.exec;
+  const secret = 'fictional-private-git-detail/https://never-export.invalid/credential';
+  f.adapters.exec = async (file, args, options) => {
+    if (file === 'git' && args.includes('--porcelain')) {
+      assert.equal(options.cwd, f.appRoot); return { stdout: ' M server/' + secret + '\n', stderr: '' };
+    }
+    return original(file, args, options);
+  };
+  let failure; await assert.rejects(f.run('probe'), error => { failure = error; return error.phase === 'checkout'; });
+  const receipt = failure.supabaseControlStopped; assert(receipt);
+  assert.deepEqual(Object.keys(receipt).sort(), ['status', 'applicationCommit', 'operatorPhase', 'metadataSha256', 'capsule'].sort());
+  assert.equal(receipt.status, 'supabase-control-stopped'); assert.equal(receipt.operatorPhase, 'checkout');
+  assert(!JSON.stringify(failure).includes(secret)); assert(!JSON.stringify(receipt).includes(secret));
+  const capsule = openTransferSecrets(privateKey, receipt.capsule);
+  assert.equal(capsule.kind, 'supabase-canary-checkout-failure-capsule-v1');
+  const packed = Buffer.from(capsule.metadataGzipBase64, 'base64'); assert.equal(sha(packed), capsule.metadataGzipSha256);
+  const raw = gunzipSync(packed, { maxOutputLength: 24 * 1024 });
+  assert.equal(sha(raw), capsule.metadataSha256); assert.equal(sha(raw), receipt.metadataSha256);
+  const metadata = JSON.parse(raw);
+  assert.equal(metadata.kind, 'supabase-canary-checkout-first-failure-v1'); assert.equal(metadata.operatorPhase, 'checkout');
+  assert.equal(metadata.failedStep, 'server-status'); assert.equal(metadata.repositoryRole, 'base');
+  assert.equal(metadata.acceptedAsVerified, false); assert.equal(metadata.routingChanged, false);
+  assert.equal(metadata.sourceStarted, false); assert.equal(metadata.readOnly, true);
+  assert.deepEqual(metadata.commands.map(row => row.step), ['head', 'toplevel', 'tracked-code', 'server-status', 'server-diffstat']);
+  assert(metadata.commands.find(row => row.step === 'server-status').stdout.includes(secret));
+  assert(metadata.commands.every(row => Buffer.byteLength(row.stdout) <= 2048 && Buffer.byteLength(row.stderr) <= 2048));
+  assert.equal(f.sudo.length, 0); assert.equal(f.urls.length, 0); assert.equal(f.held.size, 0);
+  const { driverAuditSupabaseControlStoppedReceipt } = await import('./driver-audit-native-handoff.mjs');
+  assert.deepEqual(driverAuditSupabaseControlStoppedReceipt(receipt, f.p.base, 'checkout'), receipt);
+});
+
+test('checkout command errors and oversized diagnostic output stay encrypted, bounded and unable to admit a probe', async t => {
+  const f = await hostFixture(t), original = f.adapters.exec, secret = 'fictional-raw-git-error-private-value';
+  f.adapters.exec = async (file, args, options) => {
+    if (file === 'git' && args.includes('HEAD') && !args.includes('--no-optional-locks')) {
+      throw Object.assign(Error(secret), { code: 128, stdout: secret.repeat(1000), stderr: secret.repeat(1000) });
+    }
+    if (file === 'git' && args.includes('--no-optional-locks')) return { stdout: Buffer.alloc(10000, 0xff), stderr: secret.repeat(1000) };
+    return original(file, args, options);
+  };
+  let failure; await assert.rejects(f.run('probe'), error => { failure = error; return error.phase === 'checkout'; });
+  const receipt = failure.supabaseControlStopped; assert(receipt); assert(!JSON.stringify(failure).includes(secret));
+  const value = openTransferSecrets(privateKey, receipt.capsule), packed = Buffer.from(value.metadataGzipBase64, 'base64');
+  const raw = gunzipSync(packed, { maxOutputLength: 24 * 1024 }), metadata = JSON.parse(raw);
+  assert.equal(metadata.failedStep, 'head'); assert(metadata.commands.every(row => row.stdoutTruncated && row.stderrTruncated));
+  assert(metadata.commands.every(row => Buffer.byteLength(row.stdout) <= 2048 && Buffer.byteLength(row.stderr) <= 2048));
+  assert(raw.length <= 24 * 1024); assert.equal(f.sudo.length, 0); assert.equal(f.urls.length, 0);
+});
+
 test('a failed read-only privilege probe prevents readiness reads, file writes and any mutation attempt', async t => {
   const f = await hostFixture(t), before = await fs.readdir(path.join(f.base, '.private/driver-report-supabase-handoff'));
   f.adapters.rootCommand = async () => { throw Error('fictional sudo diagnostic ' + f.secret); };

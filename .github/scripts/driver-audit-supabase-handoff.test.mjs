@@ -683,7 +683,7 @@ test('preparation calls the real source stager with the derived legal cache root
   await assert.rejects(fs.access(path.join(path.dirname(prepared.sourceConfig), 'source-state.private.json')), { code: 'ENOENT' });
 });
 
-async function directSeed(f, row) {
+async function directSeed(f, row, { materializeRuntime = false, largeRuntime = false } = {}) {
   const objects = new Map(), at = '2026-11-12T00:00:00.000Z', browser = Buffer.from(JSON.stringify({ fixture: row.collectorRevision }));
   const generation = hash(browser), reportHash = hash('direct-report-' + row.collectorRevision), catalogHash = hash('fictional-catalog');
   const snapshot = { sha256: generation, url: 'report-data/snapshot-' + generation + '.json' };
@@ -697,6 +697,13 @@ async function directSeed(f, row) {
     'browser-data.private.json.gz': gzipSync(browser), 'gps-stream.private.json.gz': gzipSync(Buffer.from('{"gps":[1,2,3]}')),
     'deferred.private.json.gz': gzipSync(Buffer.from('{"rows":["fictional"]}')),
   };
+  if (largeRuntime) values['large-runtime.private.bin'] = Buffer.alloc(8 * 1024 ** 2 + 23, 97);
+  if (materializeRuntime) {
+    const manifestFile = path.join(row.privateRoot, 'files.private.json'), declared = JSON.parse(await fs.readFile(manifestFile));
+    for (const [name, bytes] of Object.entries(values)) { await f.write(path.join(row.privateRoot, name), bytes); declared[name] = hash(bytes); }
+    const manifest = await f.write(manifestFile, JSON.stringify(declared)); row.manifestSha256 = manifest.sha256;
+    (row.role === 'serving-current' ? f.pins.servingCurrent : f.pins.servingPrevious).manifestSha256 = manifest.sha256;
+  }
   const storage = { async putVerifiedObject(key, bytes) { objects.set(key, bytes); return { key, bytes: bytes.length, sha256: hash(bytes), verified: true }; } };
   const files = {};
   for (const [name, bytes] of Object.entries(values)) files[name] = await archiveBytes(storage, bytes, { domain: 'previewRuntime', path: name });
@@ -726,6 +733,66 @@ test('staging verifies every original serving current/previous descriptor byte w
   assert.equal(served.length, 2); assert(served.every(row => row.descriptorVerified && row.servingSelectionPending));
   assert.equal(value.seedSelected, false);
   await assert.rejects(fs.access(path.join(value.syncRoot, 'seed.json')), { code: 'ENOENT' });
+});
+
+test('an original publication absent only from the object bundle is fully verified from its pinned local runtime file', async t => {
+  const f = await preparationFixture(t), row = f.bootstrap.retained[1];
+  const pkg = await directSeed(f, row, { materializeRuntime: true });
+  const ref = pkg.files['publication.private.json'], file = path.join(row.privateRoot, 'publication.private.json');
+  await fs.unlink(path.join(pkg.seed.bundleRoot, ref.chunks[0].sha256 + '.gz'));
+  const original = await fs.readFile(file), before = await fs.stat(file, { bigint: true });
+  f.adapters.loadRelease = async () => ({ verifyDriverAuditSupabaseServingPackage });
+  const result = await f.runPrepare(), prepared = JSON.parse(gunzipSync(Buffer.from(openTransferSecrets(privateKey, result.capsule).metadataGzipBase64, 'base64'))).preparation;
+  assert(prepared.packages.find(v=>v.role==='serving-previous').descriptorVerified);
+  assert.deepEqual(await fs.readFile(file), original); const after = await fs.stat(file, { bigint: true });
+  for (const key of ['ino', 'dev', 'mode', 'size', 'mtimeNs']) assert.equal(after[key], before[key]);
+  assert.equal(f.reads(), 1); assert.equal(prepared.seedSelected, false);
+  await assert.rejects(fs.access(path.join(prepared.syncRoot, 'retained/serving-previous/audit-objects', ref.chunks[0].sha256 + '.gz')), { code: 'ENOENT' });
+});
+
+test('every missing declared GPS, deferred and multi-chunk runtime object is verified from exact local extents without materializing copies', async t => {
+  const f = await preparationFixture(t), row = f.bootstrap.retained[0], pkg = await directSeed(f, row, { materializeRuntime: true, largeRuntime: true });
+  const keys = [];
+  for (const name of ['gps-stream.private.json.gz', 'deferred.private.json.gz', 'large-runtime.private.bin'])
+    for (const part of pkg.files[name].chunks) { keys.push(part.sha256 + '.gz'); await fs.unlink(path.join(pkg.seed.bundleRoot, part.sha256 + '.gz')); }
+  f.adapters.loadRelease = async () => ({ verifyDriverAuditSupabaseServingPackage });
+  const result = await f.runPrepare(), prepared = JSON.parse(gunzipSync(Buffer.from(openTransferSecrets(privateKey, result.capsule).metadataGzipBase64, 'base64'))).preparation;
+  assert(prepared.packages.find(v=>v.role==='serving-current').descriptorVerified); assert.equal(f.reads(), 1);
+  for (const key of keys) await assert.rejects(fs.access(path.join(prepared.syncRoot, 'retained/serving-current/audit-objects', key)), { code: 'ENOENT' });
+});
+
+test('undeclared runtime bytes, unavailable evidence and independent bundle/runtime corruption cannot receive descriptor verification', async t => {
+  for (const kind of ['undeclared', 'unavailable', 'bundle-corrupt', 'runtime-corrupt']) {
+    const f = await preparationFixture(t), row = f.bootstrap.retained[0], materializeRuntime = kind.endsWith('corrupt');
+    const pkg = await directSeed(f, row, { materializeRuntime }), key = pkg.files['publication.private.json'].chunks[0].sha256 + '.gz';
+    const bundle = path.join(pkg.seed.bundleRoot, key), runtime = path.join(row.privateRoot, 'publication.private.json');
+    if (kind === 'undeclared') await f.write(runtime, pkg.objects.get(key));
+    if (kind !== 'bundle-corrupt') await fs.unlink(bundle);
+    let changed;
+    f.adapters.verifyPackage = async args => {
+      if (kind.endsWith('corrupt')) { changed = kind === 'bundle-corrupt' ? bundle : runtime; await fs.writeFile(changed, 'independent evidence edit'); }
+      return verifyDriverAuditSupabaseServingPackage(args);
+    };
+    await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-stage-packages');
+    if (changed) assert.equal(await fs.readFile(changed, 'utf8'), 'independent evidence edit');
+    const releaseRoot = path.join(f.server, '.private/driver-report-app-releases', f.bootstrap.releaseSha), roots = await fs.readdir(path.join(releaseRoot, 'server/.private/driver-audits'));
+    await assert.rejects(fs.access(path.join(releaseRoot, 'server/.private/driver-audits', roots[0], 'staging.private.json')), { code: 'ENOENT' });
+  }
+});
+
+test('a runtime extent pathname swap is rejected without reading or changing the outside target', async t => {
+  const f = await preparationFixture(t), row = f.bootstrap.retained[0], pkg = await directSeed(f, row, { materializeRuntime: true });
+  await fs.unlink(path.join(pkg.seed.bundleRoot, pkg.files['publication.private.json'].chunks[0].sha256 + '.gz'));
+  const outside = path.join(f.appRoot, 'outside-runtime.private'); await f.write(outside, 'outside retained bytes');
+  const original = fs.open; let verifying = false, reached = false;
+  f.adapters.verifyPackage = async args => { verifying = true; try { return await verifyDriverAuditSupabaseServingPackage(args); } finally { verifying = false; } };
+  fs.open = async (file, ...args) => { const opened = await original(file, ...args);
+    if (verifying && !reached && file.endsWith('/retained/serving-current/server-data/publication.private.json')) {
+      reached = true; await fs.rename(file, file + '.preserved'); await fs.symlink(outside, file);
+    } return opened; };
+  try { await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-stage-packages'); }
+  finally { fs.open = original; }
+  assert(reached); assert.equal(await fs.readFile(outside, 'utf8'), 'outside retained bytes');
 });
 
 test('a missing original deferred or GPS object cannot receive a complete staging receipt', async t => {
