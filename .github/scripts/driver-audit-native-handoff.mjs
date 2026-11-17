@@ -36,6 +36,7 @@ const supabaseReleaseOperations = Object.freeze({
   'export-supabase-release-inputs': 'export-release-inputs', 'stage-supabase-source-release': 'stage-source-release',
   'start-supabase-source-sync': 'start-source-sync', 'export-supabase-previous-manifest': 'export-previous-manifest',
 });
+const supabaseLogCompactionOperations = Object.freeze({ 'archive-supabase-closed-logs': 'archive-closed-logs' });
 
 function boundedSupabasePublicPlan(operation, encoded, choices, hashes) {
   if (typeof operation !== 'string' || !Object.hasOwn(choices, operation) || typeof encoded !== 'string' || !encoded.length
@@ -59,6 +60,10 @@ export function driverAuditSupabaseCanaryRequest(operation, encoded) {
     ...(['enable', 'seal-entry', 'restore', 'promote'].includes(selected) ? ['planSha256'] : []),
     ...(selected === 'promote' ? ['canaryAcceptanceSha256', 'canaryAcceptanceObjectSha256'] : []),
   ]);
+}
+
+export function driverAuditSupabaseLogCompactionRequest(operation, encoded) {
+  return boundedSupabasePublicPlan(operation, encoded, supabaseLogCompactionOperations, ['planSha256']);
 }
 
 export function driverAuditSupabaseReleaseRequest(operation, encoded) {
@@ -349,7 +354,8 @@ async function main() {
     'activate-native', 'start-native', 'stage-native-proofs', 'export-native-controls',
     'plan-native-cleanup', 'apply-native-cleanup', 'inspect-database-config',
     'prepare-object-store', 'externalize-native-archive', 'inspect-supabase-host', 'prepare-supabase-host', 'inspect-supabase-routing', 'inspect-supabase-storage', 'inspect-supabase-disk-usage', 'plan-supabase-log-archive',
-    ...Object.keys(supabaseControlOperations), ...Object.keys(supabaseCanaryOperations), ...Object.keys(supabaseReleaseOperations)].includes(operation)) {
+    ...Object.keys(supabaseControlOperations), ...Object.keys(supabaseCanaryOperations), ...Object.keys(supabaseReleaseOperations),
+    ...Object.keys(supabaseLogCompactionOperations)].includes(operation)) {
     phase = 'native-' + operation;
     const supabaseControl = Object.hasOwn(supabaseControlOperations, operation)
       ? driverAuditSupabaseControlRequest(operation, process.env.NATIVE_TRANSFER_PLAN_B64) : null;
@@ -357,6 +363,8 @@ async function main() {
       ? driverAuditSupabaseCanaryRequest(operation, process.env.NATIVE_TRANSFER_PLAN_B64) : null;
     const supabaseRelease = Object.hasOwn(supabaseReleaseOperations, operation)
       ? driverAuditSupabaseReleaseRequest(operation, process.env.NATIVE_TRANSFER_PLAN_B64) : null;
+    const supabaseLogCompaction = Object.hasOwn(supabaseLogCompactionOperations, operation)
+      ? driverAuditSupabaseLogCompactionRequest(operation, process.env.NATIVE_TRANSFER_PLAN_B64) : null;
     const code = decodeDriverAuditOperator(process.env.NATIVE_IMPORT_CODE, process.env.NATIVE_IMPORT_COMPRESSION);
     const load = name => import(pathToFileURL(path.join(appRoot, 'server', name)).href);
     const { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory } = await load('services/driverAuditSource.js');
@@ -368,6 +376,16 @@ async function main() {
     catch (error) { if (error.code !== 'EEXIST') throw error; }
     if (hash(await readPrivateDriverAuditSource(filename, 256 * 1024)) !== hash(code)) throw Error('Reviewed import operator hash differs');
     const operator = await import(pathToFileURL(filename).href);
+    if (supabaseLogCompaction) {
+      try {
+        console.log(JSON.stringify(await operator.runDriverAuditSupabaseLogCompaction({ ...supabaseLogCompaction, appRoot, expectedSha: expected })));
+      } catch (error) {
+        const stopped = driverAuditSupabaseControlStoppedReceipt(error.supabaseControlStopped, expected, error.phase);
+        if (stopped) console.log(JSON.stringify(stopped));
+        throw error;
+      }
+      return;
+    }
     if (supabaseCanary || supabaseRelease) {
       try {
         if (supabaseCanary) console.log(JSON.stringify(await operator.runDriverAuditSupabaseCanaryControl({ ...supabaseCanary, appRoot, expectedSha: expected })));

@@ -9,7 +9,8 @@ import { gzipSync } from 'node:zlib';
 import { generateKeyPairSync, createHash } from 'node:crypto';
 import test from 'node:test';
 import { driverAuditSupabaseControlRequest, driverAuditSupabaseControlStoppedReceipt,
-  driverAuditSupabaseCanaryRequest, driverAuditSupabaseReleaseRequest, driverAuditSupabaseReleaseReceipts } from './driver-audit-native-handoff.mjs';
+  driverAuditSupabaseCanaryRequest, driverAuditSupabaseReleaseRequest, driverAuditSupabaseReleaseReceipts,
+  driverAuditSupabaseLogCompactionRequest } from './driver-audit-native-handoff.mjs';
 import { sealTransferSecrets } from '../../server/services/driverAuditTransferCodec.js';
 
 const commit = '7'.repeat(40), hash = 'a'.repeat(64), secret = 'fictional-private-cause-never-public';
@@ -93,6 +94,23 @@ test('storage inspection dispatches only its fixed public recipient to the read-
     const invalid = await bridgeFixture(t, code, { operation, input: { ...input, path: '/arbitrary' } });
     await assert.rejects(invalid.run(), error => error.code === 1 && !error.stdout.includes('storage-fixture'));
   }
+});
+
+test('closed-log compaction accepts only a public recipient and exact plan hash before dispatch', async t => {
+  const operation = 'archive-supabase-closed-logs', input = { version: 1, recipientPublicKey: 'fixture public recipient', planSha256: hash };
+  assert.deepEqual(driverAuditSupabaseLogCompactionRequest(operation, encode(input)), {
+    operation: 'archive-closed-logs', recipientPublicKey: input.recipientPublicKey, planSha256: hash,
+  });
+  for (const invalid of [{ ...input, path: '/arbitrary' }, { ...input, planSha256: [hash] }, { ...input, version: 2 }])
+    assert.throws(() => driverAuditSupabaseLogCompactionRequest(operation, encode(invalid)));
+  const code = 'export async function runDriverAuditSupabaseLogCompaction(a){if(a.operation!=="archive-closed-logs"'
+    + '||a.planSha256!==' + JSON.stringify(hash) + ')throw Error("Wrong log dispatch");return{status:"closed-log-fixture"};}';
+  const f = await bridgeFixture(t, code, { operation, input });
+  assert.deepEqual(JSON.parse((await f.run()).stdout), { status: 'closed-log-fixture' });
+  await assert.rejects(fs.access(path.join(f.root, 'server/node_modules')), { code: 'ENOENT' });
+  const invalid = await bridgeFixture(t, code, { operation, input: { ...input, command: 'forbidden' } });
+  await assert.rejects(invalid.run(), error => error.code === 1 && !error.stdout.includes('closed-log-fixture'));
+  await assert.rejects(fs.access(path.join(invalid.root, 'server/.private/driver-audit-native-operators')), { code: 'ENOENT' });
 });
 
 const canaryOperations = [
