@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -79,6 +79,7 @@ test(
     const { default: User } = await import('../models/User.js');
     const { default: drivers } = await import('../routes/drivers.js');
     const { default: deliveries } = await import('../routes/deliveries.js');
+    const { default: authRoutes } = await import('../routes/auth.js');
     const { default: Delivery } = await import('../models/Delivery.js');
     const { createTraceabilityRouter } = await import('../routes/traceability.js');
     const { createRequestTrace } = await import('./requestTrace.js');
@@ -94,11 +95,14 @@ test(
     const token = jwt.sign({ id: owner._id.toString() }, process.env.JWT_SECRET, {
       algorithm: 'HS256',
     });
+    process.env.MATTER_ACTIVITY_READERS_FILE = path.join(directory, 'readers.json');
+    await writeFile(process.env.MATTER_ACTIVITY_READERS_FILE, JSON.stringify({ version: 1, readerIds: [owner._id.toString()] }), { mode: 0o600 });
     const app = express();
     app.set('activityHistoryEnabled', true);
     app.use(createRequestTrace({ resolveRoute: resolveTraceRoute, sink: () => {} }));
     app.use(express.json());
     app.use('/api/drivers', drivers);
+    app.use('/api/auth', authRoutes);
     app.use('/api/users/drivers', drivers);
     app.use('/api/deliveries', deliveries);
     app.use('/api/traceability', createTraceabilityRouter());
@@ -117,6 +121,10 @@ test(
       'X-Matter-Activity-ID': '11111111-1111-4111-a111-111111111111',
     };
     const origin = `http://127.0.0.1:${server.address().port}`;
+    const login = await fetch(origin + '/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'osman@example.invalid', password: 'SYNTHETIC_PASSWORD' }) });
+    assert.equal(login.status, 200);
+    assert.equal((await login.json()).data.user.canViewActivityHistory, true);
+    assert.ok((await readActivity(200)).events.some(event => event.requestId === login.headers.get('x-request-id') && event.stage === 'record_saved' && event.actor.id === owner._id.toString()), 'The confirmed login timestamp uses the authenticated account identity');
     const response = await fetch(origin + '/api/users/drivers', {
       method: 'POST',
       headers,
@@ -130,16 +138,32 @@ test(
     });
     assert.equal(response.status, 201);
     const driver = await response.json();
+    const driverToken = jwt.sign({ id: driver._id }, process.env.JWT_SECRET);
+    const ownerInfo = await (await fetch(origin + '/api/auth/me', { headers })).json();
+    assert.equal(ownerInfo.data.user.canViewActivityHistory, true);
+    const driverInfo = await (await fetch(origin + '/api/auth/me', { headers: { Authorization: 'Bearer ' + driverToken } })).json();
+    assert.equal(driverInfo.data.user.canViewActivityHistory, false);
+    const gps = await fetch(origin + '/api/drivers/' + driver._id + '/location', {
+      method: 'PUT', headers: { Authorization: 'Bearer ' + driverToken, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ latitude: 25.2, longitude: 55.3 }),
+    });
+    assert.equal(gps.status, 200);
+    assert.ok(!(await readActivity(500)).events.some(event => event.requestId === gps.headers.get('x-request-id')), 'Real timestamped driver GPS does not duplicate native observations into staff history');
+    const explicitLocation = await fetch(origin + '/api/drivers/' + driver._id + '/location', {
+      method: 'PUT', headers, body: JSON.stringify({ latitude: 25.21, longitude: 55.31 }),
+    });
+    assert.equal(explicitLocation.status, 200);
+    assert.ok((await readActivity(500)).events.some(event => event.stage === 'record_saved' && event.requestId === explicitLocation.headers.get('x-request-id')), 'Explicit staff location changes remain captured');
     app.set('customerServiceAuth', { authenticate: async () => { throw Object.assign(Error('No CS access'), { status: 403 }); } });
     const capture = await fetch(origin + '/api/traceability/capture', {
       method: 'POST',
-      headers: { ...headers, Authorization: 'Bearer ' + jwt.sign({ id: driver._id }, process.env.JWT_SECRET) },
+      headers: { ...headers, Authorization: 'Bearer ' + driverToken },
       body: JSON.stringify({ events: [{ eventId: randomUUID(), actionId: randomUUID(), stage: 'form_edited', page: '/driver-mobile', form: { title: 'Driver tasks', field: 'Status' }, changes: [{ field: 'Status', before: 'Waiting', after: 'Ready' }] }] }),
     });
     assert.equal(capture.status, 202, 'Drivers can capture their own forms without Customer Service access');
     assert.ok((await readActivity(100)).events.some(event => event.stage === 'form_edited' && event.actor.id === driver._id && event.actor.name === 'Fixture driver'));
     const record = (await readActivity(100)).events.find(
-      (event) => event.stage === 'record_saved' && event.record?.id === driver._id,
+      (event) => event.stage === 'record_saved' && event.record?.id === driver._id && event.summary === 'Osman added a driver.',
     );
     assert.ok(record, 'A confirmed driver change is recorded');
     assert.equal(record.actor.name, 'Osman');

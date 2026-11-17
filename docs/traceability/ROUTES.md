@@ -65,20 +65,20 @@ Read [interpretation and operations](README.md) alongside this map. Machine-read
 | POST | `/api/customer-service/issues/:id/actions` | See area meaning in README and direct calls in this row. | Inputs params.id / Calls createServiceAction | protect → loadServiceAccess | Default or delegated | [server/routes/customerService.js:69](../../server/routes/customerService.js#L69) |
 | PATCH | `/api/customer-service/actions/:id` | See area meaning in README and direct calls in this row. | Inputs params.id / Calls updateServiceAction | protect → loadServiceAccess | Default or delegated | [server/routes/customerService.js:70](../../server/routes/customerService.js#L70) |
 | POST | `/api/customer-service/allocate` | See area meaning in README and direct calls in this row. | Calls allocateServiceReviews | protect → loadServiceAccess | Default or delegated | [server/routes/customerService.js:71](../../server/routes/customerService.js#L71) |
-| POST | `/api/traceability/capture` | See area meaning in README and direct calls in this row. |  | captureAuthenticate → capture | Default or delegated | [server/routes/traceability.js:57](../../server/routes/traceability.js#L57) |
-| POST | `/api/traceability/capture/partner` | See area meaning in README and direct calls in this row. |  | partnerProtect → capture | Default or delegated | [server/routes/traceability.js:58](../../server/routes/traceability.js#L58) |
-| POST | `/api/traceability/capture/member` | See area meaning in README and direct calls in this row. |  | memberProtect → capture | Default or delegated | [server/routes/traceability.js:59](../../server/routes/traceability.js#L59) |
-| GET | `/api/traceability/activity` | See area meaning in README and direct calls in this row. | Inputs query.before, query.issues, query.limit, query.q / Returns data, message, success | authenticate → authorize | 400, 503 | [server/routes/traceability.js:65](../../server/routes/traceability.js#L65) |
-| GET | `/api/traceability/catalog` | See area meaning in README and direct calls in this row. | Returns data, success | authenticate → authorize | Default or delegated | [server/routes/traceability.js:97](../../server/routes/traceability.js#L97) |
-| GET | `/api/traceability/events` | See area meaning in README and direct calls in this row. | Returns data, success | authenticate → authorize | Default or delegated | [server/routes/traceability.js:98](../../server/routes/traceability.js#L98) |
+| POST | `/api/traceability/capture` | See area meaning in README and direct calls in this row. |  | captureAuthenticate → capture | Default or delegated | [server/routes/traceability.js:62](../../server/routes/traceability.js#L62) |
+| POST | `/api/traceability/capture/partner` | See area meaning in README and direct calls in this row. |  | partnerProtect → capture | Default or delegated | [server/routes/traceability.js:63](../../server/routes/traceability.js#L63) |
+| POST | `/api/traceability/capture/member` | See area meaning in README and direct calls in this row. |  | memberProtect → capture | Default or delegated | [server/routes/traceability.js:64](../../server/routes/traceability.js#L64) |
+| GET | `/api/traceability/activity` | See area meaning in README and direct calls in this row. | Inputs query.before, query.issues, query.limit, query.q / Returns data, message, success | authenticate → authorize | 400, 503 | [server/routes/traceability.js:66](../../server/routes/traceability.js#L66) |
+| GET | `/api/traceability/catalog` | See area meaning in README and direct calls in this row. | Returns data, success | authenticate → authorize | Default or delegated | [server/routes/traceability.js:98](../../server/routes/traceability.js#L98) |
+| GET | `/api/traceability/events` | See area meaning in README and direct calls in this row. | Returns data, success | authenticate → authorize | Default or delegated | [server/routes/traceability.js:99](../../server/routes/traceability.js#L99) |
 | GET | `/api/mobile/update-policy` | See area meaning in README and direct calls in this row. | Returns data, success / Calls mobileUpdatePolicy | No named guard found locally; inspect mount and handler. | Default or delegated | [server/routes/mobileUpdates.js:5](../../server/routes/mobileUpdates.js#L5) |
-| POST | `/api/auth/register` | Register user | Inputs body.email, body.firstName, body.lastName, body.password, body.phone, body.role / Returns data, errors, message, success / Calls User.create, User.findOne | authenticate → admin → [ body('email').isEmail().normalizeEmail(), body('password').isLength({ min: 6 }), body('firstName').notEmpty().trim(), body('lastName').notEmpty().trim() ] | 201, 400, 403, 500 | [server/routes/auth.js:22](../../server/routes/auth.js#L22) |
-| POST | `/api/auth/login` | Login user | Inputs body.email, body.password / Returns data, errors, message, success / Calls User.findOne | [ body('email').isEmail().normalizeEmail(), body('password').notEmpty() ] | 400, 401, 500 | [server/routes/auth.js:93](../../server/routes/auth.js#L93) |
-| GET | `/api/auth/me` | Get current user | Returns data, message, success / Calls User.findById | authenticate | 500 | [server/routes/auth.js:181](../../server/routes/auth.js#L181) |
-| PUT | `/api/auth/profile` | Update user profile | Inputs body.firstName, body.lastName, body.phone, body.vehiclePlate, body.vehicleType / Returns data, message, success / Calls User.findByIdAndUpdate | authenticate | 500 | [server/routes/auth.js:210](../../server/routes/auth.js#L210) |
-| PUT | `/api/auth/change-password` | Change password | Inputs body.currentPassword, body.newPassword / Returns errors, message, success / Calls User.findById | authenticate → [ body('currentPassword').notEmpty(), body('newPassword').isLength({ min: 6 }) ] | 400, 401, 500 | [server/routes/auth.js:245](../../server/routes/auth.js#L245) |
-| POST | `/api/auth/push-token` | Register (or refresh) this device's push token for the current user | Inputs body.platform, body.token / Returns errors, message, success / Calls User.findByIdAndUpdate | authenticate → [ body('token').notEmpty() ] | 400, 500 | [server/routes/auth.js:291](../../server/routes/auth.js#L291) |
-| DELETE | `/api/auth/push-token` | Unregister this device's push token for the current user | Inputs body.token / Returns errors, message, success / Calls User.findByIdAndUpdate | authenticate → [ body('token').notEmpty() ] | 400, 500 | [server/routes/auth.js:331](../../server/routes/auth.js#L331) |
+| POST | `/api/auth/register` | Register user | Inputs body.email, body.firstName, body.lastName, body.password, body.phone, body.role / Returns data, errors, message, success / Calls User.create, User.findOne | authenticate → admin → [ body('email').isEmail().normalizeEmail(), body('password').isLength({ min: 6 }), body('firstName').notEmpty().trim(), body('lastName').notEmpty().trim() ] | 201, 400, 403, 500 | [server/routes/auth.js:24](../../server/routes/auth.js#L24) |
+| POST | `/api/auth/login` | Login user | Inputs body.email, body.password / Returns data, errors, message, success / Calls User.findOne | [ body('email').isEmail().normalizeEmail(), body('password').notEmpty() ] | 400, 401, 500 | [server/routes/auth.js:95](../../server/routes/auth.js#L95) |
+| GET | `/api/auth/me` | Get current user | Returns data, message, success / Calls User.findById | authenticate | 500 | [server/routes/auth.js:186](../../server/routes/auth.js#L186) |
+| PUT | `/api/auth/profile` | Update user profile | Inputs body.firstName, body.lastName, body.phone, body.vehiclePlate, body.vehicleType / Returns data, message, success / Calls User.findByIdAndUpdate | authenticate | 500 | [server/routes/auth.js:216](../../server/routes/auth.js#L216) |
+| PUT | `/api/auth/change-password` | Change password | Inputs body.currentPassword, body.newPassword / Returns errors, message, success / Calls User.findById | authenticate → [ body('currentPassword').notEmpty(), body('newPassword').isLength({ min: 6 }) ] | 400, 401, 500 | [server/routes/auth.js:251](../../server/routes/auth.js#L251) |
+| POST | `/api/auth/push-token` | Register (or refresh) this device's push token for the current user | Inputs body.platform, body.token / Returns errors, message, success / Calls User.findByIdAndUpdate | authenticate → [ body('token').notEmpty() ] | 400, 500 | [server/routes/auth.js:297](../../server/routes/auth.js#L297) |
+| DELETE | `/api/auth/push-token` | Unregister this device's push token for the current user | Inputs body.token / Returns errors, message, success / Calls User.findByIdAndUpdate | authenticate → [ body('token').notEmpty() ] | 400, 500 | [server/routes/auth.js:337](../../server/routes/auth.js#L337) |
 | GET | `/api/users/drivers` | See area meaning in README and direct calls in this row. | Returns error, message / Calls Delivery.aggregate, User.find | protect | 500 | [server/routes/drivers.js:12](../../server/routes/drivers.js#L12) |
 | GET | `/api/users/drivers/locations` | See area meaning in README and direct calls in this row. | Inputs query.includeInactive / Returns error, message / Calls User.find, addressForDriver | protect | 500 | [server/routes/drivers.js:91](../../server/routes/drivers.js#L91) |
 | GET | `/api/users/drivers/:id/location` | See area meaning in README and direct calls in this row. | Inputs params.id / Returns data, message, success / Calls User.findOne, addressForDriver | protect | 403, 404, 500 | [server/routes/drivers.js:143](../../server/routes/drivers.js#L143) |
@@ -431,57 +431,57 @@ Read [interpretation and operations](README.md) alongside this map. Machine-read
 
 | Path | Elements and guards | Guard attributes | Source |
 | --- | --- | --- | --- |
-| `/traceability` | ProtectedRoute → RoleBasedRoute → Layout → Traceability | allowedRoles={['super_admin']} | [client/src/App.js:283](../../client/src/App.js#L283) |
-| `/login` | Login |  | [client/src/App.js:284](../../client/src/App.js#L284) |
-| `/privacy-policy` | PrivacyPolicy |  | [client/src/App.js:285](../../client/src/App.js#L285) |
-| `/partner/login` | PartnerLogin |  | [client/src/App.js:286](../../client/src/App.js#L286) |
-| `/partner/portal` | PartnerRoute → PartnerPortal |  | [client/src/App.js:287](../../client/src/App.js#L287) |
-| `/join/:token` | MemberJoin |  | [client/src/App.js:288](../../client/src/App.js#L288) |
-| `/member/portal` | MemberRoute → MemberPortal |  | [client/src/App.js:289](../../client/src/App.js#L289) |
-| `/` | ProtectedRoute → Navigate |  | [client/src/App.js:291](../../client/src/App.js#L291) |
-| `/dashboard` | ProtectedRoute → PermissionBasedRoute → Layout → Dashboard | permission="dashboard" | [client/src/App.js:297](../../client/src/App.js#L297) |
-| `/drivers` | ProtectedRoute → PermissionBasedRoute → Layout → Drivers | permission="drivers" | [client/src/App.js:307](../../client/src/App.js#L307) |
-| `/fleet` | ProtectedRoute → PermissionBasedRoute → Layout → FleetManagement | permission="fleet" | [client/src/App.js:317](../../client/src/App.js#L317) |
-| `/live-tracking` | ProtectedRoute → PermissionBasedRoute → Layout → LiveTracking | permission="live_map" | [client/src/App.js:327](../../client/src/App.js#L327) |
-| `/drivers/create` | ProtectedRoute → PermissionBasedRoute → Layout → CreateDriver | permission="drivers" | [client/src/App.js:337](../../client/src/App.js#L337) |
-| `/drivers/:id` | ProtectedRoute → PermissionBasedRoute → Layout → DriverDetail | permission="drivers" | [client/src/App.js:347](../../client/src/App.js#L347) |
-| `/driver-mobile` | ProtectedRoute → DriverMobile | allowDrivers | [client/src/App.js:356](../../client/src/App.js#L356) |
-| `/dispatcher` | ProtectedRoute → RoleBasedRoute → ResponsiveDispatcher | allowDispatchers, allowedRoles={['super_admin', 'admin', 'manager', 'dispatcher']} | [client/src/App.js:361](../../client/src/App.js#L361) |
-| `/dispatcher/driver-routes` | ProtectedRoute → RoleBasedRoute → DriverRoutesPage | allowDispatchers, allowedRoles={['super_admin', 'admin', 'manager', 'dispatcher']} | [client/src/App.js:368](../../client/src/App.js#L368) |
-| `/store-keeper` | ProtectedRoute → RoleBasedRoute → PermissionBasedRoute → BagOperationsRoute | allowStoreKeepers, allowedRoles={['super_admin', 'admin', 'store_keeper']}, permission="bags" | [client/src/App.js:376](../../client/src/App.js#L376) |
-| `/users` | ProtectedRoute → PermissionBasedRoute → Layout → Users | permission="users" | [client/src/App.js:386](../../client/src/App.js#L386) |
-| `/employees` | ProtectedRoute → PermissionBasedRoute → Layout → Employees | permission="employees" | [client/src/App.js:395](../../client/src/App.js#L395) |
-| `/deliveries` | ProtectedRoute → PermissionBasedRoute → Layout → Deliveries | permission="deliveries" | [client/src/App.js:404](../../client/src/App.js#L404) |
-| `/customers` | ProtectedRoute → PermissionBasedRoute → Layout → Customers | permission="customers" | [client/src/App.js:414](../../client/src/App.js#L414) |
-| `/events` | ProtectedRoute → PermissionBasedRoute → Layout → Events | allowDispatchers, allowYellowblock, permission="events" | [client/src/App.js:424](../../client/src/App.js#L424) |
-| `/dispatcher/events` | ProtectedRoute → RoleBasedRoute → Events | allowDispatchers, allowedRoles={['super_admin', 'admin', 'dispatcher']} | [client/src/App.js:434](../../client/src/App.js#L434) |
-| `/customer-service/*` | ProtectedRoute → PermissionBasedRoute → Layout →  → div → CustomerService | allowDispatchers, allowStoreKeepers, allowKitchen, permission="customer_service" | [client/src/App.js:442](../../client/src/App.js#L442) |
-| `/complaints` | ProtectedRoute → PermissionBasedRoute → Layout → Complaints | permission="complaints" | [client/src/App.js:447](../../client/src/App.js#L447) |
-| `/batch-auto-assign` | ProtectedRoute → RoleBasedRoute → Layout → BatchAutoAssign | allowedRoles={['super_admin', 'admin', 'dispatcher']} | [client/src/App.js:457](../../client/src/App.js#L457) |
-| `/test-api` | ProtectedRoute → TestAPI |  | [client/src/App.js:467](../../client/src/App.js#L467) |
-| `/deliveries/:id` | ProtectedRoute → Layout → DeliveryDetail |  | [client/src/App.js:473](../../client/src/App.js#L473) |
-| `/add-delivery` | ProtectedRoute → Layout → AddDelivery |  | [client/src/App.js:481](../../client/src/App.js#L481) |
-| `/bags` | ProtectedRoute → PermissionBasedRoute → BagOperationsRoute | allowStoreKeepers, permission="bags" | [client/src/App.js:489](../../client/src/App.js#L489) |
-| `/reports` | ProtectedRoute → PermissionBasedRoute → Layout → Reports | permission="reports" | [client/src/App.js:497](../../client/src/App.js#L497) |
-| `/driver-audits` | Navigate |  | [client/src/App.js:506](../../client/src/App.js#L506) |
-| `/driver-reports` | ProtectedRoute → PermissionBasedRoute → Layout → DriverReports | permission="reports" | [client/src/App.js:507](../../client/src/App.js#L507) |
-| `/subscription` | ProtectedRoute → PermissionBasedRoute → Layout → Subscription | permission="subscription" | [client/src/App.js:514](../../client/src/App.js#L514) |
-| `/website-subscriptions` | ProtectedRoute → PermissionBasedRoute → Layout → WebsiteSubscription | permission="website_subscriptions" | [client/src/App.js:523](../../client/src/App.js#L523) |
-| `/website-subscriptions/:id` | ProtectedRoute → PermissionBasedRoute → Layout → WebsiteSubscription | permission="website_subscriptions" | [client/src/App.js:532](../../client/src/App.js#L532) |
-| `/customer-analytics` | ProtectedRoute → PermissionBasedRoute → Layout → CustomerAnalytics | permission="customer_analytics" | [client/src/App.js:541](../../client/src/App.js#L541) |
-| `/renewal` | ProtectedRoute → PermissionBasedRoute → Layout → Renewal | permission="renewal" | [client/src/App.js:550](../../client/src/App.js#L550) |
-| `/delivery-changes` | ProtectedRoute → PermissionBasedRoute → Layout → DeliveryChanges | permission="delivery_changes" | [client/src/App.js:559](../../client/src/App.js#L559) |
-| `/delivery-changes/add` | ProtectedRoute → PermissionBasedRoute → Layout → AddDeliveryChange | permission="delivery_changes" | [client/src/App.js:569](../../client/src/App.js#L569) |
-| `/admin/meal-selection-v2/*` | ProtectedRoute → PermissionBasedRoute → Layout →  → div → AdminMealSelectionV2 | permission="menus" | [client/src/App.js:579](../../client/src/App.js#L579) |
-| `/menus` | ProtectedRoute → PermissionBasedRoute → Layout → MenuManagement | permission="menus" | [client/src/App.js:589](../../client/src/App.js#L589) |
-| `/menu-select/:token` | MenuSelectPage |  | [client/src/App.js:599](../../client/src/App.js#L599) |
-| `/menu-select-v2` | MenuSelectionLinkPage |  | [client/src/App.js:605](../../client/src/App.js#L605) |
-| `/matter-core` | ProtectedRoute → PermissionBasedRoute → Layout → MatterCore | permission="matter_core" | [client/src/App.js:609](../../client/src/App.js#L609) |
-| `/matter-core/:token` | MatterCorePdfPage |  | [client/src/App.js:619](../../client/src/App.js#L619) |
-| `/admin/partners` | ProtectedRoute → PermissionBasedRoute → Layout → AdminPartners | allowKitchen, permission="partners" | [client/src/App.js:623](../../client/src/App.js#L623) |
-| `/kitchen-list` | ProtectedRoute → PermissionBasedRoute → Layout → KitchenList | allowKitchen, permission="kitchen_list" | [client/src/App.js:633](../../client/src/App.js#L633) |
-| `/kitchen-counting` | ProtectedRoute → PermissionBasedRoute → Layout → KitchenCounting | allowKitchen, permission="kitchen_counting" | [client/src/App.js:643](../../client/src/App.js#L643) |
-| `/yellowblock/*` | ProtectedRoute → RoleBasedRoute → YellowblockApp | allowYellowblock, allowedRoles={['super_admin', 'admin', 'yellowblock_user']} | [client/src/App.js:653](../../client/src/App.js#L653) |
+| `/traceability` | ProtectedRoute → ActivityHistoryRoute → AccessDenied → Layout → Traceability |  | [client/src/App.js:270](../../client/src/App.js#L270) |
+| `/login` | Login |  | [client/src/App.js:279](../../client/src/App.js#L279) |
+| `/privacy-policy` | PrivacyPolicy |  | [client/src/App.js:280](../../client/src/App.js#L280) |
+| `/partner/login` | PartnerLogin |  | [client/src/App.js:281](../../client/src/App.js#L281) |
+| `/partner/portal` | PartnerRoute → PartnerPortal |  | [client/src/App.js:282](../../client/src/App.js#L282) |
+| `/join/:token` | MemberJoin |  | [client/src/App.js:283](../../client/src/App.js#L283) |
+| `/member/portal` | MemberRoute → MemberPortal |  | [client/src/App.js:284](../../client/src/App.js#L284) |
+| `/` | ProtectedRoute → Navigate |  | [client/src/App.js:286](../../client/src/App.js#L286) |
+| `/dashboard` | ProtectedRoute → PermissionBasedRoute → Layout → Dashboard | permission="dashboard" | [client/src/App.js:292](../../client/src/App.js#L292) |
+| `/drivers` | ProtectedRoute → PermissionBasedRoute → Layout → Drivers | permission="drivers" | [client/src/App.js:302](../../client/src/App.js#L302) |
+| `/fleet` | ProtectedRoute → PermissionBasedRoute → Layout → FleetManagement | permission="fleet" | [client/src/App.js:312](../../client/src/App.js#L312) |
+| `/live-tracking` | ProtectedRoute → PermissionBasedRoute → Layout → LiveTracking | permission="live_map" | [client/src/App.js:322](../../client/src/App.js#L322) |
+| `/drivers/create` | ProtectedRoute → PermissionBasedRoute → Layout → CreateDriver | permission="drivers" | [client/src/App.js:332](../../client/src/App.js#L332) |
+| `/drivers/:id` | ProtectedRoute → PermissionBasedRoute → Layout → DriverDetail | permission="drivers" | [client/src/App.js:342](../../client/src/App.js#L342) |
+| `/driver-mobile` | ProtectedRoute → DriverMobile | allowDrivers | [client/src/App.js:351](../../client/src/App.js#L351) |
+| `/dispatcher` | ProtectedRoute → RoleBasedRoute → ResponsiveDispatcher | allowDispatchers, allowedRoles={['super_admin', 'admin', 'manager', 'dispatcher']} | [client/src/App.js:356](../../client/src/App.js#L356) |
+| `/dispatcher/driver-routes` | ProtectedRoute → RoleBasedRoute → DriverRoutesPage | allowDispatchers, allowedRoles={['super_admin', 'admin', 'manager', 'dispatcher']} | [client/src/App.js:363](../../client/src/App.js#L363) |
+| `/store-keeper` | ProtectedRoute → RoleBasedRoute → PermissionBasedRoute → BagOperationsRoute | allowStoreKeepers, allowedRoles={['super_admin', 'admin', 'store_keeper']}, permission="bags" | [client/src/App.js:371](../../client/src/App.js#L371) |
+| `/users` | ProtectedRoute → PermissionBasedRoute → Layout → Users | permission="users" | [client/src/App.js:381](../../client/src/App.js#L381) |
+| `/employees` | ProtectedRoute → PermissionBasedRoute → Layout → Employees | permission="employees" | [client/src/App.js:390](../../client/src/App.js#L390) |
+| `/deliveries` | ProtectedRoute → PermissionBasedRoute → Layout → Deliveries | permission="deliveries" | [client/src/App.js:399](../../client/src/App.js#L399) |
+| `/customers` | ProtectedRoute → PermissionBasedRoute → Layout → Customers | permission="customers" | [client/src/App.js:409](../../client/src/App.js#L409) |
+| `/events` | ProtectedRoute → PermissionBasedRoute → Layout → Events | allowDispatchers, allowYellowblock, permission="events" | [client/src/App.js:419](../../client/src/App.js#L419) |
+| `/dispatcher/events` | ProtectedRoute → RoleBasedRoute → Events | allowDispatchers, allowedRoles={['super_admin', 'admin', 'dispatcher']} | [client/src/App.js:429](../../client/src/App.js#L429) |
+| `/customer-service/*` | ProtectedRoute → PermissionBasedRoute → Layout →  → div → CustomerService | allowDispatchers, allowStoreKeepers, allowKitchen, permission="customer_service" | [client/src/App.js:437](../../client/src/App.js#L437) |
+| `/complaints` | ProtectedRoute → PermissionBasedRoute → Layout → Complaints | permission="complaints" | [client/src/App.js:442](../../client/src/App.js#L442) |
+| `/batch-auto-assign` | ProtectedRoute → RoleBasedRoute → Layout → BatchAutoAssign | allowedRoles={['super_admin', 'admin', 'dispatcher']} | [client/src/App.js:452](../../client/src/App.js#L452) |
+| `/test-api` | ProtectedRoute → TestAPI |  | [client/src/App.js:462](../../client/src/App.js#L462) |
+| `/deliveries/:id` | ProtectedRoute → Layout → DeliveryDetail |  | [client/src/App.js:468](../../client/src/App.js#L468) |
+| `/add-delivery` | ProtectedRoute → Layout → AddDelivery |  | [client/src/App.js:476](../../client/src/App.js#L476) |
+| `/bags` | ProtectedRoute → PermissionBasedRoute → BagOperationsRoute | allowStoreKeepers, permission="bags" | [client/src/App.js:484](../../client/src/App.js#L484) |
+| `/reports` | ProtectedRoute → PermissionBasedRoute → Layout → Reports | permission="reports" | [client/src/App.js:492](../../client/src/App.js#L492) |
+| `/driver-audits` | Navigate |  | [client/src/App.js:501](../../client/src/App.js#L501) |
+| `/driver-reports` | ProtectedRoute → PermissionBasedRoute → Layout → DriverReports | permission="reports" | [client/src/App.js:502](../../client/src/App.js#L502) |
+| `/subscription` | ProtectedRoute → PermissionBasedRoute → Layout → Subscription | permission="subscription" | [client/src/App.js:509](../../client/src/App.js#L509) |
+| `/website-subscriptions` | ProtectedRoute → PermissionBasedRoute → Layout → WebsiteSubscription | permission="website_subscriptions" | [client/src/App.js:518](../../client/src/App.js#L518) |
+| `/website-subscriptions/:id` | ProtectedRoute → PermissionBasedRoute → Layout → WebsiteSubscription | permission="website_subscriptions" | [client/src/App.js:527](../../client/src/App.js#L527) |
+| `/customer-analytics` | ProtectedRoute → PermissionBasedRoute → Layout → CustomerAnalytics | permission="customer_analytics" | [client/src/App.js:536](../../client/src/App.js#L536) |
+| `/renewal` | ProtectedRoute → PermissionBasedRoute → Layout → Renewal | permission="renewal" | [client/src/App.js:545](../../client/src/App.js#L545) |
+| `/delivery-changes` | ProtectedRoute → PermissionBasedRoute → Layout → DeliveryChanges | permission="delivery_changes" | [client/src/App.js:554](../../client/src/App.js#L554) |
+| `/delivery-changes/add` | ProtectedRoute → PermissionBasedRoute → Layout → AddDeliveryChange | permission="delivery_changes" | [client/src/App.js:564](../../client/src/App.js#L564) |
+| `/admin/meal-selection-v2/*` | ProtectedRoute → PermissionBasedRoute → Layout →  → div → AdminMealSelectionV2 | permission="menus" | [client/src/App.js:574](../../client/src/App.js#L574) |
+| `/menus` | ProtectedRoute → PermissionBasedRoute → Layout → MenuManagement | permission="menus" | [client/src/App.js:584](../../client/src/App.js#L584) |
+| `/menu-select/:token` | MenuSelectPage |  | [client/src/App.js:594](../../client/src/App.js#L594) |
+| `/menu-select-v2` | MenuSelectionLinkPage |  | [client/src/App.js:600](../../client/src/App.js#L600) |
+| `/matter-core` | ProtectedRoute → PermissionBasedRoute → Layout → MatterCore | permission="matter_core" | [client/src/App.js:604](../../client/src/App.js#L604) |
+| `/matter-core/:token` | MatterCorePdfPage |  | [client/src/App.js:614](../../client/src/App.js#L614) |
+| `/admin/partners` | ProtectedRoute → PermissionBasedRoute → Layout → AdminPartners | allowKitchen, permission="partners" | [client/src/App.js:618](../../client/src/App.js#L618) |
+| `/kitchen-list` | ProtectedRoute → PermissionBasedRoute → Layout → KitchenList | allowKitchen, permission="kitchen_list" | [client/src/App.js:628](../../client/src/App.js#L628) |
+| `/kitchen-counting` | ProtectedRoute → PermissionBasedRoute → Layout → KitchenCounting | allowKitchen, permission="kitchen_counting" | [client/src/App.js:638](../../client/src/App.js#L638) |
+| `/yellowblock/*` | ProtectedRoute → RoleBasedRoute → YellowblockApp | allowYellowblock, allowedRoles={['super_admin', 'admin', 'yellowblock_user']} | [client/src/App.js:648](../../client/src/App.js#L648) |
 
 ## Special boundaries
 

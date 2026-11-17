@@ -5,7 +5,8 @@ import { formActivity } from '../observability/activityForms.js';
 import { recordActivity, readActivity } from '../observability/activityStore.js';
 import express from 'express';
 import { readFileSync } from 'node:fs';
-import { protect, superAdmin } from '../middleware/auth.js';
+import { protect } from '../middleware/auth.js';
+import { requireActivityHistoryReader } from '../observability/activityAccess.js';
 import { recentEvents } from '../observability/recentEvents.js';
 
 const catalog = JSON.parse(
@@ -19,13 +20,17 @@ const captureStaff = (req, res, next) =>
 // An injectable auth boundary allows isolated tests without production sessions.
 export function createTraceabilityRouter({
   authenticate = protect,
-  authorize = superAdmin,
+  authorize = requireActivityHistoryReader,
   preview = false,
   captureAuthenticate = captureStaff,
   activityReader = readActivity,
   activityWriter = recordActivity,
 } = {}) {
   const router = express.Router();
+  router.use((_req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
   const capture = async (req, res) => {
     const inputs = req.body?.events;
     if (!Array.isArray(inputs) || !inputs.length || inputs.length > 100)
@@ -58,10 +63,6 @@ export function createTraceabilityRouter({
   router.post('/capture/partner', partnerProtect, capture);
   router.post('/capture/member', memberProtect, capture);
   router.use(authenticate, authorize);
-  router.use((_req, res, next) => {
-    res.set('Cache-Control', 'no-store');
-    next();
-  });
   router.get('/activity', async (req, res) => {
     try {
       const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));

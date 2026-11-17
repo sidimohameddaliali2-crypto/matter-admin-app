@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { activityActor, safeChanges, privateValue, fieldLabel } from './activityPolicy.js';
 import { traceContext } from './telemetry.js';
 import { describeActivity } from './activityLanguage.js';
+import { shouldAuditModel, isAutomaticDriverLocation, isLocationOnlyUpdate } from './activityScope.js';
 
 const pendingWrites = Symbol('activity-pending-writes');
 const wrappedSession = Symbol('activity-wrapped-session');
@@ -199,7 +200,7 @@ export function createActivityPlugin({ write }) {
   return function activityPlugin(schema) {
     if (schema.options.activityAudit === false) return;
     schema.pre('save', async function () {
-      if (!this.constructor.modelName) return;
+      if (!this.constructor.modelName || !shouldAuditModel(this.constructor.modelName)) return;
       const after = plain(this);
       let before = {};
       if (!this.isNew) {
@@ -251,6 +252,9 @@ export function createActivityPlugin({ write }) {
       'findOneAndDelete',
     ]) {
       schema.pre(operation, { query: true, document: false }, async function () {
+        if (!shouldAuditModel(this.model.modelName)) return;
+        const proposed = this.getUpdate?.() || {};
+        if (this.model.modelName === 'User' && isAutomaticDriverLocation(traceContext()?.request) && isLocationOnlyUpdate(proposed)) return;
         let before = {};
         try {
           before =
@@ -353,6 +357,7 @@ export function createActivityPlugin({ write }) {
       });
     }
     schema.post('insertMany', function (error, documents, next) {
+      if (!shouldAuditModel(this.modelName)) return next(error);
       const recordInserted = async () => {
         for (const document of error.insertedDocs || []) {
           await complete(
@@ -368,6 +373,7 @@ export function createActivityPlugin({ write }) {
       );
     });
     schema.post('insertMany', async function (documents) {
+      if (!shouldAuditModel(this.modelName)) return;
       for (const doc of documents)
         await complete(
           makeRecordActivity(this.modelName, true, {}, plain(doc), 'save'),
@@ -386,6 +392,8 @@ export function installActivityDatabase(mongoose, write) {
   };
   const bulkWrite = mongoose.Model.bulkWrite;
   mongoose.Model.bulkWrite = async function (operations, options, ...args) {
+    if (this.schema?.options.activityAudit === false || !shouldAuditModel(this.modelName))
+      return bulkWrite.call(this, operations, options, ...args);
     const context = traceContext();
     const actor = activityActor(context?.request);
     const operationId = randomUUID();

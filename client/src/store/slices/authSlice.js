@@ -125,9 +125,15 @@ const authSlice = createSlice({
       // Sync auth user when their own record is updated (e.g. permissions changed)
       .addCase(updateUser.fulfilled, (state, action) => {
         if (state.user && state.user._id === action.payload._id) {
-          state.user = action.payload;
+          const updatedUser = { ...action.payload };
+          // Only login and /auth/me establish this server-derived access flag.
+          delete updatedUser.canViewActivityHistory;
+          if (typeof state.user.canViewActivityHistory === 'boolean') {
+            updatedUser.canViewActivityHistory = state.user.canViewActivityHistory;
+          }
+          state.user = updatedUser;
           try {
-            localStorage.setItem('user', JSON.stringify(action.payload));
+            localStorage.setItem('user', JSON.stringify(updatedUser));
           } catch (e) {}
         }
       });

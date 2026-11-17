@@ -5,6 +5,7 @@ import mongoose from 'mongoose';
 import { createActivityJournal, provisionalStages, terminalStages } from './activityJournal.js';
 import { activityActor, safeChanges } from './activityPolicy.js';
 import { describeActivity } from './activityLanguage.js';
+import { isAutomaticDriverLocation } from './activityScope.js';
 
 const defaultDirectory = fileURLToPath(new URL('../.activity-journal', import.meta.url));
 const collection = () => mongoose.connection.db.collection('activity_audit_events');
@@ -159,6 +160,8 @@ export async function recordRequestActivity(req, res, { route, disconnected, con
   )
     return;
   if (!route.path.startsWith('/api/')) return;
+  if (isAutomaticDriverLocation(req) && !disconnected && res.statusCode < 400 &&
+    !res.locals.activityResponseFailed && !res.locals.activityResponsePartial && !res.locals.traceOutcome) return;
   const actor = activityActor(req);
   const outcome = disconnected
     ? 'uncertain'

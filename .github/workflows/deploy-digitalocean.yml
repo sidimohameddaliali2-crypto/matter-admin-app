@@ -118,6 +118,7 @@ jobs:
           DO_SSH_KEY: ${{ secrets.DO_SSH_KEY }}
           DO_SSH_PASSPHRASE: ${{ secrets.DO_SSH_PASSPHRASE }}
           MATTER_CS_RUNTIME_B64: ${{ secrets.MATTER_CS_RUNTIME_B64 }}
+          MATTER_ACTIVITY_READER_EMAILS: ${{ secrets.MATTER_ACTIVITY_READER_EMAILS }}
           OPERATION: ${{ inputs.operation || 'deploy' }}
         run: |
           set -e
@@ -126,6 +127,7 @@ jobs:
           if [ -z "$DO_APP_PATH" ]; then echo "DO_APP_PATH is missing"; exit 1; fi
           if [ -z "$DO_SSH_KEY" ]; then echo "DO_SSH_KEY is missing"; exit 1; fi
           if [ "$OPERATION" = deploy ] && [ -z "$MATTER_CS_RUNTIME_B64" ]; then echo "Customer Service connection secret is missing"; exit 1; fi
+          if [ "$OPERATION" = deploy ] && [ -z "$MATTER_ACTIVITY_READER_EMAILS" ]; then echo "Private activity reader configuration is missing"; exit 1; fi
 
       - name: Verify reviewed audit operation inputs
         if: github.event_name == 'workflow_dispatch' && inputs.operation != 'deploy'
@@ -217,6 +219,7 @@ jobs:
         uses: appleboy/ssh-action@v1.2.0
         env:
           MATTER_CS_RUNTIME_B64: ${{ secrets.MATTER_CS_RUNTIME_B64 }}
+          MATTER_ACTIVITY_READER_EMAILS: ${{ secrets.MATTER_ACTIVITY_READER_EMAILS }}
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
           DEPLOY_SHA: ${{ github.sha }}
         with:
@@ -224,7 +227,7 @@ jobs:
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
-          envs: MATTER_CS_RUNTIME_B64,DO_APP_PATH,DEPLOY_SHA
+          envs: MATTER_CS_RUNTIME_B64,MATTER_ACTIVITY_READER_EMAILS,DO_APP_PATH,DEPLOY_SHA
           script: |
             set -e
             cd -- "$DO_APP_PATH"
@@ -273,7 +276,9 @@ jobs:
 
             echo "[5/7] Verify canonical Customer Service and existing staff access"
             node server/scripts/customerServiceDeploy.js --apply
+            node server/scripts/activityHistoryDeploy.js --apply
             unset MATTER_CS_RUNTIME_B64
+            unset MATTER_ACTIVITY_READER_EMAILS
 
             echo "[6/7] Restart API with PM2"
             pm2 delete matter-delivery-api 2>/dev/null || true
@@ -284,6 +289,7 @@ jobs:
 
             echo "[7/7] Verify existing app health and canonical Customer Service readiness"
             node server/scripts/customerServiceDeploy.js --verify
+            node server/scripts/activityHistoryDeploy.js --verify
             if [ "$sync_paused" = 1 ]; then
               DRIVER_AUDIT_DEPLOY_SHA="$DEPLOY_SHA" node server/scripts/driverAuditDeploy.js deploy-worker-resume
               sync_paused=0
