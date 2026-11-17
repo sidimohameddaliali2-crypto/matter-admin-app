@@ -2,7 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import mongoose from 'mongoose';
-import { createActivityJournal } from './activityJournal.js';
+import { createActivityJournal, provisionalStages, terminalStages } from './activityJournal.js';
 import { activityActor, safeChanges } from './activityPolicy.js';
 import { describeActivity } from './activityLanguage.js';
 
@@ -19,11 +19,11 @@ export const activityJournal = createActivityJournal({
       { $setOnInsert: event },
       { upsert: true, writeConcern: { w: 'majority' } },
     ),
-  list: async ({ limit, q, issues, before }) => {
+  resolveOperations: async (ids) => ids.length ? (await collection().find({ operationId: { $in: ids }, stage: { $in: terminalStages } }, { projection: { operationId: 1 } }).toArray()).map(event => event.operationId) : [],
+  list: async ({ limit, q, issues, before, completedOperations = [] }) => {
     const filter = {};
     if (issues) filter.issue = { $nin: [null, ''] };
     if (q) {
-      filter.$text = { $search: q };
       filter.$and = q
         .toLowerCase()
         .split(/\s+/)
@@ -44,10 +44,32 @@ export const activityJournal = createActivityJournal({
       };
       filter.$and = [...(filter.$and || []), cursor];
     }
+    if (completedOperations.length) filter.$and = [...(filter.$and || []), { $or: [{ stage: { $nin: provisionalStages } }, { operationId: { $nin: completedOperations } }] }];
     return collection()
-      .find(filter, { projection: { _id: 0 } })
-      .sort({ occurredAt: -1, eventId: -1 })
-      .limit(limit)
+      .aggregate([
+        { $match: filter },
+        { $sort: { occurredAt: -1, eventId: -1 } },
+        { $lookup: {
+          from: 'activity_audit_events',
+          let: { operation: '$operationId', stage: '$stage' },
+          pipeline: [
+            { $match: { $expr: { $and: [
+              { $in: ['$$stage', provisionalStages] },
+              { $eq: ['$operationId', '$$operation'] },
+              { $in: ['$stage', terminalStages] },
+            ] } } },
+            { $limit: 1 },
+            { $project: { _id: 1 } },
+          ],
+          as: 'completedOperation',
+        } },
+        { $match: { $expr: { $or: [
+          { $not: [{ $in: ['$stage', provisionalStages] }] },
+          { $eq: [{ $size: '$completedOperation' }, 0] },
+        ] } } },
+        { $limit: limit },
+        { $project: { _id: 0, completedOperation: 0 } },
+      ], { maxTimeMS: 5000 })
       .toArray();
   },
 });
@@ -82,19 +104,6 @@ export async function readActivity(input = 100) {
   const options = typeof input === 'number' ? { limit: input } : input;
   const limit = Math.max(1, Math.min(500, options.limit || 100));
   const result = await activityJournal.read({ ...options, limit: limit * 3 });
-  const finished = new Set(
-    result.events
-      .filter((event) =>
-        ['record_saved', 'record_not_saved', 'record_not_changed'].includes(event.stage),
-      )
-      .map((event) => event.operationId)
-      .filter(Boolean),
-  );
-  result.events = result.events.filter(
-    (event) =>
-      !['record_change_started', 'record_waiting_for_commit'].includes(event.stage) ||
-      !finished.has(event.operationId),
-  );
   const more = result.events.length > limit || result.hasMore;
   result.events = result.events.slice(0, limit);
   const last = result.events.at(-1);
@@ -130,10 +139,7 @@ export function startActivityHistory() {
     try {
       await collection().createIndex({ occurredAt: -1, eventId: -1 });
       await collection().createIndex({ 'actor.id': 1, occurredAt: -1 });
-      await collection().createIndex(
-        { summary: 'text', 'actor.name': 'text', area: 'text', issue: 'text' },
-        { name: 'activity_search', default_language: 'none' },
-      );
+      await collection().createIndex({ operationId: 1, stage: 1 });
       await activityJournal.flush();
     } catch {
       activityJournal.markFailure();
@@ -177,7 +183,9 @@ export async function recordRequestActivity(req, res, { route, disconnected, con
   });
   if (res.locals.activityIssue) {
     language.issue = res.locals.activityIssue;
-    const reason = language.issue.startsWith('A matching')
+    const reason = language.issue.startsWith('That email')
+      ? 'that email is already in use'
+      : language.issue.startsWith('A matching')
       ? 'a matching record already exists'
       : language.issue.startsWith('Some required')
         ? 'required information was missing or invalid'

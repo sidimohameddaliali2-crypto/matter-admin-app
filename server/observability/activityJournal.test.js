@@ -109,6 +109,21 @@ test('form events use verified identity, hide secrets, deduplicate within the ac
   );
   assert.throws(() => formActivity(req, { ...input, page: '/traceability' }, catalog));
 });
+test('filtered disk history resolves completed operations held in the database', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'activity-journal-terminal-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const operationId = randomUUID();
+  const journal = createActivityJournal({
+    directory,
+    connected: () => true,
+    persist: async () => { throw Error('keep pending fixture'); },
+    resolveOperations: async ids => ids.includes(operationId) ? [operationId] : [],
+    list: async () => [],
+  });
+  await journal.append({ ...event(), operationId, stage: 'record_waiting_for_commit', issue: 'Waiting for transaction.' });
+  assert.equal((await journal.read({ issues: true })).events.length, 0);
+  assert.equal((await journal.read({ q: 'edited' })).events.length, 0);
+});
 test('record changes redact identity, credentials and customer free text while preserving operational changes', () => {
   const changes = safeChanges(
     { status: 'pending', password: 'PRIVATE_OLD' },

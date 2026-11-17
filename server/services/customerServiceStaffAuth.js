@@ -16,7 +16,7 @@ export function createExistingAppStaffAuth({resolve,authenticate=authenticateSta
   if(effectivePermissions(account).customer_service!==true)throw fail(403);
   const user=await resolve('matter',String(account._id));
   if(!user?.isActive)throw fail(403);
-  verified.add(user);return {user};
+  verified.add(user);return {user,activityActor:activityActor({user:account})};
  }};
 }
 export function createServiceStaffAuth({supabase,resolve,fetchImpl=fetch}){
@@ -31,4 +31,4 @@ export function createServiceStaffAuth({supabase,resolve,fetchImpl=fetch}){
  }};
 }
 // Opt-in on service routes only. Shared app/driver authentication is unchanged.
-export async function protectService(req,res,next){const auth=req.app.get('customerServiceAuth');if(!auth)return protect(req,res,next);try{const r=await auth.authenticate(req.headers.authorization);req.user=r.user;req.activityActor=Object.freeze(activityActor(req));if(r.token)res.set('X-Customer-Service-Session',r.token);next();}catch(e){res.status(e.statusCode||e.status||503).json({success:false,message:e.statusCode===403?'No linked customer-service access.':'Staff sign-in required or identity service unavailable.'});}}
+export async function protectService(req,res,next){const auth=req.app.get('customerServiceAuth');if(!auth)return protect(req,res,next);try{const r=await auth.authenticate(req.headers.authorization);req.user=r.user;req.activityActor=Object.freeze(r.activityActor||activityActor(req));if(r.token)res.set('X-Customer-Service-Session',r.token);next();}catch(e){res.status(e.statusCode||e.status||503).json({success:false,message:e.statusCode===403?'No linked customer-service access.':'Staff sign-in required or identity service unavailable.'});}}

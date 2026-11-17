@@ -11,12 +11,16 @@ import {
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
+export const provisionalStages = ['record_change_started', 'record_waiting_for_commit'];
+export const terminalStages = ['record_saved', 'record_not_saved', 'record_not_changed', 'record_batch_result'];
+
 // Each event is committed to a private disk file before database delivery. Stable
 // event IDs make retries and concurrent process drains idempotent in Mongo.
 export function createActivityJournal({
   directory,
   persist,
   list,
+  resolveOperations = async () => [],
   connected = () => false,
   maxPending = 50000,
 } = {}) {
@@ -119,9 +123,12 @@ export function createActivityJournal({
           'Pending disk history could not be read. Database history is shown when available.';
       }
       let stored = [];
+      const finished = new Set(disk.filter(event => terminalStages.includes(event.stage)).map(event => event.operationId).filter(Boolean));
       if (connected()) {
         try {
-          stored = await list({ limit: limit + 1, q, issues, before });
+          const pendingIds = [...new Set(disk.filter(event => provisionalStages.includes(event.stage)).map(event => event.operationId).filter(Boolean))];
+          for (const id of await resolveOperations(pendingIds)) finished.add(id);
+          stored = await list({ limit: limit + 1, q, issues, before, completedOperations: [...finished] });
         } catch {
           lastError =
             'Stored activity history could not be loaded. Pending disk entries are shown.';
@@ -129,6 +136,7 @@ export function createActivityJournal({
       }
       const byId = new Map([...disk, ...stored].map((event) => [event.eventId, event]));
       const matching = [...byId.values()].filter((event) => {
+        if (provisionalStages.includes(event.stage) && finished.has(event.operationId)) return false;
         if (issues && !event.issue) return false;
         if (
           before &&

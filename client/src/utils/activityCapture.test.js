@@ -55,7 +55,7 @@ test('captures selections, checkboxes, file counts and contenteditable text with
   const box = document.querySelector('[type=checkbox]'); focus(box); box.checked = true; box.dispatchEvent(new Event('change', { bubbles: true }));
   const file = document.querySelector('[type=file]'); Object.defineProperty(file, 'files', { value: [new File(['a'], 'customer-passport.png'), new File(['b'], 'photo.jpg')] }); file.dispatchEvent(new Event('change', { bubbles: true }));
   const note = document.querySelector('[contenteditable]'); focus(note); edit(note, 'New note', 'change'); await deliver();
-  expect(sent().map(event => event.changes[0].after)).toEqual(['Route B', 'Selected', '2 files', 'New note']);
+  expect(sent().map(event => event.changes[0].after)).toEqual(['Route B', 'Selected', '2 files', '[Not recorded]']);
   expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('customer-passport.png');
 });
 test.each([['/partner/portal', 'partnerToken', 'partner-session', '/api/traceability/capture/partner'], ['/member/portal', 'memberToken', 'member-session', '/api/traceability/capture/member']])('uses the matching portal authentication at %s', async (path, key, token, endpoint) => {
@@ -207,11 +207,15 @@ test('the durable cap reports a persistent gap without expiring old activity', a
   expect(readCaptureStatus()).toMatchObject({ queueIssue: 'capacity-exceeded', droppedEvents: 1 });
   expect(Array.from(table.values()).filter(row => row.queuedAt === 1)).toHaveLength(4998);
 });
-test('credentials are redacted before any durable write', async () => {
-  const storage = await useDurableQueue(); document.querySelector('input').type = 'password';
-  edit(document.querySelector('input'), 'Private-password-only', 'change'); for (let i = 0; i < 5; i += 1) await settle();
+test('credentials, contact details and private free text are redacted before any durable write', async () => {
+  const storage = await useDurableQueue();
+  document.body.innerHTML = '<h1>Driver</h1><form><label>Password<input type="password"></label><label>Phone<input type="tel"></label><label>Email<input type="email"></label><label>Private notes<textarea></textarea></label><label>Message<textarea></textarea></label><label>Full name<input name="fullName"></label></form>';
+  const privateValues = ['Private-password-only', '+971501234567', 'private@example.invalid', 'Customer has severe diabetes', 'A private customer message'];
+  document.querySelectorAll('input,textarea').forEach((field, index) => edit(field, privateValues[index] || 'Visible driver', 'change'));
+  for (let i = 0; i < 10; i += 1) await settle();
   const rows = JSON.stringify(Array.from(storage.tables.get('queue').values()));
-  expect(rows).toContain('[Not recorded]'); expect(rows).not.toContain('Private-password-only'); expect(rows).not.toContain('staff-session');
+  expect(rows).toContain('[Not recorded]'); privateValues.forEach(value => expect(rows).not.toContain(value)); expect(rows).not.toContain('staff-session');
+  expect(rows).toContain('Visible driver');
 });
 test('records custom validation rendered after submit without a business request or raw error text', async () => {
   const form = document.querySelector('form'); const field = document.querySelector('input'); field.value = '';

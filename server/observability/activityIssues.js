@@ -2,6 +2,8 @@
 // exception text into the activity feed.
 export function responseIssue(body, status) {
   const message = typeof body?.message === 'string' ? body.message : '';
+  if (/already exists|duplicate/i.test(message) && /email/i.test(message))
+    return 'That email is already used by another account.';
   if (/already exists|duplicate/i.test(message))
     return 'A matching record already exists, so the new entry was not saved.';
   if (/required|provide valid|invalid/i.test(message) && status >= 400)

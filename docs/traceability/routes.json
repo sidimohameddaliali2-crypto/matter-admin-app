@@ -162,7 +162,7 @@
     "server/routes/partnerPortal.js": "6efa0e89af3f3f618d476e12f4e01e3345a2278405772b69cfbdf4898fb3c9a5",
     "server/routes/reports.js": "2f47a5ca54b28ee3dfe8eed0c896590e3411cb2bd85263abcec8e5f1b4254b64",
     "server/routes/storeKeeperScans.js": "53ccdc75bc154610453ecf5890598e70c1a972351e580e1c496ff3fe2c9f0e31",
-    "server/routes/traceability.js": "7763d205017a56ddf3e2e3921e26db5b433379483ff9186c97e5d78632e709aa",
+    "server/routes/traceability.js": "4122f33a213c902b94ee5cf3042d27eed67435dbfed864d9172dcb9bbafb8411",
     "server/routes/truckoomApi.js": "e6ce503e456e9371102b13f76c4066fafe980ce82186c063c5b1be8e5a5c5634",
     "server/routes/upload.js": "70d735777f602df261219898f34093b53092ca3cc3e51db8a02795226b960e18",
     "server/routes/users.js": "9d62189cb347a57b6292fccb2c4b80d2da195f7924397aac7bb59af90b145317",
@@ -1301,7 +1301,7 @@
     {
       "id": "d67b016178283bfd",
       "method": "POST",
-      "source": "server/routes/traceability.js:53",
+      "source": "server/routes/traceability.js:57",
       "description": null,
       "handlerGuards": [
         "captureAuthenticate",
@@ -1317,7 +1317,7 @@
     {
       "id": "2a7e4819491fe6e1",
       "method": "POST",
-      "source": "server/routes/traceability.js:54",
+      "source": "server/routes/traceability.js:58",
       "description": null,
       "handlerGuards": [
         "partnerProtect",
@@ -1333,7 +1333,7 @@
     {
       "id": "8a931bc6133b4922",
       "method": "POST",
-      "source": "server/routes/traceability.js:55",
+      "source": "server/routes/traceability.js:59",
       "description": null,
       "handlerGuards": [
         "memberProtect",
@@ -1349,7 +1349,7 @@
     {
       "id": "97eebef97977208e",
       "method": "GET",
-      "source": "server/routes/traceability.js:61",
+      "source": "server/routes/traceability.js:65",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -1377,7 +1377,7 @@
     {
       "id": "5717e0752a0dcc37",
       "method": "GET",
-      "source": "server/routes/traceability.js:93",
+      "source": "server/routes/traceability.js:97",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -1396,7 +1396,7 @@
     {
       "id": "d425cd79464544d1",
       "method": "GET",
-      "source": "server/routes/traceability.js:94",
+      "source": "server/routes/traceability.js:98",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],

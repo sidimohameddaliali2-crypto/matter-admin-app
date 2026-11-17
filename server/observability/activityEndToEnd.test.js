@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import express from 'express';
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
+import { randomUUID } from 'node:crypto';
 
 const binary =
   process.env.TEST_MONGOD_BIN ||
@@ -82,7 +83,7 @@ test(
     const { createTraceabilityRouter } = await import('../routes/traceability.js');
     const { createRequestTrace } = await import('./requestTrace.js');
     const { resolveTraceRoute } = await import('./routeCatalog.js');
-    const { activityJournal, readActivity } = await import('./activityStore.js');
+    const { activityJournal, readActivity, recordActivity } = await import('./activityStore.js');
     const { inTraceContext } = await import('./telemetry.js');
     const owner = await User.create({
       email: 'osman@example.invalid',
@@ -129,6 +130,14 @@ test(
     });
     assert.equal(response.status, 201);
     const driver = await response.json();
+    app.set('customerServiceAuth', { authenticate: async () => { throw Object.assign(Error('No CS access'), { status: 403 }); } });
+    const capture = await fetch(origin + '/api/traceability/capture', {
+      method: 'POST',
+      headers: { ...headers, Authorization: 'Bearer ' + jwt.sign({ id: driver._id }, process.env.JWT_SECRET) },
+      body: JSON.stringify({ events: [{ eventId: randomUUID(), actionId: randomUUID(), stage: 'form_edited', page: '/driver-mobile', form: { title: 'Driver tasks', field: 'Status' }, changes: [{ field: 'Status', before: 'Waiting', after: 'Ready' }] }] }),
+    });
+    assert.equal(capture.status, 202, 'Drivers can capture their own forms without Customer Service access');
+    assert.ok((await readActivity(100)).events.some(event => event.stage === 'form_edited' && event.actor.id === driver._id && event.actor.name === 'Fixture driver'));
     const record = (await readActivity(100)).events.find(
       (event) => event.stage === 'record_saved' && event.record?.id === driver._id,
     );
@@ -307,6 +316,15 @@ test(
     );
     configureCloudInbox(null);
     await activityJournal.flush();
+    const partialName = await readActivity({ q: 'osm', limit: 100 });
+    assert.ok(partialName.events.length > 0, 'Partial person search works after Mongo persistence');
+    assert.equal(partialName.storage.issue, null);
+    const operationId = randomUUID();
+    await recordActivity({ operationId, stage: 'record_waiting_for_commit', outcome: 'pending', actor: { id: owner._id.toString(), name: 'Osman', role: 'super_admin' }, occurredAt: '2000-01-01T00:00:00.000Z', summary: 'Osman prepared coalescing-fixture.', issue: 'Waiting coalescing-fixture.' });
+    await recordActivity({ operationId, stage: 'record_saved', outcome: 'saved', actor: { id: owner._id.toString(), name: 'Osman', role: 'super_admin' }, occurredAt: '2000-01-01T00:00:02.000Z', summary: 'Osman saved coalescing-fixture.', issue: null, changes: [] });
+    await activityJournal.flush();
+    assert.equal((await readActivity({ q: 'coalescing-fixture', issues: true })).events.length, 0, 'A confirmed transaction is not an issue');
+    assert.equal((await readActivity({ q: 'prepared coalescing-fixture', before: { occurredAt: '2000-01-01T00:00:01.000Z', eventId: randomUUID() } })).events.length, 0, 'Terminal status is resolved beyond search and page boundaries');
     assert.ok(
       (await mongoose.connection.db
         .collection('activity_audit_events')

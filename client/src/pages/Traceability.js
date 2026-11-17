@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { AlertCircle, ChevronDown, RefreshCw, Search } from 'lucide-react';
+import { AlertCircle, RefreshCw, Search } from 'lucide-react';
 import api from '../utils/api';
 import { readCaptureStatus } from '../utils/activityCapture';
 import './Traceability.css';
@@ -26,13 +26,21 @@ const outcome = (event) => {
   };
   return labels[event.outcome] || 'Result not recorded';
 };
-const outcomeTone = (event) => {
-  if (event.issue || ['failed', 'rejected'].includes(event.outcome)) return 'issue';
-  if (event.stage === 'record_saved' && event.outcome === 'saved') return 'saved';
-  return 'pending';
-};
 const summary = (event) =>
   event.summary || `${person(event)} ${event.action || 'performed an action'}`;
+const rowSummary = (event) => {
+  const description = summary(event);
+  if (!event.issue) return description;
+  const failed = ['failed', 'rejected'].includes(event.outcome);
+  if (description.toLowerCase().includes(event.issue.toLowerCase()) ||
+    (failed && /\bbecause\b/i.test(description))) return description;
+  const name = person(event);
+  const namedIssue = event.issue.toLowerCase().startsWith(`${name.toLowerCase()} `);
+  const completeIssue = /\b(?:because|could not|cannot|failed to)\b/i.test(event.issue);
+  if (namedIssue || completeIssue) return namedIssue ? event.issue : `${name}: ${event.issue}`;
+  const action = failed ? description.replace(/\btried to\b/i, 'could not') : description;
+  return `${action.replace(/[.!?]\s*$/, '')}: ${event.issue}`;
+};
 const dateParts = (value) => {
   const date = new Date(value);
   if (!value || Number.isNaN(date.getTime())) return { date: 'Time not recorded', time: '' };
@@ -72,24 +80,18 @@ const eventKey = (event, index) => event.eventId || `${event.occurredAt}-${index
 function ActivityDetail({ event, id }) {
   const when = dateParts(event.occurredAt);
   const draft = isDraft(event);
+  const saved = event.stage === 'record_saved' && event.outcome === 'saved';
   const changes = event.changes || [];
+  const moreInformation = event.actor?.id || event.actor?.role || event.requestId ||
+    event.confirmation || event.previousValuesObserved || draft;
   return (
     <section id={id} className="trace-detail" aria-label="Activity details">
-      <h2>Activity details</h2>
+      <h2>Details</h2>
       <dl className="trace-facts">
         <div>
           <dt>Who</dt>
-          <dd>
-            {person(event)}
-            {event.actor?.role && <span> · {readable(event.actor.role)}</span>}
-          </dd>
+          <dd>{person(event)}</dd>
         </div>
-        {event.actor?.id && (
-          <div>
-            <dt>Account</dt>
-            <dd>{event.actor.id}</dd>
-          </div>
-        )}
         <div>
           <dt>When</dt>
           <dd>
@@ -102,95 +104,44 @@ function ActivityDetail({ event, id }) {
           <dd>{formName(event) || event.area || 'Not recorded'}</dd>
         </div>
         <div>
-          <dt>Outcome</dt>
-          <dd>{outcome(event)}</dd>
+          <dt>Result</dt>
+          <dd className="trace-result">{outcome(event)}</dd>
         </div>
       </dl>
-      {event.confirmation && <p className="trace-confirmation">{event.confirmation}</p>}
-      {event.issue && (
-        <div className="trace-detail-issue">
-          <h3>What needs attention</h3>
-          <p>{event.issue}</p>
-        </div>
-      )}
-      <div className="trace-changes">
-        <h3>{draft ? 'What was edited' : 'What changed'}</h3>
-        {draft && (
-          <p className="trace-change-note">
-            This records an edit to a form. It does not confirm that the change was saved.
-          </p>
-        )}
-        {!draft && event.stage !== 'record_saved' && (
-          <p className="trace-change-note">
-            Only an activity marked “Saved” confirms a saved change. Values below describe this
-            action.
-          </p>
-        )}
-        {event.previousValuesObserved && (
-          <p className="trace-change-note">
-            Earlier values were observed before saving; simultaneous edits can affect them.
-          </p>
-        )}
-        {changes.length ? (
+      {changes.length > 0 && <div className="trace-changes">
+        <h3>{saved ? 'Changes' : 'Entered values'}</h3>
           <div className="trace-change-list">
             {changes.map((change, index) => (
               <div className="trace-change" key={`${change.field}-${index}`}>
                 <h4>{readable(change.field || event.form?.field || 'Field')}</h4>
-                <dl>
-                  <div>
+                <dl className={saved ? '' : 'trace-entered-values'}>
+                  {saved && <div>
                     <dt>Before</dt>
                     <dd>{change.redacted ? 'Hidden for privacy' : displayValue(change.before)}</dd>
-                  </div>
+                  </div>}
                   <div>
-                    <dt>After</dt>
+                    <dt>{saved ? 'After' : 'Entered'}</dt>
                     <dd>{change.redacted ? 'Hidden for privacy' : displayValue(change.after)}</dd>
                   </div>
                 </dl>
               </div>
             ))}
           </div>
-        ) : (
-          <p className="trace-change-note">
-            Before and after values were not recorded for this action.
-          </p>
-        )}
-      </div>
+      </div>}
+      {moreInformation && <details className="trace-more-information">
+        <summary>More information</summary>
+        <div>
+          <dl>
+            {event.actor?.id && <div><dt>Account</dt><dd>{event.actor.id}</dd></div>}
+            {event.actor?.role && <div><dt>Role</dt><dd>{readable(event.actor.role)}</dd></div>}
+            {event.requestId && <div><dt>Reference</dt><dd>{event.requestId}</dd></div>}
+          </dl>
+          {event.confirmation && <p>{event.confirmation}</p>}
+          {event.previousValuesObserved && <p>Earlier values were observed before saving; simultaneous edits can affect them.</p>}
+          {draft && <p>This records an edit to a form. It does not confirm that the change was saved.</p>}
+        </div>
+      </details>}
     </section>
-  );
-}
-
-function Coverage({ activity }) {
-  const coverage = activity.coverage || {};
-  return (
-    <details className="trace-coverage">
-      <summary>What is tracked</summary>
-      <div>
-        <p>
-          {coverage.formCapture
-            ? 'Form edits and submissions are recorded separately from saved changes.'
-            : 'Form edits are not included in this history.'}
-        </p>
-        <p>
-          {coverage.serverChanges
-            ? 'Saved changes and action results recorded by the app are included.'
-            : 'Saved changes are not included in this history.'}
-        </p>
-        <p>
-          {activity.preview
-            ? 'This preview shows fictional examples supplied by the app.'
-            : activity.storage?.durable
-              ? 'Recorded history is saved and remains available after the app restarts.'
-              : 'History storage is not available right now.'}
-        </p>
-        {coverage.limitations?.length > 0 && (
-          <ul>
-            {coverage.limitations.map((limitation, index) => (
-              <li key={index}>{limitation}</li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </details>
   );
 }
 
@@ -237,7 +188,7 @@ function CaptureNotice({ status }) {
 export default function Traceability() {
   const [activity, setActivity] = useState(null);
   const [query, setQuery] = useState('');
-  const [request, setRequest] = useState({ q: '', issues: false, before: null, revision: 0 });
+  const [request, setRequest] = useState({ q: '', issues: true, before: null, revision: 0 });
   const [loadedCriteria, setLoadedCriteria] = useState(null);
   const [captureStatus, setCaptureStatus] = useState(readCaptureStatus);
   const [selection, setSelection] = useState(null);
@@ -325,8 +276,7 @@ export default function Traceability() {
     <div className="traceability">
       <header className="trace-header">
         <div>
-          <h1>Activity history</h1>
-          <p>See who did what, what changed, and anything that needs attention.</p>
+          <h1>{request.issues ? 'Issues' : 'All activity'}</h1>
         </div>
         <button className="trace-refresh" onClick={refresh} disabled={loading}>
           <RefreshCw size={16} className={loading ? 'trace-refreshing' : ''} aria-hidden="true" />
@@ -335,7 +285,7 @@ export default function Traceability() {
       </header>
       {activity?.preview && (
         <p className="trace-notice trace-preview">
-          <strong>Preview</strong> · These activities use fictional people and records.
+          <strong>Preview</strong> · Fictional examples.
         </p>
       )}
       {unavailable && (
@@ -389,11 +339,11 @@ export default function Traceability() {
         <>
           <div className="trace-tools">
             <nav aria-label="Filter activity" className="trace-filters">
-              <button aria-pressed={filter === 'all'} onClick={() => changeFilter(false)}>
-                All activity
-              </button>
               <button aria-pressed={filter === 'issues'} onClick={() => changeFilter(true)}>
                 Issues
+              </button>
+              <button aria-pressed={filter === 'all'} onClick={() => changeFilter(false)}>
+                All activity
               </button>
             </nav>
             <label className="trace-search">
@@ -403,33 +353,25 @@ export default function Traceability() {
                 type="search"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Search a person, action or issue"
+                placeholder="Search"
               />
             </label>
           </div>
           <div className="trace-list-context">
             <p role="status">
               {pendingSearch || (loading && !request.before)
-                ? 'Searching recorded history…'
+                ? 'Loading…'
                 : !matchingResults
                   ? 'Previous results shown'
                   : `${rows.length} ${filter === 'issues' ? (rows.length === 1 ? 'issue' : 'issues') : rows.length === 1 ? 'activity' : 'activities'} shown`}
             </p>
-            <span>Times shown in Dubai</span>
+            <span>Dubai time</span>
           </div>
           <section
             className="trace-history"
             aria-label="Activity history"
             aria-busy={loading || pendingSearch}
           >
-            {!!rows.length && (
-              <div className="trace-columns" aria-hidden="true">
-                <span>Activity</span>
-                <span>When · Dubai</span>
-                <span>Outcome</span>
-                <span />
-              </div>
-            )}
             <ol className="trace-events">
               {rows.map((event, index) => {
                 const key = eventKey(event, index);
@@ -445,18 +387,8 @@ export default function Traceability() {
                       aria-controls={detailId}
                     >
                       <span className="trace-event-main">
-                        <strong>{summary(event)}</strong>
-                        <span className="trace-event-meta">
-                          {[event.area, event.actor?.role && readable(event.actor.role)]
-                            .filter(Boolean)
-                            .join(' · ')}
-                        </span>
-                        {event.issue && (
-                          <span className="trace-issue">
-                            <AlertCircle size={14} aria-hidden="true" />
-                            <span>{event.issue}</span>
-                          </span>
-                        )}
+                        <strong>{rowSummary(event)}</strong>
+                        {!request.issues && isDraft(event) && <span className="trace-event-note">Not saved</span>}
                       </span>
                       <span className="trace-when">
                         <time dateTime={event.occurredAt || undefined}>
@@ -464,11 +396,7 @@ export default function Traceability() {
                           <span>{when.date}</span>
                         </time>
                       </span>
-                      <span className={`trace-outcome trace-outcome-${outcomeTone(event)}`}>
-                        <span className="trace-outcome-dot" aria-hidden="true" />
-                        {outcome(event)}
-                      </span>
-                      <ChevronDown size={17} className="trace-expand" aria-hidden="true" />
+                      <span className="trace-details-label">{expanded ? 'Hide details' : 'Details'}</span>
                     </button>
                     {expanded && <ActivityDetail event={event} id={detailId} />}
                   </li>
@@ -511,14 +439,7 @@ export default function Traceability() {
               </div>
             )}
           </section>
-          <div className="trace-pagination">
-            <p>
-              Search covers the full recorded history.
-              {!activity.nextCursor && matchingResults && !historyIncomplete && rows.length > 0
-                ? ' All matching activity is shown.'
-                : ''}
-            </p>
-            {activity.nextCursor && (
+          {activity.nextCursor && <div className="trace-pagination">
               <button
                 className="trace-refresh"
                 onClick={loadOlder}
@@ -526,9 +447,7 @@ export default function Traceability() {
               >
                 {loading && request.before ? 'Loading older…' : 'Load older activity'}
               </button>
-            )}
-          </div>
-          <Coverage activity={activity} />
+          </div>}
         </>
       )}
     </div>

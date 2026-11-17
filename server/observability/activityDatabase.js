@@ -135,6 +135,20 @@ export function wrapActivitySession(session, write) {
   if (!session || session[wrappedSession]) return session;
   session[wrappedSession] = true;
   session[pendingWrites] = [];
+  const start = session.startTransaction.bind(session);
+  session.startTransaction = function (...args) {
+    const result = start(...args);
+    for (const event of session[pendingWrites].splice(0))
+      void write({
+        ...event,
+        eventId: randomUUID(),
+        stage: 'record_not_saved',
+        outcome: 'uncertain',
+        summary: `${event.actor.name} had a transaction attempt replaced by a retry.`,
+        issue: 'The earlier attempt was not confirmed. Only the completed retry can confirm saved changes.',
+      });
+    return result;
+  };
   const commit = session.commitTransaction.bind(session);
   session.commitTransaction = async function (...args) {
     const result = await commit(...args);
@@ -172,7 +186,7 @@ async function complete(event, session, write) {
       stage: 'record_waiting_for_commit',
       outcome: 'pending',
       summary: `${event.actor.name} prepared a change. The database transaction has not been confirmed.`,
-      issue: 'This change is waiting for the database transaction to finish.',
+      issue: null,
     };
     await write({ ...pending, eventId: randomUUID() });
     if (session[wrappedSession]) session[pendingWrites].push(event);
@@ -374,8 +388,10 @@ export function installActivityDatabase(mongoose, write) {
   mongoose.Model.bulkWrite = async function (operations, options, ...args) {
     const context = traceContext();
     const actor = activityActor(context?.request);
+    const operationId = randomUUID();
     const event = {
-      eventId: randomUUID(),
+      eventId: operationId,
+      operationId,
       occurredAt: new Date().toISOString(),
       actor,
       area: 'App records',

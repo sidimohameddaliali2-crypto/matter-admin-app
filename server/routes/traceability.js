@@ -11,13 +11,17 @@ import { recentEvents } from '../observability/recentEvents.js';
 const catalog = JSON.parse(
   readFileSync(new URL('../../docs/traceability/routes.json', import.meta.url), 'utf8'),
 );
+const captureStaff = (req, res, next) =>
+  /^Bearer cs-/.test(req.headers.authorization || '')
+    ? protectService(req, res, next)
+    : protect(req, res, next);
 
 // An injectable auth boundary allows isolated tests without production sessions.
 export function createTraceabilityRouter({
   authenticate = protect,
   authorize = superAdmin,
   preview = false,
-  captureAuthenticate = protectService,
+  captureAuthenticate = captureStaff,
   activityReader = readActivity,
   activityWriter = recordActivity,
 } = {}) {

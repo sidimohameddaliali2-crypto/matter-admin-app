@@ -11,7 +11,7 @@ const MAX_BATCH_BYTES = 48000;
 const MAX_FIELDS = 20;
 const VALIDATION_INDICATORS = '[aria-invalid="true"],.Mui-error,.text-red-400,.text-red-500,.text-red-600,.text-red-700,.text-red-800,.text-red-900,[data-validation-error]';
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-const PRIVATE_FIELD = /password|passphrase|credential|secret|token|api.?key|private.?key|service.?role|authorization|csrf|session|recovery|one.?time|verification.?code|security.?code|\botp\b|\bpin.?code\b|passport|emirates.?id|national.?id|identity|id.?document|driv(?:ing|er).?licen[cs]e|\biban\b|\bswift\b|bank|account.?number|routing.?number|credit.?card|debit.?card|card.?number|\bcvv\b|\bcvc\b|salary|medical|health|diagnos|medicat|allerg|prescription/i;
+const PRIVATE_FIELD = /password|passphrase|credential|secret|token|api.?key|private.?key|service.?role|authorization|csrf|session|recovery|one.?time|verification.?code|security.?code|\botp\b|\bpin.?code\b|passport|emirates.?id|national.?id|identity|id.?document|driv(?:ing|er).?licen[cs]e|\biban\b|\bswift\b|bank|account.?number|routing.?number|credit.?card|debit.?card|card.?number|\bcvv\b|\bcvc\b|salary|deduction|medical|health|diagnos|medicat|allerg|prescription|phone|email|message|comment|body|content|text|notes?|evidence|photo|picture|attachment|signature/i;
 const SECRET_VALUE = /\bBearer\s+\S+|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+|\b(?:sk|pk|rk|sb_secret|ghp|gho|github_pat)[-_][A-Za-z0-9_-]{12,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|(?:password|secret|token|api[_ -]?key|authorization)\s*[=:]\s*\S+|[?&](?:token|key|secret|signature|code)=|\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b|\b784[- ]?\d{4}[- ]?\d{7}[- ]?\d\b|\b(?:\d[ -]?){13,19}\b|(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql):\/\/[^\s]+:[^\s]+@|\b(?=[A-Za-z0-9_-]{40,}\b)(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{40,}\b/i;
 let runtime = null;
 let previousStatus = { pendingEvents: 0, failedBatches: 0, droppedEvents: 0, lastFailureAt: null, lastSuccessAt: null, sending: false, durableQueueSupported: false, queueIssue: null };
@@ -63,11 +63,12 @@ function editable(target) {
 }
 function snapshot(field, initial = false) {
   const label = fieldLabel(field);
-  const description = [label, field.name, field.id, field.type, field.getAttribute('autocomplete'), field.getAttribute('data-activity-private')].join(' ');
-  if (PRIVATE_FIELD.test(description) || field.closest('[data-activity-private],[data-no-capture]')) return { value: MASK, redacted: true };
+  const description = [label, field.name, field.id, field.getAttribute('autocomplete'), field.getAttribute('data-activity-private')].join(' ');
+  if (field.closest('[data-activity-private],[data-no-capture]')) return { value: MASK, redacted: true };
+  if (field.type === 'file') return { value: `${initial ? 0 : (field.files?.length || 0)} file${(initial ? 0 : field.files?.length) === 1 ? '' : 's'}`, redacted: false };
+  if (/^(password|tel|email)$/.test(field.type) || PRIVATE_FIELD.test(description)) return { value: MASK, redacted: true };
   let value;
-  if (field.type === 'file') value = `${initial ? 0 : (field.files?.length || 0)} file${(initial ? 0 : field.files?.length) === 1 ? '' : 's'}`;
-  else if (field.type === 'checkbox' || field.type === 'radio') value = (initial ? field.defaultChecked : field.checked) ? 'Selected' : 'Not selected';
+  if (field.type === 'checkbox' || field.type === 'radio') value = (initial ? field.defaultChecked : field.checked) ? 'Selected' : 'Not selected';
   else if (field.tagName === 'SELECT') {
     const options = Array.from(field.options).filter(option => initial ? option.defaultSelected : option.selected);
     value = (options.length ? options : initial ? Array.from(field.options).slice(0, 1) : []).map(option => option.textContent || option.value).join(', ');
