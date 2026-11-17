@@ -130,6 +130,7 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    }
    const cookie=req.headers.cookie;
    const session=await context.auth.authenticate(cookie);
+   if(session?.activityActor)req.activityActor=Object.freeze({...session.activityActor});
    // The existing audit client probes its session before enabling review/maps.
    // Staff identity stays with this app; never invoke the Supabase login flow.
    if(path==='/api/session/refresh'){

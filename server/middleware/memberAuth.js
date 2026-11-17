@@ -1,3 +1,4 @@
+import { activityActor } from '../observability/activityPolicy.js';
 import jwt from 'jsonwebtoken';
 import Member from '../models/Member.js';
 
@@ -28,6 +29,7 @@ export const memberProtect = async (req, res, next) => {
     req.member = member;
     // Deliberate: lets menu/price handlers be copied verbatim from partnerPortal.js
     req.partner = member.partner;
+    req.activityActor ||= Object.freeze(activityActor(req));
     next();
   } catch (error) {
     return res.status(401).json({ success: false, message: 'Not authorized, token failed' });

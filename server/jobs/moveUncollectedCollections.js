@@ -1,3 +1,4 @@
+import { traceJob } from '../observability/telemetry.js';
 import mongoose from 'mongoose';
 import Delivery from '../models/Delivery.js';
 
@@ -47,14 +48,16 @@ async function moveUncollectedCollections() {
 }
 
 export async function runMoveUncollectedCollectionsOnce() {
-  try {
-    const result = await moveUncollectedCollections();
-    console.log(`[AutoMove] Moved ${result.moved} uncollected collections to next day.`);
-    return result;
-  } catch (err) {
-    console.error('[AutoMove] Error:', err.message);
-    throw err;
-  }
+  return traceJob('move-uncollected-collections', async () => {
+    try {
+      const result = await moveUncollectedCollections();
+      console.log(`[AutoMove] Moved ${result.moved} uncollected collections to next day.`);
+      return result;
+    } catch (err) {
+      console.error('[AutoMove] Error:', err.message);
+      throw err;
+    }
+  });
 }
 
 export function startMoveUncollectedCollectionsJob() {

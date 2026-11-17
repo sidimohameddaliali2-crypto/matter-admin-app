@@ -54,7 +54,8 @@ router.get('/vehicles', async (req, res) => {
       truckoomApiService.getFleetStatus()
         .then((fleet) => ({ fleet, warning: null }))
         .catch((error) => {
-          console.warn('Truckoom unavailable; returning phone locations:', error.message);
+          if (res.locals) res.locals.traceOutcome = 'degraded';
+          console.warn('Truckoom unavailable; returning phone locations.');
           return { fleet: [], warning: 'Tracker locations are unavailable. Showing driver phone locations.' };
         }),
       User.find({ role: 'driver', $or: [{ 'profile.truckoomVehicleNo': { $ne: null } }, { isActive: true }] })

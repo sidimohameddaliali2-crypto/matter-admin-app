@@ -1,3 +1,6 @@
+import {makeRecordActivity} from '../observability/activityDatabase.js';
+import {recordActivity} from '../observability/activityStore.js';
+import {traceContext} from '../observability/telemetry.js';
 import {AsyncLocalStorage} from 'node:async_hooks';
 import mongoose from 'mongoose';
 import {randomUUID} from 'node:crypto';
@@ -31,16 +34,19 @@ async function query(sql){const tx=transactions.getStore();return tx?tx.query(sq
 export async function cloudWorkflowTransaction(operation){
  if(transactions.getStore())return operation();
  const store=cloudInbox().store;
- return store.transaction(async tx=>{
+ const audit=[];
+ const result=await store.transaction(async tx=>{
   await tx("SELECT pg_advisory_xact_lock(hashtext('gallabox_private.inbox'));");
   await tx("SELECT set_config('gallabox.workflow_writer','cloud',true);");
   const head=await tx('SELECT row_to_json(h) FROM gallabox_private.inbox_head h WHERE singleton FOR UPDATE;');
-  const state={query:tx,revision:Number(head.revision)+1,writes:0};
+  const state={query:tx,revision:Number(head.revision)+1,writes:0,audit};
   const execute=()=>transactions.run(state,operation);
   const result=await (store.withWorkflowReads?store.withWorkflowReads(tx.read,execute):execute());
   if(state.writes){await tx(`UPDATE gallabox_private.inbox_head SET revision=${state.revision},committed_at=now() WHERE singleton; INSERT INTO gallabox_private.inbox_commit(run_id,revision,records,captured_at) VALUES(${lit('workflow:'+randomUUID())},${state.revision},${state.writes},now());`);}
   return result;
  });
+ for(const event of audit)await recordActivity({...event,occurredAt:new Date().toISOString(),stage:'record_saved',outcome:'saved',issue:null});
+ return result;
 }
 async function persist(model,document){
  if(!transactions.getStore())return cloudWorkflowTransaction(()=>persist(model,document));
@@ -48,9 +54,15 @@ async function persist(model,document){
  await document.validate();document.updatedAt=new Date();document.createdAt ||= document.updatedAt;
  const row=encodeCloudRecord(model.collection.name,document.toObject()),tx=transactions.getStore();tx.revision++;
  await query(`INSERT INTO gallabox_private.inbox_record_history(kind,id,revision,payload,sha256) SELECT kind,id,revision,payload,sha256 FROM gallabox_private.inbox_record WHERE kind=${lit(row.kind)} AND id=${lit(row.id)};
- INSERT INTO gallabox_private.inbox_record(kind,id,body,payload,sha256,revision) VALUES(${lit(row.kind)},${lit(row.id)},${lit(JSON.stringify(row.body))}::jsonb,${lit(row.payload)},${lit(row.sha256)},${tx.revision}) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body,payload=excluded.payload,sha256=excluded.sha256,revision=excluded.revision;`);tx.writes++;return document;
+ INSERT INTO gallabox_private.inbox_record(kind,id,body,payload,sha256,revision) VALUES(${lit(row.kind)},${lit(row.id)},${lit(JSON.stringify(row.body))}::jsonb,${lit(row.payload)},${lit(row.sha256)},${tx.revision}) ON CONFLICT(kind,id) DO UPDATE SET body=excluded.body,payload=excluded.payload,sha256=excluded.sha256,revision=excluded.revision;`);tx.writes++;
+ if(traceContext()?.request?.app?.get('activityHistoryEnabled')){
+  const before=document.$locals.activityBefore||{};
+  tx.audit.push(makeRecordActivity(model.modelName,document.isNew&&!document.$locals.activityBefore,before,document.toObject(),'save'));
+ }
+ document.$locals.activityBefore=document.toObject();
+ return document;
 }
-function hydrate(model,raw){const d=model.hydrate(raw);d.save=()=>persist(model,d);return d;}
+function hydrate(model,raw){const d=model.hydrate(raw);d.$locals.activityBefore=d.toObject();d.save=()=>persist(model,d);return d;}
 function selected(raw,selection){if(!selection)return raw;const fields=typeof selection==='string'?selection.split(/\s+/).filter(Boolean):Object.entries(selection).map(([k,v])=>v?k:'-'+k);const positives=fields.filter(f=>!f.startsWith('-'));if(!positives.length){const r={...raw};for(const f of fields)delete r[f.slice(1)];return r;}const r={_id:raw._id};for(const f of positives){const parts=f.split('.');let from=raw,to=r;for(let i=0;i<parts.length;i++){const p=parts[i];if(from?.[p]===undefined)break;if(i===parts.length-1)to[p]=from[p];else{to[p]||={};to=to[p];from=from[p];}}}return r;}
 function builder(model,filter,single=false,mode='find',field){
  const options={sort:{},limit:single?1:null,lean:false,populate:[]};

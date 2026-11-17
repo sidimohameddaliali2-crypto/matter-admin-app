@@ -58,7 +58,7 @@ self.addEventListener('activate', (event) => {
       const requests = await cache.keys();
       await Promise.all(requests.filter(request => {
         const url = new URL(request.url);
-        return url.origin === location.origin && isDriverAuditPath(url.pathname);
+        return url.origin === location.origin && (isDriverAuditPath(url.pathname) || url.pathname.startsWith('/api/traceability/'));
       }).map(request => cache.delete(request)));
       console.log('[Service Worker] Claiming clients');
       return self.clients.claim();
@@ -77,6 +77,10 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (isDriverAuditPath(url.pathname)) return;
+  if (url.pathname.startsWith('/api/traceability/')) {
+    event.respondWith(fetch(request, { cache: 'no-store' }));
+    return;
+  }
 
   // Production kitchen inputs and reconciliation must fail when offline.
   // A previously cached successful response cannot establish current Matter data.

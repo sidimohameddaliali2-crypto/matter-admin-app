@@ -5,6 +5,11 @@
 // module imported below sees process.env already populated. See
 // loadEnv.js for the full explanation.
 import './loadEnv.js';
+import './observability/installActivity.js';
+import { startActivityHistory } from './observability/activityStore.js';
+import { createRequestTrace } from './observability/requestTrace.js';
+import { resolveTraceRoute } from './observability/routeCatalog.js';
+import traceabilityRoutes from './routes/traceability.js';
 import path from 'path';
 import {mountCustomerServiceInAdmin} from './services/customerServiceAdminMount.js';
 import { fileURLToPath } from 'url';
@@ -14,7 +19,7 @@ const __dirname = path.dirname(__filename);
 
 console.log('🔧 Environment check:', {
   nodeEnv: process.env.NODE_ENV,
-  mongodbUri: process.env.MONGODB_URI?.substring(0, 50) + '...',
+  hasMongoConnection: Boolean(process.env.MONGODB_URI),
   port: process.env.PORT,
   hasSpacesKey: !!process.env.SPACES_KEY,
   hasSpacesSecret: !!process.env.SPACES_SECRET,
@@ -45,6 +50,8 @@ initializeSpaces();
 
 // Create Express app
 const app = express();
+app.set('activityHistoryEnabled', true);
+startActivityHistory();
 const server = http.createServer(app);
 
 // Origins allowed to call the API with credentials. The SPA is served by this
@@ -77,6 +84,7 @@ const corsOptions = {
     return callback(null, false);
   },
   credentials: true,
+  exposedHeaders: ['X-Request-ID'],
 };
 
 const io = new Server(server, {
@@ -91,6 +99,7 @@ io.use(authenticateSocket);
 app.set('io', io);
 
 // Middleware
+app.use(createRequestTrace({ resolveRoute: resolveTraceRoute }));
 // This handler owns its raw JSON body and existing reporting security headers.
 const driverAuditIntegration = createDriverAuditIntegration({db:()=>mongoose.connection.db,authenticateStaffToken});
 app.use(driverAuditIntegration);
@@ -211,6 +220,7 @@ import { createAdapter } from '@socket.io/redis-adapter';
 import { setupMongooseSlowQueryMonitoring } from './middleware/slowQueryLogger.js';
 // Routes middleware
 mountCustomerServiceInAdmin({app,onError:()=>console.error('Customer service is unavailable while its Supabase connection is verified. Other app routes remain available.')});
+app.use('/api/traceability', traceabilityRoutes);
 app.use('/api/mobile', mobileUpdatesRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/users/drivers', driverRoutes); // Allow driver routes under /api/users/drivers
@@ -336,7 +346,7 @@ app.use((err, req, res, next) => {
 
 // 404 handler for API routes only
 app.use('/api/*', (req, res) => {
-  console.log(`❌ 404 - API Route not found: ${req.method} ${req.originalUrl}`);
+  // The structured completion record carries the safe route and request reference.
   
   res.status(404).json({
     success: false,

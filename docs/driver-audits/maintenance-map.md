@@ -34,6 +34,8 @@ The tracked vendor tree is self-contained for serving, but the complete schedule
 
 Allowed roles are `super_admin`, `admin`, `manager`, `dispatcher` and `viewer`; non-super-admin users also need effective `reports` permission. The first four become reporting `reviewer`; `viewer` stays read-only for human findings. Staff report cookies/CSRF, external API keys, cron authorization and Gateway identity are separate schemes.
 
+The app's [Activity history](../traceability/README.md) retains the authenticated Matter account name, account ID and original staff role alongside request activity. The report session preserves its existing reporting actor and authority. An accepted reporting request is not labelled a confirmed database save by this cross-app history; the report's own immutable review journal confirms the saved review. Browser capture in the parent app does not observe unsaved controls inside the report frame.
+
 The [integration](../../server/services/driverAuditIntegration.js) authenticates report routes before dispatching to [cloud-http.mjs](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs):
 
 | Route and method | Purpose | Persistence or compatibility boundary |
@@ -157,6 +159,8 @@ Keep a private acceptance receipt that binds the deployed app, source/config/env
 5. Observe an eligible new image reach a completed grade with matching image/binding, durable result receipt and budget settlement, then appear in the published report. Accepted, uncertain, deferred or failed provider work remains pending; do not blindly repeat uncertain inference.
 6. Confirm original review/household history survives publication and reload. Prove new save, lost-acknowledgement retry, stale conflict and restart in isolation. Production exact-event retry requires the original verified actor and exact request; a genuine authorized staff response can prove a new production save. Never append a fabricated finding to a real customer's immutable history.
 7. Check the next duplicate/no-change capture preserves results/history without unnecessary regrading or derived report publication. Verify approved pause/restart recovery retains pending work and the last verified report. Keep backups and newest native edits throughout recovery.
+
+For an Activity history release, also check that a real authorized report request retains the original staff account identity while its canonical saved-review actor/history and permissions remain unchanged. This live identity check is pending; local auth, integration and offline fixtures do not establish production acceptance.
 
 Record each result and unresolved gap. A report displaying only its pre-activation capture, a source-only success, or a passing fixture suite does not complete this journey.
 

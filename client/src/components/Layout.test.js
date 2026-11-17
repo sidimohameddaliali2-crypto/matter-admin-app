@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import Layout from './Layout';
 
 let mockPathname = '/customer-service/chats';
+let mockUser;
 const mockNavigate = jest.fn();
 const mockDispatch = jest.fn();
 jest.mock('react-router-dom', () => ({
@@ -13,7 +14,7 @@ jest.mock('react-router-dom', () => ({
 }), { virtual: true });
 jest.mock('react-redux', () => ({
   useDispatch: () => mockDispatch,
-  useSelector: select => select({ auth: { user: { role: 'super_admin', profile: { firstName: 'QA' } } } }),
+  useSelector: select => select({ auth: { user: mockUser } }),
 }));
 jest.mock('../store/slices/authSlice', () => ({ logout: () => ({ type: 'auth/logout' }) }));
 jest.mock('./users/UserAvatar', () => () => <span>QA</span>);
@@ -39,6 +40,7 @@ beforeEach(() => {
   showModal.mockImplementation(function () { this.setAttribute('open', ''); });
   close.mockImplementation(function () { this.removeAttribute('open'); });
   mockPathname = '/customer-service/chats';
+  mockUser = { role: 'super_admin', profile: { firstName: 'QA' } };
   document.title = 'Matter App';
   listeners = new Set();
   desktop = { matches: false, addEventListener: (_, listener) => listeners.add(listener), removeEventListener: (_, listener) => listeners.delete(listener) };
@@ -115,4 +117,29 @@ test('Driver Reports is a separate item and preserves the native unload boundary
   await openMenu();
   expect(dialog().querySelector('a[href="/reports"]').getAttribute('data-reload')).toBe('true');
   expect(dialog().querySelector('a[href="/driver-reports"]').getAttribute('aria-current')).toBe('page');
+});
+
+test.each([
+  ['approved admin', 'admin', true, true],
+  ['unapproved admin', 'admin', false, false],
+  ['unapproved super admin', 'super_admin', false, false],
+  ['unknown super admin', 'super_admin', undefined, false],
+  ['non-boolean approval', 'super_admin', 'true', false],
+])('Activity history navigation follows explicit server approval for %s', async (_, role, approval, visible) => {
+  mockUser = { role, canViewActivityHistory: approval, permissions: { dashboard: true } };
+  await mountLayout();
+  expect(container.querySelectorAll('a[href="/traceability"]').length > 0).toBe(visible);
+  expect(container.querySelector('a[href="/dashboard"]')).not.toBeNull();
+});
+
+test('restricting Activity history preserves the existing permissions of other pages', async () => {
+  mockUser = { role: 'admin', canViewActivityHistory: true, permissions: { dashboard: true, drivers: false } };
+  await mountLayout();
+  expect(container.querySelector('a[href="/traceability"]')).not.toBeNull();
+  expect(container.querySelector('a[href="/dashboard"]')).not.toBeNull();
+  expect(container.querySelector('a[href="/drivers"]')).toBeNull();
+  mockUser = { role: 'super_admin', canViewActivityHistory: false };
+  await mountLayout();
+  expect(container.querySelector('a[href="/traceability"]')).toBeNull();
+  expect(container.querySelector('a[href="/drivers"]')).not.toBeNull();
 });

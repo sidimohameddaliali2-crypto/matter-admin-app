@@ -1,3 +1,4 @@
+import { traceJob } from '../observability/telemetry.js';
 import { recalculateAllDriverKPIs } from '../services/driverKpiService.js';
 
 // Recompute every driver's month-to-date KPI scorecard once a day at local
@@ -11,14 +12,16 @@ const RUN_HOUR = 0; // Midnight
 const TIMEZONE_OFFSET_MINUTES = parseInt(process.env.LOCAL_TIMEZONE_OFFSET_MINUTES || '240', 10); // Default: UAE
 
 export async function runRecalculateDriverKpisOnce() {
-  try {
-    const result = await recalculateAllDriverKPIs();
-    console.log(`[DriverKPI] Recalculated KPIs for ${result.processed} driver(s).`);
-    return result;
-  } catch (err) {
-    console.error('[DriverKPI] Error:', err.message);
-    throw err;
-  }
+  return traceJob('driver-kpi-recalculation', async () => {
+    try {
+      const result = await recalculateAllDriverKPIs();
+      console.log(`[DriverKPI] Recalculated KPIs for ${result.processed} driver(s).`);
+      return result;
+    } catch (err) {
+      console.error('[DriverKPI] Error:', err.message);
+      throw err;
+    }
+  });
 }
 
 export function startRecalculateDriverKpisJob() {

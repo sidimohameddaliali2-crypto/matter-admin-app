@@ -1,3 +1,5 @@
+import { attachActivityContext } from './activityCapture';
+import { attachRequestReference } from './requestReference';
 import axios from 'axios';
 
 const resolveApiBaseUrl = () => {
@@ -84,5 +86,8 @@ api.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+attachRequestReference(api);
+attachActivityContext(api);
 
 export default api;

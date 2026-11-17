@@ -1,3 +1,4 @@
+import { traceJob } from '../observability/telemetry.js';
 import { syncCustomerTrackerVisits } from '../services/truckoomVisitSync.js';
 
 export function startCustomerTrackerVisitsJob(io) {
@@ -5,7 +6,7 @@ export function startCustomerTrackerVisitsJob(io) {
   const run = async () => {
     if (running) return;
     running = true;
-    try { await syncCustomerTrackerVisits({ io }); }
+    try { await traceJob('customer-tracker-visits', () => syncCustomerTrackerVisits({ io })); }
     catch { console.warn('Customer tracker visit sync failed; retrying next cycle'); }
     finally { running = false; }
   };
