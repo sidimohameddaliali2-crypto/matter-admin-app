@@ -218,19 +218,34 @@ export function mergeLegacyDraft(current, legacy, missingOnly = true) {
   const merged = changeMealCreationState(current, { catalogue: legacy.catalogue }, missingOnly);
   const boards = {};
   for (const [key, days] of Object.entries(legacy.boards || {})) {
-    if (!boardKeys.has(key) || missingOnly && Object.hasOwn(merged.boards, key)) continue;
+    // Global week keys belong to the old combined planner. A matching key
+    // there says nothing about whether this browser's cycle has been saved.
+    if (!boardKeys.has(key)) continue;
     // Keep the original browser draft available if it has unrecoverable IDs.
     try { Object.assign(boards, checkedBoards({ [key]: days }, merged.catalogue.meals, merged.aliases)); }
     catch { continue; }
   }
   const sourceCycles = new Set(legacy.catalogue.meals.map(meal => cycleIdentity(meal, legacy.catalogue.source).id));
+  const sourceCycleByMealId = new Map(legacy.catalogue.meals.map(meal => [meal.id, cycleIdentity(meal, legacy.catalogue.source).id]));
+  const hasSavedWeek = (cycle, key) => {
+    if (current.cycles !== undefined) return Object.hasOwn(current.cycles.find(saved => saved.id === cycle.id)?.boards || {}, key);
+    if (!Object.hasOwn(current.boards, key)) return false;
+    const entries = current.boards[key].flat(2);
+    // An empty legacy combined board was explicitly cleared. Otherwise only
+    // original IDs in that cycle establish ownership, not generated seeds.
+    return !entries.length || entries.some(entry => cycle.meals.some(item => item.sourceMealId === entry.mealId));
+  };
   for (const cycle of merged.cycles) {
-    const ids = new Set(cycle.meals.map(item => item.mealId));
+    if (!sourceCycles.has(cycle.id)) continue;
     for (const [key, days] of Object.entries(boards)) {
-      if (missingOnly && Object.hasOwn(existingCycles.find(saved => saved.id === cycle.id)?.boards || {}, key)) continue;
-      const filtered = days.map(groups => groups.map(entries => entries.filter(entry => ids.has(entry.mealId))));
-      if (sourceCycles.has(cycle.id) || filtered.some(groups => groups.some(entries => entries.length))) cycle.boards[key] = compatibleBoards({ [key]: filtered }, merged.catalogue.meals)[key];
+      const existing = existingCycles.find(saved => saved.id === cycle.id);
+      if (missingOnly && existing && hasSavedWeek(existing, key)) continue;
+      // Partition before alias resolution: a recipe shared by two workbooks
+      // does not make their unpublished scheduling choices interchangeable.
+      const filtered = sourceCycles.size === 1 ? days : checkedBoards({ [key]: legacy.boards[key].map(groups => groups.map(entries => entries.filter(entry => sourceCycleByMealId.get(entry.mealId) === cycle.id))) }, merged.catalogue.meals, merged.aliases)[key];
+      cycle.boards[key] = compatibleBoards({ [key]: filtered }, merged.catalogue.meals)[key];
     }
   }
-  return { ...merged, boards: compatibleBoards(rewriteDuplicateBoards({ ...merged.boards, ...boards }, merged.aliases), merged.catalogue.meals) };
+  const missingGlobalBoards = Object.fromEntries(Object.entries(boards).filter(([key]) => !missingOnly || !Object.hasOwn(merged.boards, key)));
+  return { ...merged, boards: compatibleBoards(rewriteDuplicateBoards({ ...merged.boards, ...missingGlobalBoards }, merged.aliases), merged.catalogue.meals) };
 }

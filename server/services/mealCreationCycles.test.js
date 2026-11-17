@@ -94,6 +94,60 @@ test('legacy board migration retains its Main/Sub/Core choices in the new named 
   assert.equal(cycleIdentity(meal('free-form'), 'Original Workbook.xlsx').id, 'WORKBOOK:original-workbook');
 });
 
+test('browser NOV4 Week 1 migrates independently of an existing global NOV3 Week 1', () => {
+  const nov3 = meal('NOV3-004'), nov4 = meal('NOV4-004');
+  const globalWeek = empty(); globalWeek[0][1] = [{ mealId: nov3.id, isMatterCore: false }];
+  const browserWeek = empty(); browserWeek[3][2] = [{ mealId: nov4.id, isMatterCore: true }];
+  const legacy = { catalogue: { meals: [nov4], source: 'Nov4.xlsx' }, boards: { 'Main menu:Week 1': browserWeek } };
+  for (const current of [
+    { catalogue: { meals: [nov3], source: 'Nov3.xlsx' }, boards: { 'Main menu:Week 1': globalWeek } },
+    upload({ catalogue: { meals: [nov3], source: 'Nov3.xlsx' }, boards: { 'Main menu:Week 1': globalWeek } }, [nov3], 'Nov3.xlsx'),
+  ]) {
+    const before = JSON.stringify({ current, legacy });
+    const saved = mergeLegacyDraft(current, legacy);
+    const canonical = saved.catalogue.meals[0].id;
+    assert.equal(saved.catalogue.meals.length, 1);
+    assert.deepEqual(cycle(saved, 'NOV4').boards['Main menu:Week 1'][3][2], [{ mealId: canonical, isMatterCore: true }]);
+    assert.deepEqual(cycle(saved, 'NOV4').boards['Main menu:Week 1'][0][1], []);
+    assert.deepEqual(cycle(saved, 'NOV3').boards['Main menu:Week 1'], globalWeek);
+    assert.deepEqual(saved.boards['Main menu:Week 1'], globalWeek);
+    assert.equal(JSON.stringify({ current, legacy }), before);
+    assert.deepEqual(mergeLegacyDraft(saved, legacy), saved);
+    const emptied = changeMealCreationState(saved, { cycleId: 'NOV4', boards: { 'Main menu:Week 1': empty() } });
+    assert.deepEqual(cycle(mergeLegacyDraft(emptied, legacy), 'NOV4').boards['Main menu:Week 1'], empty());
+  }
+});
+
+test('browser weeks cannot migrate into another cycle through a shared canonical recipe', () => {
+  const nov3 = meal('NOV3-004'), nov4 = meal('NOV4-004');
+  const current = upload(initial(), [nov3], 'Nov3.xlsx');
+  const browserWeek = empty(); browserWeek[3][2] = [{ mealId: nov4.id, isMatterCore: true }];
+  const saved = mergeLegacyDraft(current, { catalogue: { meals: [nov4], source: 'Nov4.xlsx' }, boards: { 'Main menu:Week 2': browserWeek } });
+  assert.deepEqual(cycle(saved, 'NOV3'), cycle(current, 'NOV3'));
+  assert.deepEqual(cycle(saved, 'NOV4').boards['Main menu:Week 2'][3][2], [{ mealId: nov3.id, isMatterCore: true }]);
+});
+
+test('generated seeds cannot suppress browser weeks for recipes already in an old combined catalogue', () => {
+  const nov3 = meal('NOV3-004'), nov4 = { ...meal('NOV4-004'), name: 'Different NOV4 recipe' };
+  const globalWeek = empty(); globalWeek[0][1] = [{ mealId: nov3.id, isMatterCore: false }];
+  const current = { catalogue: { meals: [nov3, nov4], source: 'Nov3.xlsx' }, boards: { 'Main menu:Week 1': globalWeek } };
+  const browserWeek = empty(); browserWeek[3][2] = [{ mealId: nov4.id, isMatterCore: true }];
+  const saved = mergeLegacyDraft(current, { catalogue: { meals: [nov4], source: 'Nov4.xlsx' }, boards: { 'Main menu:Week 1': browserWeek } });
+  assert.deepEqual(cycle(saved, 'NOV4').boards['Main menu:Week 1'], browserWeek);
+  assert.deepEqual(cycle(saved, 'NOV3').boards['Main menu:Week 1'], globalWeek);
+  assert.deepEqual(saved.boards['Main menu:Week 1'], globalWeek);
+});
+
+test('a combined browser board partitions original IDs before recipes are consolidated', () => {
+  const nov3 = meal('NOV3-004'), nov4 = meal('NOV4-004');
+  const browserWeek = empty(); browserWeek[1][1] = [{ mealId: nov3.id, isMatterCore: false }]; browserWeek[3][2] = [{ mealId: nov4.id, isMatterCore: true }];
+  const saved = mergeLegacyDraft(initial(), { catalogue: { meals: [nov3, nov4], source: 'Combined.xlsx' }, boards: { 'Main menu:Week 1': browserWeek } });
+  assert.deepEqual(cycle(saved, 'NOV3').boards['Main menu:Week 1'][1][1], [{ mealId: nov3.id, isMatterCore: false }]);
+  assert.deepEqual(cycle(saved, 'NOV3').boards['Main menu:Week 1'][3][2], []);
+  assert.deepEqual(cycle(saved, 'NOV4').boards['Main menu:Week 1'][3][2], [{ mealId: nov3.id, isMatterCore: true }]);
+  assert.deepEqual(cycle(saved, 'NOV4').boards['Main menu:Week 1'][1][1], []);
+});
+
 test('recovery uses exact source occurrence days instead of the shared canonical recipe day', () => {
   const snapshot = { ...meal('NOV3-004'), cycleSource: { cycleId: 'NOV4', sourceMealId: 'NOV4-020', sourceDay: 'DAY 4', sourceDays: ['DAY 4', 'DAY 5'], week: 'Week 1', day: 4 } };
   const recover = value => recoverMealCreationState([{ meals: [{ mealType: 'main', items: [{ cycleMeal: value }] }] }]);
