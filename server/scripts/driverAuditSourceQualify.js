@@ -24,6 +24,7 @@ const memorySafetyReserve = 512 * MiB;
 const priorSourcePeak = 4_086_464_512;
 const archiveDownloadLimit = 192 * MiB;
 const exec = promisify(execFile);
+const heldQualificationLeases = new WeakSet();
 
 function requireQualification(condition, message) {
   if (!condition) throw new Error(message);
@@ -216,6 +217,81 @@ function checkedWorkers(rows) {
 const noSourceActive = rows => requireQualification(rows.filter(row => row.name === 'matter-driver-audit-source')
   .every(row => row.pm2_env?.status === 'stopped'), 'Stop the source worker before pre-switch qualification.');
 
+function qualificationHeavyRoot(config) {
+  requireQualification(typeof config?.root === 'string' && path.isAbsolute(config.root), 'A private source qualification root is required.');
+  return path.join(path.dirname(path.dirname(config.root)), 'driver-audit-heavy-work');
+}
+
+function checkedStoppedSync(rows, expectedRoot) {
+  requireQualification(Array.isArray(rows), 'Managed worker inspection is unavailable.');
+  noSourceActive(rows);
+  const matches = rows.filter(row => row.name === 'matter-driver-audit-sync');
+  requireQualification(matches.length === 1 && matches[0].pm2_env?.status === 'stopped',
+    'A stopped managed audit sync is required.');
+  const { root } = managedSyncConfig(matches[0]);
+  requireQualification(expectedRoot === undefined || root === expectedRoot, 'Managed sync configuration changed during qualification.');
+  return root;
+}
+
+// The sync process must be real and online for the existing PID/RSS checks,
+// while its build/publication work stays queued behind this actual source
+// lease. The private token is never supplied to lifecycle callbacks or JSON.
+async function runDriverAuditHeldQualificationSync({ config, supervisor, startSync, stopSync, signal }, operation) {
+  requireQualification(typeof supervisor === 'function' && typeof startSync === 'function' && typeof stopSync === 'function',
+    'Managed qualification lifecycle callbacks are required.');
+  requireQualification(typeof operation === 'function', 'A held qualification operation is required.');
+  const root = qualificationHeavyRoot(config);
+  const controller = new AbortController();
+  const interrupt = () => controller.abort(Object.assign(new Error('Host qualification interrupted.'), { code: 'interrupted' }));
+  const interrupts = ['SIGTERM', 'SIGINT', 'SIGHUP'];
+  const lifecycleSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  // Persistent handlers also protect startup and repeated interruption during
+  // cleanup. Remove only these handlers after observed stop AND lock release.
+  for (const event of interrupts) process.on(event, interrupt);
+  try {
+    const result = await withDriverAuditHeavyWork({ root, owner: 'source',
+      signal: AbortSignal.any([lifecycleSignal, AbortSignal.timeout(120_000)]) }, async () => {
+      const syncRoot = checkedStoppedSync(await supervisor());
+      lifecycleSignal.throwIfAborted();
+      const heldQualificationLease = Object.freeze({ root });
+      heldQualificationLeases.add(heldQualificationLease);
+      try {
+        await startSync();
+        lifecycleSignal.throwIfAborted();
+        const result = await operation(heldQualificationLease, lifecycleSignal);
+        lifecycleSignal.throwIfAborted();
+        return result;
+      } finally {
+        heldQualificationLeases.delete(heldQualificationLease);
+        // A failed pause/inspection must not release admission to the queued
+        // worker. Cancellation ends qualification, but never cancels this stop.
+        for (;;) {
+          let pauseCompleted = false;
+          try { await stopSync(); pauseCompleted = true; } catch { /* Inspect below, then retry the durable pause. */ }
+          try { checkedStoppedSync(await supervisor(), syncRoot); if (pauseCompleted) break; }
+          catch { /* Retain admission while a process is online or inspection fails. */ }
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+    });
+    lifecycleSignal.throwIfAborted();
+    return result;
+  } finally { for (const event of interrupts) process.off(event, interrupt); }
+}
+
+// Existing online host-verification callbacks may share the safe lifecycle,
+// but receive no capability to bypass qualification's nested heavy admission.
+export function withDriverAuditHeldQualificationSync(options, operation) {
+  requireQualification(typeof operation === 'function', 'A held qualification operation is required.');
+  return runDriverAuditHeldQualificationSync(options, () => operation());
+}
+
+export function qualifyDriverAuditSourceWhileHeld({ config, commit, fixtureSha256, supervisor, startSync, stopSync, signal }) {
+  return runDriverAuditHeldQualificationSync({ config, supervisor, startSync, stopSync, signal },
+    (heldQualificationLease, externalSignal) => qualifyDriverAuditSource({ config, commit, fixtureSha256, supervisor,
+      heldQualificationLease, externalSignal }));
+}
+
 function managedSyncConfig(sync) {
   const [flag, file, ...extra] = sync.pm2_env.args ?? [];
   const root = typeof file === 'string' ? path.dirname(file) : '';
@@ -347,9 +423,13 @@ function archiveForBuilder({ archive, root, signal }) {
   return { read, stats: () => ({ objects: files.size, bytes }) };
 }
 
-export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, supervisor }) {
+export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, supervisor, heldQualificationLease, externalSignal }) {
+  requireQualification(heldQualificationLease === undefined || heldQualificationLeases.has(heldQualificationLease)
+    && heldQualificationLease.root === qualificationHeavyRoot(config), 'An owned qualification lease is required.');
+  externalSignal?.throwIfAborted();
   requireQualification(process.platform === 'linux' && hashPattern.test(fixtureSha256 ?? ''), 'Exact Linux host qualification is required.');
   const first = await supervisor();
+  externalSignal?.throwIfAborted();
   noSourceActive(first);
   const [api, sync] = checkedWorkers(first);
   if (config.archiveCacheDirectory) {
@@ -365,9 +445,11 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
     env: { ...process.env, DRIVER_AUDIT_DATA_STORE: 'mongo' }, staging: true,
   }) : null;
   try {
+    externalSignal?.throwIfAborted();
     const rpc = backend?.rpc || createHostedRpc({ secret });
     const remote = backend?.archive || createSupabaseArchiveTransport({ secret });
     await remote.assertPrivate();
+    externalSignal?.throwIfAborted();
     const { readBounded } = createBudgetedAuditArchive({ rpc, state: createCloudState({ rpc }), remote, receiptRoot: config.root,
       requestBytes: 4096 + 2 * Buffer.byteLength(secret || ''), approvedNovemberRelease: true,
       approvedNovemberSync: true, approvedNovemberRecovery: true, approvedNovemberOvernight: true,
@@ -381,7 +463,7 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
       fixtureSha256, nodeExecutable: config.nodeExecutable, nodeVersion: config.nodeVersion,
       source: null, builder: null, sourceAfterBuilder: null, measurements: observations };
     const controller = new AbortController();
-    const { signal } = controller;
+    const signal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
     const interrupt = () => controller.abort(Object.assign(new Error('Host qualification interrupted.'), { code: 'interrupted' }));
     const interrupts = ['SIGTERM', 'SIGINT', 'SIGHUP'];
     for (const event of interrupts) process.once(event, interrupt);
@@ -418,8 +500,7 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
           return { root, result: child.result };
         } finally { await child.stop(); }
       }
-      await withDriverAuditHeavyWork({ root: path.join(privateRoot, 'driver-audit-heavy-work'), owner: 'source',
-        signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]) }, async () => {
+      const replay = async () => {
         const source = await runSource('source', [], true);
         receipt.source = source.result;
         const available = await freeDisk(directory);
@@ -467,7 +548,13 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
           receipt.blocked = { phase: receipt.builder ? 'source-after-builder' : 'builder',
             reason: ['disk', 'memory', 'budget', 'timeout', 'interrupted'].includes(error.code) ? error.code : 'replay' };
         } finally { await builderChild?.stop(); }
-      });
+      };
+      if (heldQualificationLease) {
+        requireQualification(heldQualificationLeases.has(heldQualificationLease)
+          && heldQualificationLease.root === path.join(privateRoot, 'driver-audit-heavy-work'), 'An owned qualification lease is required.');
+        await replay();
+      } else await withDriverAuditHeavyWork({ root: path.join(privateRoot, 'driver-audit-heavy-work'), owner: 'source',
+        signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]) }, replay);
       signal.throwIfAborted();
       const after = await supervisor();
       noSourceActive(after);

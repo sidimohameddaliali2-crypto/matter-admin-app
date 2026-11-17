@@ -7,6 +7,7 @@ import { Readable } from 'node:stream';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import { createDriverAuditTransferSessions, validateDriverAuditTransferPlan } from './driverAuditTransferSession.js';
 import { transferPlan, encryptTransfer, openTransferSecrets } from './driverAuditTransferCodec.js';
+import { createDriverAuditTransferDownload } from './driverAuditTransferDownload.js';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const recipient = generateKeyPairSync('rsa', { modulusLength: 3072 });
@@ -21,7 +22,7 @@ async function fixture(t) {
   const request = { version: 1, targetDatabase: 'fictional_reports', capacityBytes: 1000000, plan: transferPlan(inventory),
     recipientPublicKey: recipient.publicKey.export({ type: 'spki', format: 'pem' }) };
   const saved = new Map(), removed = [], objects = new Map();
-  let failObject = false, failCleanup = false, admitted = true, calls = 0;
+  let failObject = false, failCleanup = false, admitted = true, calls = 0, onStore;
   const spaces = {
     async prepare(id, bytes) { return { uploadUrl: 'https://example.invalid/' + id, headers: {}, cipherBytes: bytes }; },
     async head(id) { return { bytes: saved.get(id)?.length }; },
@@ -30,6 +31,7 @@ async function fixture(t) {
   };
   const manager = createDriverAuditTransferSessions({ root, targetDatabase: request.targetDatabase, capacityBytes: request.capacityBytes,
     spaces, archive: { async putVerifiedObject(key, value) {
+      await onStore?.();
       calls++; if (failObject) { failObject = false; throw Error('fixture interrupted native write'); }
       if (objects.has(key)) assert.deepEqual(objects.get(key), value);
       objects.set(key, Buffer.from(value));
@@ -43,7 +45,8 @@ async function fixture(t) {
     saved.set(result.sessionId, Buffer.concat(chunks));
     return { ...result, secrets };
   }
-  return { root, request, manager, original, rows, saved, removed, objects, prepare,
+  return { root, request, manager, original, rows, saved, removed, objects, prepare, spaces,
+    onStore: value => { onStore = value; },
     failObject: () => { failObject = true; }, failCleanup: () => { failCleanup = true; },
     refuseAdmission: () => { admitted = false; }, calls: () => calls };
 }
@@ -103,4 +106,55 @@ test('a completion receipt copied from another session cannot bypass target-boun
     path.join(f.root, second.sessionId, 'received.private.json'));
   await assert.rejects(f.manager.receive(second.sessionId), /completion differs/);
   assert.ok(f.saved.has(second.sessionId));
+});
+
+test('ranged encrypted receive survives a remote socket reset with no duplicate evidence and no HTTP response open during storage', async t => {
+  const f = await fixture(t), prepared = await f.prepare(), ciphertext = f.saved.get(prepared.sessionId);
+  const etag = '"' + hash(ciphertext) + '"', requests = [];
+  let active = 0, reset = false;
+  // An earlier failed receive may have already committed immutable originals.
+  f.objects.set(f.rows[1].key, Buffer.from(f.original[1]));
+  f.onStore(() => assert.equal(active, 0, 'Mongo settling must not hold a remote HTTP response open'));
+  f.spaces.head = async () => ({ bytes: ciphertext.length, etag });
+  f.spaces.read = async (id, signal, remote) => {
+    assert.equal(id, prepared.sessionId); assert.deepEqual(remote, { bytes: ciphertext.length, etag });
+    return createDriverAuditTransferDownload({ remote, signal, rangeBytes: 17, wait: async (_, current) => current.throwIfAborted(),
+      readRange: async ({ start, end, etag: pinned }) => {
+        assert.equal(pinned, etag); requests.push(start); active++;
+        let closed = false;
+        const body = { async *[Symbol.asyncIterator]() {
+          if (start === 17 && !reset) { reset = true; yield ciphertext.subarray(start, start + 3);
+            throw Object.assign(Error('fixture HTTP socket closed'), { code: 'ECONNRESET' }); }
+          yield ciphertext.subarray(start, end + 1);
+        }, destroy() { if (!closed) { closed = true; active--; } } };
+        return { Body: body, ETag: etag, ContentLength: end - start + 1, ContentRange: `bytes ${start}-${end}/${ciphertext.length}`,
+          $metadata: { httpStatusCode: 206 } };
+      } });
+  };
+  const result = await f.manager.receive(prepared.sessionId);
+  assert.deepEqual(requests.slice(0, 3), [0, 17, 17]); assert.equal(active, 0);
+  assert.equal(result.verified, true); assert.equal(result.authorityChanged, false); assert.equal(f.objects.size, 2);
+  assert.deepEqual([...f.objects.values()], f.original.slice(1)); assert.equal(f.calls(), 2);
+  assert.deepEqual(await fs.readFile(path.join(f.root, prepared.sessionId, 'history.private.json')), f.original[0]);
+  assert.deepEqual(f.removed, [prepared.sessionId]);
+});
+
+test('an authenticated-range ciphertext failure retains the original upload and permits an exact clean retry', async t => {
+  const f = await fixture(t), prepared = await f.prepare(), ciphertext = f.saved.get(prepared.sessionId);
+  const etag = '"' + hash(ciphertext) + '"'; let corrupt = true;
+  f.spaces.head = async () => ({ bytes: ciphertext.length, etag });
+  f.spaces.read = async (_, signal, remote) => createDriverAuditTransferDownload({ remote, signal, rangeBytes: 19,
+    readRange: async ({ start, end }) => {
+      const bytes = Buffer.from(ciphertext.subarray(start, end + 1));
+      if (corrupt && end === ciphertext.length - 1) bytes[bytes.length - 1] ^= 1;
+      return { Body: Readable.from([bytes]), ETag: etag, ContentLength: bytes.length,
+        ContentRange: `bytes ${start}-${end}/${ciphertext.length}`, $metadata: { httpStatusCode: 206 } };
+    } });
+  await assert.rejects(f.manager.receive(prepared.sessionId));
+  assert.equal(f.objects.size, 0); assert.deepEqual(f.removed, []);
+  assert.deepEqual(f.saved.get(prepared.sessionId), ciphertext);
+  await assert.rejects(fs.stat(path.join(f.root, prepared.sessionId, 'received.private.json')), { code: 'ENOENT' });
+  corrupt = false;
+  const result = await f.manager.receive(prepared.sessionId);
+  assert.equal(result.verified, true); assert.equal(result.authorityChanged, false); assert.equal(f.objects.size, 2);
 });
