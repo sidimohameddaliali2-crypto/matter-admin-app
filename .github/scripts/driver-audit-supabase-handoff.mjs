@@ -652,17 +652,31 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
         phase: packagePhase(row.role + '-package'), observe: observeRole(row.role) }), accepted, seed, objects });
   }
   setPhase('release');
+  const releaseGit = async (step, args, timeout = 10_000) => {
+    setPhase('release-' + step);
+    try { return await exec('git', args, { timeout }); }
+    catch (error) {
+      observeFailure({ releaseCommand: true, step, exitCode: Number.isInteger(error.code) ? error.code : null,
+        signal: typeof error.signal === 'string' ? error.signal.slice(0, 32) : null, killed: error.killed === true,
+        stdout: String(error.stdout ?? '').slice(0, 8192), stderr: String(error.stderr ?? '').slice(0, 8192),
+        message: String(error.message ?? '').slice(0, 4096) });
+      throw error;
+    }
+  };
   const rootId = sha(JSON.stringify(['driver-reports-supabase-sync-v1', bootstrap.releaseSha, pins.source, pins.builder, pins.baseline, pins.candidate]));
   const releases = path.join(server, '.private/driver-report-app-releases'), releaseRoot = path.join(releases, bootstrap.releaseSha);
   await mkdirPrivate(releases);
   try { await directory(releaseRoot); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    try { await exec('git', ['cat-file', '-e', bootstrap.releaseSha + '^{commit}']); }
-    catch { await exec('git', ['fetch', '--no-tags', 'origin', bootstrap.releaseSha]); await exec('git', ['cat-file', '-e', bootstrap.releaseSha + '^{commit}']); }
+    try { await releaseGit('commit', ['cat-file', '-e', bootstrap.releaseSha + '^{commit}']); }
+    catch {
+      await releaseGit('fetch', ['fetch', '--no-tags', 'origin', bootstrap.releaseSha], 120_000);
+      await releaseGit('fetched-commit', ['cat-file', '-e', bootstrap.releaseSha + '^{commit}']);
+    }
     await mkdirPrivate(releaseRoot);
-    await exec('git', ['clone', '--shared', '--dissociate', '--no-checkout', '--', appRoot, releaseRoot]);
-    await exec('git', ['-C', releaseRoot, 'checkout', '--detach', bootstrap.releaseSha]);
+    await releaseGit('clone', ['clone', '--shared', '--dissociate', '--no-checkout', '--', appRoot, releaseRoot], 120_000);
+    await releaseGit('checkout', ['-C', releaseRoot, 'checkout', '--detach', bootstrap.releaseSha], 60_000);
     await fs.chmod(releaseRoot, 0o700); await directory(releaseRoot);
   }
   const targetServer = path.join(releaseRoot, 'server');
@@ -676,7 +690,7 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
       'server/scripts/driverAuditHttp.js', 'server/scripts/driverAuditSourceStage.js', 'server/services/driverAuditSource.js',
       'server/services/driverAuditSupabaseReplica.js', 'server/services/driverAuditSupabaseSync.js']);
   };
-  await releaseCheck();
+  setPhase('release-readback'); await releaseCheck();
   const originalLock = await read(path.join(server, 'package-lock.json'), { privateMode: false });
   const targetLock = await read(path.join(targetServer, 'package-lock.json'), { privateMode: false });
   need(originalLock.sha256 === bootstrap.packageLockSha256 && targetLock.sha256 === originalLock.sha256);
@@ -803,6 +817,21 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
 }
 
 async function sealedPackageFailure({ target, phase, operation, expectedSha, recipientKey, exec, load }) {
+  if (target?.releaseCommand === true && recipientKey && /^[a-z-]+$/.test(target.step || '')
+    && phase === 'prepare-release-' + target.step && target.step.length <= 32) {
+    const raw = Buffer.from(JSON.stringify({ version: 1, kind: 'supabase-release-command-failure-v1',
+      applicationCommit: expectedSha, operation, operatorPhase: phase,
+      command: { step: target.step, exitCode: target.exitCode, signal: target.signal, killed: target.killed,
+        stdout: target.stdout, stderr: target.stderr, message: target.message } }));
+    need(raw.length <= 32 * 1024);
+    if ((await exec('git', ['rev-parse', 'HEAD'])).stdout.trim() !== expectedSha) return null;
+    await exec('git', ['diff', '--quiet', 'HEAD', '--', 'server/services/driverAuditTransferCodec.js']);
+    const packed = gzipSync(raw), { sealTransferSecrets } = await load('services/driverAuditTransferCodec.js');
+    const metadataSha256 = sha(raw);
+    const capsule = sealTransferSecrets(recipientKey, { version: 1, kind: 'supabase-release-command-failure-capsule-v1',
+      applicationCommit: expectedSha, metadataSha256, metadataGzipSha256: sha(packed), metadataGzipBase64: packed.toString('base64') });
+    return { status: 'supabase-host-stopped', applicationCommit: expectedSha, operatorPhase: phase, metadataSha256, capsule };
+  }
   if (!target || !recipientKey || !/^prepare-(?:baseline|candidate|serving-current|serving-previous)-[a-z-]+$/.test(phase)) return null;
   const relativePath = path.relative(target.root, target.file);
   if (!['baseline', 'candidate', 'serving-current', 'serving-previous'].includes(target.role)

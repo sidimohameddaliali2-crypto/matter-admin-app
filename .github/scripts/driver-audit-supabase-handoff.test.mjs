@@ -6,7 +6,7 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { gzipSync } from 'node:zlib';
+import { gzipSync, gunzipSync } from 'node:zlib';
 import { constants } from 'node:fs';
 import test from 'node:test';
 import dotenv from '../../server/node_modules/dotenv/lib/main.js';
@@ -1018,4 +1018,34 @@ test('ordinary data directories never relax the existing600 leaf or strict code 
   await fs.chmod(root,0o775);const file=path.join(root,'original-data.private.json');await fs.chmod(file,0o664);
   await assert.rejects(f.runPrepare(),error=>error.phase==='prepare-candidate-package-file-metadata');
   assert.equal((await fs.lstat(file)).mode&0o777,0o664);assert(!f.commands.some(row=>row.args[0]==='clone'));
+});
+
+test('release transport failures seal the bounded private cause and retain exact original data', async t => {
+  const { driverAuditSupabaseStoppedReceipt } = await import('./driver-audit-native-handoff.mjs');
+  const f = await preparationFixture(t), execute = f.adapters.exec, pointer = await fs.readFile(path.join(f.root, 'work/current.private.json'));
+  f.adapters.exec = async (file, args, options) => {
+    if (file === 'git' && args[0] === 'cat-file') throw Error('fixture commit needs fetch');
+    if (file === 'git' && args[0] === 'fetch') {
+      assert.equal(options.timeout, 120_000);
+      throw Object.assign(Error('fictional credential ' + f.secret), { code: 128, stderr: 'fictional remote: ' + f.secret, stdout: '' });
+    }
+    return execute(file, args, options);
+  };
+  await assert.rejects(f.runPrepare(), error => {
+    assert.equal(error.phase, 'prepare-release-fetch');
+    assert(!JSON.stringify(error).includes(f.secret));
+    const { supabaseHostStopped: stopped } = error;
+    assert(stopped); assert(!JSON.stringify(stopped).includes(f.secret));
+    assert.deepEqual(driverAuditSupabaseStoppedReceipt(stopped, commit, error.phase), stopped);
+    const capsule = openTransferSecrets(privateKey, stopped.capsule);
+    assert.equal(capsule.kind, 'supabase-release-command-failure-capsule-v1');
+    const raw = gunzipSync(Buffer.from(capsule.metadataGzipBase64, 'base64'));
+    assert.equal(hash(raw), stopped.metadataSha256);
+    const detail = JSON.parse(raw);
+    assert.equal(detail.command.exitCode, 128); assert(detail.command.stderr.includes(f.secret));
+    assert.equal(driverAuditSupabaseStoppedReceipt({ ...stopped, plaintext: f.secret }, commit, error.phase), null);
+    return true;
+  });
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'work/current.private.json')), pointer);
+  assert(!f.commands.some(row => row.args[0] === 'clone'));
 });
