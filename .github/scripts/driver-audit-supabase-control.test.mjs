@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash, generateKeyPairSync } from 'node:crypto';
@@ -93,7 +94,7 @@ export async function validateAutomaticCandidate(candidate){const bytes=await fs
 `,
 };
 
-async function reportPackage(directory, revision) {
+async function reportPackage(directory, revision, { largeRuntime = false } = {}) {
   const blobs = new Map(), files = {};
   const local = { async putVerifiedObject(key, body) {
     blobs.set(key, Buffer.from(body));
@@ -119,10 +120,12 @@ async function reportPackage(directory, revision) {
     'publication.private.json': Buffer.from(JSON.stringify(publication)), 'identities.private.json': Buffer.from('{}'),
     'maps.private.json': Buffer.from('{}'), 'gps-index.private.json.gz': gzipSync('{"streamFiles":{}}'),
     'preview-read-view.private.json.gz': gzipSync(JSON.stringify({ reportHash, generation, catalogHash: catalog.sha256,
-      browser: snapshot, allowedResources: [snapshot.url], photos: [], gpsRows: [] })),
+      browser: snapshot, allowedResources: [snapshot.url], photos: [], gpsRows: [],
+      ...(largeRuntime ? { deferredQueryFiles: { fictional_large: 'deferred-large.private.bin' } } : {}) })),
     'renderer.private.html': Buffer.from('<html>Fictional</html>'), 'build.private.json': Buffer.from('{}'),
     'browser-data.private.json.gz': gzipSync(browser),
   };
+  if (largeRuntime) values['deferred-large.private.bin'] = Buffer.alloc(8 * 1024 ** 2 + 23, 97);
   for (const [name, body] of Object.entries(values)) { await write(path.join(directory, name), body); files[name] = sha(body); }
   for (const [key, body] of blobs) {
     const name = 'archive-' + key.slice(0, 64) + '.private.bin';
@@ -143,7 +146,7 @@ async function reportPackage(directory, revision) {
 }
 
 
-async function fixture(t) {
+async function fixture(t, { largeRuntime = false } = {}) {
   const appRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'supabase-control-')));
   let stopModel = async () => {};
   t.after(async () => { await stopModel(); await fs.rm(appRoot, { recursive: true, force: true }); });
@@ -163,7 +166,7 @@ async function fixture(t) {
   const packageRoot = path.join(appRoot, 'original-packages');
   const baseline = await reportPackage(path.join(packageRoot, 'baseline/server-data'), 4);
   const candidate = await reportPackage(path.join(packageRoot, 'candidate/server-data'), 7);
-  const current = await reportPackage(path.join(packageRoot, 'current/server-data'), 6);
+  const current = await reportPackage(path.join(packageRoot, 'current/server-data'), 6, { largeRuntime });
   const previous = await reportPackage(path.join(packageRoot, 'previous/server-data'), 5);
   p.baseline = baseline.seed.manifestSha256; p.candidate = candidate.seed.manifestSha256;
   p.current = { revision: 6, manifest: current.seed.manifestSha256, generation: current.seed.pointer.generation };
@@ -437,6 +440,129 @@ test('prepare-serving uses the actual Sync and Replica to publish current plus p
   const capsule = openTransferSecrets(privateKey,result.capsule), {gunzipSync}=await import('node:zlib');
   const raw=gunzipSync(Buffer.from(capsule.metadataGzipBase64,'base64')); assert.equal(hash(raw),result.metadataSha256);
   assert(!raw.includes(Buffer.from(f.secret))); assert(!JSON.stringify(result).includes(f.appRoot));
+});
+
+async function runtimeParts(f, role, name) {
+  const row = f.receipt.packages.find(item => item.role === role), folder = path.dirname(row.root);
+  const seed = JSON.parse(await fs.readFile(path.join(folder, 'direct-seed.original.private.json')));
+  const descriptor = JSON.parse(await fs.readFile(path.join(folder, 'audit-objects', seed.pointer.descriptor.sha256 + '.gz')));
+  const ref = descriptor.files[name]; assert(ref); return { row, folder, ref, file: path.join(row.root, name) };
+}
+
+async function retainedObjectInventory(f) {
+  const values = [];
+  for (const role of ['serving-current', 'serving-previous']) {
+    const folder = path.join(f.syncRoot, 'retained', role, 'audit-objects');
+    for (const name of (await fs.readdir(folder)).sort()) {
+      const file = path.join(folder, name), bytes = await fs.readFile(file), stat = await fs.stat(file, { bigint: true });
+      values.push({ role, name, sha256: hash(bytes), bytes: bytes.length, inode: String(stat.ino), mode: String(stat.mode), mtimeNs: String(stat.mtimeNs) });
+    }
+  }
+  return values;
+}
+
+test('serving preparation links an exact missing whole-runtime chunk only into selected objects and seeds both genuine heads', async t => {
+  const f = await fixture(t), part = await runtimeParts(f, 'serving-previous', 'publication.private.json');
+  assert.equal(part.ref.chunks.length, 1); const key = part.ref.chunks[0].sha256 + '.gz';
+  await fs.unlink(path.join(part.folder, 'audit-objects', key));
+  const inventory = await retainedObjectInventory(f), before = await fs.stat(part.file, { bigint: true });
+  const originals = new Map([f.prefixFile, path.join(f.syncRoot, 'staging.private.json'), path.join(part.row.root, 'files.private.json')]
+    .map(file => [file, null])); for (const file of originals.keys()) originals.set(file, await fs.readFile(file));
+  const source = structuredClone(f.states.get('collector-state')), paid = structuredClone(f.states.get('photo-grading-budget'));
+  assert.equal((await f.run('prepare-serving')).status, 'serving-prepared');
+  const seed = JSON.parse(await fs.readFile(path.join(f.syncRoot, 'seed.json'))), selected = path.join(seed.bundleRoot, key);
+  const after = await fs.stat(selected, { bigint: true });
+  assert.equal(after.ino, before.ino); assert.equal(after.dev, before.dev); assert.equal(after.mode, before.mode); assert.equal(after.mtimeNs, before.mtimeNs);
+  assert.equal(hash(await fs.readFile(selected)), part.ref.sha256);
+  assert.deepEqual(await retainedObjectInventory(f), inventory);
+  for (const [file, bytes] of originals) assert.deepEqual(await fs.readFile(file), bytes);
+  const head = JSON.parse(f.states.get('app-sidi-report-head').body);
+  assert.equal(head.servingPackage.collectorRevision, f.p.current.revision); assert.equal(head.previous.servingPackage.collectorRevision, f.p.previous.revision);
+  assert.deepEqual(f.states.get('collector-state'), source); assert.deepEqual(f.states.get('photo-grading-budget'), paid);
+  const accepted = structuredClone(f.states.get('app-sidi-report-head')); await f.run('prepare-serving');
+  assert.deepEqual(f.states.get('app-sidi-report-head'), accepted); await f.run('start-report');
+  assert.equal(f.rows.find(row => row.name === 'matter-driver-audit-source'), undefined);
+});
+
+test('missing partial runtime chunks use only exact bounded selected-cache bytes while the actual seed worker validates every chunk', async t => {
+  const f = await fixture(t, { largeRuntime: true }), part = await runtimeParts(f, 'serving-current', 'deferred-large.private.bin');
+  assert.equal(part.ref.chunks.length, 2);
+  for (const chunk of part.ref.chunks) await fs.unlink(path.join(part.folder, 'audit-objects', chunk.sha256 + '.gz'));
+  const inventory = await retainedObjectInventory(f), original = await fs.readFile(part.file), before = await fs.stat(part.file, { bigint: true });
+  await f.run('prepare-serving');
+  const seed = JSON.parse(await fs.readFile(path.join(f.syncRoot, 'seed.json')));
+  for (const chunk of part.ref.chunks) {
+    const file = path.join(seed.bundleRoot, chunk.sha256 + '.gz'), bytes = await fs.readFile(file), stat = await fs.stat(file, { bigint: true });
+    assert(bytes.equals(original.subarray(chunk.offset, chunk.offset + chunk.size))); assert.equal(hash(bytes), chunk.sha256);
+    assert.notEqual(stat.ino, before.ino); assert.equal(stat.mode & 0o777n, 0o600n);
+  }
+  assert.deepEqual(await fs.readFile(part.file), original); assert.deepEqual(await retainedObjectInventory(f), inventory);
+  assert.equal(JSON.parse(f.states.get('app-sidi-report-head').body).servingPackage.collectorRevision, f.p.current.revision);
+});
+
+test('a failed seed retries exact existing derived chunks without claiming or reserving extra disk bytes', async t => {
+  const f = await fixture(t, { largeRuntime: true }), part = await runtimeParts(f, 'serving-current', 'deferred-large.private.bin');
+  for (const chunk of part.ref.chunks) await fs.unlink(path.join(part.folder, 'audit-objects', chunk.sha256 + '.gz'));
+  f.failPublication = true; await assert.rejects(f.run('prepare-serving'), /Supabase control stopped at seed-cli/);
+  assert.equal(f.states.has('app-sidi-report-head'), false);
+  const seed = JSON.parse(await fs.readFile(path.join(f.syncRoot, 'seed.json'))), before = [];
+  for (const chunk of part.ref.chunks) before.push(await fs.stat(path.join(seed.bundleRoot, chunk.sha256 + '.gz'), { bigint: true }));
+  const statfs = fs.statfs; fs.statfs = async () => ({ bavail: 0n, bsize: 4096n });
+  try { assert.equal((await f.run('prepare-serving')).status, 'serving-prepared'); } finally { fs.statfs = statfs; }
+  for (const [index, chunk] of part.ref.chunks.entries()) {
+    const after = await fs.stat(path.join(seed.bundleRoot, chunk.sha256 + '.gz'), { bigint: true });
+    assert.equal(after.ino, before[index].ino); assert.equal(after.mtimeNs, before[index].mtimeNs);
+  }
+  assert(!(await fs.readdir(seed.bundleRoot)).some(name => name.startsWith('.runtime-derived-')));
+});
+
+test('insufficient derived-cache space fails before seed admission and preserves retained objects', async t => {
+  const f = await fixture(t, { largeRuntime: true }), part = await runtimeParts(f, 'serving-current', 'deferred-large.private.bin');
+  for (const chunk of part.ref.chunks) await fs.unlink(path.join(part.folder, 'audit-objects', chunk.sha256 + '.gz'));
+  const inventory = await retainedObjectInventory(f), statfs = fs.statfs; fs.statfs = async () => ({ bavail: 0n, bsize: 4096n });
+  try { await assert.rejects(f.run('prepare-serving'), /Supabase control stopped at select-local-seed/); } finally { fs.statfs = statfs; }
+  assert.equal(f.states.has('app-sidi-report-head'), false); assert.deepEqual(await retainedObjectInventory(f), inventory);
+  await assert.rejects(fs.access(path.join(f.syncRoot, 'seed.json')), { code: 'ENOENT' });
+});
+
+test('an independently changed selected partial chunk is preserved and cannot be hidden by a valid original runtime', async t => {
+  const f = await fixture(t, { largeRuntime: true }), part = await runtimeParts(f, 'serving-current', 'deferred-large.private.bin');
+  for (const chunk of part.ref.chunks) await fs.unlink(path.join(part.folder, 'audit-objects', chunk.sha256 + '.gz'));
+  f.failPublication = true; await assert.rejects(f.run('prepare-serving'), /Supabase control stopped at seed-cli/);
+  const seed = JSON.parse(await fs.readFile(path.join(f.syncRoot, 'seed.json'))), file = path.join(seed.bundleRoot, part.ref.chunks[0].sha256 + '.gz');
+  await fs.writeFile(file, 'independent selected cache edit');
+  await assert.rejects(f.run('prepare-serving'), /Supabase control stopped at select-local-seed/);
+  assert.equal(await fs.readFile(file, 'utf8'), 'independent selected cache edit'); assert.equal(f.states.has('app-sidi-report-head'), false);
+});
+
+test('existing bundle corruption never falls through to a valid runtime copy or admits a seed', async t => {
+  const f = await fixture(t), part = await runtimeParts(f, 'serving-current', 'publication.private.json');
+  const object = path.join(part.folder, 'audit-objects', part.ref.chunks[0].sha256 + '.gz'); await fs.writeFile(object, 'independent bad bundle bytes');
+  await assert.rejects(f.run('prepare-serving'), /Supabase control stopped at seed-inputs/);
+  assert.equal(await fs.readFile(object, 'utf8'), 'independent bad bundle bytes');
+  assert.equal(f.states.has('app-sidi-report-head'), false); assert.equal(f.calls.length, 0);
+  await assert.rejects(fs.access(path.join(f.syncRoot, 'seed.json')), { code: 'ENOENT' });
+});
+
+test('a runtime pathname swap during fallback stops before publication without reading or changing outside bytes', async t => {
+  const f = await fixture(t), part = await runtimeParts(f, 'serving-previous', 'publication.private.json');
+  const missing = path.join(part.folder, 'audit-objects', part.ref.chunks[0].sha256 + '.gz'); await fs.unlink(missing);
+  const outside = path.join(f.appRoot, 'outside-runtime.private.json'); await write(outside, 'outside private bytes');
+  const open = fs.open, lstat = fs.lstat; let eligible = false, reached = false, outsideReads = 0;
+  fs.lstat = async (file, ...args) => { try { return await lstat(file, ...args); } catch (error) {
+    if (file === missing && error.code === 'ENOENT') eligible = true; throw error;
+  } };
+  fs.open = async (file, ...args) => {
+    if (file === outside) outsideReads++;
+    const fd = await open(file, ...args);
+    if (eligible && !reached && file === part.file && args[0] === (fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)) {
+      reached = true; await fs.rename(part.file, part.file + '.preserved'); await fs.symlink(outside, part.file);
+    }
+    return fd;
+  };
+  try { await assert.rejects(f.run('prepare-serving'), /Supabase control stopped/); } finally { fs.open = open; fs.lstat = lstat; }
+  assert(reached); assert.equal(outsideReads, 0); assert.equal(await fs.readFile(outside, 'utf8'), 'outside private bytes');
+  assert.equal(f.states.has('app-sidi-report-head'), false);
 });
 
 test('a copied verification prefix must be admitted before any serving RPC and cannot be replaced by an unchecked verified flag',async t=>{

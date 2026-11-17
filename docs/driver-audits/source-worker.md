@@ -22,6 +22,8 @@ Preparation leaves the effective seed and current pointer absent, the new HTTP s
 
 Retained package verification reads the existing object bundle first. If a declared runtime chunk is missing there, it can read the exact descriptor-bound extent of the same hash-verified local runtime file. This creates no extra object copy or remote request. Full package, deferred-data and GPS verification still applies; missing or changed bytes stop preparation.
 
+Serving selection gives the unchanged seed loader a complete disposable object bundle. It links existing whole files without copying their bytes. Only missing partial-file chunks need derived cache files, bounded to 8 MiB each and 256 MiB total with a 1 GiB free-disk reserve. Retries verify and reuse existing cache files; the original retained bundles, manifests and presence proofs stay exact.
+
 The selected follow-up operations use the [Supabase control operator](../../.github/scripts/driver-audit-supabase-control.mjs). Their exact public `transfer_plan_b64` schema contains the temporary RSA recipient and the actual staging-receipt hash; qualification also pins the original fixture and independently read-back environment-backup proof. A controlled build additionally pins the fresh actual Linux qualification receipt. No caller supplies server paths, commands, credentials or environment overrides.
 
 | Operation | Effect and boundary |
