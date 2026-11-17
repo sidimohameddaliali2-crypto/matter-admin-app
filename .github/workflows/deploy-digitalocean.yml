@@ -91,6 +91,7 @@ on:
       - '.github/workflows/driver-audit-native-handoff.yml'
       - '.github/scripts/driver-audit-native-handoff.mjs'
       - '.github/scripts/driver-audit-native-*.mjs'
+      - '.github/scripts/driver-audit-supabase-*.mjs'
 
 concurrency:
   group: production-deploy
