@@ -52,6 +52,8 @@ Document rows use the original `{key, revision, body_text}`. Receipt rows preser
 
 `verify` compares every supplied current state document, selected original receipt and historical row, checks collection totals, reads back the declared archive objects, and compares the loaded report and GPS queries. It reports live and backup-only counts separately. Its result is `staged-data-verified` with `activationPending` and `archiveClosurePending`. This is deliberately a partial check. A supplied object list cannot establish that it includes every historical photo, GPS window, grading receipt and review-linked snapshot. The command never creates an activation parity receipt. Complete closure and the normal staff, grader and saved-source journeys must be independently established from the preserved roots before calling `verifyDriverAuditMongoAuthority`.
 
+Use the [complete read-only parity operator and proof contract](native-parity.md) to bind an independently audited final source closure to the exact original/native records, contexts and physical bytes. It can reuse the completed CLI's full object-byte iteration only with its exact implementation pin and matching native file/chunk metadata captured before and after that pass. Final-window runs keep record/review/census comparisons fresh and clearly identify reused byte attestations. This operator does not update or activate native authority.
+
 ### Final authority handoff
 
 Leave the existing authority serving during staging. Complete the handoff in this order:

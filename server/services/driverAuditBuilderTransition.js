@@ -1,18 +1,25 @@
 import fs from 'node:fs/promises';
 import {randomUUID} from 'node:crypto';
 import path from 'node:path';
-import {privateAuditDirectory,privateAuditJson,verifyAuditBuilder} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
+import {privateAuditDirectory,privateAuditJson,verifyAuditBuilder,sha256} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
+
+export const driverAuditBuilderConfigGuardVersion=1;
 
 async function sync(file){
   const handle=await fs.open(file,'r');
   try{await handle.sync();}finally{await handle.close();}
 }
 
-async function durableWrite(file,bytes){
+async function durableWrite(file,bytes,expectedBefore){
   const temporary=file+'.'+randomUUID()+'.tmp';
+  const unchanged=async()=>{
+    if(expectedBefore&&!(await fs.readFile(file)).equals(expectedBefore))throw Error('Audit sync config changed during transition');
+  };
   try{
+    await unchanged();
     await fs.writeFile(temporary,bytes,{mode:0o600,flag:'wx'});
     await sync(temporary);
+    await unchanged();
     await fs.rename(temporary,file);
   }finally{await fs.rm(temporary,{force:true});}
   await sync(path.dirname(file));
@@ -26,7 +33,7 @@ async function present(file){
 }
 
 // Caller holds both deployment and worker locks and has drained the direct stage.
-export async function transitionDriverAuditBuilder({root,from,to,rollback=false}){
+export async function transitionDriverAuditBuilder({root,from,to,rollback=false,expectedConfigSha256}){
   if(from===to||![from,to].every(hash=>typeof hash==='string'&&/^[a-f0-9]{64}$/.test(hash)))
     throw Error('Two distinct reviewed builder hashes required');
   await privateAuditDirectory(root);
@@ -37,6 +44,8 @@ export async function transitionDriverAuditBuilder({root,from,to,rollback=false}
   const receipt=path.join(root,'builder-transition-'+from+'-'+to+'.private.json');
   await privateAuditJson(config);
   const current=await fs.readFile(config);
+  if(expectedConfigSha256!==undefined&&(!/^[a-f0-9]{64}$/.test(expectedConfigSha256)||sha256(current)!==expectedConfigSha256))
+    throw Error('Audit sync config changed before transition');
   const saved=await privateAuditJson(receipt).catch(error=>{
     if(error.code==='ENOENT')return null;
     throw error;
@@ -82,6 +91,7 @@ export async function transitionDriverAuditBuilder({root,from,to,rollback=false}
   }
   await verifyAuditBuilder(builder,activeHash);
   const expected=rollback?originalBytes:upgraded;
-  if(!current.equals(expected))await durableWrite(config,expected);
+  if(!(await fs.readFile(config)).equals(current))throw Error('Audit sync config changed during transition');
+  if(!current.equals(expected))await durableWrite(config,expected,current);
   return {builderSha256:activeHash};
 }

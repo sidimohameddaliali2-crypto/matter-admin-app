@@ -153,7 +153,7 @@
     "server/routes/matterCore.js": "47f4b1442ce3bea3df33ee77e3fac8f24f0f55cd9b11835553abf39fa253745e",
     "server/routes/mcp.js": "3aeef9528a12edd994c0f5f965859c2ad89fa01d33b464ee83f320593dbe84be",
     "server/routes/mcpOAuth.js": "519c8fbd54fe07a50aeb4344035aab7eda76a94fc3c00d56a80f5e57b6cc6f39",
-    "server/routes/mealCreation.js": "039fde782065a7d04cf3673dcf104db9d80a986f41668c1cd8862934d40b2906",
+    "server/routes/mealCreation.js": "c9447d57c3d3d488c3db6cb096902105b12b00127addc9a28f96586f4ba77555",
     "server/routes/memberAuth.js": "09e897fdb0276e7f2461e92503ddd8e6aa9627d35896ed0bfd6c5bb3bc9b071f",
     "server/routes/memberPortal.js": "1bee15124322c921ab7b92862b72f2b80abaffb47ebcbebb138abb27fd5f78ed",
     "server/routes/menus.js": "9b24ad084b23bd619431a4bfb24fa82c3b435bc56f92997ed1a799334e92f2a6",
@@ -6879,7 +6879,8 @@
         "State.findOneAndUpdate",
         "changeMealCreationState",
         "mergeLegacyDraft",
-        "recoverMealCreationState"
+        "recoverMealCreationState",
+        "repairMealCreationState"
       ],
       "path": "/api/meal-creation/bootstrap",
       "middlewareDeclarations": [
@@ -6889,7 +6890,7 @@
     {
       "id": "106d4bad7f60dc7b",
       "method": "GET",
-      "source": "server/routes/mealCreation.js:36",
+      "source": "server/routes/mealCreation.js:46",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -6913,7 +6914,7 @@
     {
       "id": "ba9d35e28494e600",
       "method": "PUT",
-      "source": "server/routes/mealCreation.js:44",
+      "source": "server/routes/mealCreation.js:54",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],

@@ -58,3 +58,45 @@ test('candidate tampering and changed configuration fail before directory switch
   assert.equal(await fs.readFile(f.config,'utf8'),f.original);
   assert.equal(await fs.readFile(path.join(f.builder,'scripts/run-automatic-report.mjs'),'utf8'),'// original');
 });
+
+test('the caller exact-before configuration pin is checked at the actual transition read',async t=>{
+  const f=await fixture(t);
+  await assert.rejects(transitionDriverAuditBuilder({...f,expectedConfigSha256:'0'.repeat(64)}),/config changed/);
+  assert.equal(await fs.readFile(f.config,'utf8'),f.original);
+  assert.equal(await fs.stat(f.retained).catch(error=>error.code),'ENOENT');
+  assert.equal(await fs.stat(path.join(f.root,'builder-transition-'+f.from+'-'+f.to+'.private.json')).catch(error=>error.code),'ENOENT');
+});
+
+test('an independent config edit during a builder rename survives the conflict with both builders held',async t=>{
+  const f=await fixture(t),rename=fs.rename;
+  const edited=JSON.stringify({...JSON.parse(f.original),other:'independent edit that must survive'});
+  fs.rename=async(from,to)=>{
+    const result=await rename(from,to);
+    if(from===f.staging&&to===f.builder)await fs.writeFile(f.config,edited,{mode:0o600});
+    return result;
+  };
+  try{await assert.rejects(transitionDriverAuditBuilder({...f,expectedConfigSha256:digest(f.original)}),/config changed/);}
+  finally{fs.rename=rename;}
+  assert.equal(await fs.readFile(f.config,'utf8'),edited);
+  assert.equal(await fs.readFile(path.join(f.builder,'scripts/run-automatic-report.mjs'),'utf8'),'// candidate');
+  assert.equal(await fs.readFile(path.join(f.retained,'scripts/run-automatic-report.mjs'),'utf8'),'// original');
+  const receipt=JSON.parse(await fs.readFile(path.join(f.root,'builder-transition-'+f.from+'-'+f.to+'.private.json')));
+  assert.equal(Buffer.from(receipt.oldConfig,'base64').toString(),f.original);
+  await assert.rejects(transitionDriverAuditBuilder(f),/config changed/);
+  assert.equal(await fs.readFile(f.config,'utf8'),edited);
+});
+
+test('the actual config writer checks the captured bytes again after preparing its temporary file',async t=>{
+  const f=await fixture(t),writeFile=fs.writeFile;
+  const edited=JSON.stringify({...JSON.parse(f.original),other:'edit after temporary config write'});
+  fs.writeFile=async(file,...args)=>{
+    const result=await writeFile(file,...args);
+    if(typeof file==='string'&&file.startsWith(f.config+'.'))await writeFile(f.config,edited,{mode:0o600});
+    return result;
+  };
+  try{await assert.rejects(transitionDriverAuditBuilder(f),/config changed/);}
+  finally{fs.writeFile=writeFile;}
+  assert.equal(await fs.readFile(f.config,'utf8'),edited);
+  assert.equal(await fs.readFile(path.join(f.retained,'scripts/run-automatic-report.mjs'),'utf8'),'// original');
+  assert.equal((await fs.readdir(f.root)).some(name=>name.startsWith('sync.json.')&&name.endsWith('.tmp')),false);
+});

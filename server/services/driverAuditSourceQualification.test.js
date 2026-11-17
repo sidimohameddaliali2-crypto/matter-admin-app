@@ -5,6 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
+import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import * as qualification from '../scripts/driverAuditSourceQualify.js';
+import { withDriverAuditHeavyWork } from './driverAuditHeavyWork.js';
 import {
   runDriverAuditQualificationChild,
   stageDriverAuditQualification,
@@ -12,6 +17,197 @@ import {
 } from '../scripts/driverAuditSourceQualify.js';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
+
+async function heldQualificationFixture(t) {
+  const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'audit-held-qualification-')));
+  t.after(() => fs.rm(base, { recursive: true, force: true }));
+  const server = path.resolve(fileURLToPath(new URL('../', import.meta.url)));
+  const root = path.join(base, 'driver-audit-source', 'a'.repeat(64));
+  await fs.mkdir(root, { recursive: true, mode: 0o700 });
+  const syncRoot = path.join(server, '.private/driver-audits', 'b'.repeat(64));
+  const api = { name: 'matter-delivery-api', pid: process.pid, pm2_env: { status: 'online' } };
+  const source = { name: 'matter-driver-audit-source', pid: 0, pm2_env: { status: 'stopped' } };
+  const sync = { name: 'matter-driver-audit-sync', pid: 0, pm2_env: { status: 'stopped',
+    pm_cwd: server, pm_exec_path: path.join(server, 'scripts/driverAuditSync.js'), args: ['--config', path.join(syncRoot, 'sync.json')] } };
+  const events = [], heavyRoot = path.join(base, 'driver-audit-heavy-work');
+  const config = { root, get runtime() { throw Error('Fixture stops before external replay'); } };
+  const supervisor = async () => { events.push('observe:' + sync.pm2_env.status); return structuredClone([api, source, sync]); };
+  const options = { config, commit: 'a'.repeat(40), fixtureSha256: 'c'.repeat(64), supervisor };
+  const owned = async () => assert.equal(await fs.readFile(path.join(heavyRoot, 'work.lock'), 'utf8'), String(process.pid));
+  const expectedReplayFailure = /Exact Linux host qualification|Fixture stops before external replay/;
+  return { root, heavyRoot, source, sync, events, options, owned, expectedReplayFailure };
+}
+
+test('shared held sync lifecycle runs a callback without exposing the private qualification token', async t => {
+  assert.equal(typeof qualification.withDriverAuditHeldQualificationSync, 'function');
+  const f = await heldQualificationFixture(t); let stopped = 0;
+  const result = await qualification.withDriverAuditHeldQualificationSync({ ...f.options,
+    async startSync() { await f.owned(); f.sync.pid = process.pid; f.sync.pm2_env.status = 'online'; },
+    async stopSync() { await f.owned(); stopped++; f.sync.pid = 0; f.sync.pm2_env.status = 'stopped'; },
+  }, async function () {
+    assert.equal(arguments.length, 0); await f.owned(); assert.equal(f.sync.pm2_env.status, 'online');
+    return { existingOnlineVerifierCompleted: true };
+  });
+  assert.deepEqual(result, { existingOnlineVerifierCompleted: true }); assert.equal(stopped, 1);
+  assert.equal(f.events.at(-1), 'observe:stopped');
+  await assert.rejects(fs.readFile(path.join(f.heavyRoot, 'work.lock')), { code: 'ENOENT' });
+});
+
+test('cancellation during successful pause cleanup rejects after stopped observation and lease release', async t => {
+  const f = await heldQualificationFixture(t), controller = new AbortController();
+  await assert.rejects(qualification.withDriverAuditHeldQualificationSync({ ...f.options, signal: controller.signal,
+    async startSync() { await f.owned(); f.sync.pid = process.pid; f.sync.pm2_env.status = 'online'; },
+    async stopSync() {
+      await f.owned(); f.sync.pid = 0; f.sync.pm2_env.status = 'stopped';
+      controller.abort(Object.assign(Error('cancelled during durable cleanup'), { code: 'interrupted' }));
+    },
+  }, async () => ({ verified: true })), { code: 'interrupted' });
+  assert.equal(f.events.at(-1), 'observe:stopped');
+  await assert.rejects(fs.readFile(path.join(f.heavyRoot, 'work.lock')), { code: 'ENOENT' });
+});
+
+test('held qualification owns real admission before sync starts and stops it before queued writers can advance', async t => {
+  assert.equal(typeof qualification.qualifyDriverAuditSourceWhileHeld, 'function');
+  const f = await heldQualificationFixture(t), controls = [], waiting = [], work = [], advances = [];
+  const run = qualification.qualifyDriverAuditSourceWhileHeld({ ...f.options,
+    async startSync() {
+      await f.owned(); f.events.push('start');
+      f.sync.pid = process.pid; f.sync.pm2_env.status = 'online';
+      for (const owner of ['sync', 'source']) {
+        const controller = new AbortController(); controls.push(controller);
+        let queued; waiting.push(new Promise(resolve => { queued = resolve; }));
+        work.push(withDriverAuditHeavyWork({ root: f.heavyRoot, owner, pollMs: 5, signal: controller.signal,
+          onWaiting: () => queued() }, async () => { advances.push(owner); }));
+      }
+      await Promise.all(waiting);
+      assert.deepEqual(advances, []);
+    },
+    async stopSync() {
+      await f.owned(); f.events.push('stop'); assert.deepEqual(advances, []);
+      for (const controller of controls) controller.abort();
+      await Promise.all(work.map(item => assert.rejects(item, { code: 'AUDIT_ADMISSION_CANCELLED' })));
+      f.sync.pid = 0; f.sync.pm2_env.status = 'stopped';
+    } });
+  await assert.rejects(run, f.expectedReplayFailure);
+  assert.equal(f.source.pm2_env.status, 'stopped'); assert.equal(f.sync.pm2_env.status, 'stopped');
+  assert.deepEqual(advances, []); assert.equal(f.events[0], 'observe:stopped');
+  assert.ok(f.events.indexOf('start') < f.events.indexOf('stop'));
+  assert.equal(f.events.at(-1), 'observe:stopped');
+  await assert.rejects(fs.readFile(path.join(f.heavyRoot, 'work.lock')), { code: 'ENOENT' });
+  assert.equal(await withDriverAuditHeavyWork({ root: f.heavyRoot, owner: 'sync', pollMs: 5 }, async () => 'released'), 'released');
+});
+
+test('a partially failed sync start is stopped inside the held lease', async t => {
+  assert.equal(typeof qualification.qualifyDriverAuditSourceWhileHeld, 'function');
+  const f = await heldQualificationFixture(t); let stopped = 0;
+  await assert.rejects(qualification.qualifyDriverAuditSourceWhileHeld({ ...f.options,
+    async startSync() { await f.owned(); f.sync.pid = process.pid; f.sync.pm2_env.status = 'online'; throw Error('start interrupted'); },
+    async stopSync() { await f.owned(); stopped++; f.sync.pid = 0; f.sync.pm2_env.status = 'stopped'; },
+  }), /start interrupted/);
+  assert.equal(stopped, 1); assert.equal(f.events.at(-1), 'observe:stopped');
+  await assert.rejects(fs.readFile(path.join(f.heavyRoot, 'work.lock')), { code: 'ENOENT' });
+});
+
+test('cancellation during sync start stops the real lifecycle before releasing admission', async t => {
+  const f = await heldQualificationFixture(t), controller = new AbortController(); let stopped = 0;
+  await assert.rejects(qualification.qualifyDriverAuditSourceWhileHeld({ ...f.options, signal: controller.signal,
+    async startSync() {
+      await f.owned(); f.sync.pid = process.pid; f.sync.pm2_env.status = 'online';
+      controller.abort(Object.assign(Error('qualification cancelled during startup'), { code: 'interrupted' }));
+    },
+    async stopSync() { await f.owned(); stopped++; f.sync.pid = 0; f.sync.pm2_env.status = 'stopped'; },
+  }), { code: 'interrupted' });
+  assert.equal(stopped, 1); assert.equal(f.events.at(-1), 'observe:stopped');
+  await assert.rejects(fs.readFile(path.join(f.heavyRoot, 'work.lock')), { code: 'ENOENT' });
+});
+
+test('real repeated process interrupts cannot release held admission before sync stops', async t => {
+  const f = await heldQualificationFixture(t);
+  const moduleFile = fileURLToPath(new URL('../scripts/driverAuditSourceQualify.js', import.meta.url));
+  const script = `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs/promises';
+    import {qualifyDriverAuditSourceWhileHeld} from ${JSON.stringify(moduleFile)};
+    const sync=${JSON.stringify(f.sync)}, source=${JSON.stringify(f.source)};
+    const api={name:'matter-delivery-api',pid:process.pid,pm2_env:{status:'online'}};
+    const marker=()=>{}; process.on('SIGHUP',marker);
+    const before=Object.fromEntries(['SIGTERM','SIGINT','SIGHUP'].map(name=>[name,process.listenerCount(name)]));
+    const owned=async()=>assert.equal(await fs.readFile(${JSON.stringify(path.join(f.heavyRoot, 'work.lock'))},'utf8'),String(process.pid));
+    let stops=0;
+    await assert.rejects(qualifyDriverAuditSourceWhileHeld({
+      config:{root:${JSON.stringify(f.root)}},commit:'a'.repeat(40),fixtureSha256:'c'.repeat(64),
+      supervisor:async()=>structuredClone([api,source,sync]),
+      async startSync(){
+        await owned(); sync.pid=process.pid; sync.pm2_env.status='online';
+        process.kill(process.pid,'SIGTERM'); await new Promise(resolve=>setTimeout(resolve,20));
+      },
+      async stopSync(){
+        await owned();
+        if(++stops===1){
+          for(const name of ['SIGTERM','SIGTERM','SIGINT','SIGHUP'])process.kill(process.pid,name);
+          await new Promise(resolve=>setTimeout(resolve,20));
+          throw Error('temporary pause failure');
+        }
+        sync.pid=0; sync.pm2_env.status='stopped';
+      }
+    }),{code:'interrupted'});
+    assert.equal(stops,2);
+    await assert.rejects(fs.readFile(${JSON.stringify(path.join(f.heavyRoot, 'work.lock'))}),{code:'ENOENT'});
+    for(const name of ['SIGTERM','SIGINT','SIGHUP'])assert.equal(process.listenerCount(name),before[name]);
+    process.off('SIGHUP',marker);
+    console.log('held-interrupt-cleanup-verified');
+  `;
+  const env = { ...process.env }; delete env.NODE_TEST_CONTEXT;
+  const { stdout } = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', script],
+    { timeout: 10000, maxBuffer: 1024 * 1024, env });
+  assert.match(stdout, /held-interrupt-cleanup-verified/);
+});
+
+test('a pause failure retains real admission until the actual worker is observed stopped', async t => {
+  assert.equal(typeof qualification.qualifyDriverAuditSourceWhileHeld, 'function');
+  const f = await heldQualificationFixture(t); let stops = 0;
+  await assert.rejects(qualification.qualifyDriverAuditSourceWhileHeld({ ...f.options,
+    async startSync() { await f.owned(); f.sync.pid = process.pid; f.sync.pm2_env.status = 'online'; },
+    async stopSync() {
+      await f.owned();
+      if (++stops === 1) throw Error('transient supervisor pause failure');
+      f.sync.pid = 0; f.sync.pm2_env.status = 'stopped';
+    },
+  }), f.expectedReplayFailure);
+  assert.equal(stops, 2); assert.equal(f.events.at(-1), 'observe:stopped');
+  await assert.rejects(fs.readFile(path.join(f.heavyRoot, 'work.lock')), { code: 'ENOENT' });
+});
+
+test('a stopped worker with failed durable pause completion retains admission until callback succeeds', async t => {
+  const f = await heldQualificationFixture(t); let stops = 0;
+  await assert.rejects(qualification.qualifyDriverAuditSourceWhileHeld({ ...f.options,
+    async startSync() { await f.owned(); f.sync.pid = process.pid; f.sync.pm2_env.status = 'online'; },
+    async stopSync() {
+      await f.owned(); f.sync.pid = 0; f.sync.pm2_env.status = 'stopped';
+      if (++stops === 1) throw Error('durable process save failed after pause');
+    },
+  }), f.expectedReplayFailure);
+  assert.equal(stops, 2); assert.equal(f.events.at(-1), 'observe:stopped');
+  await assert.rejects(fs.readFile(path.join(f.heavyRoot, 'work.lock')), { code: 'ENOENT' });
+});
+
+test('held qualification refuses an already-running source or sync before invoking lifecycle callbacks', async t => {
+  assert.equal(typeof qualification.qualifyDriverAuditSourceWhileHeld, 'function');
+  for (const name of ['source', 'sync']) {
+    const f = await heldQualificationFixture(t); f[name].pm2_env.status = 'online'; f[name].pid = process.pid;
+    await assert.rejects(qualification.qualifyDriverAuditSourceWhileHeld({ ...f.options,
+      startSync: async () => assert.fail('must preserve the existing worker'),
+      stopSync: async () => assert.fail('must preserve the existing worker'),
+    }), /Stop the source worker|stopped.*sync|sync.*stopped/i);
+  }
+});
+
+test('ordinary qualification rejects fabricated or serialized held-lease tokens', async () => {
+  for (const heldQualificationLease of [{}, { root: '/private/driver-audit-heavy-work' }, true, 'owned', JSON.parse('{"active":true}')]) {
+    await assert.rejects(qualification.qualifyDriverAuditSource({ config: { root: '/private/driver-audit-source/example' },
+      heldQualificationLease, fixtureSha256: 'c'.repeat(64), supervisor: async () => assert.fail('forged lease reached workers') }), /owned.*lease|lease.*owned/i);
+  }
+});
 
 test('qualification stages only the verified saved input and declared archive bytes', async t => {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'audit-qualification-')));

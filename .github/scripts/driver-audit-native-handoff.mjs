@@ -204,7 +204,7 @@ async function main() {
   }
   if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'stage-lineage', 'qualify-source',
     'diagnose-roots', 'disable-pruning', 'prepare-native-settings', 'swap-builder-held', 'verify-native-parity',
-    'activate-native', 'start-native', 'stage-native-proofs'].includes(operation)) {
+    'activate-native', 'start-native', 'stage-native-proofs', 'export-native-controls'].includes(operation)) {
     phase = 'native-' + operation;
     const encoded = process.env.NATIVE_IMPORT_CODE;
     if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
@@ -220,6 +220,13 @@ async function main() {
     catch (error) { if (error.code !== 'EEXIST') throw error; }
     if (hash(await readPrivateDriverAuditSource(filename, 256 * 1024)) !== hash(code)) throw Error('Reviewed import operator hash differs');
     const operator = await import(pathToFileURL(filename).href);
+    let recipientPublicKey;
+    if (['diagnose-roots', 'export-native-controls', 'verify-native-parity'].includes(operation) && process.env.NATIVE_TRANSFER_PLAN_B64) {
+      const encodedPlan = process.env.NATIVE_TRANSFER_PLAN_B64;
+      if (encodedPlan.length > 24576 || !/^[A-Za-z0-9+/]+=*$/.test(encodedPlan)) throw Error('Bounded public diagnostic recipient required');
+      const { validateDriverAuditTransferPlan } = await load('services/driverAuditTransferSession.js');
+      recipientPublicKey = validateDriverAuditTransferPlan(JSON.parse(Buffer.from(encodedPlan, 'base64').toString('utf8'))).recipientPublicKey;
+    }
     const common = { operation, appRoot, expectedSha: expected, sessionId: process.env.NATIVE_TRANSFER_SESSION_ID,
       profileSha256: process.env.NATIVE_IMPORT_PROFILE_SHA256 || undefined,
       templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256 || undefined };
@@ -230,11 +237,11 @@ async function main() {
       console.log(JSON.stringify(await operator.runDriverAuditNativeBuilder(common))); return;
     }
     if (operation === 'verify-native-parity') {
-      const result = await operator.runDriverAuditNativeParity({ ...common, closureProofSha256: common.templateSha256 });
+      const result = await operator.runDriverAuditNativeParity({ ...common, closureProofSha256: common.templateSha256, recipientPublicKey });
       const names = ['version', 'status', 'verified', 'sessionId', 'profileSha256', 'closureProofSha256', 'collectorRootsSha256',
         'sourceRevision', 'counts', 'fingerprints', 'originSha256', 'bootstrapSha256', 'semanticCoverage', 'sourceGaps',
         'completeByteParity', 'archive', 'resultsEqual', 'gpsEqual', 'photosEqual', 'reviewHistoryEqual',
-        'freshOriginalRecordComparisons', 'authorityChanged', 'activationPending', 'receiptSha256'];
+        'freshOriginalRecordComparisons', 'authorityChanged', 'activationPending', 'receiptSha256', 'sealedReceipt'];
       console.log(JSON.stringify(Object.fromEntries(names.filter(name => result[name] !== undefined).map(name => [name, result[name]]))));
       return;
     }
@@ -244,14 +251,11 @@ async function main() {
     if (operation === 'stage-native-proofs') {
       console.log(JSON.stringify(await operator.runDriverAuditNativeProofs(common))); return;
     }
-    const { runDriverAuditNativeImport } = operator;
-    let recipientPublicKey;
-    if (operation === 'diagnose-roots' && process.env.NATIVE_TRANSFER_PLAN_B64) {
-      const encodedPlan = process.env.NATIVE_TRANSFER_PLAN_B64;
-      if (encodedPlan.length > 24576 || !/^[A-Za-z0-9+/]+=*$/.test(encodedPlan)) throw Error('Bounded public diagnostic recipient required');
-      const { validateDriverAuditTransferPlan } = await load('services/driverAuditTransferSession.js');
-      recipientPublicKey = validateDriverAuditTransferPlan(JSON.parse(Buffer.from(encodedPlan, 'base64').toString('utf8'))).recipientPublicKey;
+    if (operation === 'export-native-controls') {
+      console.log(JSON.stringify(await operator.runDriverAuditNativeControlExport({ ...common, recipientPublicKey,
+        qualificationFixtureSha256: process.env.NATIVE_QUALIFICATION_FIXTURE_SHA256 || undefined }))); return;
     }
+    const { runDriverAuditNativeImport } = operator;
     const allPages = operation === 'diagnose-roots' && process.env.NATIVE_DIAGNOSTIC_PAGE === 'all';
     const argumentsFor = diagnosticPage => ({ operation, appRoot, expectedSha: expected,
       sessionId: process.env.NATIVE_TRANSFER_SESSION_ID, templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256 || undefined,
