@@ -42,6 +42,7 @@ const technicalNames = new Set([
 export function isDriverAuditTechnicalKey(key) {
   if (typeof key !== 'string') return false;
   return technicalNames.has(key.split(':').at(-1))
+    || /^(?:native-progress:delivery|native-progress:gps:[a-zA-Z0-9_-]{1,60})$/.test(key)
     || /(?:^|:)preview-map-loads:\d{8}:\d{4}-(?:0[1-9]|1[0-2])$/.test(key)
     || /(?:^|:)road-display-requests:\d{4}-(?:0[1-9]|1[0-2])$/.test(key);
 }

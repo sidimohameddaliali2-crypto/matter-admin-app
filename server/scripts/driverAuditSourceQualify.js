@@ -150,6 +150,7 @@ export function runDriverAuditQualificationChild({ mode, inputFile, executable, 
       root, path.join(serverRoot, 'package.json'), path.join(serverRoot, 'services', 'driverAuditSource.js'),
       path.join(serverRoot, 'services', 'driverAuditFixedHostBudget.js'),
       path.join(serverRoot, 'services', 'driverAuditReadCache.js'),
+      path.join(serverRoot, 'services', 'driverAuditPollProgress.js'),
       path.join(serverRoot, 'vendor', 'driver-audits', 'integration', 'hosted', 'worker-lock.mjs'),
       ...(archiveCacheDirectory ? [archiveCacheDirectory] : []), ...readRoots,
     ].map(file => '--allow-fs-read=' + file)],
@@ -491,7 +492,8 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
         await fs.mkdir(root, { mode: 0o700 });
         const inputFile = path.join(root, 'input.private.json');
         await writeDriverAuditSourceState(inputFile, { root, ...saved, runtimeRoot: config.runtimeRoot, entrypoint,
-          failPublication, archiveCacheDirectory, nativeReplay: native });
+          failPublication, archiveCacheDirectory, nativeReplay: native,
+          nativePollProgress: native && config.runtime.files.some(file => file.path === 'source/integration/cloud/native-poll-progress.mjs') });
         const child = await measureChild({ phase, retained, measure, signal, specification: { mode: 'source', root, inputFile,
           executable: process.execPath, args: ['--max-old-space-size=3072'], readRoots: [directory, config.runtimeRoot],
           timeoutMs: entrypoint.maxDurationSeconds * 1000, archiveCacheDirectory } });
@@ -622,6 +624,13 @@ export async function verifyDriverAuditSourceHostQualification({ config, commit,
       && receipt.measurements[phase].peakApiRssBytes > 0 && receipt.measurements[phase].peakSyncRssBytes > 0
       && receipt.measurements[phase].minimumAvailableBytes >= memorySafetyReserve),
   'Host qualification is incomplete or the reviewed runtime changed.');
+  if (config.environment?.DRIVER_AUDIT_DATA_STORE === 'mongo'
+      && config.runtime?.files?.some(file => file.path === 'source/integration/cloud/native-poll-progress.mjs')) {
+    requireQualification([receipt.source, receipt.sourceAfterBuilder].every(row => row.nativeNoChangeDuplicateFree === true
+      && row.outputObjects === 0) && receipt.source.failureKind === 'progress'
+      && receipt.sourceAfterBuilder.failureKind === null,
+    'Native polling progress needs exact original replay, zero new evidence objects and a verified interrupted retry.');
+  }
   requireSharedArchiveCache(config, builder, receipt);
   return receipt;
 }

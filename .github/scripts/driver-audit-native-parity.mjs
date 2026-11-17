@@ -17,6 +17,18 @@ const dataFiles = ['documents', 'receipts', 'historical', 'objects', 'reviewCont
 const encode = values => values.map(JSON.stringify).join('\n') + '\n';
 const canonicalInventory = values => [...values].sort((a, b) => a.key.localeCompare(b.key)).map(({ key, bytes }) => ({ key, bytes }));
 const execute = promisify(execFile);
+export const driverAuditArchiveImplementationFiles = Object.freeze(['services/driverAuditMongoArchive.js',
+  'services/driverAuditSpacesArchive.js', 'services/driverAuditNativeObjectStore.js']);
+export function driverAuditArchiveImplementationSha256(byteMap) {
+  check(object(byteMap) && Object.keys(byteMap).length === driverAuditArchiveImplementationFiles.length,
+    'All native archive implementation files must be pinned');
+  const identities = driverAuditArchiveImplementationFiles.map(file => {
+    check(Buffer.isBuffer(byteMap[file]), 'An exact native archive implementation file is required');
+    const sha256 = hash(byteMap[file]); check(digest(sha256), 'Invalid native archive implementation identity');
+    return { file, sha256 };
+  });
+  return hash(JSON.stringify(identities));
+}
 
 function validatePublicRecipient(value) {
   check(typeof value === 'string' && value.length <= 8192 && !value.includes('PRIVATE KEY')
@@ -85,27 +97,47 @@ function inventory(values) {
 
 // Only file references and referenced chunk IDs/sizes are read. Document-text
 // chunks outside this immutable object union do not invalidate its attestation.
-export async function captureNativeDriverAuditArchiveMetadata({ db, objects, targetIdentitySha256 }) {
+export async function captureNativeDriverAuditArchiveMetadata({ db, objects, targetIdentitySha256,
+  objectStoreIdentitySha256, validateExternalReference }) {
   check(digest(targetIdentitySha256), 'The exact native database identity is required');
+  check(objectStoreIdentitySha256 === undefined || digest(objectStoreIdentitySha256), 'The configured external archive identity differs');
+  const binding = await db.collection('driverAuditNativeControl').findOne({ _id: 'archive-object-store' });
+  check(!binding || Object.keys(binding).sort().join(',') === '_id,identitySha256,provider,version'
+    && binding.version === 1 && binding.provider === 'spaces' && digest(binding.identitySha256)
+    && binding.identitySha256 === objectStoreIdentitySha256, 'Native external archive store identity differs');
+  const store = binding ? { _id: 'archive-object-store', version: 1, provider: 'spaces', identitySha256: binding.identitySha256 } : null;
   const expected = inventory(objects), files = [], chunkSizes = new Map();
+  let externalObjects = 0;
   for (let start = 0; start < expected.rows.length; start += 500) {
     const batch = expected.rows.slice(start, start + 500), found = await db.collection('driverAuditNativeFiles')
-      .find({ _id: { $in: batch.map(row => row.key) } }, { projection: { _id: 1, reference: 1 } }).toArray();
+      .find({ _id: { $in: batch.map(row => row.key) } }).toArray();
     const mapped = new Map(found.map(row => [row._id, row]));
     check(mapped.size === batch.length && found.length === batch.length, 'A required native archive file is absent');
     for (const row of batch) {
-      const ref = mapped.get(row.key)?.reference;
-      check(ref?.version === 1 && ref.sha256 === row.key.slice(0, 64) && ref.size === row.bytes
+      const saved = mapped.get(row.key), external = Object.hasOwn(saved, 'externalReference');
+      check(Object.keys(saved).sort().join(',') === (external ? '_id,externalReference' : '_id,reference'),
+        'Native archive file metadata is mixed or contains unknown fields');
+      if (external) {
+        check(store && typeof validateExternalReference === 'function', 'A bound external archive validator is required');
+        const reference = validateExternalReference(saved.externalReference,
+          { identitySha256: store.identitySha256, key: row.key, bytes: row.bytes });
+        files.push([row.key, { externalReference: reference }]); externalObjects++; continue;
+      }
+      const ref = saved.reference;
+      check(object(ref) && Object.keys(ref).sort().join(',') === 'chunks,sha256,size,version'
+        && ref.version === 1 && ref.sha256 === row.key.slice(0, 64) && ref.size === row.bytes
         && Array.isArray(ref.chunks) && ref.chunks.length > 0 && ref.chunks.length <= 16,
       'A native archive file reference differs from the original');
       let size = 0;
       for (const part of ref.chunks) {
-        check(digest(part?.sha256) && integer(part.size) && part.size > 0 && part.size <= 4 * 1024 * 1024
+        check(object(part) && Object.keys(part).sort().join(',') === 'sha256,size'
+          && digest(part.sha256) && integer(part.size) && part.size > 0 && part.size <= 4 * 1024 * 1024
           && (!chunkSizes.has(part.sha256) || chunkSizes.get(part.sha256) === part.size), 'A native archive chunk reference differs');
         chunkSizes.set(part.sha256, part.size); size += part.size;
       }
       check(size === row.bytes, 'A native archive reference has incomplete byte coverage');
-      files.push([row.key, ref]);
+      files.push([row.key, { reference: { version: 1, sha256: ref.sha256, size: ref.size,
+        chunks: ref.chunks.map(part => ({ sha256: part.sha256, size: part.size })) } }]);
     }
   }
   const chunks = [...chunkSizes].sort(([a], [b]) => a.localeCompare(b));
@@ -121,8 +153,10 @@ export async function captureNativeDriverAuditArchiveMetadata({ db, objects, tar
   check(integer(total) && total >= expected.objects, 'Native archive file coverage differs');
   return { inventorySha256: expected.inventorySha256, objects: expected.objects, bytes: expected.bytes,
     targetDatabase: db.databaseName, targetIdentitySha256,
-    filesSha256, chunksSha256, metadataSha256: hash(JSON.stringify([targetIdentitySha256, filesSha256, chunksSha256])),
-    referencedChunks: chunks.length, protectedStagingExtras: total - expected.objects };
+    metadataVersion: 2, filesSha256, chunksSha256,
+    objectStoreIdentitySha256: objectStoreIdentitySha256 ?? null, externalStoreBindingSha256: hash(JSON.stringify(store)),
+    metadataSha256: hash(JSON.stringify([2, targetIdentitySha256, filesSha256, chunksSha256, store, objectStoreIdentitySha256 ?? null])),
+    referencedChunks: chunks.length, externalObjects, protectedStagingExtras: total - expected.objects };
 }
 
 function validateClosure({ closure, profile, expected }) {
@@ -422,7 +456,9 @@ export async function verifyDriverAuditNativeParity(args) {
       ['driverAuditNativeHistorical', counts.historical], ['driverAuditNativeReviewContexts', counts.reviewContexts], ['driverAuditNativeReviewFiles', counts.reviewFiles]]) {
       check(await db.collection(collection).countDocuments() === count, 'Native original-record coverage differs');
     }
-    phase = 'archive-metadata'; const before = await captureNativeDriverAuditArchiveMetadata({ db, objects, targetIdentitySha256 });
+    const captureMetadata = () => captureNativeDriverAuditArchiveMetadata({ db, objects, targetIdentitySha256,
+      objectStoreIdentitySha256: args.objectStoreIdentitySha256, validateExternalReference: args.validateExternalReference });
+    phase = 'archive-metadata'; const before = await captureMetadata();
     const now = (args.now || Date.now)();
     let attestation = args.priorArchiveAttestation || await args.readArchiveAttestation?.(before);
     let mode = 'reused-full-byte-attestation', objectBytesReadFresh = 0;
@@ -449,7 +485,7 @@ export async function verifyDriverAuditNativeParity(args) {
         metadataAfterSha256: before.metadataSha256, completedAt: new Date((args.now || Date.now)()).toISOString() };
     }
     phase = 'inline-originals'; const inlineReferences = await verifyInline(archive, closure.inlineReferences, expectedMap);
-    phase = 'final-stability'; const after = await captureNativeDriverAuditArchiveMetadata({ db, objects, targetIdentitySha256 });
+    phase = 'final-stability'; const after = await captureMetadata();
     check(same(before, after), 'Immutable native archive metadata changed during verification');
     check(hash(JSON.stringify(await db.collection('driverAuditNativeControl').findOne({ _id: 'authority' }))) === authoritySha256,
       'Native authority or staged state changed during verification');
@@ -509,6 +545,8 @@ export async function runDriverAuditNativeParity({ sessionId, profileSha256, clo
       'The exact reviewed Linux checkout is required');
       await exec('git', ['diff', '--quiet', expectedSha, '--', 'server/services/driverAuditSource.js',
         'server/services/driverAuditLiveImport.js', 'server/services/driverAuditOriginalSourceLineage.js', 'server/services/driverAuditMongoArchive.js',
+        'server/services/driverAuditSpacesArchive.js', 'server/services/driverAuditNativeObjectStore.js', 'server/loadEnv.js',
+        'server/vendor/driver-audits/integration/hosted/worker-lock.mjs',
         'server/services/driverAuditMongoText.js', 'server/services/driverAuditTechnicalState.js',
         'server/services/driverAuditTransferCodec.js',
         'server/scripts/driverAuditMongoMigrate.js'], { cwd: appRoot, timeout: 5000, maxBuffer: 4096 });
@@ -578,15 +616,19 @@ export async function runDriverAuditNativeParity({ sessionId, profileSha256, clo
     const { readDriverAuditImportRows, collectDriverAuditReceiptRoots, createDriverAuditReceiptSelection,
       isDriverAuditTechnicalKey } = await load('services/driverAuditLiveImport.js');
     const { createDriverAuditMongoArchive } = await load('services/driverAuditMongoArchive.js');
+    const { createDriverAuditNativeObjectStore } = await load('services/driverAuditNativeObjectStore.js');
+    const { validateDriverAuditSpacesArchiveReference } = await load('services/driverAuditSpacesArchive.js');
     const { createDriverAuditMongoTextReader } = await load('services/driverAuditMongoText.js');
     const { createDriverAuditTechnicalState } = await load('services/driverAuditTechnicalState.js');
-    const archive = createDriverAuditMongoArchive({ db, client: connection.getClient(), capacityBytes: profile.capacityBytes });
+    const objectStore = await createDriverAuditNativeObjectStore({ env });
+    const archive = createDriverAuditMongoArchive({ db, client: connection.getClient(), capacityBytes: profile.capacityBytes, objectStore });
     const technical = createDriverAuditTechnicalState({ db, objects: archive });
     const readPinnedJson = async ref => { const bytes = await read(path.join(folder, ref.file), 1024 * 1024);
       check(hash(bytes) === ref.sha256, 'Pinned original backup proof differs'); return JSON.parse(bytes); };
     const implementationIdentities = {
       verifierSha256: hash(await fs.readFile(fileURLToPath(import.meta.url))),
-      archiveSha256: hash(await fs.readFile(path.join(server, 'services/driverAuditMongoArchive.js'))),
+      archiveSha256: driverAuditArchiveImplementationSha256(Object.fromEntries(await Promise.all(
+        driverAuditArchiveImplementationFiles.map(async file => [file, await fs.readFile(path.join(server, file))])))),
       migrationCliSha256: hash(await fs.readFile(path.join(server, 'scripts/driverAuditMongoMigrate.js'))),
     };
     const targetIdentitySha256 = nativeDriverAuditTargetIdentity(env.MONGODB_URI, db.databaseName);
@@ -594,7 +636,9 @@ export async function runDriverAuditNativeParity({ sessionId, profileSha256, clo
     let priorAttestationBytes;
     phase = 'complete-parity';
     const result = await verifyDriverAuditNativeParity({ db, archive, profileBytes, profileSha256, closureProofBytes, closureProofSha256,
-      sessionId, implementationIdentities, targetIdentitySha256, readRows: ref => readDriverAuditImportRows(folder, ref), readPinnedJson,
+      sessionId, implementationIdentities, targetIdentitySha256, objectStoreIdentitySha256: objectStore?.identitySha256,
+      validateExternalReference: validateDriverAuditSpacesArchiveReference,
+      readRows: ref => readDriverAuditImportRows(folder, ref), readPinnedJson,
       readText: createDriverAuditMongoTextReader(archive), readTechnical: reference => technical.read(reference), isTechnicalKey: isDriverAuditTechnicalKey,
       createReceiptSelection: createDriverAuditReceiptSelection,
       collectCensus: async documents => {

@@ -16,6 +16,7 @@ import { getHeapStatistics } from 'node:v8';
 import { DRIVER_AUDIT_SOURCE_CACHE_ENV, driverAuditSourceHash as sha256, invokeDriverAuditSourceHandler } from '../services/driverAuditSource.js';
 import { createDriverAuditFixedHostBudgetFactory } from '../services/driverAuditFixedHostBudget.js';
 import { createDriverAuditReadCache } from '../services/driverAuditReadCache.js';
+import { createDriverAuditPollProgress, validateDriverAuditPollProgressWrite } from '../services/driverAuditPollProgress.js';
 
 const MiB = 1024 * 1024;
 const OriginalDate = Date;
@@ -79,7 +80,7 @@ function createLocalTransport(roots, fallback) {
   };
 }
 
-function createReplayState(state, day, time, capture, { nativeReplay }) {
+function createReplayState(state, day, time, capture, { nativeReplay, nativePollProgress }) {
   const prior = state.get('collector-state');
   const publication = JSON.parse(prior.body);
   const recentDays = Array.from({ length: 3 }, (_, offset) =>
@@ -89,7 +90,12 @@ function createReplayState(state, day, time, capture, { nativeReplay }) {
     pending: [{ day, runId: capture.runId, final: false, fresh: false, sourceStarted: true, attempts: 0, nextAttempt: 0 }],
     lastDay: day, sourceAttempts: { ...publication.schedule?.sourceAttempts, ...attempts },
     lastAttempts: { ...publication.schedule?.lastAttempts, ...attempts } };
-  state.set('collector-state', { ...prior, body: JSON.stringify(publication) });
+  if (nativePollProgress) {
+    state.set('native-progress:delivery', { revision: 0, body: JSON.stringify({ version: 1,
+      kind: 'native-delivery-poll-progress', schedule: publication.schedule,
+      photoCursor: publication.photoCursor ?? 0, photoSourceHalt: publication.photoSourceHalt ?? null,
+      lastPoll: null, lastSuccessfulPollAt: null, lastDataChangeAt: null }) });
+  } else state.set('collector-state', { ...prior, body: JSON.stringify(publication) });
   if (!nativeReplay) {
     const budget = state.get('worker-budget');
     const document = JSON.parse(budget.body);
@@ -102,19 +108,25 @@ function createReplayState(state, day, time, capture, { nativeReplay }) {
   return publication;
 }
 
-function createReplayTransport(state, time, readObject, { failPublication, reject, nativeReplay }) {
+function createReplayTransport(state, time, readObject, { failPublication, reject, nativeReplay, nativePollProgress }) {
   const writes = new Map();
   const reservations = new Map();
   const archiveReads = { requests: 0, bytes: 0 };
   let lease = null;
   let failedOnce = false;
+  let failureKind = null;
   const store = key => state.get(key) ?? { revision: 0, body: null };
   const ownsLease = args => lease && lease.owner === args.p_owner && lease.token === args.p_token;
   const commit = (key, args) => {
     const revision = store(key).revision;
     assert.equal(args.p_expected, revision, 'Fixture state revision changed.');
-    if (failPublication && !failedOnce && key === 'collector-state' && JSON.parse(args.p_event_text).kind === 'report-publication') {
+    const event = JSON.parse(args.p_event_text);
+    const failurePoint = nativePollProgress
+      ? key.startsWith('native-progress:') && event.phase === 'settled'
+      : key === 'collector-state' && event.kind === 'report-publication';
+    if (failPublication && !failedOnce && failurePoint) {
       failedOnce = true;
+      failureKind = nativePollProgress ? 'progress' : 'publication';
       throw new Error('Isolated publication failure.');
     }
     state.set(key, { revision: revision + 1, body: args.p_body_text });
@@ -127,7 +139,13 @@ function createReplayTransport(state, time, readObject, { failPublication, rejec
         const { revision, body } = store(args.p_key);
         return { revision, body_text: body };
       }
-      case 'matter_hosted_state_cas': return commit(args.p_key, args);
+      case 'matter_hosted_state_cas':
+        assert(!args.p_key.startsWith('native-progress:'), 'Progress requires its collector lease.');
+        return commit(args.p_key, args);
+      case 'matter_hosted_native_progress_cas':
+        validateDriverAuditPollProgressWrite(args);
+        assert(ownsLease(args), 'Fixture collector lease changed.');
+        return commit(args.p_key, args);
       case 'matter_hosted_collector_cas':
       case 'matter_hosted_collector_cas_review':
         assert(ownsLease(args), 'Fixture collector lease changed.');
@@ -166,6 +184,7 @@ function createReplayTransport(state, time, readObject, { failPublication, rejec
   const read = (key, limit) => writes.get(key) ?? readObject(key, limit);
   const nativeBackend = {
     kind: 'mongo', rpc: async (name, args) => rpc(name, args),
+    pollProgress: createDriverAuditPollProgress({ rpc: async (name, args) => rpc(name, args) }),
     createExecutionBudget: createDriverAuditFixedHostBudgetFactory(),
     archive: {
       async assertPrivate() { return { public: false }; },
@@ -210,12 +229,15 @@ function createReplayTransport(state, time, readObject, { failPublication, rejec
     return reject();
   };
   return { read, writes, store, archiveReads, nativeBackend, leaseReleased: () => lease === null, failedOnce: () => failedOnce,
+    failureKind: () => failureKind,
     reservationsReleased: () => [...reservations.values()].every(item => item.released) };
 }
 
 async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsRoot, expected, failPublication,
-  archiveCacheDirectory, nativeReplay = false }) {
+  archiveCacheDirectory, nativeReplay = false, nativePollProgress = false }) {
   assert.equal(typeof nativeReplay, 'boolean');
+  assert.equal(typeof nativePollProgress, 'boolean');
+  assert(!nativePollProgress || nativeReplay, 'Bounded progress is a native capability.');
   const state = await readState(stateFile);
   const executionLedgers = () => [...state].filter(([key]) => /^(?:worker|reader)-budget(?:-|$)/.test(key));
   const preservedExecutionLedgers = structuredClone(executionLedgers());
@@ -226,7 +248,8 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
   const readObject = createLocalTransport([[objectsRoot, false]]);
   const originalCapture = JSON.parse(await readObject(capture.ref.key));
   assert.equal(originalCapture.snapshot.rows.length, expected.sourceRows);
-  createReplayState(state, day, time, capture, { nativeReplay });
+  const originalPublication = structuredClone(state.get('collector-state'));
+  createReplayState(state, day, time, capture, { nativeReplay, nativePollProgress });
   assert(archiveCacheDirectory === undefined || archiveCacheDirectory === path.join(path.dirname(root), 'source-archive-cache'));
   const environment = { ...fakeEnvironment, ...(nativeReplay ? { DRIVER_AUDIT_DATA_STORE: 'mongo' } : {}),
     ...(archiveCacheDirectory === undefined ? {} : { [DRIVER_AUDIT_SOURCE_CACHE_ENV]: archiveCacheDirectory }) };
@@ -236,7 +259,7 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
     static now() { return time; }
   };
   let forbidden = 0;
-  const fixture = createReplayTransport(state, time, readObject, { failPublication, nativeReplay, reject() {
+  const fixture = createReplayTransport(state, time, readObject, { failPublication, nativeReplay, nativePollProgress, reject() {
     forbidden++;
     throw new Error('Request outside saved collector fixture.');
   } });
@@ -259,10 +282,13 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
     assert.deepEqual(publication.head, prior.head);
     assert.equal(fixture.leaseReleased(), true);
     assert.equal(fixture.failedOnce(), true);
-    const pending = publication.schedule.pending.find(item => item.runId === capture.runId);
+    const progress = nativePollProgress ? fixture.store('native-progress:delivery') : null;
+    const recovery = progress?.body ? JSON.parse(progress.body) : publication;
+    const pending = recovery.schedule.pending.find(item => item.runId === capture.runId);
     assert(pending);
     pending.nextAttempt = 0;
-    state.set('collector-state', { ...afterFailure, body: JSON.stringify(publication) });
+    state.set(progress?.body ? 'native-progress:delivery' : 'collector-state',
+      { ...(progress?.body ? progress : afterFailure), body: JSON.stringify(recovery) });
   }
   const result = await invoke();
   firstArchiveReads ??= { ...fixture.archiveReads };
@@ -277,7 +303,9 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
   const duplicate = await invoke();
   assert.equal(duplicate.status, 'not-due');
   assert.deepEqual(fixture.store('collector-state'), published);
-  assert.deepEqual([...fixture.writes.keys()].sort(), expected.writeKeys);
+  assert.deepEqual([...fixture.writes.keys()].sort(), nativePollProgress ? [] : expected.writeKeys);
+  if (nativePollProgress) assert.deepEqual(published, originalPublication,
+    'An identical saved capture must preserve the exact original collector publication.');
 
   const { createCloudRepository } = await load(path.join(runtimeRoot, 'source/integration/cloud/repository.mjs'));
   const { createCloudPublication } = await load(path.join(runtimeRoot, 'source/integration/cloud/publication.mjs'));
@@ -302,7 +330,8 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
     history: current.historyCount, acceptedGrades: expected.acceptedGrades, sourceRows: expected.sourceRows,
     outputObjects: fixture.writes.size, handlerPeakRssBytes, failureRetry: !!failPublication, archiveReads: firstArchiveReads,
     ...(nativeReplay ? { executionAdmission: 'fixed-host-v1', executionLedgersPreserved: true,
-      nativeManagedArchiveCache: true, nativeArchiveCacheEnabled: archiveCacheDirectory !== undefined } : {}) };
+      nativeManagedArchiveCache: true, nativeArchiveCacheEnabled: archiveCacheDirectory !== undefined } : {}),
+    ...(nativePollProgress ? { nativeNoChangeDuplicateFree: true, failureKind: fixture.failureKind() } : {}) };
 }
 
 function archiveFromParent(key, maxBytes) {

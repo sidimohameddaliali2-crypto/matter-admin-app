@@ -92,7 +92,7 @@ async function fixture(t) {
 }
 
 async function controlFixture(t) {
-  const f = await fixture(t), manifest = 'e1650c0a521271976629fafc1ad6d6eb0abf39074b5eeaf909f2d93f929f9d9d';
+  const f = await fixture(t), manifest = '15301337474717828b88997faac92cbc23763b16ed1fc7881fa6bd553696a64b';
   const sourceRoot = path.join(f.server, '.private/driver-audit-source', manifest), fixtureSha256 = 'e'.repeat(64);
   await fs.mkdir(sourceRoot, { recursive: true, mode: 0o700 });
   Object.assign(f.profile, { runtimeRoot: path.join(sourceRoot, 'runtime'), runtimeSha256: manifest });

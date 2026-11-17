@@ -5,21 +5,22 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { createDriverAuditMongoArchive } from './driverAuditMongoArchive.js';
+import { validateDriverAuditSpacesArchiveReference } from './driverAuditSpacesArchive.js';
 
 const migration = await import('../scripts/driverAuditMongoMigrate.js');
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 
-function fixture() {
+function fixture({ external = false } = {}) {
   const contents = new Map(), tables = new Map(), queries = [], originalReads = [];
   const table = name => { if (!tables.has(name)) tables.set(name, []); return tables.get(name); };
   let fullChunkReads = 0;
   const db = { collection(name) { return {
-    find(filter, options) {
+    find(filter, options = {}) {
       queries.push({ name, filter, options });
       const ids = new Set(filter._id.$in), projection = options.projection;
-      assert.equal(projection.bytes, undefined, 'Metadata inspection must not request chunk payloads');
+      assert.equal(projection?.bytes, undefined, 'Metadata inspection must not request chunk payloads');
       return { toArray: async () => table(name).filter(row => ids.has(row._id)).map(row =>
-        Object.fromEntries(Object.keys(projection).filter(key => projection[key] && Object.hasOwn(row, key)).map(key => [key, row[key]]))) };
+        projection ? Object.fromEntries(Object.keys(projection).filter(key => projection[key] && Object.hasOwn(row, key)).map(key => [key, row[key]])) : row) };
     },
     async findOne(query) {
       if (name === 'driverAuditNativeChunks') fullChunkReads++;
@@ -36,7 +37,17 @@ function fixture() {
   const capacityBytes = 1024 * 1024;
   table('driverAuditNativeControl').push({ _id: 'capacity', limitBytes: capacityBytes, usedBytes: 0 });
   const client = { startSession() { return { async withTransaction(work) { return work(); }, async endSession() {} }; } };
-  const archive = createDriverAuditMongoArchive({ db, client, capacityBytes });
+  const objectStoreIdentitySha256 = external ? '7'.repeat(64) : undefined, externalContents = new Map();
+  let externalReads = 0;
+  const objectStore = external ? { identitySha256: objectStoreIdentitySha256,
+    async assertPrivate() { return { public: false, identitySha256: objectStoreIdentitySha256 }; },
+    async readBytes(reference) { externalReads++; validateDriverAuditSpacesArchiveReference(reference, { identitySha256: objectStoreIdentitySha256 });
+      return externalContents.get(reference.key); },
+    async putVerifiedObject(key, bytes) { const reference = { version: 1, provider: 'spaces', identitySha256: objectStoreIdentitySha256,
+      key: 'driver-reports/archive/v1/' + key, size: bytes.length, sha256: hash(bytes) }; externalContents.set(reference.key, Buffer.from(bytes));
+      assert((await this.readBytes(reference)).equals(bytes)); return validateDriverAuditSpacesArchiveReference(reference); },
+  } : undefined;
+  const archive = createDriverAuditMongoArchive({ db, client, capacityBytes, objectStore });
   function original(text, present = true) {
     const bytes = Buffer.from(text), sha256 = hash(bytes), key = sha256 + '.gz'; contents.set(key, bytes);
     if (present) {
@@ -47,8 +58,52 @@ function fixture() {
     return { key, bytes: bytes.length };
   }
   const readOriginal = async row => { originalReads.push(row.key); return contents.get(row.key); };
-  return { db, archive, table, contents, queries, originalReads, original, readOriginal, get fullChunkReads() { return fullChunkReads; } };
+  function externalOriginal(text, alias = false) {
+    const row = original(text, false), reference = { version: 1, provider: 'spaces', identitySha256: objectStoreIdentitySha256,
+      key: alias ? 'photos/fictional/original.jpg' : 'driver-reports/archive/v1/' + row.key, size: row.bytes, sha256: row.key.slice(0, 64),
+      ...(alias ? { kind: 'existing-photo-v1', etag: '"original-etag"', versionId: 'original-version' } : {}) };
+    if (!table('driverAuditNativeControl').some(row => row._id === 'archive-object-store')) table('driverAuditNativeControl')
+      .push({ _id: 'archive-object-store', version: 1, provider: 'spaces', identitySha256: objectStoreIdentitySha256 });
+    externalContents.set(reference.key, contents.get(row.key)); table('driverAuditNativeFiles').push({ _id: row.key, externalReference: reference });
+    return row;
+  }
+  return { db, archive, table, contents, queries, originalReads, original, externalOriginal, externalContents, readOriginal,
+    objectStoreIdentitySha256, get externalReads() { return externalReads; }, get fullChunkReads() { return fullChunkReads; } };
 }
+
+test('hybrid stage accepts exact private and existing-photo references without rereading payloads; full verify reads both', async () => {
+  const f = fixture({ external: true }), rows = [f.original('legacy exact GPS'), f.externalOriginal('private raw original'), f.externalOriginal('existing photograph', true)];
+  const staged = await migration.stageDriverAuditMongoArchiveObjects({ ...f, objectIndex: rows });
+  assert.equal(staged.existingObjects, 3); assert.equal(f.externalReads, 0); assert.equal(f.fullChunkReads, 0);
+  const verified = await migration.verifyDriverAuditMongoArchiveObjects({ archive: f.archive, objectIndex: rows });
+  assert.equal(verified.bytesRead, rows.reduce((sum, row) => sum + row.bytes, 0)); assert.equal(f.externalReads, 2);
+});
+
+test('hybrid stage rejects mixed, unknown or drifting external identities without writes or fallback', async t => {
+  for (const reason of ['mixed', 'unknown-row', 'unknown-ref', 'wrong-key', 'wrong-size', 'identity-drift', 'binding-extra', 'binding-missing', 'unconfigured']) await t.test(reason, async () => {
+    const f = fixture({ external: true }), row = f.externalOriginal('fictional preserved image', true), saved = f.table('driverAuditNativeFiles')[0];
+    if (reason === 'mixed') saved.reference = { version: 1 };
+    if (reason === 'unknown-row') saved.unexpected = true;
+    if (reason === 'unknown-ref') saved.externalReference.unexpected = true;
+    if (reason === 'wrong-key') saved.externalReference.sha256 = '0'.repeat(64);
+    if (reason === 'wrong-size') saved.externalReference.size++;
+    if (reason === 'identity-drift') f.table('driverAuditNativeControl')[1].identitySha256 = '8'.repeat(64);
+    if (reason === 'binding-extra') f.table('driverAuditNativeControl')[1].unexpected = true;
+    if (reason === 'binding-missing') f.table('driverAuditNativeControl').pop();
+    const before = JSON.stringify(f.table('driverAuditNativeFiles'));
+    await assert.rejects(migration.stageDriverAuditMongoArchiveObjects({ ...f, objectIndex: [row],
+      ...(reason === 'unconfigured' ? { objectStoreIdentitySha256: undefined } : {}) }));
+    assert.equal(f.externalReads, 0); assert.deepEqual(f.originalReads, []); assert.equal(JSON.stringify(f.table('driverAuditNativeFiles')), before);
+  });
+});
+
+test('hybrid missing originals use verified external write/readback and corruption fails the full pass', async () => {
+  const f = fixture({ external: true }), row = f.original('new original in private archive', false);
+  assert.equal((await migration.stageDriverAuditMongoArchiveObjects({ ...f, objectIndex: [row] })).importedObjects, 1);
+  assert.equal(f.table('driverAuditNativeChunks').length, 0); assert(f.externalReads > 0);
+  const saved = f.table('driverAuditNativeFiles')[0]; f.externalContents.set(saved.externalReference.key, Buffer.alloc(row.bytes, 'x'));
+  await assert.rejects(migration.verifyDriverAuditMongoArchiveObjects({ archive: f.archive, objectIndex: [row] }), /integrity/);
+});
 
 test('stage reuses immutable archive metadata without rereading existing evidence bytes', async () => {
   assert.equal(typeof migration.stageDriverAuditMongoArchiveObjects, 'function', 'Metadata staging is not implemented');

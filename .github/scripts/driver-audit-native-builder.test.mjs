@@ -18,7 +18,7 @@ import { acquireWorkerLock } from '../../server/vendor/driver-audits/integration
 const implementation = await import('./driver-audit-native-builder.mjs').catch(() => ({}));
 const sha = value => createHash('sha256').update(value).digest('hex'), exec = promisify(execFile);
 const appCommit = 'a'.repeat(40), sessionId = '00000000-0000-4000-8000-000000000008';
-const sourceManifest = 'e1650c0a521271976629fafc1ad6d6eb0abf39074b5eeaf909f2d93f929f9d9d';
+const sourceManifest = '15301337474717828b88997faac92cbc23763b16ed1fc7881fa6bd553696a64b';
 const capacity = 16 * 1024 ** 3, repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 async function fixture(t) {
@@ -89,7 +89,7 @@ async function fixture(t) {
   await fs.writeFile(envFile, '# Keep exact values\nDRIVER_AUDIT_REPLICA_GC_ENABLED=0\n', { mode: 0o600 });
   const entries = [
     { name: 'matter-delivery-api', pm_id: 3, pid: 4242, pm2_env: { status: 'online', pm_cwd: appRoot,
-      pm_exec_path: path.join(server, 'server.js'), pm_uptime: 100 } },
+      pm_exec_path: '/usr/bin/npm', args: ['start', '--prefix', 'server'], pm_uptime: 100 } },
     { name: 'matter-driver-audit-sync', pm_id: 4, pid: 0, pm2_env: { status: 'stopped', pm_cwd: server,
       pm_exec_path: path.join(server, 'scripts/driverAuditSync.js'), args: ['--config', configFile] } },
   ];
@@ -110,9 +110,12 @@ async function fixture(t) {
   const events = {};
   const adapters = { platform: 'linux', builderPins: { from, to },
     env: { MONGODB_URI: uri, DRIVER_AUDIT_REPLICA_GC_ENABLED: '0' },
+    async systemFile(file) { assert.equal(file, '/usr/bin/npm'); return { realpath: '/usr/lib/node_modules/npm/bin/npm-cli.js',
+      isFile: true, uid: 0, mode: 0o100644, bytes: 100, sha256: 'f'.repeat(64) }; },
     async exec(file, argv, options) {
       calls.push({ file, argv, options });
-      if (file === 'git') return { stdout: argv[0] === 'rev-parse' ? appCommit + '\n' : '' };
+      if (file === 'git') return { stdout: argv[0] === 'rev-parse' ? appCommit + '\n'
+        : argv[0] === 'ls-files' ? argv.slice(argv.indexOf('--') + 1).join('\n') + '\n' : '' };
       if (file === 'pm2') {
         if (argv[0] === 'jlist') return { stdout: JSON.stringify(entries) };
         assert.deepEqual(argv, ['save']); saves++; await events.save?.(saves); return { stdout: 'saved' };
@@ -176,6 +179,36 @@ test('the held swap runs the actual host smoke and transition, preserves old byt
   assert(retainedFiles.some(name => name.startsWith('held-builder-plan-')));
   assert(retainedFiles.some(name => name.startsWith('held-builder-receipt-')));
   assert.equal((await f.run()).status, 'builder-already-held'); assert.equal(f.smokes.length, 2);
+});
+
+test('held builder admits the declared NPM launch and tracks its native dependency files', async t => {
+  const f = await fixture(t); assert.equal((await f.run()).status, 'builder-swapped-held');
+  for (const file of ['server/loadEnv.js', 'server/package.json', 'server/services/driverAuditPollProgress.js',
+    'server/services/driverAuditSpacesArchive.js', 'server/services/driverAuditNativeObjectStore.js']) {
+    assert(f.calls.some(row => row.file === 'git' && row.argv[0] === 'ls-files' && row.argv.includes(file)), file);
+    assert(f.calls.some(row => row.file === 'git' && row.argv[0] === 'diff' && row.argv.includes(file)), file);
+  }
+});
+
+test('held builder rejects changed NPM identity and unreviewed dependencies before any swap or PM2 save', async t => {
+  for (const reason of ['args', 'direct-node', 'writable-npm', 'foreign-npm', 'changed-npm', 'untracked', 'dirty-reader']) await t.test(reason, async t => {
+    const f = await fixture(t), systemFile = f.adapters.systemFile, execute = f.adapters.exec;
+    if (reason === 'args') f.entries[0].pm2_env.args = ['start', '--prefix', 'other'];
+    if (reason === 'direct-node') f.entries[0].pm2_env.pm_exec_path = path.join(f.server, 'server.js');
+    if (['writable-npm', 'foreign-npm', 'changed-npm'].includes(reason)) {
+      let calls = 0;
+      f.adapters.systemFile = async file => ({ ...await systemFile(file),
+        ...(reason === 'writable-npm' ? { mode: 0o100666 } : reason === 'foreign-npm' ? { realpath: '/tmp/npm-cli.js' }
+          : ++calls > 1 ? { sha256: 'a'.repeat(64) } : {}) });
+    }
+    if (reason === 'untracked' || reason === 'dirty-reader') f.adapters.exec = async (file, argv, options) => {
+      if (file === 'git' && argv[0] === (reason === 'untracked' ? 'ls-files' : 'diff')
+          && argv.includes('server/services/driverAuditSpacesArchive.js')) throw Error('Fictional unreviewed code');
+      return execute(file, argv, options);
+    };
+    await assert.rejects(f.run()); assert.deepEqual(await fs.readFile(f.configFile), f.beforeConfig);
+    assert.equal(f.saves, 0); await verifyAuditBuilder(f.builder, f.from);
+  });
 });
 
 test('unsafe held-swap admissions fail without switching code or saving PM2', async t => {

@@ -2,6 +2,8 @@
 
 The public repository contains the application, backend adapters and reviewed deployment controls. The complete scheduled generator and builder are private code exports because they contain business identity configuration. They must be recoverable from Sidi's own server and MongoDB; a previous developer's checkout is not a maintenance dependency.
 
+With hybrid storage, MongoDB holds records, reviews and file references; complete immutable code archives and evidence bytes may live in Sidi's configured Spaces bucket. Follow the reference through the app archive adapter and verify its hash. An archive reference, photo URL or candidate lookup alone is not an independent byte backup. Keep original encrypted backups and their verified restore evidence.
+
 Migration acceptance is separate from this code map. Check the actual authority, workers, stage receipts and archive readback before reporting a completed handoff.
 
 ## Find the actual implementation
@@ -36,12 +38,19 @@ The [native handoff workflow](../../.github/workflows/driver-audit-native-handof
 | Operation | Effect |
 | --- | --- |
 | `prepare-transfer`, `receive-transfer` | Reuse verified backup bytes; authenticated immutable writes and private inputs. Downloads use bounded, fully drained ranges with exact length, 206 response and ETag/version checks. A dropped connection retries its bounded range; a process restart uses the same encrypted session and immutable object checks. Original backups remain intact. It does not activate authority. |
+| `inspect-database-config` | Compare fresh, read-only probes of effective, durable and available PM2 launch configuration. Outputs contain no connection strings or credentials. A saved launch snapshot is not proof of the running driver's connection. No environment value or data is changed. |
+| `plan-native-cleanup`, `apply-native-cleanup` | Plan then remove an exact backup-pinned unused migration batch and only its unreferenced chunks. Require absent native authority, no native records/reviews/unknown references, held workers and unchanged serving roots. Original backups and sessions stay intact; this is never a general database cleanup. |
+| `prepare-object-store`, `externalize-native-archive` | Prepare only the hybrid archive location and pinned photo lookup, keeping live authority and workers unchanged. Review a separate target plan before bounded moves of unused staging to verified Spaces objects/aliases; commit metadata/chunk/quota changes together and retain the bounded recovery journal. Do not run this staging-only path after native records or reviews exist. |
 | `stage-source`, `stage-builder` | Prepare complete hash-checked private code. Preserve the active implementation and leave workers held. |
 | `stage-lineage` | Retain an exact original source receipt for an explicitly missing historical temporary working copy; see [the gap policy](historical-source-lineage.md). |
 | `create-profile`, `plan-import`, `stage-import`, `verify-import` | Derive real host paths/census, plan and stage exact data, then verify actual source/native records and report queries. A stage receipt is not complete parity. |
 | `disable-pruning`, `prepare-native-settings` | Preserve exact before bytes; disable disposable replica pruning or prepare the three native backend settings. Preparation does not select the native backend. |
 | `swap-builder-held` | Exact guarded builder transition; keep the worker stopped, retain the old code/config, and require a new profile for the changed census. |
 | `qualify-source` | Run the real held Linux rehearsal with the separately pinned saved fixture; a partial result remains unqualified. |
+
+Full-byte archive attestations bind the complete physical reference metadata, object-store identity and the reviewed Mongo archive, Spaces adapter and factory code. A move, alias ETag/version change or reader implementation change invalidates cached proof. Qualify again using the actual destination; do not reuse the earlier Mongo-only byte pass.
+
+Before dispatching, check actual workflow states. An owner may pause all repository Actions, including automatic deployment and CI. Preserve that pause while preparing changes locally; enable only a reviewed, needed manual operation and disable it again. Merging code while deployment is paused does not establish that the server runs that code.
 | `stage-native-proofs` | Copy only fixed immutable proof JSON aliases from another verified transfer. Preserve the original import session and bind supplemental provenance. It does not certify proof semantics. |
 | `export-native-controls` | Send fixed current private controls and qualification receipts to an explicit RSA recipient for local release assembly. Verify their exact bytes and current identities; the export grants no authority or qualification. |
 | `verify-native-parity` | Complete read-only preservation verification. Reuse a full byte attestation only when the exact inventory, target, references/chunks and reader implementations still match. |

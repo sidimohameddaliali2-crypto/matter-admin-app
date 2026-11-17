@@ -33,6 +33,8 @@ on:
           - diagnose-roots
           - plan-native-cleanup
           - apply-native-cleanup
+          - prepare-object-store
+          - externalize-native-archive
         default: inspect
       expected_deployed_sha:
         description: Exact current application commit on the host
@@ -82,6 +84,7 @@ jobs:
           printf 'code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-handoff.mjs)" >> "$GITHUB_OUTPUT"
           case "$OPERATION" in
             inspect-database-config) operator=database-check ;;
+            prepare-object-store|externalize-native-archive) operator=object-store ;;
             plan-native-cleanup|apply-native-cleanup) operator=cleanup ;;
             disable-pruning|prepare-native-settings) operator=settings ;;
             swap-builder-held) operator=builder ;;

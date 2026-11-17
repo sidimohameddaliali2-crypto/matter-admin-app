@@ -205,7 +205,8 @@ async function main() {
   if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'stage-lineage', 'qualify-source',
     'diagnose-roots', 'disable-pruning', 'prepare-native-settings', 'swap-builder-held', 'verify-native-parity',
     'activate-native', 'start-native', 'stage-native-proofs', 'export-native-controls',
-    'plan-native-cleanup', 'apply-native-cleanup', 'inspect-database-config'].includes(operation)) {
+    'plan-native-cleanup', 'apply-native-cleanup', 'inspect-database-config',
+    'prepare-object-store', 'externalize-native-archive'].includes(operation)) {
     phase = 'native-' + operation;
     const encoded = process.env.NATIVE_IMPORT_CODE;
     if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
@@ -233,6 +234,9 @@ async function main() {
       templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256 || undefined };
     if (operation === 'inspect-database-config') {
       console.log(JSON.stringify(await operator.runDriverAuditNativeDatabaseCheck({ ...common, recipientPublicKey }))); return;
+    }
+    if (['prepare-object-store', 'externalize-native-archive'].includes(operation)) {
+      console.log(JSON.stringify(await operator.runDriverAuditNativeObjectStore(common))); return;
     }
     if (['plan-native-cleanup', 'apply-native-cleanup'].includes(operation)) {
       console.log(JSON.stringify(await operator.runDriverAuditNativeCleanup(common))); return;
