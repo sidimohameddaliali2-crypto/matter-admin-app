@@ -1060,6 +1060,12 @@ test('isolated dependency installation has a bounded secret-free environment and
   assert.equal(install.options.cwd, path.join(prepared.releaseRoot, 'server'));
   assert.equal(install.options.timeout, 300000);
   assert.equal(install.options.env.NODE_OPTIONS, '--max-old-space-size=1024');
+  assert.notEqual(install.options.env.npm_config_userconfig, install.options.env.npm_config_globalconfig);
+  for (const name of ['npm_config_userconfig', 'npm_config_globalconfig']) {
+    const file = install.options.env[name];
+    assert(file.startsWith(path.join(prepared.releaseRoot, 'server/.private/dependencies') + path.sep));
+    assert.equal((await fs.readFile(file)).length, 0); assert.equal((await fs.stat(file)).mode & 0o077, 0);
+  }
   assert(!JSON.stringify(install.options.env).includes(f.secret));
   assert(!Object.keys(install.options.env).some(key => /MONGO|JWT|SUPABASE|SPACES|TOKEN|PASSWORD/.test(key)));
   const dependencies = path.join(prepared.releaseRoot, 'server/node_modules');
@@ -1067,6 +1073,21 @@ test('isolated dependency installation has a bounded secret-free environment and
   assert.equal(prepared.dependencies.mode, 'isolated-npm-ci-v1');
   assert.equal(prepared.dependencies.target, undefined);
   assert(f.commands.find(row => row.args[0] === 'clone').args.includes('--dissociate'));
+});
+
+test('the actual npm CLI loads separate empty private configurations without reading normal account configuration',
+  { skip: !process.env.DRIVER_AUDIT_TEST_NPM_CLI }, async t => {
+  const f = await preparationFixture(t); await f.runPrepare();
+  const install = f.commands.find(row => row.file === '/usr/bin/npm' && row.args[0] === 'ci');
+  const args = [process.env.DRIVER_AUDIT_TEST_NPM_CLI, 'config', 'get'];
+  const execute = promisify(execFile), options = { ...install.options, timeout: 10000 };
+  await assert.rejects(execute(process.execPath, [...args, 'userconfig'], { ...options,
+    env: { ...options.env, npm_config_userconfig: '/dev/null', npm_config_globalconfig: '/dev/null' } }),
+    error => /double-loading config/.test(error.stderr));
+  for (const [key, field] of [['userconfig', 'npm_config_userconfig'], ['globalconfig', 'npm_config_globalconfig']]) {
+    const result = await execute(process.execPath, [...args, key], options);
+    assert.equal(result.stdout.trim(), options.env[field]);
+  }
 });
 
 test('a dependency changed after installation is retained and rejects retry instead of reinstalling over it', async t => {
