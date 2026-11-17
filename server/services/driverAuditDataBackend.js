@@ -17,6 +17,16 @@ export const driverAuditLocalReaderBudget = Object.freeze({
 });
 
 export async function createDriverAuditDataBackend({ db, env = process.env, staging = false }) {
+  if (env.DRIVER_AUDIT_EXECUTION_HOST !== undefined) {
+    if (env.DRIVER_AUDIT_EXECUTION_HOST !== 'sidi') throw Error('Unknown Driver Reports execution host');
+    // Sidi-hosted reporting explicitly keeps the existing Supabase data. An
+    // inherited setting from the parked migration must not open MongoDB.
+    const selected = { ...env, DRIVER_AUDIT_DATA_STORE: 'supabase' };
+    delete selected.MONGODB_URI;
+    delete selected.DRIVER_AUDIT_NATIVE_CAPACITY_BYTES;
+    const { createDriverAuditSupabaseAppBackend } = await import('./driverAuditSupabaseAppBackend.js');
+    return createDriverAuditSupabaseAppBackend({ env: selected });
+  }
   const kind = env.DRIVER_AUDIT_DATA_STORE || 'supabase';
   if (kind === 'supabase') {
     const secret = env.DRIVER_AUDIT_SUPABASE_SECRET || env.MATTER_SUPABASE_SECRET;
@@ -58,7 +68,7 @@ export async function createDriverAuditDataBackend({ db, env = process.env, stag
 // CLI workers use the same MongoDB setting as the app. It stays out of the
 // recovered source environment and private runtime bundle.
 export async function openDriverAuditDataBackend({ env = process.env, staging = false } = {}) {
-  if ((env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase') {
+  if (env.DRIVER_AUDIT_EXECUTION_HOST !== undefined || (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase') {
     return { ...await createDriverAuditDataBackend({ env }), close: async () => {} };
   }
   if (!env.MONGODB_URI) throw Error('The app MongoDB connection is unavailable');

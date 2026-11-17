@@ -121,6 +121,43 @@ async function registeredArchiveCacheDirectory(processes) {
   return directory;
 }
 
+async function heldSyncLifecycle(shell) {
+  const supervisor = async () => JSON.parse(await pm2(['jlist'], shell));
+  const readSync = async () => {
+    const rows = (await supervisor()).filter(row => row.name === 'matter-driver-audit-sync');
+    requireDeployment(rows.length === 1 && Number.isInteger(rows[0].pm_id), 'One managed audit sync is required.');
+    const row = rows[0], env = row.pm2_env;
+    const { driverAuditSyncArchiveCacheDirectory } = await import('./driverAuditSourceQualify.js');
+    driverAuditSyncArchiveCacheDirectory(row);
+    return { row, fingerprint: JSON.stringify({ id: row.pm_id, script: env.pm_exec_path, cwd: env.pm_cwd,
+      args: env.args, interpreter: env.exec_interpreter }) };
+  };
+  const before = await readSync();
+  requireDeployment(before.row.pm2_env.status === 'stopped', 'Held qualification requires a stopped audit sync.');
+  const same = async () => {
+    const current = await readSync();
+    requireDeployment(current.fingerprint === before.fingerprint, 'Managed audit sync registration changed.');
+    return current.row;
+  };
+  return { supervisor,
+    async startSync() {
+      requireDeployment((await same()).pm2_env.status === 'stopped', 'Audit sync changed before held startup.');
+      await pm2(['restart', 'matter-driver-audit-sync'], shell);
+      for (let attempt = 0; attempt < 60; attempt++) {
+        const row = await same();
+        if (row.pm2_env.status === 'online' && Number.isSafeInteger(row.pid) && row.pid > 0) return;
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      throw Error('The held audit sync did not become online.');
+    },
+    async stopSync() {
+      if ((await same()).pm2_env.status !== 'stopped') await pm2(['stop', 'matter-driver-audit-sync'], shell);
+      requireDeployment((await same()).pm2_env.status === 'stopped', 'The held audit sync did not stop.');
+      await pm2(['save'], shell);
+    },
+  };
+}
+
 async function inspectHost(shell, commit) {
   const candidates = [...new Set([shell.DRIVER_AUDIT_SOURCE_NODE, process.execPath,
     '/usr/local/bin/node', '/usr/bin/node', '/opt/node24/bin/node'].filter(Boolean))];
@@ -136,7 +173,7 @@ async function inspectHost(shell, commit) {
     } catch { nodes.push({ executable: candidate, available: false }); }
   }
   const registered = JSON.parse(await pm2(['jlist'], shell)).filter(entry =>
-    ['matter-delivery-api', 'matter-driver-audit-sync', sourceName].includes(entry.name));
+    ['matter-delivery-api', 'matter-driver-reports-api', 'matter-driver-audit-sync', sourceName].includes(entry.name));
   const processes = registered.map(entry => ({
     name: entry.name, status: entry.pm2_env?.status, pid: entry.pid,
     interpreter: entry.pm2_env?.exec_interpreter,
@@ -147,21 +184,24 @@ async function inspectHost(shell, commit) {
   const disk = await fs.statfs(appRoot);
   const memory = await fs.readFile('/proc/meminfo', 'utf8').catch(() => '');
   const available = /^MemAvailable:\s+(\d+) kB$/m.exec(memory);
-  let mongo = { configured: false };
   await import('../loadEnv.js');
+  const host = shell.DRIVER_AUDIT_EXECUTION_HOST || process.env.DRIVER_AUDIT_EXECUTION_HOST;
+  const dataStore = host === 'sidi' ? 'supabase' : shell.DRIVER_AUDIT_DATA_STORE || process.env.DRIVER_AUDIT_DATA_STORE || 'supabase';
+  requireDeployment(['supabase', 'mongo'].includes(dataStore), 'Unknown source reporting store.');
+  let mongo = { required: dataStore === 'mongo', configured: false };
   const uri = shell.MONGODB_URI || process.env.MONGODB_URI;
-  if (uri) {
+  if (dataStore === 'mongo' && uri) {
     const { default: mongoose } = await import('mongoose');
     const connection = mongoose.createConnection(uri, {
       autoCreate: false, autoIndex: false, maxPoolSize: 1, serverSelectionTimeoutMS: 10000,
     });
     try {
       await connection.asPromise();
-      mongo = { configured: true, ...await readDriverAuditDataCapacity(connection.db) };
-    } catch { mongo = { configured: true, available: false }; }
+      mongo = { required: true, configured: true, ...await readDriverAuditDataCapacity(connection.db) };
+    } catch { mongo = { required: true, configured: true, available: false }; }
     finally { await connection.close(); }
   }
-  return { status: 'host-checked', deployedSha: commit, platform: process.platform, architecture: process.arch, nodes, processes, archiveCacheDirectory, mongo,
+  return { status: 'host-checked', deployedSha: commit, dataStore, platform: process.platform, architecture: process.arch, nodes, processes, archiveCacheDirectory, mongo,
     freeDiskBytes: disk.bavail * disk.bsize, freeMemoryBytes: available ? Number(available[1]) * 1024 : os.freemem() };
 }
 
@@ -221,9 +261,17 @@ async function runtimeAdapter(config, shell) {
       const parityFile = path.isAbsolute(release.parity.path) ? release.parity.path : path.join(path.dirname(reference.path), release.parity.path);
       const parityBytes = await readPrivateDriverAuditSource(parityFile);
       requireDeployment(driverAuditSourceHash(parityBytes) === release.parity.sha256, 'Source parity receipt changed during verification.');
-      const { requireDriverAuditSourceHostQualification } = await import('./driverAuditSourceQualify.js');
-      await requireDriverAuditSourceHostQualification({ config, commit: shell.DRIVER_AUDIT_DEPLOY_SHA,
-        reference: JSON.parse(parityBytes).hostQualification, supervisor: async () => JSON.parse(await pm2(['jlist'], shell)) });
+      const { requireDriverAuditSourceHostQualification, withDriverAuditHeldQualificationSync } = await import('./driverAuditSourceQualify.js');
+      const supervisor = async () => JSON.parse(await pm2(['jlist'], shell));
+      const verify = () => requireDriverAuditSourceHostQualification({ config, commit: shell.DRIVER_AUDIT_DEPLOY_SHA,
+        reference: JSON.parse(parityBytes).hostQualification, supervisor });
+      const sync = (await supervisor()).filter(row => row.name === 'matter-driver-audit-sync');
+      if (config.executionHost === 'sidi' && sync.length === 1 && sync[0].pm2_env?.status === 'stopped') {
+        await withDriverAuditHeldQualificationSync({ config, ...await heldSyncLifecycle(shell) }, verify);
+      } else await verify();
+      // Controlled sync verification and durable pause can consume part of the
+      // fresh window. Re-read every pinned release proof before dispatch.
+      await verifyDriverAuditSourceRelease(config, reference);
       return { reference };
     },
     readActivation: activation,
@@ -287,7 +335,7 @@ export async function deployDriverAuditSource(operation, shell = process.env) {
   const worker = await registeredWorker(shell);
   const maintenance = operation.startsWith('deploy-source-');
   const action = operation.replace(/^(?:audit|deploy)-source-/, '');
-  requireDeployment(['check', 'qualify', 'start', 'pause', 'resume', 'rollback'].includes(action), 'Invalid source operation.');
+  requireDeployment(['check', 'qualify', 'qualify-held', 'start', 'pause', 'resume', 'rollback'].includes(action), 'Invalid source operation.');
   if (maintenance && action === 'pause' && (!worker || worker.status === 'stopped')) return { status: 'inactive' };
   const manifest = shell.DRIVER_AUDIT_SOURCE_MANIFEST;
   const file = maintenance ? worker?.config : digestPattern.test(manifest ?? '') ? path.join(sourceRoot, manifest, 'source.json') : worker?.config;
@@ -300,7 +348,7 @@ export async function deployDriverAuditSource(operation, shell = process.env) {
     // Ordinary app deployments may use another Node major version. Re-execute
     // the control operation with the source worker's qualified interpreter.
     const output = await exec(executable, [fileURLToPath(import.meta.url), operation], {
-      cwd: appRoot, env: shell, timeout: action === 'qualify' ? 54 * 60_000 : 360_000, maxBuffer: 1024 * 1024,
+      cwd: appRoot, env: shell, timeout: action.startsWith('qualify') ? 54 * 60_000 : 360_000, maxBuffer: 1024 * 1024,
     });
     return JSON.parse(output.stdout.trim());
   }
@@ -308,15 +356,17 @@ export async function deployDriverAuditSource(operation, shell = process.env) {
   const config = await readDriverAuditSourceConfig(file);
   requireDeployment(path.basename(path.dirname(file)) === config.manifestSha256,
     'Source staging directory differs from its pinned manifest.');
-  if (action === 'qualify') {
+  if (action === 'qualify' || action === 'qualify-held') {
     requireDeployment(!maintenance && digestPattern.test(shell.DRIVER_AUDIT_SOURCE_QUALIFICATION_SHA256 ?? ''),
       'A pinned private qualification fixture is required.');
-    const { qualifyDriverAuditSource } = await import('./driverAuditSourceQualify.js');
+    const { qualifyDriverAuditSource, qualifyDriverAuditSourceWhileHeld } = await import('./driverAuditSourceQualify.js');
     const { acquireWorkerLock } = await import('../vendor/driver-audits/integration/hosted/worker-lock.mjs');
     const lock = await acquireWorkerLock(path.join(sourceRoot, 'source-deployment.lock'));
     try {
-      return await qualifyDriverAuditSource({ config, commit: head, fixtureSha256: shell.DRIVER_AUDIT_SOURCE_QUALIFICATION_SHA256,
-        supervisor: async () => JSON.parse(await pm2(['jlist'], shell)) });
+      const options = { config, commit: head, fixtureSha256: shell.DRIVER_AUDIT_SOURCE_QUALIFICATION_SHA256 };
+      return action === 'qualify-held'
+        ? await qualifyDriverAuditSourceWhileHeld({ ...options, ...await heldSyncLifecycle(shell) })
+        : await qualifyDriverAuditSource({ ...options, supervisor: async () => JSON.parse(await pm2(['jlist'], shell)) });
     } finally { await lock.release(); }
   }
   const adapter = await runtimeAdapter(config, shell);

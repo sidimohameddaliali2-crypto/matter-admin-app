@@ -27,8 +27,14 @@ const nullableIso=value=>typeof value==='string'&&Number.isFinite(Date.parse(val
 
 async function main(){
  const [flag,file,mode]=process.argv.slice(2);
- if(flag!=='--config'||!path.isAbsolute(file||'')||mode!==undefined&&mode!=='--check'||process.argv.length>5)throw Error('Invalid audit sync arguments');
+ const sidi=process.env.DRIVER_AUDIT_EXECUTION_HOST==='sidi';
+ if(flag!=='--config'||!path.isAbsolute(file||'')||mode!==undefined&&mode!=='--check'&&!(sidi&&mode==='--seed-only')||process.argv.length>5)throw Error('Invalid audit sync arguments');
  const config=await privateAuditJson(file);
+ if(sidi){
+  const {runDriverAuditSupabaseSync}=await import('../services/driverAuditSupabaseSync.js');
+  await runDriverAuditSupabaseSync({config,file,mode});
+  return;
+ }
  const {root,baselineRoot,codeRoot,builderSha256,rendererBuild,journals}=config;
  if(config.version!==1||path.dirname(file)!==root||baselineRoot!==path.join(root,'baseline')||
     codeRoot!==path.join(root,'builder')||
@@ -291,6 +297,6 @@ async function main(){
 }
 
 main().catch(()=>{
- console.error('Driver audit sync could not start. Verify the staged config and app connection.');
+ console.error('Driver audit sync could not start. Verify the staged report configuration and private access.');
  process.exitCode=1;
 });

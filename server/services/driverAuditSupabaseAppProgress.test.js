@@ -25,6 +25,10 @@ const delivery = () => ({ version: 1, kind: 'native-delivery-poll-progress', las
 const gps = () => ({ version: 1, kind: 'native-gps-poll-progress', namespace: 'fixture', turn: 0,
   lastPoll: null, lastSuccessfulPollAt: null, lastDataChangeAt: null, windows: {} });
 const gpsKey = 'native-progress:gps:fixture';
+const validationKey = 'native-progress:validation';
+const validation = () => ({ version: 1, kind: 'native-validation-poll-progress', lastPoll: null,
+  lastSuccessfulPollAt: null, lastDataChangeAt: null, lastInputDigest: null, resultDigest: null,
+  resultManifestSha256: null, sourceRevision: null });
 
 before(async () => {
   if (!bin) return;
@@ -74,8 +78,8 @@ async function lease() { return JSON.parse(await sql(`SELECT matter_reporting_ho
 function args(value, expected = 0, target = key, held = {}) {
   return bodyArgs(JSON.stringify(value), expected, target, held);
 }
-function bodyArgs(body, expected = 0, target = key, held = {}) {
-  const bodySha256 = hash(body), event = JSON.stringify({ kind: 'native-poll-progress', key: target, phase: 'schedule', bodySha256 });
+function bodyArgs(body, expected = 0, target = key, held = {}, phase = target === validationKey ? 'settled' : 'schedule') {
+  const bodySha256 = hash(body), event = JSON.stringify({ kind: 'native-poll-progress', key: target, phase, bodySha256 });
   return { p_key: target, p_owner: owner, p_token: held.token, p_expected: expected,
     p_event_id: 'progress-' + hash(JSON.stringify([target, expected, bodySha256])), p_body_text: body, p_event_text: event,
     p_request_text: JSON.stringify({ key: target, expectedRevision: expected, bodySha256 }) };
@@ -117,6 +121,125 @@ test('typed delivery/GPS metadata replays exactly and keeps only two retry rows 
     failures: 1, error: { at: time, category: 'http', httpStatus: 429, message: 'Saved GPS refresh failed; previously verified history is retained' } };
   validateDriverAuditPollProgressBody(gpsKey, JSON.stringify(g)); await cas(args(g, 0, gpsKey, held));
   assert.equal((await rpc('matter_hosted_app_progress_read', key)).revision, 6); assert.equal(await fingerprint(), original);
+});
+test('validation polling stores only typed current metadata and two retry rows without original receipt growth', { skip }, async () => {
+  await reset(); const held = await lease(), value = validation();
+  assert.deepEqual(await rpc('matter_hosted_app_progress_read', validationKey), { revision: 0, body_text: null });
+  value.lastPoll = { startedAt: time, status: 'started' };
+  let request = bodyArgs(JSON.stringify(value), 0, validationKey, held, 'started');
+  validateDriverAuditPollProgressWrite(request);
+  const first = await cas(request); assert.equal(first.revision, 1); assert.equal((await cas(request)).replayed, true);
+  value.lastPoll = { startedAt: time, status: 'complete', completedAt: time, unchanged: true };
+  value.lastSuccessfulPollAt = time; value.lastDataChangeAt = time;
+  value.lastInputDigest = digest; value.resultDigest = digest; value.resultManifestSha256 = digest;
+  value.sourceRevision = 2118;
+  for (let revision = 1; revision < 8; revision++) {
+    value.sourceRevision++;
+    request = args(value, revision, validationKey, held);
+    validateDriverAuditPollProgressWrite(request); await cas(request);
+  }
+  assert.equal(await sql(`SELECT count(*) FROM matter_reporting_app.progress WHERE key='${validationKey}';`), '1');
+  assert.equal(await sql(`SELECT count(*) FROM matter_reporting_app.progress_retry WHERE key='${validationKey}';`), '2');
+  const current = await rpc('matter_hosted_app_progress_read', validationKey);
+  assert.equal(current.revision, 8); assert.equal(current.body_text, request.p_body_text);
+  assert.equal(await fingerprint(), original);
+});
+test('validation shape and key fraud are rejected equally by JavaScript and PostgreSQL', { skip }, async () => {
+  await reset(); const held = await lease(), allowed = validation();
+  for (const status of ['started', 'complete', 'failed']) {
+    const value = { ...allowed, lastPoll: { startedAt: time, status, completedAt: time, unchanged: false },
+      lastSuccessfulPollAt: time, lastDataChangeAt: time, lastInputDigest: digest, resultDigest: digest,
+      resultManifestSha256: digest, sourceRevision: Number.MAX_SAFE_INTEGER };
+    validateDriverAuditPollProgressBody(validationKey, JSON.stringify(value));
+    await sql(`SELECT matter_reporting_app.validate_progress('${validationKey}',${quote(JSON.stringify(value))});`);
+  }
+  const invalid = [
+    { ...allowed, rawResults: [] }, { ...allowed, url: 'https://example.invalid/private' },
+    { ...allowed, kind: 'native-delivery-poll-progress' },
+    { ...allowed, lastPoll: { startedAt: time, status: 'complete', raw: {} } },
+    { ...allowed, lastPoll: { startedAt: 'not-a-time', status: 'started' } },
+    { ...allowed, lastPoll: { startedAt: time, status: 'unknown' } },
+    { ...allowed, lastPoll: { startedAt: time, status: 'complete', unchanged: 'true' } },
+    ...[-1, 0.5, Number.MAX_SAFE_INTEGER + 1, '2118'].map(sourceRevision => ({ ...allowed, sourceRevision })),
+    ...['lastInputDigest', 'resultDigest', 'resultManifestSha256'].map(key => ({ ...allowed, [key]: 'not-a-sha' })),
+    ...Object.keys(allowed).map(key => { const value = { ...allowed }; delete value[key]; return value; }),
+  ];
+  for (const value of invalid) {
+    assert.throws(() => validateDriverAuditPollProgressBody(validationKey, JSON.stringify(value)));
+    await assert.rejects(cas(args(value, 0, validationKey, held)), /22023/);
+  }
+  for (const target of ['native-progress:validation:extra', 'native-progress:Validation', 'validation']) {
+    assert.throws(() => validateDriverAuditPollProgressBody(target, JSON.stringify(allowed)));
+    await assert.rejects(rpc('matter_hosted_app_progress_read', target), /22023/);
+  }
+  assert.equal(await sql('SELECT count(*) FROM matter_reporting_app.progress;'), '0');
+  assert.equal(await fingerprint(), original);
+});
+test('validation request identity and duplicate JSON cannot create disguised results', { skip }, async () => {
+  await reset(); const held = await lease(), body = JSON.stringify(validation());
+  for (const phase of ['schedule', 'failure']) {
+    const request = bodyArgs(body, 0, validationKey, held, phase);
+    assert.throws(() => validateDriverAuditPollProgressWrite(request));
+    await assert.rejects(cas(request), /22023/);
+  }
+  for (const text of [body.replace('{', '{"resultDigest":{"raw":"forbidden"},'),
+    body.replace('{', '{"kind":"hidden raw result",')]) {
+    const request = bodyArgs(text, 0, validationKey, held);
+    assert.throws(() => validateDriverAuditPollProgressWrite(request));
+    await assert.rejects(cas(request), /22023/);
+  }
+  assert.equal(await sql('SELECT count(*) FROM matter_reporting_app.progress_retry;'), '0');
+});
+test('validation progress uses the original collector lock and rolls back when the lease expires during write', { skip }, async () => {
+  await reset(); const held = await lease(), request = args(validation(), 0, validationKey, held);
+  const blocker = sql(`BEGIN; SELECT pg_advisory_xact_lock(hashtextextended('matter_reporting_hosted/lease/collector',0)); SELECT pg_sleep(0.4); COMMIT;`);
+  await new Promise(resolve => setTimeout(resolve, 100)); const start = Date.now();
+  try { await cas(request); assert(Date.now() - start >= 200); } finally { await blocker; }
+  await sql(`TRUNCATE matter_reporting_app.progress_retry,matter_reporting_app.progress;
+    CREATE FUNCTION public.fixture_validation_delay() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.2); RETURN NEW; END $$;
+    CREATE TRIGGER fixture_validation_delay BEFORE INSERT ON matter_reporting_app.progress FOR EACH ROW EXECUTE FUNCTION public.fixture_validation_delay();`);
+  try {
+    await assert.rejects(sql(`BEGIN; UPDATE matter_reporting_hosted.collector_lease SET expires_at=clock_timestamp()+interval '100 milliseconds';
+      SELECT public.matter_hosted_app_progress_cas(${Object.values(request).map(quote).join(',')}); COMMIT;`), /PT409/);
+    assert.equal(await sql('SELECT count(*) FROM matter_reporting_app.progress;'), '0');
+    assert.equal(await sql('SELECT count(*) FROM matter_reporting_app.progress_retry;'), '0');
+  } finally { await sql('DROP TRIGGER fixture_validation_delay ON matter_reporting_app.progress; DROP FUNCTION public.fixture_validation_delay();'); }
+  assert.equal(await fingerprint(), original);
+});
+test('reserved morning fleet progress retains only its two optional provider clocks without a fake driver', { skip }, async () => {
+  await reset(); const held = await lease(), namespace = '__morning_fleet_v1', target = 'native-progress:gps:' + namespace;
+  const value = { ...gps(), namespace, fleetFetchedAt: time, fleetObservedAt: '2026-11-17T10:00:01.000Z' };
+  const request = args(value, 0, target, held); validateDriverAuditPollProgressWrite(request);
+  await cas(request);
+  assert.deepEqual(JSON.parse((await rpc('matter_hosted_app_progress_read', target)).body_text), value);
+  assert.equal(value.lastPoll, null); assert.deepEqual(value.windows, {});
+  for (const partial of [{ ...gps(), namespace }, { ...gps(), namespace, fleetFetchedAt: null },
+    { ...gps(), namespace, fleetObservedAt: null }, { ...gps(), namespace, fleetFetchedAt: null, fleetObservedAt: null }]) {
+    const body = JSON.stringify(partial); validateDriverAuditPollProgressBody(target, body);
+    await sql(`SELECT matter_reporting_app.validate_progress(${quote(target)},${quote(body)});`);
+  }
+  for (const name of ['__morning_batch_v1', '__gps_registry_v1']) {
+    const ordinary = { ...gps(), namespace: name, turn: 17 };
+    validateDriverAuditPollProgressBody('native-progress:gps:' + name, JSON.stringify(ordinary));
+    await cas(args(ordinary, 0, 'native-progress:gps:' + name, held));
+  }
+  assert.equal(await fingerprint(), original);
+});
+test('fleet clocks cannot escape their exact reserved namespace or carry raw provider data', { skip }, async () => {
+  await reset(); const held = await lease();
+  for (const namespace of ['fixture', '__morning_batch_v1', '__gps_registry_v1', '__morning_fleet_v2']) {
+    const value = { ...gps(), namespace, fleetFetchedAt: time, fleetObservedAt: time }, target = 'native-progress:gps:' + namespace;
+    assert.throws(() => validateDriverAuditPollProgressBody(target, JSON.stringify(value)));
+    await assert.rejects(cas(args(value, 0, target, held)), /22023/);
+  }
+  for (const extra of [{ fleetFetchedAt: 123 }, { fleetObservedAt: 'not-a-time' }, { fleetObservedAt: { raw: [] } },
+    { fleetFetchedAt: time, providerResponse: {} }]) {
+    const value = { ...gps(), namespace: '__morning_fleet_v1', ...extra }, target = 'native-progress:gps:__morning_fleet_v1';
+    assert.throws(() => validateDriverAuditPollProgressBody(target, JSON.stringify(value)));
+    await assert.rejects(cas(args(value, 0, target, held)), /22023/);
+  }
+  assert.equal(await sql('SELECT count(*) FROM matter_reporting_app.progress;'), '0');
+  assert.equal(await fingerprint(), original);
 });
 test('SQL rejects raw payloads, duplicate JSON properties, forged event/request/hash and nested shape violations', { skip }, async t => {
   await reset(); const held = await lease();

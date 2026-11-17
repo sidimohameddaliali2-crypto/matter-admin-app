@@ -6,6 +6,17 @@ export async function readDriverAuditSyncStatus(db,generation,clock=Date.now){
  let saved;
  try{saved=await db.collection('driverAuditControl').findOne({_id:'sync-status'},{maxTimeMS:1000});}
  catch{return {status:'failed',pending:true,latestCaptureAt:null,checkedAt:null};}
+ return driverAuditSyncStatusFor(saved,generation,clock);
+}
+
+export async function readDriverAuditFileSyncStatus(file,generation,clock=Date.now){
+ let saved;
+ try{saved=JSON.parse(await readPrivateDriverAuditSource(file,64*1024));}
+ catch(error){if(error.code==='ENOENT')return driverAuditSyncStatusFor(null,generation,clock);return {status:'failed',pending:true,latestCaptureAt:null,checkedAt:null};}
+ return driverAuditSyncStatusFor(saved,generation,clock);
+}
+
+export function driverAuditSyncStatusFor(saved,generation,clock=Date.now){
  if(!saved)return {status:'snapshot',pending:false,latestCaptureAt:null,checkedAt:null};
  const checkedAt=iso(saved.checkedAt);
  const age=checkedAt?clock()-Date.parse(checkedAt):Infinity;
@@ -17,3 +28,4 @@ export async function readDriverAuditSyncStatus(db,generation,clock=Date.now){
  return {status:visibleStatus,pending:saved.pending===true||visibleStatus==='failed'||visibleStatus==='pending',
   latestCaptureAt:iso(saved.latestCaptureAt),checkedAt,...(showCapacity?{capacityReason:reason}:{})};
 }
+import {readPrivateDriverAuditSource} from './driverAuditSource.js';

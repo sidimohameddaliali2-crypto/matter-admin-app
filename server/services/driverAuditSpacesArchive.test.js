@@ -58,6 +58,27 @@ function fixture(options = {}) {
   return { archive, objects, calls, cancelled };
 }
 
+test('existing photo verification and reads perform only full GETs without private probes or uploads', async () => {
+  const bytes = Buffer.from('fictional original delivery photo');
+  const f = fixture({ objects: new Map([['photos/retained.jpg', bytes]]) });
+  const reference = await f.archive.verifyExistingPhoto({ key: 'photos/retained.jpg', size: bytes.length, sha256: hash(bytes) });
+  assert.equal(reference.kind, 'existing-photo-v1');
+  assert.deepEqual(await f.archive.readExistingPhoto(reference), bytes);
+  assert.deepEqual(f.calls.map(call => call.name), ['GetObjectCommand', 'GetObjectCommand']);
+  assert.equal(f.calls[1].input.IfMatch, reference.etag);
+  assert.equal(f.objects.size, 1);
+});
+
+test('existing photo verification rejects missing or changed bytes and private-object references', async () => {
+  const bytes = Buffer.from('fictional expected photo');
+  const f = fixture({ objects: new Map([['photos/changed.jpg', Buffer.from('changed')]]) });
+  await assert.rejects(f.archive.verifyExistingPhoto({ key: 'photos/changed.jpg', size: bytes.length, sha256: hash(bytes) }), /integrity/);
+  await assert.rejects(f.archive.verifyExistingPhoto({ key: 'photos/missing.jpg', size: bytes.length, sha256: hash(bytes) }));
+  assert.throws(() => f.archive.readExistingPhoto({ version: 1, provider: 'spaces', identitySha256: f.archive.identitySha256,
+    key: driverAuditSpacesArchivePrefix + hash(bytes) + '.gz', size: bytes.length, sha256: hash(bytes) }), /photo/);
+  assert(f.calls.every(call => call.name === 'GetObjectCommand'));
+});
+
 test('Spaces identity binds only the strict Sidi endpoint, bucket and fixed private prefix', () => {
   const first = fixture().archive;
   const second = createDriverAuditSpacesArchive({ env: { ...env, SPACES_SECRET: 'rotated-secret' },

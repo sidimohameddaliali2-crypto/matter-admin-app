@@ -101,7 +101,7 @@ REVOKE ALL ON ALL TABLES IN SCHEMA matter_reporting_app FROM PUBLIC, anon, authe
 
 CREATE FUNCTION matter_reporting_app.valid_key(p_key text) RETURNS boolean
 LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $fn$
-  SELECT p_key IS NOT NULL AND p_key ~ '^(native-progress:delivery|native-progress:gps:[a-zA-Z0-9_-]{1,60})$'
+  SELECT p_key IS NOT NULL AND p_key ~ '^(native-progress:delivery|native-progress:validation|native-progress:gps:[a-zA-Z0-9_-]{1,60})$'
 $fn$;
 
 -- JSONB would silently discard duplicate properties. This compact round trip
@@ -196,6 +196,25 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN RETURN false;
 END $fn$;
 
+CREATE FUNCTION matter_reporting_app.validation_progress_schema() RETURNS jsonb
+LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $fn$
+  SELECT $validation_schema${
+    "type":"object","required":{
+      "version":{"type":"enum","values":[1]},
+      "kind":{"type":"enum","values":["native-validation-poll-progress"]},
+      "lastPoll":{"type":"oneOf","options":[{"type":"null"},{"type":"object",
+        "required":{"startedAt":{"type":"timestamp"},"status":{"type":"enum","values":["started","complete","failed"]}},
+        "optional":{"completedAt":{"type":"timestamp"},"unchanged":{"type":"boolean"}}}]},
+      "lastSuccessfulPollAt":{"type":"oneOf","options":[{"type":"null"},{"type":"timestamp"}]},
+      "lastDataChangeAt":{"type":"oneOf","options":[{"type":"null"},{"type":"timestamp"}]},
+      "lastInputDigest":{"type":"oneOf","options":[{"type":"null"},{"type":"digest"}]},
+      "resultDigest":{"type":"oneOf","options":[{"type":"null"},{"type":"digest"}]},
+      "resultManifestSha256":{"type":"oneOf","options":[{"type":"null"},{"type":"digest"}]},
+      "sourceRevision":{"type":"oneOf","options":[{"type":"null"},{"type":"integer"}]}
+    },"optional":{}
+  }$validation_schema$::jsonb
+$fn$;
+
 CREATE FUNCTION matter_reporting_app.progress_schema(p_gps boolean) RETURNS jsonb
 LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $fn$
   SELECT CASE WHEN p_gps THEN $gps_schema${"type":"object","required":{"version":{"type":"enum","values":[1]},"kind":{"type":"enum","values":["native-gps-poll-progress"]},"lastPoll":{"type":"oneOf","options":[{"type":"null"},{"type":"object","required":{"driverId":{"type":"driver"},"day":{"type":"day"},"startedAt":{"type":"timestamp"},"status":{"type":"enum","values":["started","complete","failed"]}},"optional":{"completedAt":{"type":"timestamp"},"unchanged":{"type":"boolean"},"dataSnapshotSha256":{"type":"digest"}}}]},"lastSuccessfulPollAt":{"type":"oneOf","options":[{"type":"null"},{"type":"timestamp"}]},"lastDataChangeAt":{"type":"oneOf","options":[{"type":"null"},{"type":"timestamp"}]},"namespace":{"type":"text","max":60},"turn":{"type":"integer"},"windows":{"type":"record","key":"windowKey","items":{"type":"object","required":{"driverId":{"type":"driver"},"day":{"type":"day"}},"optional":{"scopeKind":{"type":"enum","values":["driver","vehicle"]},"vehicleNo":{"type":"text","max":128},"rosterReferenceDriverId":{"type":"driver"},"lastAttemptAt":{"type":"timestamp"},"retryAt":{"type":"oneOf","options":[{"type":"null"},{"type":"epoch"}]},"failures":{"type":"integer"},"error":{"type":"oneOf","options":[{"type":"null"},{"type":"object","required":{"at":{"type":"timestamp"},"category":{"type":"enum","values":["http","schema","pagination","response_limit","capacity","timeout","read_failed"]},"httpStatus":{"type":"oneOf","options":[{"type":"null"},{"type":"httpStatus"}]},"message":{"type":"enum","values":["Saved GPS refresh failed; previously verified history is retained"]}},"optional":{}}]},"lastSuccessfulPollAt":{"type":"timestamp"},"refreshToken":{"type":"text","max":128}}},"max":700}},"optional":{}}$gps_schema$::jsonb ELSE $delivery_schema${"type":"object","required":{"version":{"type":"enum","values":[1]},"kind":{"type":"enum","values":["native-delivery-poll-progress"]},"lastPoll":{"type":"oneOf","options":[{"type":"null"},{"type":"object","required":{"runId":{"type":"run"},"day":{"type":"day"},"startedAt":{"type":"timestamp"},"status":{"type":"enum","values":["started","complete","failed"]}},"optional":{"completedAt":{"type":"timestamp"},"unchanged":{"type":"boolean"},"captureRunId":{"type":"run"},"captureSha256":{"type":"digest"},"lastDataChangeAt":{"type":"oneOf","options":[{"type":"null"},{"type":"timestamp"}]},"errorCode":{"type":"enum","values":["capture-not-published"]}}}]},"lastSuccessfulPollAt":{"type":"oneOf","options":[{"type":"null"},{"type":"timestamp"}]},"lastDataChangeAt":{"type":"oneOf","options":[{"type":"null"},{"type":"timestamp"}]},"schedule":{"type":"object","required":{"pending":{"type":"array","items":{"type":"object","required":{"day":{"type":"day"},"runId":{"type":"run"}},"optional":{"final":{"type":"boolean"},"fresh":{"type":"boolean"},"sourceStarted":{"type":"boolean"},"attempts":{"type":"integer"},"nextAttempt":{"type":"epoch"},"lastFailure":{"type":"oneOf","options":[{"type":"object","required":{"code":{"type":"enum","values":["capture-not-published"]}},"optional":{}},{"type":"object","required":{"runId":{"type":"run"},"day":{"type":"day"},"message":{"type":"text","max":200}},"optional":{}}]},"nativeCaptureRunId":{"type":"run"},"nativeCaptureSha256":{"type":"digest"},"reason":{"type":"text","max":200}}},"max":4096}},"optional":{"migrationPendingHistory":{"type":"array","items":{"type":"object","required":{"day":{"type":"day"},"runId":{"type":"run"}},"optional":{"final":{"type":"boolean"},"fresh":{"type":"boolean"},"sourceStarted":{"type":"boolean"},"attempts":{"type":"integer"},"nextAttempt":{"type":"epoch"},"lastFailure":{"type":"oneOf","options":[{"type":"object","required":{"code":{"type":"enum","values":["capture-not-published"]}},"optional":{}},{"type":"object","required":{"runId":{"type":"run"},"day":{"type":"day"},"message":{"type":"text","max":200}},"optional":{}}]},"nativeCaptureRunId":{"type":"run"},"nativeCaptureSha256":{"type":"digest"},"reason":{"type":"text","max":200}}},"max":4096},"lastDay":{"type":"day"},"sourceAttempts":{"type":"record","key":"day","items":{"type":"epoch"},"max":4096},"lastAttempts":{"type":"record","key":"day","items":{"type":"epoch"},"max":4096},"observations":{"type":"record","key":"day","items":{"type":"epoch"},"max":4096},"gaps":{"type":"array","items":{"type":"object","required":{"reason":{"type":"text","max":200}},"optional":{"from":{"type":"day"},"to":{"type":"day"},"count":{"type":"integer"},"limit":{"type":"integer"}}},"max":4096},"sourceHalt":{"type":"oneOf","options":[{"type":"null"},{"type":"object","required":{"code":{"type":"enum","values":["source_rate_limit","source_denied"]},"at":{"type":"timestamp"}},"optional":{}}]},"photoSourceHalt":{"type":"oneOf","options":[{"type":"null"},{"type":"object","required":{"status":{"type":"enum","values":[401,403,429]},"at":{"type":"timestamp"}},"optional":{}}]},"migrationCheckpointSha256":{"type":"digest"}}},"photoCursor":{"type":"integer"},"photoSourceHalt":{"type":"oneOf","options":[{"type":"null"},{"type":"object","required":{"status":{"type":"enum","values":[401,403,429]},"at":{"type":"timestamp"}},"optional":{}}]}},"optional":{}}$delivery_schema$::jsonb END
@@ -203,11 +222,16 @@ $fn$;
 
 CREATE FUNCTION matter_reporting_app.validate_progress(p_key text, p_body text) RETURNS void
 LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog AS $fn$
-DECLARE body_value jsonb; item jsonb; entry record; gps boolean := p_key <> 'native-progress:delivery';
+DECLARE body_value jsonb; item jsonb; entry record; gps boolean := p_key LIKE 'native-progress:gps:%';
 BEGIN
   IF NOT matter_reporting_app.valid_key(p_key) OR p_body IS NULL OR octet_length(p_body) > 1048576
     OR p_body IS DISTINCT FROM matter_reporting_app.compact_json(p_body::json)
-    OR NOT matter_reporting_app.matches_schema(p_body::jsonb, matter_reporting_app.progress_schema(gps)) THEN
+    OR NOT matter_reporting_app.matches_schema(p_body::jsonb, CASE WHEN p_key = 'native-progress:validation'
+      THEN matter_reporting_app.validation_progress_schema()
+      WHEN p_key = 'native-progress:gps:__morning_fleet_v1' THEN jsonb_set(matter_reporting_app.progress_schema(true), '{optional}',
+        '{"fleetFetchedAt":{"type":"oneOf","options":[{"type":"null"},{"type":"timestamp"}]},
+          "fleetObservedAt":{"type":"oneOf","options":[{"type":"null"},{"type":"timestamp"}]}}'::jsonb)
+      ELSE matter_reporting_app.progress_schema(gps) END) THEN
     RAISE EXCEPTION 'Invalid bounded app polling progress' USING ERRCODE = '22023';
   END IF;
   body_value := p_body::jsonb;
@@ -216,7 +240,7 @@ BEGIN
     FOR entry IN SELECT key, value FROM jsonb_each(body_value -> 'windows') LOOP
       IF entry.key IS DISTINCT FROM (entry.value ->> 'driverId') || '/' || (entry.value ->> 'day') THEN RAISE EXCEPTION 'GPS progress window identity differs'; END IF;
     END LOOP;
-  ELSE
+  ELSIF p_key = 'native-progress:delivery' THEN
     FOR item IN SELECT x FROM jsonb_array_elements((body_value #> '{schedule,pending}') || COALESCE(body_value #> '{schedule,migrationPendingHistory}', '[]'::jsonb)) x LOOP
       IF (item ? 'nativeCaptureRunId') <> (item ? 'nativeCaptureSha256') THEN RAISE EXCEPTION 'Progress capture identity differs'; END IF;
     END LOOP;
@@ -249,7 +273,9 @@ BEGIN
   digest := encode(sha256(convert_to(p_body_text, 'UTF8')), 'hex'); phase := p_event_text::jsonb ->> 'phase';
   expected_event := '{"kind":"native-poll-progress","key":' || to_json(p_key)::text || ',"phase":' || to_json(phase)::text || ',"bodySha256":"' || digest || '"}';
   expected_request := '{"key":' || to_json(p_key)::text || ',"expectedRevision":' || p_expected::text || ',"bodySha256":"' || digest || '"}';
-  IF phase IS NULL OR phase NOT IN ('started', 'settled', 'schedule', 'failure') OR p_event_text IS DISTINCT FROM expected_event OR p_request_text IS DISTINCT FROM expected_request
+  IF phase IS NULL OR phase NOT IN ('started', 'settled', 'schedule', 'failure')
+    OR p_key = 'native-progress:validation' AND phase NOT IN ('started', 'settled')
+    OR p_event_text IS DISTINCT FROM expected_event OR p_request_text IS DISTINCT FROM expected_request
     OR p_event_id IS DISTINCT FROM 'progress-' || encode(sha256(convert_to('[' || to_json(p_key)::text || ',' || p_expected::text || ',"' || digest || '"]', 'UTF8')), 'hex') THEN
     RAISE EXCEPTION 'App progress request identity differs' USING ERRCODE = '22023';
   END IF;

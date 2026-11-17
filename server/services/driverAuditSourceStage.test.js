@@ -92,6 +92,53 @@ test('a cache-enabled source release is staged only with the managed cache path'
   assert.equal((await readDriverAuditSourceConfig(staged.configFile)).archiveCacheDirectory, cacheDirectory);
 });
 
+async function sidiFixture(t) {
+  const f = await fixture(t);
+  const sourceRoot = path.join(f.root, 'driver-audit-source');
+  await fs.mkdir(sourceRoot, { mode: 0o700 });
+  const [savedManifest] = f.bundle.files;
+  const manifest = JSON.parse(Buffer.from(savedManifest.dataBase64, 'base64'));
+  for (const relative of ['source/integration/hosted/native-backend.mjs',
+    'source/integration/hosted/archive-read-cache.mjs', 'source/integration/cloud/native-poll-progress.mjs']) {
+    const bytes = Buffer.from('export {};');
+    manifest.files.push({ path: relative, sha256: hash(bytes), bytes: bytes.length });
+    f.bundle.files.push({ path: relative, dataBase64: bytes.toString('base64') });
+  }
+  Object.assign(manifest, { managedSourceExecutionHost: 'sidi', managedSourceExecutionAdmission: 'fixed-host-v1' });
+  const environment = { ...JSON.parse(f.environmentBytes), DRIVER_AUDIT_EXECUTION_HOST: 'sidi',
+    MATTER_SUPABASE_SECRET: 'fictional-source-credential',
+    MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: path.join(f.root, 'driver-audits', 'a'.repeat(64), 'work', 'archive-cache') };
+  const stage = async () => {
+    const bytes = Buffer.from(JSON.stringify(manifest));
+    savedManifest.dataBase64 = bytes.toString('base64');
+    f.bundle.manifestSha256 = hash(bytes);
+    return stageDriverAuditSource({ ...f.args(), sourceRoot, expectedManifestSha256: hash(bytes),
+      environmentBytes: Buffer.from(JSON.stringify(environment)) });
+  };
+  return { ...f, manifest, environment, stage };
+}
+
+test('Sidi source execution keeps Supabase selection and requires the pinned runtime capability', async t => {
+  const f = await sidiFixture(t);
+  const staged = await f.stage();
+  const checked = await readDriverAuditSourceConfig(staged.configFile);
+  assert.equal(checked.dataStore, 'supabase');
+  assert.equal(checked.executionHost, 'sidi');
+  assert.equal(checked.environment.DRIVER_AUDIT_DATA_STORE, undefined);
+});
+
+test('host execution cannot be enabled on an unqualified or mislabeled source export', async t => {
+  for (const change of [f => { delete f.manifest.managedSourceExecutionHost; },
+    f => { f.manifest.managedSourceExecutionAdmission = 'unbounded'; },
+    f => { f.environment.DRIVER_AUDIT_EXECUTION_HOST = 'other'; },
+    f => { f.environment.MONGODB_URI = 'mongodb://fictional.invalid/unused'; }]) {
+    const f = await sidiFixture(t);
+    change(f);
+    await assert.rejects(f.stage(), /execution|capability|app database/i);
+    assert.deepEqual(await fs.readdir(path.join(f.root, 'driver-audit-source')), []);
+  }
+});
+
 test('proof staging writes pinned JSON evidence without creating activation or changing source files', async t => {
   const f = await fixture(t);
   const source = await stageDriverAuditSource(f.args());

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { GetBucketPolicyCommand, GetObjectAclCommand, GetObjectCommand, PutObjectCommand,
+import { GetBucketLifecycleConfigurationCommand, GetBucketPolicyCommand, GetObjectAclCommand, GetObjectCommand, PutObjectCommand,
   S3Client } from '@aws-sdk/client-s3';
 
 export const driverAuditSpacesArchivePrefix = 'driver-reports/archive/v1/';
@@ -11,6 +11,27 @@ const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const status = error => error?.$metadata?.httpStatusCode;
 const missing = error => status(error) === 404 || error?.name === 'NoSuchKey';
 const unsupported = error => status(error) === 501 || ['NotImplemented', 'NotSupported'].includes(error?.name);
+
+export function validateDriverAuditPhotoRetention(rules) {
+  if (!Array.isArray(rules) || rules.length > 1000) throw Error('Existing photo retention is inconclusive');
+  for (const rule of rules) {
+    if (!rule || !['Enabled', 'Disabled'].includes(rule.Status)) throw Error('Existing photo retention is inconclusive');
+    if (rule.Status === 'Disabled' || !rule.Expiration && !rule.NoncurrentVersionExpiration) continue;
+    if (rule.Prefix !== undefined && rule.Filter !== undefined) throw Error('Existing photo retention is inconclusive');
+    const filter = rule.Filter;
+    if (filter !== undefined && (!filter || typeof filter !== 'object' || Array.isArray(filter))) {
+      throw Error('Existing photo retention is inconclusive');
+    }
+    let prefix = rule.Prefix ?? filter?.Prefix ?? filter?.And?.Prefix ?? '';
+    if (typeof prefix !== 'string') throw Error('Existing photo retention is inconclusive');
+    // Tag/size filters may still match a referenced photo. A narrower selector
+    // never proves that expiration cannot remove one of the original uploads.
+    if ('photos/'.startsWith(prefix) || prefix.startsWith('photos/')) {
+      throw Error('Existing photo uploads have an overlapping expiration rule');
+    }
+  }
+  return { verified: true, rules: rules.length, existingPhotosExpire: false };
+}
 
 export function validateDriverAuditSpacesArchiveReference(reference, { identitySha256, key, bytes } = {}) {
   const alias = reference?.kind === 'existing-photo-v1';
@@ -271,6 +292,37 @@ export function createDriverAuditSpacesArchive({ env = process.env, client, anon
   }
 
   return Object.freeze({ identitySha256,
+    verifyExistingPhoto(value, { signal } = {}) {
+      if (!value || Object.keys(value).length !== 3 || !existingPhotoKey(value.key)
+          || !hashPattern.test(value.sha256) || !Number.isSafeInteger(value.size)
+          || value.size < 1 || value.size > maximumBytes) throw Error('Existing photo reference is invalid');
+      const candidate = { ...value };
+      return operation(signal, async bounded => {
+        const original = await getVerified(candidate.key, candidate.size, candidate.sha256, bounded);
+        return validateDriverAuditSpacesArchiveReference({ version: 1, provider: 'spaces', identitySha256,
+          kind: 'existing-photo-v1', ...candidate, etag: original.etag, versionId: original.versionId });
+      });
+    },
+    readExistingPhoto(reference, { maxBytes = maximumBytes, signal } = {}) {
+      const checked = validateDriverAuditSpacesArchiveReference(reference, { identitySha256 });
+      if (checked.kind !== 'existing-photo-v1' || !Number.isSafeInteger(maxBytes)
+          || maxBytes < checked.size || maxBytes > maximumBytes) throw Error('Existing photo reference exceeds its bound');
+      return operation(signal, bounded => getBytes(checked.key, checked.size, checked.sha256, bounded,
+        { etag: checked.etag, versionId: checked.versionId }));
+    },
+    assertExistingPhotoRetention({ signal } = {}) {
+      return operation(signal, async bounded => {
+        try {
+          const result = await send(new GetBucketLifecycleConfigurationCommand({ Bucket: bucket }), bounded);
+          return validateDriverAuditPhotoRetention(result.Rules);
+        } catch (error) {
+          if (status(error) === 404 && error?.name === 'NoSuchLifecycleConfiguration') {
+            return validateDriverAuditPhotoRetention([]);
+          }
+          throw error;
+        }
+      });
+    },
     addExistingPhotoCandidate(value) {
       if (!value || typeof value !== 'object' || Object.keys(value).length !== 3
           || !Object.hasOwn(value, 'sha256') || !Object.hasOwn(value, 'size') || !Object.hasOwn(value, 'key')
