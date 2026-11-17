@@ -10,6 +10,9 @@ import {
   runDriverAuditSourceChild,
   verifyDriverAuditSourceRelease,
   writeDriverAuditSourceState,
+  driverAuditSourceUsesAppBackend,
+  driverAuditSourceBackendEnvironment,
+  requireDriverAuditSourceBackend,
 } from '../services/driverAuditSource.js';
 
 async function childMain(config) {
@@ -24,6 +27,8 @@ async function childMain(config) {
   if (!entrypoint) throw new Error('Source child schedule is unavailable.');
   const appDataStore = process.env.DRIVER_AUDIT_DATA_STORE || 'supabase';
   if (!message.probe && appDataStore !== config.dataStore) throw Error('App and source reporting stores differ.');
+  if (!message.probe && (process.env.DRIVER_AUDIT_EXECUTION_HOST || null) !== config.executionHost)
+    throw Error('App and source execution hosts differ.');
   Object.assign(process.env, config.environment);
   const load = async () => {
     const module = await import(pathToFileURL(path.join(config.runtimeRoot, entrypoint.module)).href);
@@ -48,10 +53,12 @@ async function childMain(config) {
       let backend;
       let result;
       try {
-        if (config.environment.DRIVER_AUDIT_DATA_STORE === 'mongo') {
-          backend = await openDriverAuditDataBackend();
+        if (driverAuditSourceUsesAppBackend(config)) {
+          const env = driverAuditSourceBackendEnvironment(config);
+          backend = await openDriverAuditDataBackend({ env });
+          requireDriverAuditSourceBackend(config, backend);
           globalThis[driverAuditNativeBackendSymbol] = backend;
-          Object.assign(process.env, config.environment);
+          Object.assign(process.env, env);
         }
         result = await invokeDriverAuditSourceHandler(await load(), {
           entrypoint, environment: config.environment,
@@ -134,6 +141,8 @@ async function main() {
   if (mode === undefined && (process.env.DRIVER_AUDIT_DATA_STORE || 'supabase') !== config.dataStore) {
     throw Error('App and source reporting stores differ.');
   }
+  if (mode === undefined && (process.env.DRIVER_AUDIT_EXECUTION_HOST || null) !== config.executionHost)
+    throw Error('App and source execution hosts differ.');
   if (mode === '--child') await childMain(config);
   else if (mode === '--check') console.log(JSON.stringify(await checkDriverAuditSource(config)));
   else await runDriverAuditSource(config);

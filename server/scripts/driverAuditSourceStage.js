@@ -6,6 +6,7 @@ import {
   driverAuditSourceHash,
   driverAuditSourceArchiveCacheDirectory,
   driverAuditSourceDataStore,
+  driverAuditSourceExecutionHost,
   readPrivateDriverAuditSource,
   requirePrivateDriverAuditSourceDirectory,
   verifyDriverAuditSource,
@@ -78,6 +79,7 @@ export async function stageDriverAuditSource({ sourceRoot, compressed, expectedB
   const target = path.join(sourceRoot, expectedManifestSha256);
   driverAuditSourceArchiveCacheDirectory(target, manifest.files, environment);
   driverAuditSourceDataStore(manifest.files, environment);
+  driverAuditSourceExecutionHost(manifest, environment);
   const staging = path.join(sourceRoot, '.staging-' + expectedBundleSha256);
   const environmentSha256 = driverAuditSourceHash(environmentBytes);
   const expectedReceipt = { version: 1, bundleSha256: expectedBundleSha256, manifestSha256: expectedManifestSha256,

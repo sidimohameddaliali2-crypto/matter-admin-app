@@ -112,7 +112,7 @@ function gpsWindows(windows) {
   }
 }
 export function isDriverAuditPollProgressKey(key) {
-  return matches(/^(?:native-progress:delivery|native-progress:gps:[a-zA-Z0-9_-]{1,60})$/, key);
+  return matches(/^(?:native-progress:delivery|native-progress:validation|native-progress:gps:[a-zA-Z0-9_-]{1,60})$/, key);
 }
 export function validateDriverAuditPollProgressBody(key, body) {
   need(isDriverAuditPollProgressKey(key));
@@ -120,13 +120,34 @@ export function validateDriverAuditPollProgressBody(key, body) {
   // Store only the typed JSON itself; duplicate properties must not hide raw
   // evidence in bytes that JSON.parse would silently discard.
   need(body === JSON.stringify(value));
+  if (key === 'native-progress:validation') {
+    shape(value, ['version', 'kind', 'lastPoll', 'lastSuccessfulPollAt', 'lastDataChangeAt',
+      'lastInputDigest', 'resultDigest', 'resultManifestSha256', 'sourceRevision']);
+    need(value.version === 1 && value.kind === 'native-validation-poll-progress');
+    for (const field of ['lastSuccessfulPollAt', 'lastDataChangeAt']) need(value[field] === null || timestamp(value[field]));
+    for (const field of ['lastInputDigest', 'resultDigest', 'resultManifestSha256']) need(value[field] === null || digest(value[field]));
+    need(value.sourceRevision === null || integer(value.sourceRevision));
+    if (value.lastPoll !== null) {
+      shape(value.lastPoll, ['startedAt', 'status'], ['completedAt', 'unchanged']);
+      need(timestamp(value.lastPoll.startedAt) && ['started', 'complete', 'failed'].includes(value.lastPoll.status));
+      optional(value.lastPoll, 'completedAt', timestamp);
+      optional(value.lastPoll, 'unchanged', item => typeof item === 'boolean');
+    }
+    return value;
+  }
+  const fleet = key === 'native-progress:gps:__morning_fleet_v1';
   shape(value, ['version', 'kind', 'lastPoll', 'lastSuccessfulPollAt', 'lastDataChangeAt',
-    ...(gps ? ['namespace', 'turn', 'windows'] : ['schedule', 'photoCursor', 'photoSourceHalt'])]);
+    ...(gps ? ['namespace', 'turn', 'windows'] : ['schedule', 'photoCursor', 'photoSourceHalt'])],
+  fleet ? ['fleetFetchedAt', 'fleetObservedAt'] : []);
   need(value.version === 1 && value.kind === (gps ? 'native-gps-poll-progress' : 'native-delivery-poll-progress'));
   need(value.lastSuccessfulPollAt === null || timestamp(value.lastSuccessfulPollAt));
   need(value.lastDataChangeAt === null || timestamp(value.lastDataChangeAt));
   lastPoll(value.lastPoll, gps);
-  if (gps) { need(value.namespace === key.slice('native-progress:gps:'.length) && integer(value.turn)); gpsWindows(value.windows); }
+  if (gps) {
+    need(value.namespace === key.slice('native-progress:gps:'.length) && integer(value.turn));
+    gpsWindows(value.windows);
+    if (fleet) for (const field of ['fleetFetchedAt', 'fleetObservedAt']) optional(value, field, item => item === null || timestamp(item));
+  }
   else { schedule(value.schedule); need(integer(value.photoCursor)); halt(value.photoSourceHalt, true); }
   return value;
 }
@@ -140,6 +161,7 @@ export function validateDriverAuditPollProgressWrite(args) {
   shape(event, ['kind', 'key', 'phase', 'bodySha256']);
   need(event.kind === 'native-poll-progress' && event.key === args.p_key && event.bodySha256 === bodySha256
     && ['started', 'settled', 'schedule', 'failure'].includes(event.phase)
+    && (args.p_key !== 'native-progress:validation' || ['started', 'settled'].includes(event.phase))
     && args.p_event_text === JSON.stringify({ kind: 'native-poll-progress', key: args.p_key, phase: event.phase, bodySha256 })
     && args.p_request_text === JSON.stringify({ key: args.p_key, expectedRevision: args.p_expected, bodySha256 })
     && args.p_event_id === 'progress-' + hash(JSON.stringify([args.p_key, args.p_expected, bodySha256])));

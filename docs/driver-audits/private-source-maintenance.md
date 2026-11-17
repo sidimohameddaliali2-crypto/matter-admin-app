@@ -1,10 +1,12 @@
 # Maintaining the report generator and builder
 
-The public repository contains the application, backend adapters and reviewed deployment controls. The complete scheduled generator and builder are private code exports because they contain business identity configuration. They must be recoverable from Sidi's own server and MongoDB; a previous developer's checkout is not a maintenance dependency.
+The public repository contains the application, backend adapters and reviewed deployment controls. The complete scheduled generator and builder are private code exports because they contain business identity configuration. They must be recoverable from Sidi's own server and independently retained private code/data backups; a previous developer's checkout is not a maintenance dependency.
 
-With hybrid storage, MongoDB holds records, reviews and file references; complete immutable code archives and evidence bytes may live in Sidi's configured Spaces bucket. Follow the reference through the app archive adapter and verify its hash. An archive reference, photo URL or candidate lookup alone is not an independent byte backup. Keep original encrypted backups and their verified restore evidence.
+The selected handoff keeps the existing Supabase authority and runs generation on Sidi. It remains pending actual Linux qualification and live acceptance. See [Sidi execution with Supabase](source-worker.md#sidi-execution-with-the-existing-supabase-store). Do not require a native MongoDB import, change storage selection or run the native mutation fence to perform that handoff. The native code-archive lookups below describe the parked native path; verify the actual location and readback receipt for the selected Supabase release separately.
 
-Migration acceptance is separate from this code map. Check the actual authority, workers, stage receipts and archive readback before reporting a completed handoff.
+For the parked native/hybrid option, MongoDB holds records, reviews and file references; complete immutable code archives and evidence bytes may live in Sidi's configured Spaces bucket. Follow a reference through its actual selected archive adapter and verify its hash. An archive reference, photo URL or candidate lookup alone is not an independent byte backup. Keep original encrypted backups and their verified restore evidence.
+
+Migration acceptance is separate from this code map. Check the effective store/host settings, workers, stage receipts and complete code archive or backup readback before reporting a completed handoff. Standalone source staging saves the full code locally but does not by itself prove an independent archive backup of a new release.
 
 ## Find the actual implementation
 
@@ -23,9 +25,9 @@ The read-only `inspect-bindings` operation with `diagnostic_page=builder-all` ca
 
 ## Make a maintained change
 
-1. Read the actual application commit, native authority, PM2 registrations and effective configuration. Retain current receipts, private packages, source cutoffs and original missing-evidence outcomes. Do not infer activation from documentation or a successful staging job.
+1. Read the actual application commit, selected store/execution host, PM2 registrations and effective configuration; inspect native authority only for native mode. Retain current receipts, private packages, source cutoffs and original missing-evidence outcomes. Do not infer activation from documentation or a successful staging job.
 2. Recover the complete current code and its independent inputs using the lookups above. Create a separate private candidate. Compare against the live manifest so existing fixes survive. Keep public application changes in the normal reviewed Git branch; keep private source files and credentials outside Git.
-3. Change only the relevant source or builder files. Recompute the complete manifest, code envelope and delta where applicable. Preserve source schedules, paid grading limits and uncertain attempts, review identifiers, original clocks, customer pins and existing native writes.
+3. Change only the relevant source or builder files. Recompute the complete manifest, code envelope and delta where applicable. Preserve source schedules, paid grading limits and uncertain attempts, review identifiers, original clocks, customer pins and all existing authoritative writes.
 4. Test the changed behavior and legacy compatibility. Cache changes must prove identical original bytes and results, missing/corrupt/abort behavior, bounded shared writes and no hidden second cache. A complete private source package must satisfy its original environment and runtime contract.
 5. Stage code through the reviewed controls. The migration-only native handoff operations require stopped workers and inactive authority. After native activation, use the existing source/builder deployment controls with their current admission requirements and separately retain and read back the complete code archive in native storage. Never disable authority or discard new edits merely to reuse a migration operation.
 6. Qualify the exact Linux application, source, environment, Node, builder, renderer, journals and cache. The controlled rehearsal starts a real sync process behind the shared heavy-work lock, measures its actual PID/RSS, runs isolated source → builder → source, then durably pauses it before releasing exclusion. Catchable interruption and cleanup checks are distinct from protection against a forced process kill.

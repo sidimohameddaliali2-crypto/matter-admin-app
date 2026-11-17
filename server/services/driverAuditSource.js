@@ -144,6 +144,56 @@ async function readPinnedJson(reference, label) {
 }
 
 export const DRIVER_AUDIT_SOURCE_CACHE_ENV = 'MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY';
+export const DRIVER_AUDIT_SOURCE_EXECUTION_HOST_ENV = 'DRIVER_AUDIT_EXECUTION_HOST';
+
+export function driverAuditSourceExecutionHost(runtime, environment) {
+  const host = environment[DRIVER_AUDIT_SOURCE_EXECUTION_HOST_ENV];
+  if (host === undefined) return null;
+  requireSource(host === 'sidi' && runtime.managedSourceExecutionHost === 'sidi'
+    && runtime.managedSourceExecutionAdmission === 'fixed-host-v1'
+    && ['source/integration/hosted/native-backend.mjs', 'source/integration/hosted/archive-read-cache.mjs',
+      'source/integration/cloud/native-poll-progress.mjs'].every(relative => runtime.files.some(file => file.path === relative)),
+  'The source execution host needs its pinned runtime capability.');
+  requireSource(environment.MONGODB_URI === undefined && environment.DRIVER_AUDIT_NATIVE_CAPACITY_BYTES === undefined,
+    'Source execution uses the app database configuration.');
+  return host;
+}
+
+export function driverAuditSourceUsesAppBackend(config) {
+  return (config.dataStore ?? config.environment?.DRIVER_AUDIT_DATA_STORE) === 'mongo'
+    || config.executionHost === 'sidi' || config.environment?.[DRIVER_AUDIT_SOURCE_EXECUTION_HOST_ENV] === 'sidi';
+}
+
+export function driverAuditSourceBackendEnvironment(config, appEnvironment = process.env) {
+  const environment = { ...appEnvironment, ...config.environment };
+  if (config.executionHost === 'sidi' && config.dataStore === 'supabase') {
+    const secret = config.environment.MATTER_SUPABASE_SECRET;
+    requireSource(typeof secret === 'string' && secret.length > 0 && secret.length <= 8192 && !/[\r\n\0]/.test(secret),
+      'The staged Supabase source credential is required.');
+    // The private source environment is the qualified identity. An inherited
+    // app alias must not select another credential inside this child.
+    environment.DRIVER_AUDIT_DATA_STORE = 'supabase';
+    environment.DRIVER_AUDIT_SUPABASE_SECRET = secret;
+    delete environment.MONGODB_URI;
+    delete environment.DRIVER_AUDIT_NATIVE_CAPACITY_BYTES;
+  }
+  return environment;
+}
+
+export function requireDriverAuditSourceBackend(config, backend) {
+  requireSource(backend?.kind === config.dataStore && typeof backend.rpc === 'function'
+    && typeof backend.archive?.readObject === 'function' && typeof backend.archive?.putVerifiedObject === 'function'
+    && typeof backend.createExecutionBudget === 'function', 'The app source backend differs from its qualified store.');
+  if (config.executionHost === 'sidi') {
+    requireSource(backend.executionHost === 'sidi' && backend.executionAdmission === 'fixed-host-v1'
+      && backend.archive.managedReadCache === true && backend.archiveCacheDirectory === config.archiveCacheDirectory
+      && backend.pollProgress?.version === 1 && typeof backend.pollProgress.read === 'function'
+      && typeof backend.pollProgress.compareAndSwap === 'function' && backend.transferAccounting === 'supabase-http-bytes-v1'
+      && typeof backend.archiveReadBudget?.reserve === 'function' && typeof backend.archiveReadBudget?.settle === 'function'
+      && typeof backend.readTransferUsage === 'function', 'The qualified Sidi source capabilities are unavailable.');
+  }
+  return backend;
+}
 
 export function driverAuditSourceDataStore(files, environment) {
   const kind = environment.DRIVER_AUDIT_DATA_STORE || 'supabase';
@@ -190,6 +240,8 @@ export async function readDriverAuditSourceConfig(file) {
   'Invalid source environment.');
   const archiveCacheDirectory = driverAuditSourceArchiveCacheDirectory(config.root, runtime.files, environment);
   const dataStore = driverAuditSourceDataStore(runtime.files, environment);
+  const executionHost = driverAuditSourceExecutionHost(runtime, environment);
+  requireSource(executionHost !== 'sidi' || archiveCacheDirectory, 'Sidi source execution requires its managed archive cache.');
   // Runtime configuration contains source credentials only. Node loader and
   // process options remain controlled by the app's supervised runner.
   requireSource(!Object.keys(environment).some(key => ['NODE_OPTIONS', 'NODE_PATH', 'PATH', 'HOME', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES'].includes(key)),
@@ -213,11 +265,12 @@ export async function readDriverAuditSourceConfig(file) {
   requireSource(environment.MATTER_PHOTO_GRADE_ENABLED !== '1' || gatewayCredential,
     'Enabled photo grading requires a qualified Gateway credential.');
   return { ...config, file, configSha256: driverAuditSourceHash(bytes), runtime,
-    environmentReference: config.environment, environment, gatewayCredential, archiveCacheDirectory, dataStore };
+    environmentReference: config.environment, environment, gatewayCredential, archiveCacheDirectory, dataStore, executionHost };
 }
 
 const capabilityFenceMode = 'reporting-database-capability-v1';
 const twoPhaseFenceMode = 'reporting-database-capability-v2';
+const hostingAdmissionFenceMode = 'reporting-hosting-admission-v1';
 const originalReportingProject = 'trhhjfgfmxofxhnzocks';
 const proofId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
 const fingerprintNames = ['documents', 'receipts', 'archive', 'reservations', 'roadCache', 'capabilities'];
@@ -266,6 +319,40 @@ export function driverAuditReportingFunctionCatalogSha256(rows) {
   return driverAuditSourceHash(JSON.stringify(projected));
 }
 
+export function driverAuditHostingAppRpcCatalogSha256(rows) {
+  const identities = new Set(['progress_read(text)', 'progress_cas(text,uuid,bigint,bigint,text,text,text,text)',
+    'photo_alias_read(text)', 'photo_alias_register(text,jsonb)', 'read_egress_read()',
+    'read_egress_reserve(uuid,bigint,bigint)', 'read_egress_settle(uuid,bigint,bigint)']
+    .map(signature => 'public.matter_hosted_app_' + signature));
+  requireSource(Array.isArray(rows) && rows.length === identities.size, 'The exact hosting app RPC catalog is required.');
+  const projected = rows.map(row => {
+    requireSource(identities.delete(row?.identity) && row.owner === 'postgres'
+      && hashPattern.test(row.definitionSha256 ?? '') && hashPattern.test(row.aclSha256 ?? '')
+      && Array.isArray(row.apiExecutableRoles) && row.apiExecutableRoles.length === 1
+      && row.apiExecutableRoles[0] === 'service_role', 'The hosting app RPC execution scope differs.');
+    return { identity: row.identity, owner: row.owner, definitionSha256: row.definitionSha256,
+      aclSha256: row.aclSha256, apiExecutableRoles: ['service_role'] };
+  }).sort((left, right) => left.identity < right.identity ? -1 : left.identity > right.identity ? 1 : 0);
+  return driverAuditSourceHash(JSON.stringify(projected));
+}
+
+export function driverAuditHostingAppHelperCatalogSha256(rows) {
+  const identities = new Set(['compact_json(json,integer)', 'deny_alias_change()', 'egress_summary(timestamp with time zone)',
+    'matches_schema(jsonb,jsonb)', 'progress_schema(boolean)', 'prune_egress(timestamp with time zone)',
+    'valid_alias(text,jsonb)', 'valid_key(text)', 'valid_scalar(jsonb,text,integer)', 'validate_progress(text,text)',
+    'validation_progress_schema()'].map(signature => 'matter_reporting_app.' + signature));
+  requireSource(Array.isArray(rows) && rows.length === identities.size, 'The exact hosting app helper catalog is required.');
+  const projected = rows.map(row => {
+    requireSource(identities.delete(row?.identity) && row.owner === 'postgres'
+      && hashPattern.test(row.definitionSha256 ?? '') && hashPattern.test(row.aclSha256 ?? '')
+      && Array.isArray(row.apiExecutableRoles) && row.apiExecutableRoles.length === 0,
+    'The hosting app helper execution scope differs.');
+    return { identity: row.identity, owner: row.owner, definitionSha256: row.definitionSha256,
+      aclSha256: row.aclSha256, apiExecutableRoles: [] };
+  }).sort((left, right) => left.identity < right.identity ? -1 : left.identity > right.identity ? 1 : 0);
+  return driverAuditSourceHash(JSON.stringify(projected));
+}
+
 function sourceReceiptReference(saved, directory) {
   return typeof saved?.path === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}\.private\.json$/.test(saved.path)
     ? { ...saved, path: path.join(directory, saved.path) } : saved;
@@ -290,6 +377,183 @@ function embeddedPhaseReceipt(reference, expectedSha256) {
   const value = JSON.parse(bytes);
   requireSource(value && typeof value === 'object' && !Array.isArray(value), 'An embedded phase receipt object is required.');
   return value;
+}
+
+// Supabase stays writable. This closes only the reviewed old hosting budget
+// admission path; it is deliberately distinct from the native mutation fence.
+async function verifyHostingAdmissionFence(config, fence, release, receipts, directory, verifiedAt, expires, nowMs) {
+  const blockedAt = Date.parse(fence.admissionBlockedAt), checkedAt = Date.parse(fence.checkedAt);
+  const baseline = receipts.backup.uncertainAttemptsBaseline;
+  const guardIdentity = 'matter_reporting_hosted.state_cas_internal(text,bigint,text,text,text,text)';
+  const exact = (actual, expected) => Array.isArray(actual) && actual.length === expected.length
+    && new Set(actual).size === actual.length && expected.every(item => actual.includes(item));
+  requireSource(config.dataStore === 'supabase' && config.executionHost === 'sidi'
+    && fence.sourceProjectRef === originalReportingProject && proofId(fence.id)
+    && fence.writersStopped === false && fence.processesStopped !== true && fence.oldHostingAdmissionsFenced === true
+    && fence.sharedReportingRpcWritesUsable === true
+    && ['legacyRuntimeSha256', 'legacyEntrypointsSha256', 'hostingAdmissionReceiptSha256', 'hostingAdmissionGraphSha256',
+      'appRpcCatalogSha256', 'appHelperCatalogSha256',
+      'hostingAdmissionSqlSha256', 'hostingGuardDefinitionSha256'].every(name => hashPattern.test(fence[name] ?? ''))
+    && Number.isFinite(blockedAt) && Number.isFinite(checkedAt) && blockedAt <= checkedAt && checkedAt <= verifiedAt
+    && nowMs - checkedAt <= 30 * minuteMs && expires <= blockedAt + 30 * minuteMs
+    && Date.parse(fence.validUntil) >= expires && Date.parse(fence.validUntil) <= blockedAt + 30 * minuteMs
+    && fence.initialCursor === release.initialCursor && Date.parse(release.initialCursor) <= blockedAt,
+  'The Supabase hosting admission fence scope or fresh window differs.');
+  requireSource(Number.isSafeInteger(baseline?.count) && baseline.count >= 0 && hashPattern.test(baseline.sha256 ?? '')
+    && hashPattern.test(baseline.subsetSha256 ?? '')
+    && proofId(baseline.snapshotId) && hashPattern.test(baseline.sourceSnapshotSha256 ?? '')
+    && hashPattern.test(baseline.restoreVerificationSha256 ?? ''), 'The restored hosting uncertain-attempt baseline is required.');
+  const proofs = {}, ids = new Set([fence.id]), hashes = new Set(), paths = new Set();
+  for (const [name, kind] of [['capabilityAudit', 'reporting-hosting-admission-audit'], ['drainAudit', 'reporting-hosting-drain-audit'],
+    ['quietAudit', 'reporting-hosting-quiet-window'], ['checkpoint', 'reporting-final-checkpoint']]) {
+    const ref = sourceReceiptReference(fence[name], directory);
+    requireSource(proofId(ref?.id) && !ids.has(ref.id) && !hashes.has(ref.sha256) && !paths.has(ref.path),
+      'Independent pinned hosting admission proofs are required.');
+    ids.add(ref.id); hashes.add(ref.sha256); paths.add(ref.path);
+    const proof = await readPinnedJson(ref, 'hosting ' + name), at = Date.parse(proof.checkedAt);
+    requireSource(proof.version === 1 && proof.verified === true && proof.id === ref.id && proof.kind === kind
+      && ['sourceProjectRef', 'legacyRuntimeSha256', 'legacyEntrypointsSha256', 'admissionBlockedAt']
+        .every(key => proof[key] === fence[key]) && Number.isFinite(at) && at >= blockedAt && at <= checkedAt,
+    'Hosting admission proof identity or origin clock differs.');
+    proofs[name] = proof;
+  }
+  const { capabilityAudit: audit, drainAudit: drain, quietAudit: quiet, checkpoint } = proofs;
+  const graph = embeddedPhaseReceipt(audit.admissionGraph, fence.hostingAdmissionGraphSha256);
+  const handlerModules = ['collector', 'index', 'morning-gps', 'private-validation', 'qualify-publication', 'qualify']
+    .map(name => 'source/api/' + name + '.mjs');
+  const direct = [
+    ...['/api/collector', '/api/collector?task=auto', '/api/collector?verify=1', '/api/collector?verify=photo']
+      .map(route => ['source/api/collector.mjs', 'GET', route, 'worker-or-reader-budget-before-operation']),
+    ['source/api/qualify.mjs', 'POST', '/api/qualify', 'worker-budget-before-qualification'],
+    ['source/api/qualify-publication.mjs', 'POST', '/api/qualify-publication', 'permanently-closed-503'],
+    ...['delivery-identities', 'fresh-run', 'api-refresh', 'reviews/migrate'].map(name =>
+      ['source/api/index.mjs', 'POST', '/api/reporting/' + name, 'reader-budget-before-service-initialization']),
+    ['source/api/index.mjs', 'POST', '/api/reporting/reviews', 'intentionally-preserved-human-review-write'],
+  ].map(row => JSON.stringify(row));
+  const local = graph.localFixture;
+  requireSource(graph.version === 1 && graph.kind === 'legacy-hosting-admission-review' && graph.verified === true
+    && ['sourceProjectRef', 'legacyRuntimeSha256', 'legacyEntrypointsSha256'].every(key => graph[key] === fence[key])
+    && graph.coveredEntrypoints === 13 && graph.maximumRuntimeMs === 300000 && graph.graceMs === 60000
+    && graph.allProviderNetworkRequiresCommittedAdmission === true && graph.paidModelCallsAdditionallyRequireUniquePaidAttempt === true
+    && graph.gradeResultDurableBeforePaidSettlement === true && graph.sharedHumanReviewWritesRemainAllowed === true
+    && graph.actualWorkDrainedByThisReview === false && graph.cronProcessesStopped === false && graph.allDatabaseWritesFenced === false
+    && graph.paidLedgerFrozen === false && graph.productionSqlExecuted === false && graph.sourceMutations === 0
+    && Array.isArray(graph.entrypoints) && graph.entrypoints.length === 13
+    && JSON.stringify(graph.entrypoints) === JSON.stringify(config.runtime?.entrypoints)
+    && Array.isArray(graph.requestHandlers) && exact(graph.requestHandlers.map(row => row.module), handlerModules)
+    && graph.requestHandlers.every(row => row.exportName === 'default' && row.maxDurationSeconds === 300)
+    && Array.isArray(graph.directPaths) && exact(graph.directPaths.map(row => JSON.stringify([row.module, row.method, row.path, row.admission])), direct)
+    && Array.isArray(graph.originalFiles) && graph.originalFiles.length === 131
+    && new Set(graph.originalFiles.map(row => row.path)).size === 131
+    && graph.originalFiles.every(row => safeRelativePath(row.path) && row.path.startsWith('source/')
+      && Number.isSafeInteger(row.bytes) && row.bytes >= 0 && row.bytes <= 16 * 1024 ** 2 && hashPattern.test(row.sha256 ?? ''))
+    && hashPattern.test(local?.fixtureSha256 ?? '') && hashPattern.test(local.logSha256 ?? '')
+    && Number.isSafeInteger(local.groups) && local.groups >= 5 && local.scheduleCases === 13 && local.manualAndPreviewCases === 11
+    && local.sourceCalls === 0 && local.providerCalls === 0 && local.actualDatabaseCalls === 0,
+  'The complete original hosting admission graph and preserved human-write scope are required.');
+  const origin = embeddedPhaseReceipt(audit.hostingAdmissionReceipt, fence.hostingAdmissionReceiptSha256);
+  const appCatalogSha256 = driverAuditHostingAppRpcCatalogSha256(origin.appRpcFunctions);
+  requireSource([fence.appRpcCatalogSha256, audit.appRpcCatalogSha256, origin.appRpcCatalogSha256,
+    origin.beforeAppRpcCatalogSha256, origin.afterAppRpcCatalogSha256].every(value => value === appCatalogSha256),
+  'The independently pinned hosting app RPC catalog changed.');
+  const appHelperCatalogSha256 = driverAuditHostingAppHelperCatalogSha256(origin.appHelperFunctions);
+  requireSource([fence.appHelperCatalogSha256, audit.appHelperCatalogSha256, origin.appHelperCatalogSha256,
+    origin.beforeAppHelperCatalogSha256, origin.afterAppHelperCatalogSha256].every(value => value === appHelperCatalogSha256),
+  'The independently pinned hosting app helper catalog changed.');
+  requireSource(hashPattern.test(origin.afterHostingControlSha256 ?? '')
+    && audit.hostingControlSha256 === origin.afterHostingControlSha256,
+  'The actual hosting control observation differs from its committed origin.');
+  const beforeCommit = Date.parse(origin.commitBeforeAt), afterCommit = Date.parse(origin.commitAfterAt);
+  const beforeObservation = Date.parse(origin.beforeObservationAt), afterObservation = Date.parse(origin.afterObservationAt);
+  requireSource(origin.version === 1 && origin.verified === true && origin.kind === 'reporting-hosting-admission-origin-v1'
+    && origin.sourceProjectRef === fence.sourceProjectRef && proofId(origin.executionId)
+    && /^[1-9]\d{0,19}$/.test(origin.transactionId ?? '') && Number.isSafeInteger(origin.backendPid) && origin.backendPid > 0
+    && origin.sqlSha256 === fence.hostingAdmissionSqlSha256 && origin.guardFunctionIdentity === guardIdentity
+    && origin.hostingGuardDefinitionSha256 === fence.hostingGuardDefinitionSha256
+    && ['legacyRuntimeSha256', 'legacyEntrypointsSha256', 'admissionBlockedAt'].every(key => origin[key] === fence[key])
+    && origin.admissionBlockedAt === origin.commitBeforeAt && beforeCommit === blockedAt
+    && Number.isFinite(beforeObservation) && Number.isFinite(afterCommit) && Number.isFinite(afterObservation)
+    && beforeObservation <= beforeCommit && beforeCommit <= afterCommit && afterCommit - beforeCommit <= 180_000
+    && afterObservation >= afterCommit && afterObservation <= Date.parse(audit.checkedAt)
+    && hashPattern.test(origin.beforeObservationSha256 ?? '') && hashPattern.test(origin.afterObservationSha256 ?? '')
+    && origin.beforeObservationSha256 !== origin.afterObservationSha256
+    && origin.applied === true && origin.alreadyClosed === false && origin.reapplied === false
+    && origin.oldHostingAdmissionsFenced === true && origin.sharedReportingRpcWritesUsable === true
+    && origin.paidGradingPolicyUnchanged === true && origin.originalRolesSchemasRelationsAndGallaboxPreserved === true
+    && origin.hostingBudgetPolicyCount === 11 && exact(origin.cronJobsDisabled, [4, 5]),
+  'The exact one-time hosting admission SQL origin is required.');
+  requireSource(exact(audit.apiRoles, ['PUBLIC', 'anon', 'authenticated', 'service_role'])
+    && exact(audit.ownerBypassRoles, ['postgres', 'supabase_admin']) && hashPattern.test(audit.roleMembershipSha256 ?? '')
+    && audit.serviceRoleCannotAssumeOwner === true && audit.rawStorageAndGatewayRevoked === false
+    && audit.oldHostingAdmissionsFenced === true && audit.sharedReportingRpcWritesUsable === true
+    && audit.paidGradingPolicyUnchanged === true && hashPattern.test(audit.unrelatedBeforeSha256 ?? '')
+    && audit.unrelatedBeforeSha256 === audit.unrelatedAfterSha256, 'Hosting admission permissions or unrelated scope differ.');
+  const afterCatalog = driverAuditReportingFunctionCatalogSha256(audit.functions);
+  const beforeCatalog = driverAuditReportingFunctionCatalogSha256(audit.functions.map(row => ({ ...row,
+    definitionSha256: row.beforeDefinitionSha256, aclSha256: row.beforeAclSha256, apiExecutableRoles: row.beforeApiExecutableRoles })));
+  requireSource(beforeCatalog === audit.baselineCatalogSha256 && beforeCatalog === origin.beforeCatalogSha256
+    && afterCatalog === origin.afterCatalogSha256 && afterCatalog === driverAuditReportingFunctionCatalogSha256(origin.functions)
+    && audit.functions.every(row => row.aclSha256 === row.beforeAclSha256
+      && exact(row.apiExecutableRoles, row.beforeApiExecutableRoles)
+      && (!ownerOnlyFunctions.has(row.identity) || row.apiExecutableRoles.length === 0)
+      && (row.identity === guardIdentity
+        ? row.beforeDefinitionSha256 === origin.originalInternalDefinitionSha256
+          && row.definitionSha256 === fence.hostingGuardDefinitionSha256 && row.definitionSha256 !== row.beforeDefinitionSha256
+        : row.definitionSha256 === row.beforeDefinitionSha256))
+    && Array.isArray(audit.sqlCron) && exact(audit.sqlCron.map(row => row.id), [4, 5])
+    && audit.sqlCron.every(row => row.active === false && row.owner === 'postgres'
+      && hashPattern.test(row.beforeCommandSha256 ?? '') && row.commandSha256 === row.beforeCommandSha256),
+  'The hosting admission catalog must preserve every shared RPC permission and unrelated definition.');
+  const retained = value => value?.scope === 'baseline-subset'
+    && retainedUncertainAttempts(value, { ...baseline, sha256: baseline.subsetSha256 })
+    && ['beforeTotalCount', 'afterTotalCount'].every(name => Number.isSafeInteger(value[name]) && value[name] >= baseline.count);
+  const drainAt = Date.parse(drain.checkedAt);
+  requireSource(drainAt >= afterCommit + 360_000 && ['activeLeases', 'activeReportingTransactions', 'activeSqlCronRuns',
+    'activeProviderWork', 'privilegedReportingWriters', 'possibleReportingHttpQueue'].every(name => drain[name] === 0)
+    && drain.admissionGraphSha256 === fence.hostingAdmissionGraphSha256
+    && drain.hostingAdmissionReceiptSha256 === fence.hostingAdmissionReceiptSha256
+    && drain.hostingControlSha256 === audit.hostingControlSha256 && hashPattern.test(drain.ownerAuditSha256 ?? '')
+    && retained(drain.uncertainAttempts), 'Hosting admission requires a full provider drain and preserved uncertain subset.');
+  requireSource(Array.isArray(quiet.samples) && quiet.samples.length === 2, 'Independent hosting quiet samples are required.');
+  const [start, end] = quiet.samples, from = Date.parse(start?.at), to = Date.parse(end?.at);
+  const sameHosting = (left, right) => ['hostingLedgers', 'admissionGraph', 'providerWork', 'leases']
+    .every(name => hashPattern.test(left?.[name] ?? '') && left[name] === right?.[name]);
+  requireSource(proofId(start?.id) && proofId(end?.id) && start.id !== end.id
+    && hashPattern.test(start.sha256 ?? '') && hashPattern.test(end.sha256 ?? '') && start.sha256 !== end.sha256
+    && Number.isFinite(from) && Number.isFinite(to) && from >= drainAt && to - from >= 5 * minuteMs
+    && to - from <= 30 * minuteMs && to <= Date.parse(quiet.checkedAt)
+    && to <= checkedAt && sameHosting(start.fingerprints, end.fingerprints)
+    && quiet.admissionGraphSha256 === fence.hostingAdmissionGraphSha256
+    && quiet.hostingAdmissionReceiptSha256 === fence.hostingAdmissionReceiptSha256
+    && quiet.drainAuditSha256 === fence.drainAudit.sha256
+    && end.fingerprints.admissionGraph === audit.hostingControlSha256,
+  'Hosting admission needs a quiet old-host work graph after the drain.');
+  const capture = Date.parse(checkpoint.capturedAt), readback = checkpoint.sourceReadback;
+  requireSource(capture >= to && nowMs - capture <= 30 * minuteMs && capture <= Date.parse(checkpoint.checkedAt)
+    && checkpoint.snapshotId === baseline.snapshotId && checkpoint.sourceSnapshotSha256 === baseline.sourceSnapshotSha256
+    && checkpoint.restoreVerificationSha256 === baseline.restoreVerificationSha256
+    && checkpoint.backupReceiptSha256 === release.backup.sha256 && checkpoint.parityReceiptSha256 === release.parity.sha256
+    && checkpoint.initialCursor === release.initialCursor && retained(checkpoint.uncertainAttempts)
+    && sameHosting(checkpoint.hostingFingerprints, end.fingerprints)
+    && Number.isFinite(Date.parse(readback?.checkedAt)) && Date.parse(readback.checkedAt) >= capture
+    && Date.parse(readback.checkedAt) <= Date.parse(checkpoint.checkedAt)
+    && Number.isSafeInteger(checkpoint.collectorRevision) && checkpoint.collectorRevision > 0
+    && Number.isSafeInteger(checkpoint.reviewRevision) && checkpoint.reviewRevision >= 0
+    && ['collectorRevision', 'reviewRevision', 'collectorBodySha256', 'reviewBodySha256'].every(key =>
+      checkpoint[key] === readback[key] && checkpoint[key] === receipts.parity[key])
+    && ['collectorBodySha256', 'reviewBodySha256'].every(key => hashPattern.test(checkpoint[key] ?? '')),
+  'The hosting checkpoint needs the fresh restored backup and exact latest shared source heads.');
+  requireSource(receipts.parity.kind === 'supabase-sidi-source-parity-v1' && receipts.parity.dataStore === 'supabase'
+    && receipts.parity.configSha256 === config.configSha256 && receipts.parity.runtimeManifestSha256 === config.manifestSha256
+    && receipts.parity.environmentSha256 === config.environmentReference.sha256
+    && hashPattern.test(receipts.parity.hostQualification?.fixtureSha256 ?? '')
+    && hashPattern.test(receipts.parity.hostQualification?.receiptSha256 ?? ''), 'The exact Supabase source parity is required.');
+  const credentials = receipts.credentials, evidenceReference = sourceReceiptReference(credentials.evidence, directory);
+  requireSource(credentials.environmentSha256 === config.environmentReference.sha256
+    && evidenceReference?.sha256 === credentials.evidenceSha256, 'The hosting credential environment differs.');
+  const evidence = await readPinnedJson(evidenceReference, 'hosting credential evidence');
+  requireSource(evidence.version === 1 && evidence.verified === true && evidence.environmentSha256 === credentials.environmentSha256,
+    'The exact qualified Supabase credential evidence is required.');
 }
 
 function verifyTwoPhaseOrigins(capabilities, fence, baseline, finalDrain) {
@@ -514,7 +778,11 @@ export async function verifyDriverAuditSourceRelease(config, reference, now = ne
     requireSource(receipt.version === 1 && receipt.verified === true, `The ${kind} receipt is not verified.`);
     receipts[kind] = receipt;
     if (kind === 'sourceFence') {
-      if ([capabilityFenceMode, twoPhaseFenceMode].includes(receipt.mode)) {
+      requireSource(config.dataStore !== 'supabase' || config.executionHost !== 'sidi' || receipt.mode === hostingAdmissionFenceMode,
+        'Sidi Supabase execution requires its exact hosting admission fence.');
+      if (receipt.mode === hostingAdmissionFenceMode) {
+        await verifyHostingAdmissionFence(config, receipt, release, receipts, path.dirname(receiptReference.path), verifiedAt, expires, now.getTime());
+      } else if ([capabilityFenceMode, twoPhaseFenceMode].includes(receipt.mode)) {
         validatedFence = await verifyCapabilityFence(config, receipt, release, receipts.backup,
           path.dirname(receiptReference.path), verifiedAt, expires, now.getTime(), receiptReference.sha256);
       } else {

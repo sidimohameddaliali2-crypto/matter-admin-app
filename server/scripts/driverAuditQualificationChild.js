@@ -80,7 +80,7 @@ function createLocalTransport(roots, fallback) {
   };
 }
 
-function createReplayState(state, day, time, capture, { nativeReplay, nativePollProgress }) {
+function createReplayState(state, day, time, capture, { appReplay, nativePollProgress }) {
   const prior = state.get('collector-state');
   const publication = JSON.parse(prior.body);
   const recentDays = Array.from({ length: 3 }, (_, offset) =>
@@ -96,7 +96,7 @@ function createReplayState(state, day, time, capture, { nativeReplay, nativePoll
       photoCursor: publication.photoCursor ?? 0, photoSourceHalt: publication.photoSourceHalt ?? null,
       lastPoll: null, lastSuccessfulPollAt: null, lastDataChangeAt: null }) });
   } else state.set('collector-state', { ...prior, body: JSON.stringify(publication) });
-  if (!nativeReplay) {
+  if (!appReplay) {
     const budget = state.get('worker-budget');
     const document = JSON.parse(budget.body);
     const period = new OriginalDate(time).toISOString().slice(0, 7);
@@ -108,7 +108,7 @@ function createReplayState(state, day, time, capture, { nativeReplay, nativePoll
   return publication;
 }
 
-function createReplayTransport(state, time, readObject, { failPublication, reject, nativeReplay, nativePollProgress }) {
+function createReplayTransport(state, time, readObject, { failPublication, reject, appReplay, nativePollProgress, sidiReplay }) {
   const writes = new Map();
   const reservations = new Map();
   const archiveReads = { requests: 0, bytes: 0 };
@@ -183,7 +183,13 @@ function createReplayTransport(state, time, readObject, { failPublication, rejec
   };
   const read = (key, limit) => writes.get(key) ?? readObject(key, limit);
   const nativeBackend = {
-    kind: 'mongo', rpc: async (name, args) => rpc(name, args),
+    kind: sidiReplay ? 'supabase' : 'mongo', rpc: async (name, args) => rpc(name, args),
+    ...(sidiReplay ? { executionHost: 'sidi', executionAdmission: 'fixed-host-v1',
+      transferAccounting: 'supabase-http-bytes-v1', archiveReadBudget: createDriverAuditFixedHostBudgetFactory()(),
+      async readTransferUsage() { return { version: 1, basis: 'supabase-http-bytes-v1',
+        month: { period: new OriginalDate(time).toISOString().slice(0, 7), usedBytes: 0, reservedBytes: 0, limitBytes: 8 * 1024 ** 3 },
+        day: { period: new OriginalDate(time).toISOString().slice(0, 10), usedBytes: 0, reservedBytes: 0, limitBytes: 512 * MiB },
+        activeReservations: 0, uncertainReservations: 0 }; } } : {}),
     pollProgress: createDriverAuditPollProgress({ rpc: async (name, args) => rpc(name, args) }),
     createExecutionBudget: createDriverAuditFixedHostBudgetFactory(),
     archive: {
@@ -204,7 +210,7 @@ function createReplayTransport(state, time, readObject, { failPublication, rejec
     },
   };
   globalThis.fetch = async (input, options = {}) => {
-    if (nativeReplay) return reject();
+    if (appReplay) return reject();
     const url = new URL(input);
     if (url.origin !== 'https://trhhjfgfmxofxhnzocks.supabase.co' || url.search) return reject();
     if (url.pathname.startsWith('/rest/v1/rpc/') && options.method === 'POST') {
@@ -234,10 +240,13 @@ function createReplayTransport(state, time, readObject, { failPublication, rejec
 }
 
 async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsRoot, expected, failPublication,
-  archiveCacheDirectory, nativeReplay = false, nativePollProgress = false }) {
+  archiveCacheDirectory, nativeReplay = false, nativePollProgress = false, sidiReplay = false }) {
   assert.equal(typeof nativeReplay, 'boolean');
   assert.equal(typeof nativePollProgress, 'boolean');
-  assert(!nativePollProgress || nativeReplay, 'Bounded progress is a native capability.');
+  assert.equal(typeof sidiReplay, 'boolean');
+  assert(!(nativeReplay && sidiReplay), 'Replay must keep a single truthful data store.');
+  const appReplay = nativeReplay || sidiReplay;
+  assert(!nativePollProgress || appReplay, 'Bounded progress requires the app backend capability.');
   const state = await readState(stateFile);
   const executionLedgers = () => [...state].filter(([key]) => /^(?:worker|reader)-budget(?:-|$)/.test(key));
   const preservedExecutionLedgers = structuredClone(executionLedgers());
@@ -249,9 +258,10 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
   const originalCapture = JSON.parse(await readObject(capture.ref.key));
   assert.equal(originalCapture.snapshot.rows.length, expected.sourceRows);
   const originalPublication = structuredClone(state.get('collector-state'));
-  createReplayState(state, day, time, capture, { nativeReplay, nativePollProgress });
+  createReplayState(state, day, time, capture, { appReplay, nativePollProgress });
   assert(archiveCacheDirectory === undefined || archiveCacheDirectory === path.join(path.dirname(root), 'source-archive-cache'));
   const environment = { ...fakeEnvironment, ...(nativeReplay ? { DRIVER_AUDIT_DATA_STORE: 'mongo' } : {}),
+    ...(sidiReplay ? { DRIVER_AUDIT_DATA_STORE: 'supabase', DRIVER_AUDIT_EXECUTION_HOST: 'sidi' } : {}),
     ...(archiveCacheDirectory === undefined ? {} : { [DRIVER_AUDIT_SOURCE_CACHE_ENV]: archiveCacheDirectory }) };
   Object.assign(process.env, environment);
   globalThis.Date = class extends OriginalDate {
@@ -259,11 +269,11 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
     static now() { return time; }
   };
   let forbidden = 0;
-  const fixture = createReplayTransport(state, time, readObject, { failPublication, nativeReplay, nativePollProgress, reject() {
+  const fixture = createReplayTransport(state, time, readObject, { failPublication, appReplay, sidiReplay, nativePollProgress, reject() {
     forbidden++;
     throw new Error('Request outside saved collector fixture.');
   } });
-  if (nativeReplay) {
+  if (appReplay) {
     fixture.nativeBackend.archive = createDriverAuditReadCache({ archive: fixture.nativeBackend.archive,
       cacheDirectory: archiveCacheDirectory });
     assert.equal(fixture.nativeBackend.archive.managedReadCache, true);
@@ -322,7 +332,7 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
     generation: current.head.manifest.sha256, retainedSignature },
   Object.fromEntries(['records', 'history', 'reportHash', 'acceptedGrades', 'generation', 'retainedSignature'].map(key => [key, expected[key]])));
   assert.equal(forbidden, 0);
-  if (nativeReplay) assert.deepEqual(executionLedgers(), preservedExecutionLedgers, 'Native execution changed a preserved hosting ledger.');
+  if (appReplay) assert.deepEqual(executionLedgers(), preservedExecutionLedgers, 'App execution changed a preserved hosting ledger.');
   const saved = { revision: published.revision, body: published.body };
   await fs.writeFile(path.join(root, 'replayed-source.private.json'), JSON.stringify(saved), { flag: 'wx', mode: 0o600 });
   for (const [key, bytes] of fixture.writes) await fs.writeFile(path.join(root, key), bytes, { flag: 'wx', mode: 0o600 });
@@ -331,7 +341,11 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
     outputObjects: fixture.writes.size, handlerPeakRssBytes, failureRetry: !!failPublication, archiveReads: firstArchiveReads,
     ...(nativeReplay ? { executionAdmission: 'fixed-host-v1', executionLedgersPreserved: true,
       nativeManagedArchiveCache: true, nativeArchiveCacheEnabled: archiveCacheDirectory !== undefined } : {}),
-    ...(nativePollProgress ? { nativeNoChangeDuplicateFree: true, failureKind: fixture.failureKind() } : {}) };
+    ...(sidiReplay ? { dataStore: 'supabase', executionHost: 'sidi', executionAdmission: 'fixed-host-v1',
+      executionLedgersPreserved: true, transferAccounting: 'supabase-http-bytes-v1',
+      managedArchiveCache: true, archiveCacheEnabled: archiveCacheDirectory !== undefined } : {}),
+    ...(nativePollProgress ? { ...(sidiReplay ? { pollProgressDuplicateFree: true } : { nativeNoChangeDuplicateFree: true }),
+      failureKind: fixture.failureKind() } : {}) };
 }
 
 function archiveFromParent(key, maxBytes) {
@@ -347,20 +361,23 @@ function archiveFromParent(key, maxBytes) {
   });
 }
 
-async function replayBuilder({ root, objectsRoot, sourceRoot, builder, diskReserve, nativeReplay = false, archiveCacheDirectory }) {
+async function replayBuilder({ root, objectsRoot, sourceRoot, builder, diskReserve, nativeReplay = false, sidiReplay = false, archiveCacheDirectory }) {
   assert.equal(typeof nativeReplay, 'boolean');
+  assert.equal(typeof sidiReplay, 'boolean');
+  assert(!(nativeReplay && sidiReplay), 'Replay must keep a single truthful data store.');
+  const appReplay = nativeReplay || sidiReplay;
   assert(archiveCacheDirectory === undefined || archiveCacheDirectory === path.join(path.dirname(root), 'source-archive-cache'));
   const read = createLocalTransport([[sourceRoot, false], [objectsRoot, false],
     [builder.cacheRoot, false], [builder.archiveBaseline, true], [builder.initialBaseline, true]], archiveFromParent);
   const original = { readObject: async (key, { maxBytes } = {}) => Readable.from([await read(key, maxBytes)]) };
-  const transport = nativeReplay ? createDriverAuditReadCache({ archive: original, cacheDirectory: archiveCacheDirectory }) : original;
+  const transport = appReplay ? createDriverAuditReadCache({ archive: original, cacheDirectory: archiveCacheDirectory }) : original;
   const [{ automaticReleaseBasis }, { createCloudRepository }, { buildAutomaticRelease, compactDirectBuildVersion }, { validateAutomaticCandidate }] =
     await Promise.all(['integration/cloud/automatic-release.mjs', 'integration/cloud/repository.mjs',
       'integration/cloud/automatic-release-build.mjs', 'scripts/run-automatic-report.mjs'].map(file => load(path.join(builder.codeRoot, file))));
   const savedState = await json(path.join(sourceRoot, 'replayed-source.private.json'));
   const stateStore = { read: async () => savedState };
   let source;
-  if (nativeReplay) {
+  if (appReplay) {
     const { createAutomaticReleaseSource, supportsManagedArchiveCache } =
       await load(path.join(builder.codeRoot, 'integration/cloud/automatic-release-source.mjs'));
     assert.equal(supportsManagedArchiveCache, true, 'The builder must delegate native cache ownership.');
@@ -385,7 +402,9 @@ async function replayBuilder({ root, objectsRoot, sourceRoot, builder, diskReser
   assert.equal(validation.ok, true);
   return { status: 'verified', builderSha256: builder.builderSha256, baselineManifestSha256: builder.baselineManifestSha256,
     candidateManifestSha256: validation.manifestSha256,
-    ...(nativeReplay ? { nativeManagedArchiveCache: true, nativeArchiveCacheEnabled: archiveCacheDirectory !== undefined } : {}) };
+    ...(nativeReplay ? { nativeManagedArchiveCache: true, nativeArchiveCacheEnabled: archiveCacheDirectory !== undefined } : {}),
+    ...(sidiReplay ? { dataStore: 'supabase', executionHost: 'sidi', managedArchiveCache: true,
+      archiveCacheEnabled: archiveCacheDirectory !== undefined } : {}) };
 }
 
 async function main() {

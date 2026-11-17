@@ -1,12 +1,14 @@
-const hasAhead=(candidate,active)=>candidate?.collectorRevision>active?.directImport?.collectorRevision;
-const sameEvidence=(source,active)=>source.basis===active.directImport.sourceBasis;
+const evidenceFor=active=>active?.servingPackage?.version===1&&active.servingPackage.dataStore==='supabase'
+ ?active.servingPackage:active?.directImport;
+const hasAhead=(candidate,active)=>candidate?.collectorRevision>evidenceFor(active)?.collectorRevision;
+const sameEvidence=(source,active)=>source.basis===evidenceFor(active)?.sourceBasis;
 
 export function describeDriverAuditSyncFailure(error){
  const capacity=error.code==='ENOSPC'
   ?{kind:'build-disk',availableBytes:null,requiredBytes:null}
   :error.code==='AUDIT_CAPACITY'?error.capacity??null:null;
  if(error.code==='AUDIT_CAPACITY'||error.code==='ENOSPC')return {status:'capacity-blocked',errorCode:'AUDIT_CAPACITY',capacity};
- if(error.code==='AUDIT_BUDGET')return {status:'budget-deferred',errorCode:'AUDIT_BUDGET',capacity:null};
+ if(error.code==='AUDIT_BUDGET'||error.code==='AUDIT_TRANSFER_LIMIT')return {status:'budget-deferred',errorCode:'AUDIT_BUDGET',capacity:null};
  return {status:'failed',errorCode:'SYNC_FAILED',capacity:null};
 }
 
@@ -30,9 +32,9 @@ export async function runDriverAuditSyncTick({readSource,readHead,getCandidate,b
   catch(error){onMaintenanceError?.(error);}
  };
  try{
-  if(active?.directImport?.version!==1)throw Error('An active direct audit seed is required');
+  if(evidenceFor(active)?.version!==1)throw Error('An active verified audit seed is required');
   latest=await readSource();
-  if(latest.revision<active.directImport.collectorRevision)throw Error('Saved audit source moved backwards');
+  if(latest.revision<evidenceFor(active).collectorRevision)throw Error('Saved audit source moved backwards');
   if(sameEvidence(latest,active)){
    await update('ready',false);
    await maintainVerified();
@@ -56,7 +58,7 @@ export async function runDriverAuditSyncTick({readSource,readHead,getCandidate,b
   }
   if(!candidate)candidate=await applyCandidate(await build(latest));
   active=await readHead();
-  if(active?.directImport?.sourceBasis!==candidate.sourceBasis)throw Error('Active audit verification failed');
+  if(evidenceFor(active)?.sourceBasis!==candidate.sourceBasis)throw Error('Active audit verification failed');
   latest=await readSource();
   const pending=!sameEvidence(latest,active);
   await update(pending?'pending':'ready',pending);

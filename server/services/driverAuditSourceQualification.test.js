@@ -18,6 +18,25 @@ import {
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 
+test('Sidi qualification selects the real report HTTP registration and rejects another app or interpreter', () => {
+  assert.equal(typeof qualification.driverAuditSourceQualificationWorkers, 'function');
+  const server = path.resolve(fileURLToPath(new URL('../', import.meta.url)));
+  const config = { dataStore: 'supabase', executionHost: 'sidi', nodeExecutable: process.execPath };
+  const api = { name: 'matter-driver-reports-api', pm_id: 10, pid: process.pid, pm2_env: { status: 'online',
+    pm_cwd: server, pm_exec_path: path.join(server, 'scripts/driverAuditHttp.js'), args: [], exec_interpreter: process.execPath } };
+  const sync = { name: 'matter-driver-audit-sync', pid: process.pid, pm2_env: { status: 'online' } };
+  const oldApi = { name: 'matter-delivery-api', pid: process.pid, pm2_env: { status: 'online' } };
+  assert.deepEqual(qualification.driverAuditSourceQualificationWorkers([oldApi, api, sync], config), [api, sync]);
+  for (const change of [row => { row.name = 'matter-delivery-api'; }, row => { row.pid = 0; },
+    row => { row.pm2_env.pm_exec_path = path.join(server, 'server.js'); },
+    row => { row.pm2_env.pm_cwd = path.dirname(server); }, row => { row.pm2_env.args = ['--port', '5003']; },
+    row => { row.pm2_env.exec_interpreter = '/unqualified/node'; }]) {
+    const row = structuredClone(api); change(row);
+    assert.throws(() => qualification.driverAuditSourceQualificationWorkers([row, sync], config), /report HTTP|qualification|API/i);
+  }
+  assert.throws(() => qualification.driverAuditSourceQualificationWorkers([api, structuredClone(api), sync], config), /report HTTP|API/i);
+});
+
 async function heldQualificationFixture(t) {
   const base = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'audit-held-qualification-')));
   t.after(() => fs.rm(base, { recursive: true, force: true }));
@@ -346,9 +365,37 @@ test('start accepts only a complete exact Linux host qualification receipt', asy
     source: { ...nativeShared.source, nativeArchiveCacheEnabled: false } })), /archive cache/i);
   await assert.rejects(verifyNativeShared(await save({ ...nativeShared,
     builder: { ...nativeShared.builder, nativeManagedArchiveCache: false } })), /incomplete|changed/i);
+
+  const sidiConfig = { ...config, dataStore: 'supabase', executionHost: 'sidi', archiveCacheDirectory: cacheRoot,
+    environment: { DRIVER_AUDIT_EXECUTION_HOST: 'sidi' }, runtime: {
+      managedSourceExecutionHost: 'sidi', managedSourceExecutionAdmission: 'fixed-host-v1',
+      files: [{ path: 'source/integration/cloud/native-poll-progress.mjs' }] } };
+  const verifySidi = reference => verifyDriverAuditSourceHostQualification({ config: sidiConfig, commit, reference,
+    builder: { ...builder, cacheRoot }, nodeExecutable, nodeVersion, nodeArgs });
+  await assert.rejects(verifySidi(await save(nativeShared)), /incomplete|changed|Supabase/i);
+  const usage = { version: 1, basis: 'supabase-http-bytes-v1',
+    month: { period: '2026-11', usedBytes: 4096, reservedBytes: 0, limitBytes: 8 * 1024 ** 3 },
+    day: { period: '2026-11-16', usedBytes: 4096, reservedBytes: 0, limitBytes: 512 * 1024 ** 2 },
+    activeReservations: 0, uncertainReservations: 0 };
+  const sidiSource = { ...complete.source, dataStore: 'supabase', executionHost: 'sidi',
+    executionAdmission: 'fixed-host-v1', executionLedgersPreserved: true, transferAccounting: 'supabase-http-bytes-v1',
+    managedArchiveCache: true, archiveCacheEnabled: true, pollProgressDuplicateFree: true, outputObjects: 0 };
+  const sidi = { ...complete, dataStore: 'supabase', executionHost: 'sidi', transferAccounting: 'supabase-http-bytes-v1',
+    transferUsage: { before: usage, after: usage }, sourceArchiveCacheDirectory: cacheRoot,
+    source: { ...sidiSource, failureKind: 'progress', archiveReads: { requests: 50, bytes: 147_000_000 } },
+    sourceAfterBuilder: { ...sidiSource, failureKind: null, archiveReads: { requests: 3, bytes: 230_000 } },
+    builder: { ...complete.builder, dataStore: 'supabase', executionHost: 'sidi', managedArchiveCache: true, archiveCacheEnabled: true } };
+  assert.deepEqual(await verifySidi(await save(sidi)), sidi);
+  for (const changes of [{ dataStore: 'mongo' }, { executionHost: undefined }, { transferUsage: undefined },
+    { transferAccounting: 'local-zero-transfer' },
+    { source: { ...sidi.source, outputObjects: 1 } },
+    { sourceAfterBuilder: { ...sidi.sourceAfterBuilder, managedArchiveCache: false } },
+    { transferUsage: { before: usage, after: { ...usage, month: { ...usage.month, limitBytes: 16 * 1024 ** 3 } } } }]) {
+    await assert.rejects(verifySidi(await save({ ...sidi, ...changes })), /incomplete|changed|Supabase|archive cache|polling progress|transfer/i);
+  }
 });
 
-async function replayFixture(t, { network = false, nativeReplay = false, nativePollProgress = false } = {}) {
+async function replayFixture(t, { network = false, nativeReplay = false, nativePollProgress = false, sidiReplay = false } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'audit-child-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const work = path.join(root, 'work');
@@ -383,11 +430,15 @@ async function replayFixture(t, { network = false, nativeReplay = false, nativeP
     'let called = false;',
     'export default async function (request, response) {',
     '  assert.equal(process.env.QUALIFICATION_PROTECTED_VALUE, undefined);',
-    nativeReplay ? [
-      '  assert.equal(process.env.DRIVER_AUDIT_DATA_STORE, "mongo");',
+    nativeReplay || sidiReplay ? [
+      '  assert.equal(process.env.DRIVER_AUDIT_DATA_STORE, ' + JSON.stringify(sidiReplay ? 'supabase' : 'mongo') + ');',
       '  assert.equal(process.env.MONGODB_URI, undefined);',
       '  const backend = globalThis[Symbol.for("matter.driver-audit.native-backend")];',
-      '  assert.equal(backend.kind, "mongo");',
+      '  assert.equal(backend.kind, ' + JSON.stringify(sidiReplay ? 'supabase' : 'mongo') + ');',
+      ...(sidiReplay ? ['  assert.equal(process.env.DRIVER_AUDIT_EXECUTION_HOST,"sidi");',
+        '  assert.equal(backend.executionHost,"sidi");',
+        '  assert.equal(backend.executionAdmission,"fixed-host-v1");',
+        '  assert.equal(backend.transferAccounting,"supabase-http-bytes-v1");'] : []),
       '  assert.equal(backend.archive.managedReadCache, true);',
       '  const archived = Buffer.concat(await backend.archive.readObject(' + JSON.stringify(key) + '));',
       '  assert.equal(archived.toString(), ' + JSON.stringify(capture.toString()) + ');',
@@ -427,7 +478,7 @@ async function replayFixture(t, { network = false, nativeReplay = false, nativeP
   ].join('\n'));
   const entrypoint = { module: 'source/collector.mjs', method: 'GET', path: '/api/collector?task=delivery', schedule: '* * * * *' };
   const inputFile = path.join(work, 'input.private.json');
-  await fs.writeFile(inputFile, JSON.stringify({ root: work, runtimeRoot, entrypoint, stateFile, objectsRoot, expected, nativeReplay,
+  await fs.writeFile(inputFile, JSON.stringify({ root: work, runtimeRoot, entrypoint, stateFile, objectsRoot, expected, nativeReplay, sidiReplay,
     nativePollProgress, failPublication: nativePollProgress }));
   return { mode: 'source', root: work, inputFile, executable: process.execPath, args: ['--max-old-space-size=3072'],
     readRoots: [runtimeRoot], timeoutMs: 5000 };
@@ -476,6 +527,23 @@ test('native qualification tests failed progress retry while unchanged evidence 
   } finally { await child.stop(); }
 });
 
+test('Sidi qualification preserves Supabase identity and saved ledgers through a failed progress retry', async t => {
+  const child = runDriverAuditQualificationChild(await replayFixture(t, { sidiReplay: true, nativePollProgress: true }));
+  try {
+    const receipt = await child.result;
+    assert.equal(receipt.status, 'verified');
+    assert.equal(receipt.dataStore, 'supabase');
+    assert.equal(receipt.executionHost, 'sidi');
+    assert.equal(receipt.executionAdmission, 'fixed-host-v1');
+    assert.equal(receipt.transferAccounting, 'supabase-http-bytes-v1');
+    assert.equal(receipt.executionLedgersPreserved, true);
+    assert.equal(receipt.outputObjects, 0);
+    assert.equal(receipt.pollProgressDuplicateFree, true);
+    assert.equal(receipt.failureKind, 'progress');
+    assert.equal(receipt.networkAttempts, 0);
+  } finally { await child.stop(); }
+});
+
 test('native qualification rejects accidental legacy HTTP access instead of accepting a simulated hosted write', async t => {
   const fixture = await replayFixture(t, { nativeReplay: true });
   const input = JSON.parse(await fs.readFile(fixture.inputFile));
@@ -487,8 +555,9 @@ test('native qualification rejects accidental legacy HTTP access instead of acce
   finally { await child.stop(); }
 });
 
-test('native qualification reuses the managed isolated disk cache across cold and warm processes', async t => {
-  const cold = await replayFixture(t, { nativeReplay: true });
+for (const dataStore of ['mongo', 'supabase']) test(dataStore + ' app qualification reuses the managed isolated disk cache across cold and warm processes', async t => {
+  const sidiReplay = dataStore === 'supabase';
+  const cold = await replayFixture(t, { nativeReplay: !sidiReplay, sidiReplay });
   const input = JSON.parse(await fs.readFile(cold.inputFile));
   const cacheDirectory = path.join(path.dirname(cold.root), 'source-archive-cache');
   await fs.mkdir(cacheDirectory, { mode: 0o700 });
@@ -497,8 +566,8 @@ test('native qualification reuses the managed isolated disk cache across cold an
   let first;
   try { first = await coldChild.result; }
   finally { await coldChild.stop(); }
-  assert.equal(first.nativeManagedArchiveCache, true);
-  assert.equal(first.nativeArchiveCacheEnabled, true);
+  assert.equal(first[sidiReplay ? 'managedArchiveCache' : 'nativeManagedArchiveCache'], true);
+  assert.equal(first[sidiReplay ? 'archiveCacheEnabled' : 'nativeArchiveCacheEnabled'], true);
   assert.equal(first.archiveReads.requests, 1);
   assert.ok(first.archiveReads.bytes > 0);
 
@@ -510,16 +579,16 @@ test('native qualification reuses the managed isolated disk cache across cold an
     archiveCacheDirectory: cacheDirectory, readRoots: [...cold.readRoots, cold.root] });
   try {
     const second = await warmChild.result;
-    assert.equal(second.nativeManagedArchiveCache, true);
-    assert.equal(second.nativeArchiveCacheEnabled, true);
+    assert.equal(second[sidiReplay ? 'managedArchiveCache' : 'nativeManagedArchiveCache'], true);
+    assert.equal(second[sidiReplay ? 'archiveCacheEnabled' : 'nativeArchiveCacheEnabled'], true);
     assert.equal(second.archiveReads.requests, 0);
     assert.equal(second.archiveReads.bytes, 0);
     assert.equal(second.reportHash, first.reportHash);
   } finally { await warmChild.stop(); }
 });
 
-for (const mode of ['legacy', 'native', 'unqualified']) test('qualification builder ' + mode + ' cache ownership is checked before building', async t => {
-  const nativeReplay = mode !== 'legacy';
+for (const mode of ['legacy', 'native', 'sidi', 'unqualified']) test('qualification builder ' + mode + ' cache ownership is checked before building', async t => {
+  const appReplay = mode !== 'legacy', sidiReplay = mode === 'sidi', nativeReplay = appReplay && !sidiReplay;
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'audit-builder-child-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const work = path.join(root, 'work');
@@ -529,7 +598,7 @@ for (const mode of ['legacy', 'native', 'unqualified']) test('qualification buil
   const objectsRoot = path.join(root, 'objects');
   const baselineRoot = path.join(work, 'baseline');
   const cacheRoot = path.join(root, 'cache');
-  const archiveCacheDirectory = nativeReplay ? path.join(root, 'source-archive-cache') : undefined;
+  const archiveCacheDirectory = appReplay ? path.join(root, 'source-archive-cache') : undefined;
   for (const directory of [work, archiveBaseline, sourceRoot, objectsRoot, baselineRoot, cacheRoot,
     path.join(codeRoot, 'integration/cloud'), path.join(codeRoot, 'scripts')]) await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   if (archiveCacheDirectory) await fs.mkdir(archiveCacheDirectory, { mode: 0o700 });
@@ -541,9 +610,9 @@ for (const mode of ['legacy', 'native', 'unqualified']) test('qualification buil
   await fs.writeFile(path.join(codeRoot, 'integration/cloud/automatic-release.mjs'), 'export const automaticReleaseBasis=()=>"basis";');
   await fs.writeFile(path.join(codeRoot, 'integration/cloud/repository.mjs'),
     'export const createCloudRepository=()=>({pin:async()=>({publication:{}})});');
-  if (nativeReplay) await fs.writeFile(path.join(codeRoot, 'integration/cloud/automatic-release-source.mjs'), [
+  if (appReplay) await fs.writeFile(path.join(codeRoot, 'integration/cloud/automatic-release-source.mjs'), [
     'import assert from "node:assert/strict";',
-    'export const supportsManagedArchiveCache=' + (mode === 'native') + ';',
+    'export const supportsManagedArchiveCache=' + (mode !== 'unqualified') + ';',
     'export let sourceCalled=false;',
     'export function createAutomaticReleaseSource({stateStore,archiveTransport,cacheRoot,skipCacheWrite}) {',
     '  assert.equal(skipCacheWrite,true);',
@@ -558,7 +627,7 @@ for (const mode of ['legacy', 'native', 'unqualified']) test('qualification buil
     'import path from "node:path";',
     'export const compactDirectBuildVersion=1;',
     'export async function buildAutomaticRelease({source,output,baselineRoot,checkSpace}) {',
-    nativeReplay ? '  assert.equal((await import("./automatic-release-source.mjs")).sourceCalled,true);' : '',
+    appReplay ? '  assert.equal((await import("./automatic-release-source.mjs")).sourceCalled,true);' : '',
     '  await checkSpace();',
     '  await assert.rejects(fs.writeFile(' + JSON.stringify(path.join(archiveBaseline, 'forbidden')) + ', ""), {code:"ERR_ACCESS_DENIED"});',
     '  let data = "";',
@@ -573,7 +642,7 @@ for (const mode of ['legacy', 'native', 'unqualified']) test('qualification buil
     'export const validateAutomaticCandidate=async()=>({ok:true,manifestSha256:' + JSON.stringify(candidateManifestSha256) + '});');
   const inputFile = path.join(work, 'input.private.json');
   await fs.writeFile(inputFile, JSON.stringify({ root: work, sourceRoot, objectsRoot, diskReserve: { start: 1, inProgress: 1 },
-    nativeReplay, archiveCacheDirectory,
+    nativeReplay, sidiReplay, archiveCacheDirectory,
     builder: { codeRoot, baselineRoot, archiveBaseline, initialBaseline: archiveBaseline, cacheRoot, builderSha256,
       baselineManifestSha256: 'd'.repeat(64), compactDirectBuildVersion: 1 } }));
   const requests = [];
@@ -595,9 +664,10 @@ for (const mode of ['legacy', 'native', 'unqualified']) test('qualification buil
     assert.equal(result.builderSha256, builderSha256);
     assert.equal(result.candidateManifestSha256, candidateManifestSha256);
     assert.equal(result.networkAttempts, 0);
-    if (nativeReplay) {
-      assert.equal(result.nativeManagedArchiveCache, true);
-      assert.equal(result.nativeArchiveCacheEnabled, true);
+    if (appReplay) {
+      assert.equal(result[sidiReplay ? 'managedArchiveCache' : 'nativeManagedArchiveCache'], true);
+      assert.equal(result[sidiReplay ? 'archiveCacheEnabled' : 'nativeArchiveCacheEnabled'], true);
+      if (sidiReplay) { assert.equal(result.dataStore, 'supabase'); assert.equal(result.executionHost, 'sidi'); }
       assert.deepEqual(await fs.readFile(path.join(archiveCacheDirectory, key)), asset);
       assert.deepEqual(await fs.readdir(cacheRoot), []);
     }
