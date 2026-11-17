@@ -22,24 +22,59 @@ export function decodeDriverAuditOperator(encoded, compression) {
   return code;
 }
 
-export function driverAuditSupabaseStoppedReceipt(value, applicationCommit, operatorPhase) {
-  const preparationFailure = /^(?:prepare-[a-z-]+|staging-final-readback)$/.test(operatorPhase);
-  const packageFailure = /^prepare-(?:baseline|candidate|serving-current|serving-previous)-[a-z-]+$/.test(operatorPhase);
+const supabaseControlOperations = Object.freeze({
+  'prepare-supabase-serving': 'prepare-serving',
+  'start-supabase-report': 'start-report',
+  'qualify-supabase-source-held': 'held-qualify-source',
+  'run-supabase-report-once': 'run-report-once',
+});
+
+export function driverAuditSupabaseControlRequest(operation, encoded) {
+  const selected = supabaseControlOperations[operation];
+  if (typeof operation !== 'string' || !Object.hasOwn(supabaseControlOperations, operation) || typeof encoded !== 'string' || !encoded.length || encoded.length > 24576
+    || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Bounded public Supabase control required');
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.toString('base64') !== encoded) throw Error('Public Supabase control encoding differs');
+  const value = JSON.parse(bytes), qualified = ['held-qualify-source', 'run-report-once'].includes(selected);
+  const hashes = ['preparedReceiptSha256', ...(qualified ? ['qualificationFixtureSha256', 'environmentBackupProofSha256'] : []),
+    ...(selected === 'run-report-once' ? ['qualificationReceiptSha256'] : [])];
+  const fields = ['version', 'recipientPublicKey', ...hashes];
+  if (!value || Array.isArray(value) || value.version !== 1 || Object.keys(value).length !== fields.length
+    || !fields.every(field => Object.hasOwn(value, field)) || typeof value.recipientPublicKey !== 'string'
+    || !value.recipientPublicKey.length || value.recipientPublicKey.length > 8192
+    || !hashes.every(field => typeof value[field] === 'string' && /^[a-f0-9]{64}$/.test(value[field])))
+    throw Error('An exact public Supabase control is required');
+  return { operation: selected, recipientPublicKey: value.recipientPublicKey,
+    ...Object.fromEntries(hashes.map(field => [field, value[field]])) };
+}
+
+function sealedStoppedReceipt(value, applicationCommit, operatorPhase, status, allowedPhase, maximum) {
   const exact = (item, fields) => item && typeof item === 'object' && !Array.isArray(item)
     && Object.keys(item).length === fields.length && fields.every(field => Object.hasOwn(item, field));
   if (!exact(value, ['status', 'applicationCommit', 'operatorPhase', 'metadataSha256', 'capsule'])
-    || value.status !== 'supabase-host-stopped' || value.applicationCommit !== applicationCommit
-    || value.operatorPhase !== operatorPhase || !preparationFailure
-    || operatorPhase.length > 79 || !/^[a-f0-9]{64}$/.test(value.metadataSha256 || '')
+    || value.status !== status || value.applicationCommit !== applicationCommit
+    || value.operatorPhase !== operatorPhase || !allowedPhase.test(operatorPhase)
+    || operatorPhase.length > 79 || typeof value.metadataSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.metadataSha256)
     || !exact(value.capsule, ['version', 'key', 'iv', 'tag', 'data']) || value.capsule.version !== 1) return null;
   const encoded = (text, maximum, size) => typeof text === 'string' && text.length > 0 && text.length <= maximum
     && /^[A-Za-z0-9+/]+=*$/.test(text) && Buffer.from(text, 'base64').toString('base64') === text
     && (size === undefined || Buffer.from(text, 'base64').length === size);
   const capsule = value.capsule;
   if (!encoded(capsule.key, 2048) || Buffer.from(capsule.key, 'base64').length < 384
-    || !encoded(capsule.iv, 16, 12) || !encoded(capsule.tag, 24, 16) || !encoded(capsule.data, packageFailure ? 32768 : 128 * 1024)) return null;
+    || !encoded(capsule.iv, 16, 12) || !encoded(capsule.tag, 24, 16) || !encoded(capsule.data, maximum)) return null;
   return { status: value.status, applicationCommit, operatorPhase, metadataSha256: value.metadataSha256,
     capsule: { version: 1, key: capsule.key, iv: capsule.iv, tag: capsule.tag, data: capsule.data } };
+}
+
+export function driverAuditSupabaseStoppedReceipt(value, applicationCommit, operatorPhase) {
+  const packageFailure = /^prepare-(?:baseline|candidate|serving-current|serving-previous)-[a-z-]+$/.test(operatorPhase);
+  return sealedStoppedReceipt(value, applicationCommit, operatorPhase, 'supabase-host-stopped',
+    /^(?:prepare-[a-z-]+|staging-final-readback)$/, packageFailure ? 32768 : 128 * 1024);
+}
+
+export function driverAuditSupabaseControlStoppedReceipt(value, applicationCommit, operatorPhase) {
+  return sealedStoppedReceipt(value, applicationCommit, operatorPhase, 'supabase-control-stopped',
+    /^[a-z][a-z0-9-]{0,78}$/, 128 * 1024);
 }
 
 export function mongoLocation(uri, localAddresses) {
@@ -238,8 +273,11 @@ async function main() {
     'diagnose-roots', 'disable-pruning', 'prepare-native-settings', 'swap-builder-held', 'verify-native-parity',
     'activate-native', 'start-native', 'stage-native-proofs', 'export-native-controls',
     'plan-native-cleanup', 'apply-native-cleanup', 'inspect-database-config',
-    'prepare-object-store', 'externalize-native-archive', 'inspect-supabase-host', 'prepare-supabase-host', 'inspect-supabase-routing'].includes(operation)) {
+    'prepare-object-store', 'externalize-native-archive', 'inspect-supabase-host', 'prepare-supabase-host', 'inspect-supabase-routing',
+    ...Object.keys(supabaseControlOperations)].includes(operation)) {
     phase = 'native-' + operation;
+    const supabaseControl = Object.hasOwn(supabaseControlOperations, operation)
+      ? driverAuditSupabaseControlRequest(operation, process.env.NATIVE_TRANSFER_PLAN_B64) : null;
     const code = decodeDriverAuditOperator(process.env.NATIVE_IMPORT_CODE, process.env.NATIVE_IMPORT_COMPRESSION);
     const load = name => import(pathToFileURL(path.join(appRoot, 'server', name)).href);
     const { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory } = await load('services/driverAuditSource.js');
@@ -251,6 +289,16 @@ async function main() {
     catch (error) { if (error.code !== 'EEXIST') throw error; }
     if (hash(await readPrivateDriverAuditSource(filename, 256 * 1024)) !== hash(code)) throw Error('Reviewed import operator hash differs');
     const operator = await import(pathToFileURL(filename).href);
+    if (supabaseControl) {
+      try {
+        console.log(JSON.stringify(await operator.runDriverAuditSupabaseControl({ ...supabaseControl, appRoot, expectedSha: expected })));
+      } catch (error) {
+        const stopped = driverAuditSupabaseControlStoppedReceipt(error.supabaseControlStopped, expected, error.phase);
+        if (stopped) console.log(JSON.stringify(stopped));
+        throw error;
+      }
+      return;
+    }
     if (['inspect-supabase-host', 'prepare-supabase-host', 'inspect-supabase-routing'].includes(operation)) {
       const encodedPlan = process.env.NATIVE_TRANSFER_PLAN_B64;
       if (!encodedPlan || encodedPlan.length > 24576 || !/^[A-Za-z0-9+/]+=*$/.test(encodedPlan)) throw Error('Bounded public Supabase recipient required');
