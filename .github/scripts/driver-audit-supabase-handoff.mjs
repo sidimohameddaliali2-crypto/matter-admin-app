@@ -113,21 +113,30 @@ async function tree(root, files, manifestName = 'runtime-manifest.json') {
   return { files: allowed.size, bytes: total };
 }
 
-async function syncMetadata(file, server) {
+async function syncMetadata(file, server, setPhase) {
+  setPhase('sync-config');
   const saved = await read(file), config = JSON.parse(saved.data), root = path.dirname(file);
   need(config.version === 1 && config.root === root && path.dirname(root) === path.join(server, '.private/driver-audits')
     && config.codeRoot === path.join(root, 'builder') && config.baselineRoot === path.join(root, 'baseline')
     && config.rendererBuild?.path === path.join(root, 'baseline/build.private.json')
     && config.journals?.path === path.join(root, 'validation-journals.private.json') && digest(config.builderSha256));
   await directory(root);
+  setPhase('builder-manifest');
   const manifest = await read(path.join(config.codeRoot, 'runtime-manifest.json'));
   need(manifest.sha256 === config.builderSha256);
   const parsed = JSON.parse(manifest.data); need(parsed.version === 1 && parsed.files?.['scripts/run-automatic-report.mjs']);
+  setPhase('builder-tree');
   const builder = { ...metadata(manifest), ...await tree(config.codeRoot, parsed.files) };
-  const renderer = await read(config.rendererBuild.path), journals = await read(config.journals.path);
-  need(renderer.sha256 === config.rendererBuild.sha256 && journals.sha256 === config.journals.sha256);
-  const baseline = await read(path.join(config.baselineRoot, 'files.private.json')), seed = await read(path.join(root, 'seed.json'));
+  setPhase('renderer');
+  const renderer = await read(config.rendererBuild.path); need(renderer.sha256 === config.rendererBuild.sha256);
+  setPhase('journals');
+  const journals = await read(config.journals.path); need(journals.sha256 === config.journals.sha256);
+  setPhase('baseline');
+  const baseline = await read(path.join(config.baselineRoot, 'files.private.json'));
+  setPhase('seed');
+  const seed = await read(path.join(root, 'seed.json'));
   const seedValue = JSON.parse(seed.data); need(seedValue.manifestSha256 === baseline.sha256);
+  setPhase('pointers');
   const pointers = {};
   for (const name of ['current', 'previous']) {
     const pointer = await read(path.join(root, 'work', name + '.private.json'), { optional: true });
@@ -232,6 +241,7 @@ export async function runDriverAuditSupabaseHandoff({ operation, appRoot, expect
     };
     phase = 'checkout'; await checkout();
     const snapshotWorkers = async () => workers(JSON.parse((await exec('pm2', ['jlist'])).stdout), appRoot, adapters.systemFile ?? systemFile);
+    phase = 'workers';
     const first = await snapshotWorkers();
     phase = 'locks';
     const lockRoot = path.join(server, '.private/driver-report-supabase-handoff');
@@ -246,16 +256,24 @@ export async function runDriverAuditSupabaseHandoff({ operation, appRoot, expect
     const heavy = path.join(server, '.private/driver-audit-heavy-work');
     try { await directory(heavy); locks.push(await acquireWorkerLock(path.join(heavy, 'work.lock'))); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
-    const collect = async () => {
+    const collect = async prefix => {
+      const setPhase = name => { phase = prefix + '-' + name; };
+      setPhase('configuration');
       const config = await configuration(server, load);
+      setPhase('workers'); const currentWorkers = await snapshotWorkers();
+      const sync = await syncMetadata(first.syncFile, server, setPhase);
+      setPhase('source'); const source = await sourceMetadata(server);
+      setPhase('nginx'); const currentNginx = await nginx(adapters.nginxRoot ?? '/etc/nginx');
+      setPhase('node'); const executable = await fs.realpath(process.execPath);
       return { configurationPin: config.pin, metadata: { applicationCommit: expectedSha, appRoot, serverRoot: server,
-        workers: await snapshotWorkers(), sync: await syncMetadata(first.syncFile, server), source: await sourceMetadata(server),
-        configuration: config.value, nginx: await nginx(adapters.nginxRoot ?? '/etc/nginx'),
-        node: { executable: await fs.realpath(process.execPath), version: process.version, platform: adapters.platform ?? process.platform },
+        workers: currentWorkers, sync, source, configuration: config.value, nginx: currentNginx,
+        node: { executable, version: process.version, platform: adapters.platform ?? process.platform },
         mongoConnections: 0 } };
     };
-    phase = 'inspect-metadata'; const before = await collect();
-    phase = 'readback'; const after = await collect(); await checkout();
+    const before = await collect('inspect');
+    const after = await collect('readback');
+    phase = 'readback-checkout'; await checkout();
+    phase = 'readback-consistency';
     need(JSON.stringify(first) === JSON.stringify(after.metadata.workers) && JSON.stringify(before) === JSON.stringify(after));
     const raw = Buffer.from(JSON.stringify(before.metadata)); need(raw.length <= 2 * 1024 ** 2);
     const packed = gzipSync(raw); need(packed.length <= 96 * 1024);

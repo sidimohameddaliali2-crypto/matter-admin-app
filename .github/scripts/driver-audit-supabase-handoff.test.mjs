@@ -227,3 +227,48 @@ test('a strict bare Spaces hostname and its HTTPS spelling have the same sealed 
     await assert.rejects(f.run(), /Supabase handoff stopped/);
   }
 });
+
+test('metadata failures report only the fixed failing subphase while all existing guards remain closed', async t => {
+  const cases = [
+    ['configuration', f => f.write(path.join(f.server, '.env.local'), 'SPACES_ENDPOINT=not-a-provider\n')],
+    ['sync-config', f => f.write(f.configFile, JSON.stringify({ ...f.config, version: 2 }))],
+    ['builder-manifest', f => f.write(f.configFile, JSON.stringify({ ...f.config, builderSha256: 'e'.repeat(64) }))],
+    ['builder-tree', f => f.write(path.join(f.root, 'builder/integration/cloud/module-1.mjs'), f.secret)],
+    ['renderer', f => f.write(f.config.rendererBuild.path, f.secret)],
+    ['journals', f => f.write(f.config.journals.path, f.secret)],
+    ['baseline', f => fs.unlink(path.join(f.root, 'baseline/files.private.json'))],
+    ['seed', f => f.write(path.join(f.root, 'seed.json'), JSON.stringify({ ...f.seed, manifestSha256: 'e'.repeat(64) }))],
+    ['pointers', f => f.write(path.join(f.root, 'work/current.private.json'), f.secret)],
+    ['source', f => f.write(path.join(f.server, '.private/driver-audit-source', 'c'.repeat(64), 'source.json'), f.secret)],
+    ['nginx', async f => {
+      const directory = path.join(f.adapters.nginxRoot, 'sites-enabled');
+      await fs.mkdir(directory, { mode: 0o700 });
+      await fs.symlink(path.join(f.server, '.env'), path.join(directory, 'outside.conf'));
+    }],
+  ];
+  for (const [name, change] of cases) {
+    const f = await fixture(t); await change(f);
+    await assert.rejects(f.run(), error => {
+      assert.equal(error.phase, 'inspect-' + name);
+      assert.equal(error.message, 'Supabase handoff stopped at inspect-' + name);
+      assert.deepEqual(Object.keys(error), ['phase']);
+      assert(!error.message.includes(f.secret) && !error.message.includes(f.root));
+      return true;
+    });
+  }
+});
+
+test('worker and second-census failures identify their fixed boundary without exporting independent edits', async t => {
+  const first = await fixture(t);
+  first.rows[0].pm2_env.args = ['start'];
+  await assert.rejects(first.run(), error => error.phase === 'workers' && error.message === 'Supabase handoff stopped at workers');
+
+  const f = await fixture(t), original = f.adapters.exec;
+  f.adapters.exec = async (file, args) => {
+    if (file === 'pm2' && f.observations() === 2) await f.write(path.join(f.root, 'seed.json'), f.secret);
+    return original(file, args);
+  };
+  await assert.rejects(f.run(), error => error.phase === 'readback-seed'
+    && error.message === 'Supabase handoff stopped at readback-seed');
+  assert.equal(await fs.readFile(path.join(f.root, 'seed.json'), 'utf8'), f.secret);
+});
