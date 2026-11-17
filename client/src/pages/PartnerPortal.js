@@ -10,6 +10,7 @@ import partnerApi from '../utils/partnerApi';
 import PartnerDailyOrderPlanner from '../components/PartnerDailyOrderPlanner';
 import { FIXED_SELECTION_DEADLINES, isPastSelectionDeadline } from '../utils/selectionDeadlines';
 import { groupExclusions } from '../constants/exclusionList';
+import { recordActivityChange } from '../utils/activityCapture';
 
 /*  MATTER — Partner portal
  *  Dark navy / lime brand. Design source: "MATTER Partner.dc.html" (mobile)
@@ -128,6 +129,8 @@ const PartnerPortal = () => {
   const [calM, setCalM] = useState(now.getMonth());
   const [selectedDates, setSelectedDates] = useState(() => new Set([firstOrderableISO()])); // always exactly one day — single-day ordering only
   const [cart, setCart] = useState({}); // { [menuItemId]: qty }
+  const cartRef = useRef(cart);
+  useEffect(() => { cartRef.current = cart; }, [cart]);
   const [editing, setEditing] = useState(null); // { id, date, ref, originalIds } while editing an existing order
   const [deliveryWindow, setDeliveryWindow] = useState(DELIVERY_WINDOWS[0]);
   const [sheet, setSheet] = useState(null); // null | 'checkout'  (mobile only)
@@ -263,14 +266,16 @@ const PartnerPortal = () => {
     setOrderErr('');
     setSelectedDates(new Set([iso]));
   };
-  const inc = (id) => { setOrderErr(''); setCart((c) => ({ ...c, [id]: (c[id] || 0) + 1 })); };
-  const dec = (id) =>
-    setCart((c) => {
-      const q = Math.max(0, (c[id] || 0) - 1);
-      const next = { ...c };
-      if (q === 0) delete next[id]; else next[id] = q;
-      return next;
-    });
+  const changeQuantity = (id, delta) => {
+    const current = cartRef.current, before = current[id] || 0, after = Math.max(0, before + delta);
+    if (before === after) return;
+    recordActivityChange({ field: `${titleCase(menu.find(item => item._id === id)?.name || `Meal ${id}`)} quantity`, form: editing ? `Edit order ${editing.ref}` : 'Partner order draft', before, after });
+    const next = { ...current };
+    if (!after) delete next[id]; else next[id] = after;
+    cartRef.current = next; setCart(next);
+  };
+  const inc = id => { setOrderErr(''); changeQuantity(id, 1); };
+  const dec = id => changeQuantity(id, -1);
 
   // Load an existing order's meals into the cart so the partner can change them
   const startEdit = (o) => {
@@ -290,6 +295,10 @@ const PartnerPortal = () => {
     setTab('order');
   };
   const cancelEdit = () => {
+    const form = editing ? `Edit order ${editing.ref}` : 'Partner order draft';
+    const describe = values => Object.entries(values).map(([id, quantity]) => `${titleCase(menu.find(item => item._id === id)?.name || `Meal ${id}`)} × ${quantity}`);
+    recordActivityChange({ field: 'Selected meals cleared', form, before: describe(cartRef.current), after: [] });
+    recordActivityChange({ field: 'Delivery window', form, before: deliveryWindow, after: DELIVERY_WINDOWS[0] });
     setEditing(null);
     setCart({});
     setDeliveryWindow(DELIVERY_WINDOWS[0]);
@@ -492,7 +501,7 @@ const PartnerPortal = () => {
           {DELIVERY_WINDOWS.map((w) => {
             const on = deliveryWindow === w;
             return (
-              <button key={w} type="button" onClick={() => setDeliveryWindow(w)}
+              <button key={w} type="button" onClick={() => { recordActivityChange({ field: 'Delivery window', form: editing ? `Edit order ${editing.ref}` : 'Partner order draft', before: deliveryWindow, after: w }); setDeliveryWindow(w); }}
                 className="flex-1 rounded-full px-3 py-2 text-[12px] font-bold border-[1.5px] transition-colors"
                 style={{
                   borderColor: on ? '#bcf679' : '#12275e',
@@ -575,7 +584,7 @@ const PartnerPortal = () => {
         {chips.map(([t, label, n]) => {
           const on = menuTypeFilter === t;
           return (
-            <button key={t} onClick={() => setMenuTypeFilter(t)}
+            <button key={t} onClick={() => { recordActivityChange({ field: 'Meal type filter', form: 'Partner menu', before: MEAL_TYPE_LABEL[menuTypeFilter] || 'All', after: label }); setMenuTypeFilter(t); }}
               className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11.5px] font-bold transition-colors"
               style={{ background: on ? '#bcf679' : '#0a1230', color: on ? '#051747' : '#a8ccf5', border: '1.5px solid', borderColor: on ? '#bcf679' : '#12275e' }}>
               {label}
@@ -678,7 +687,7 @@ const PartnerPortal = () => {
       {[['up', 'Upcoming'], ['past', 'Past']].map(([v, label]) => {
         const on = ordersView === v;
         return (
-          <button key={v} onClick={() => setOrdersView(v)}
+          <button key={v} onClick={() => { recordActivityChange({ field: 'Orders filter', form: 'Partner orders', before: ordersView === 'up' ? 'Upcoming' : 'Past', after: label }); setOrdersView(v); }}
             className="flex-1 py-2.5 rounded-full text-[13px] font-bold transition-colors"
             style={{ background: on ? '#bcf679' : 'transparent', color: on ? '#051747' : '#a8ccf5' }}>
             {label}

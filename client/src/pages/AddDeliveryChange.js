@@ -5,6 +5,9 @@ import { DayPicker } from 'react-day-picker';
 import 'react-day-picker/dist/style.css';
 import { createDeliveryChange } from '../store/slices/deliveryChangeSlice';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
+
+const dateLabel = date => date ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}` : '';
 
 const AddDeliveryChange = () => {
   const navigate = useNavigate();
@@ -25,6 +28,19 @@ const AddDeliveryChange = () => {
   const [dateRange, setDateRange] = useState({ from: undefined, to: undefined });
   const [selectionMode, setSelectionMode] = useState('range'); // 'range' | 'multiple'
   const [selectedDates, setSelectedDates] = useState([]); // for multiple-date selection
+  const changeDateRange = next => {
+    const labels = range => [range?.from, range?.to].filter(Boolean).map(dateLabel);
+    recordActivityChange({ field: 'Delivery date range', form: 'Add delivery change', before: labels(dateRange), after: labels(next) });
+    setDateRange(next);
+  };
+  const changeDates = next => {
+    recordActivityChange({ field: 'Delivery dates', form: 'Add delivery change', before: selectedDates.map(dateLabel).sort(), after: (next || []).map(dateLabel).sort() });
+    setSelectedDates(next || []);
+  };
+  const changeSelectionMode = next => {
+    recordActivityChange({ field: 'Date selection mode', form: 'Add delivery change', before: selectionMode, after: next });
+    setSelectionMode(next);
+  };
 
   // Customer registry search for Section 1
   const [customerSearch, setCustomerSearch] = useState('');
@@ -52,6 +68,7 @@ const AddDeliveryChange = () => {
   }, [customerSearch, manualCustomerEntry]);
 
   const handleSelectCustomer = (customer) => {
+    recordActivityChange({ field: 'Customer', form: 'Add delivery change', before: manualForm.customerName || 'Not selected', after: `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || customer.customerId || 'Customer' });
     setManualForm((prev) => ({
       ...prev,
       customerId: customer.customerId || prev.customerId,
@@ -62,6 +79,7 @@ const AddDeliveryChange = () => {
   };
 
   const handleClearCustomer = () => {
+    recordActivityChange({ field: 'Customer', form: 'Add delivery change', before: manualForm.customerName || 'Not selected', after: 'Not selected' });
     setManualForm((prev) => ({ ...prev, customerId: '', customerName: '' }));
   };
 
@@ -310,14 +328,14 @@ const AddDeliveryChange = () => {
           <div className="inline-flex p-1 bg-gray-100 rounded-lg mb-4 border border-gray-200">
             <button
               type="button"
-              onClick={() => setSelectionMode('multiple')}
+              onClick={() => changeSelectionMode('multiple')}
               className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${selectionMode === 'multiple' ? 'bg-white shadow-sm border border-gray-200 text-gray-900' : 'text-gray-500 hover:text-gray-800'}`}
             >
               Select Dates
             </button>
             <button
               type="button"
-              onClick={() => setSelectionMode('range')}
+              onClick={() => changeSelectionMode('range')}
               className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${selectionMode === 'range' ? 'bg-white shadow-sm border border-gray-200 text-gray-900' : 'text-gray-500 hover:text-gray-800'}`}
             >
               Date Range
@@ -327,9 +345,9 @@ const AddDeliveryChange = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="bg-white border border-gray-200 rounded-lg p-3 flex justify-center">
               {selectionMode === 'range' ? (
-                <DayPicker mode="range" selected={dateRange} onSelect={setDateRange} numberOfMonths={1} weekStartsOn={1} showOutsideDays />
+                <DayPicker mode="range" selected={dateRange} onSelect={changeDateRange} numberOfMonths={1} weekStartsOn={1} showOutsideDays />
               ) : (
-                <DayPicker mode="multiple" selected={selectedDates} onSelect={setSelectedDates} numberOfMonths={1} weekStartsOn={1} showOutsideDays />
+                <DayPicker mode="multiple" selected={selectedDates} onSelect={changeDates} numberOfMonths={1} weekStartsOn={1} showOutsideDays />
               )}
             </div>
             <div className="flex flex-col gap-3">
@@ -342,7 +360,7 @@ const AddDeliveryChange = () => {
                     {[...selectedDates].sort((a, b) => a - b).map((d) => (
                       <span key={d.toISOString()} className="inline-flex items-center gap-1.5 px-3 py-1 bg-blue-50 border border-blue-200 rounded-full text-blue-700 text-xs font-mono">
                         {d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}
-                        <button type="button" onClick={() => setSelectedDates((prev) => prev.filter((x) => x.getTime() !== d.getTime()))} className="hover:text-blue-900">
+                        <button type="button" onClick={() => changeDates(selectedDates.filter((x) => x.getTime() !== d.getTime()))} className="hover:text-blue-900">
                           <span className="material-symbols-outlined text-[14px]">close</span>
                         </button>
                       </span>
@@ -577,14 +595,14 @@ const AddDeliveryChange = () => {
           <div className="inline-flex p-1 bg-gray-100 rounded-lg mb-4 border border-gray-200">
             <button
               type="button"
-              onClick={() => setSelectionMode('multiple')}
+              onClick={() => changeSelectionMode('multiple')}
               className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${selectionMode === 'multiple' ? 'bg-white shadow-sm border border-gray-200 text-gray-900' : 'text-gray-500'}`}
             >
               Select Dates
             </button>
             <button
               type="button"
-              onClick={() => setSelectionMode('range')}
+              onClick={() => changeSelectionMode('range')}
               className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${selectionMode === 'range' ? 'bg-white shadow-sm border border-gray-200 text-gray-900' : 'text-gray-500'}`}
             >
               Date Range
@@ -599,9 +617,9 @@ const AddDeliveryChange = () => {
 
           <div className="border border-gray-200 rounded-lg p-3 flex justify-center mb-4">
             {selectionMode === 'range' ? (
-              <DayPicker mode="range" selected={dateRange} onSelect={setDateRange} numberOfMonths={1} weekStartsOn={1} showOutsideDays />
+              <DayPicker mode="range" selected={dateRange} onSelect={changeDateRange} numberOfMonths={1} weekStartsOn={1} showOutsideDays />
             ) : (
-              <DayPicker mode="multiple" selected={selectedDates} onSelect={setSelectedDates} numberOfMonths={1} weekStartsOn={1} showOutsideDays />
+              <DayPicker mode="multiple" selected={selectedDates} onSelect={changeDates} numberOfMonths={1} weekStartsOn={1} showOutsideDays />
             )}
           </div>
 
@@ -613,7 +631,7 @@ const AddDeliveryChange = () => {
                   {[...selectedDates].sort((a, b) => a - b).map((d) => (
                     <div key={d.toISOString()} className="flex items-center gap-1.5 bg-blue-50 text-blue-700 px-3 py-1.5 rounded-full border border-blue-200 whitespace-nowrap flex-shrink-0">
                       <span className="text-xs font-mono">{d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' })}</span>
-                      <button type="button" onClick={() => setSelectedDates((prev) => prev.filter((x) => x.getTime() !== d.getTime()))} className="hover:text-blue-900">
+                      <button type="button" onClick={() => changeDates(selectedDates.filter((x) => x.getTime() !== d.getTime()))} className="hover:text-blue-900">
                         <span className="material-symbols-outlined text-[16px]">close</span>
                       </button>
                     </div>

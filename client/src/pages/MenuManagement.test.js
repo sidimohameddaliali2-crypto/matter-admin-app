@@ -3,6 +3,8 @@ import { createRoot } from 'react-dom/client';
 import api from '../utils/api';
 import MenuManagement from './MenuManagement';
 import { mealCreationStore } from '../utils/mealCreationStore';
+import { recordActivityChange } from '../utils/activityCapture';
+jest.mock('../utils/activityCapture',()=>({recordActivityChange:jest.fn()}));
 jest.mock('../utils/mealCreationStore',()=>({mealCreationStore:{flush:jest.fn(async()=>{}),getSnapshot:()=>({error:''}),load:jest.fn()}}));
 jest.mock('../utils/api',()=>({__esModule:true,default:{get:jest.fn(),post:jest.fn(),put:jest.fn(),delete:jest.fn()}}));
 jest.mock('../components/SupyRecipeSearch',()=>()=>null);
@@ -13,6 +15,41 @@ const mockExcelRows = jest.fn();
 const mockUploadRows = jest.fn();
 jest.mock('xlsx-js-style',()=>({read:()=>({Sheets:{Meals:{}},SheetNames:['Meals']}),utils:{sheet_to_json:()=>mockUploadRows(),book_new: () => ({}), aoa_to_sheet: rows => { mockExcelRows(rows); return {}; }, book_append_sheet: () => {} }, writeFile: jest.fn()}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
+
+test('menu meal duplication, removal and allergen choices are observed before saving', async()=>{
+  const date='2099-01-05', menu={_id:'week',title:'Fixture menu',startDate:date,endDate:date,meals:[{date,mealType:'main',items:[{_id:'meal',mealName:'Roast chicken',mealType:'main',allergens:''}]}]};
+  api.get.mockImplementation(async url=>({data:{success:true,data:url==='/menus'?[menu]:menu}}));
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const click=async label=>act(async()=>[...node.querySelectorAll('button')].find(button=>button.textContent.trim()===label).click());
+  try{
+    await act(async()=>root.render(<MenuManagement/>));await click('Edit');
+    expect(recordActivityChange).not.toHaveBeenCalled();
+    act(()=>[...node.querySelectorAll('.cursor-pointer')].find(element=>element.textContent.includes('Roast chicken')).click());
+    await click('Nuts');
+    expect(recordActivityChange.mock.calls.some(([change])=>change.field.includes('Allergens')&&change.after.includes('Nuts'))).toBe(true);
+    await click('Duplicate');await click('Remove meal');
+    expect(recordActivityChange.mock.calls.filter(([change])=>change.field.includes('Menu meals'))).toHaveLength(2);
+    expect(api.post).not.toHaveBeenCalled();
+  }finally{await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
+});
+
+test('customer meal replacement and removal observe the unsaved selected slot',async()=>{
+  const date='2099-01-05',customer={_id:'customer',firstName:'Aster',email:'fixture@example.invalid',mealPerDay:1,selectedMeals:[{date,mealType:'main',mealName:'Original meal',menuItemId:'old',quantity:1}]};
+  const menu={_id:'menu',title:'Fixture',startDate:date,endDate:date,meals:[{date,mealType:'main',items:[{_id:'new',mealName:'Replacement meal',mealType:'main'}]}]};
+  api.get.mockImplementation(async url=>({data:{success:true,data:url==='/menus'?[menu]:url.endsWith('/selections')?[customer]:url==='/menus/menu'?menu:url.includes('subscription-profile')?{mealPerDay:1,breakfastInclude:false}:{customer_name:'Aster',customer_email:customer.email}}}));
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const click=async label=>act(async()=>[...node.querySelectorAll('button')].find(button=>button.textContent.trim()===label).click());
+  try{
+    await act(async()=>root.render(<MenuManagement/>));await click('View selections');
+    await act(async()=>node.querySelector('.cursor-pointer.border-2').click());await click('Edit Selections');
+    act(()=>[...node.querySelectorAll('.cursor-pointer')].find(element=>element.textContent.includes('Original meal')&&element.textContent.includes('▼ change')).click());
+    act(()=>[...node.querySelectorAll('button')].find(button=>button.textContent.includes('Replacement meal')).click());
+    expect(recordActivityChange.mock.calls.some(([change])=>change.before==='Original meal'&&change.after==='Replacement meal')).toBe(true);
+    act(()=>node.querySelector('button[title="Remove"]').click());
+    expect(recordActivityChange.mock.calls.some(([change])=>change.before==='Replacement meal'&&change.after==='Empty slot')).toBe(true);
+    expect(api.put).not.toHaveBeenCalled();
+  }finally{await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
+});
 
 test.each([false,true])('pending cycle import checks newly uploaded draft and respects replacement confirmation=%s',async replace=>{
   let releaseCycle,releaseUpload;

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import * as XLSX from 'xlsx';
 import { AlertTriangle, Download, X } from 'lucide-react';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 
 const Complaints = () => {
   const [complaints, setComplaints] = useState([]);
@@ -209,13 +210,12 @@ const Complaints = () => {
     );
   };
 
-  const selectAllExportTypes = () => {
-    setExportSelectedTypes(complaintTypesForForm.map(ct => ct.value));
+  const changeExportTypes = next => {
+    const names = values => values.map(value => complaintTypesForForm.find(type => type.value === value)?.label || value);
+    recordActivityChange({ field: 'Complaint export types', before: names(exportSelectedTypes), after: names(next), form: 'Export complaints' }); setExportSelectedTypes(next);
   };
-
-  const clearExportTypes = () => {
-    setExportSelectedTypes([]);
-  };
+  const selectAllExportTypes = () => changeExportTypes(complaintTypesForForm.map(type => type.value));
+  const clearExportTypes = () => changeExportTypes([]);
 
   const toggleSelectAll = () => {
     if (selectedComplaints.length === complaints.length) {

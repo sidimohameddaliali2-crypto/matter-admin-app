@@ -1,12 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 
 // Typeahead over Supy recipes. Renders a text input the user types a recipe
 // name into; after a short pause it searches Supy and shows matches below
 // the input. Picking one hands the full recipe (name + ingredients) back to
 // the caller via onSelect — the caller decides what to do with the ingredients
 // (a lunch/dinner meal merges per-component, breakfast/snack uses it whole).
-const SupyRecipeSearch = ({ value, onChangeText, onSelect, placeholder, className }) => {
+const SupyRecipeSearch = ({ value, onChangeText, onSelect, placeholder, className, activityLabel = 'Recipe' }) => {
   const [query, setQuery] = useState(value || '');
   const [results, setResults] = useState([]);
   const [isOpen, setIsOpen] = useState(false);
@@ -70,6 +71,7 @@ const SupyRecipeSearch = ({ value, onChangeText, onSelect, placeholder, classNam
   };
 
   const handleSelect = (recipe) => {
+    recordActivityChange({ field: activityLabel, form: 'Weekly menu meal', before: value || '', after: recipe.name, element: containerRef.current });
     setQuery(recipe.name);
     setIsOpen(false);
     setResults([]);
@@ -80,6 +82,7 @@ const SupyRecipeSearch = ({ value, onChangeText, onSelect, placeholder, classNam
     <div className="relative" ref={containerRef}>
       <input
         type="text"
+        data-activity-label={activityLabel}
         value={query}
         onChange={handleChange}
         onFocus={() => { if (results.length) setIsOpen(true); }}

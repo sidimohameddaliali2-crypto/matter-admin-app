@@ -1,6 +1,7 @@
 import React,{useCallback,useEffect,useRef,useState} from 'react';
 import {RefreshCw} from 'lucide-react';
 import api from '../../utils/api';
+import {recordActivityChange} from '../../utils/activityCapture';
 
 const uid=()=>window.crypto?.randomUUID?.()||`refund-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 const money=value=>new Intl.NumberFormat('en-AE',{style:'currency',currency:'AED'}).format((value||0)/100);
@@ -15,7 +16,19 @@ export default function BagRefundTracker(){
   useEffect(()=>{load();return()=>{request.current++;};},[load]);
   useEffect(()=>{if(selection||busy)return;const timer=window.setInterval(load,30000);return()=>window.clearInterval(timer);},[load,selection,busy]);
   useEffect(()=>{panel.current?.focus();},[selection,action]);
-  const choose=(type,id,next='')=>{setSelection({type,id});setAction(next);setNote('');setConfirmed(false);setDue(false);setDamage(false);setReference('');setReturnKey('');setOutcome('good');setCompletedAt('');setError('');event.current=uid();};
+  const choose=(type,id,next='',nextReturnKey='')=>{
+    const form='Bag refund review';
+    const actionLabel=value=>({inspect:'Inspect return',approve:'Approve refund',add_returns:'Add further returns',not_due:'Mark not due',complete:'Record completion',reopen:'Reopen review','':'No action selected'}[value]||value);
+    const returnLabel=(caseId,key)=>{if(!key)return 'Not selected';const bag=data?.cases.find(item=>item._id===caseId)?.eligibility.items.find(item=>item.returnKey===key)?.bagId;return /^BAG[-_](?:[A-Z])?\d{4,}$/i.test(bag||'')?bag:'Selected return';};
+    if(action!==next)recordActivityChange({field:'Refund action',before:actionLabel(action),after:actionLabel(next),form});
+    if(returnKey!==nextReturnKey)recordActivityChange({field:'Refund return selection',before:returnLabel(selection?.id,returnKey),after:returnLabel(id,nextReturnKey),form});
+    if(selection){
+      for(const [field,before,after,privateValue] of [['Refund review note',note,'',true],['Refund confirmation',confirmed,false,false],['Deposit due confirmation',due,false,false],['Damage acknowledgement',damage,false,false],['Refund reference',reference,'',true],['Return condition',outcome,'good',false],['Refund completion date',completedAt,'',false]]){
+        if(before!==after)recordActivityChange({field,before,after,private:privateValue,form});
+      }
+    }
+    setSelection({type,id});setAction(next);setNote('');setConfirmed(false);setDue(false);setDamage(false);setReference('');setReturnKey(nextReturnKey);setOutcome('good');setCompletedAt('');setError('');event.current=uid();
+  };
   const record=selection?.type==='case'?data?.cases.find(c=>c._id===selection.id):null;
   const candidate=selection?.type==='candidate'?data?.candidates.find(c=>c.customerId===selection.id):null;
   const submit=async(actionName=action)=>{
@@ -41,7 +54,7 @@ export default function BagRefundTracker(){
         {candidate?<><p>These physical returns are potential refund cases. A regular delivery exchange does not create another AED 155 refund.</p><label className="bo-field">Subscription / internal reference (optional)<input value={reference} onChange={e=>setReference(e.target.value)} maxLength={200}/></label><label className="bo-checkbox"><input type="checkbox" checked={confirmed} onChange={e=>setConfirmed(e.target.checked)}/>I verified that this is the final subscription return.</label><label className="bo-checkbox"><input type="checkbox" checked={due} onChange={e=>setDue(e.target.checked)}/>I verified an outstanding AED 155 deposit, with no previous refund for this subscription.</label><label className="bo-field">Review evidence / reason<textarea value={note} maxLength={2000} onChange={e=>setNote(e.target.value)}/></label><div className="bo-actions"><button className="primary" disabled={busy||!confirmed||!due||!note.trim()} onClick={()=>submit('open')}>Open AED 155 refund case</button><button disabled={busy||!note.trim()} onClick={()=>submit('not_due')}>Regular exchange / not due</button></div></>:<>
           <p>{money(record.amountMinor)} · case {record._id}<br/>Final-return review: {record.endEvidence}</p>
           {record.active&&record.eligibility.blockers.length>0&&<div className="bo-inset"><strong>Before approval</strong><ul>{record.eligibility.blockers.map((b,i)=><li key={i}>{b}</li>)}</ul></div>}
-          <div className="bo-refund-returns">{record.eligibility.items.map(item=><article key={item.returnKey}><strong>{item.bagId}</strong><p>{item.receiptEventId?`Warehouse received ${date(item.receivedAt)}`:'Collected · awaiting physical warehouse receipt'}</p><p>{item.inspection?`Inspected: ${item.inspection.outcome} · ${item.inspection.note}`:'Inspection pending'}</p>{record.status==='review'&&item.receiptEventId&&<button disabled={busy} onClick={()=>{choose('case',record._id,'inspect');setReturnKey(item.returnKey);}}>Record inspection · {item.bagId}</button>}</article>)}</div>
+          <div className="bo-refund-returns">{record.eligibility.items.map(item=><article key={item.returnKey}><strong>{item.bagId}</strong><p>{item.receiptEventId?`Warehouse received ${date(item.receivedAt)}`:'Collected · awaiting physical warehouse receipt'}</p><p>{item.inspection?`Inspected: ${item.inspection.outcome} · ${item.inspection.note}`:'Inspection pending'}</p>{record.status==='review'&&item.receiptEventId&&<button disabled={busy} onClick={()=>{choose('case',record._id,'inspect',item.returnKey);}}>Record inspection · {item.bagId}</button>}</article>)}</div>
           {record.active&&<div className="bo-actions">{data.canApprove&&record.status==='review'&&<><button className="primary" disabled={busy||!record.eligibility.eligible} onClick={()=>choose('case',record._id,'approve')}>Approve AED 155 refund</button><button disabled={busy} onClick={()=>choose('case',record._id,'add_returns')}>Add further returns</button><button disabled={busy} onClick={()=>choose('case',record._id,'not_due')}>Mark not due</button></>}{data.canApprove&&record.status==='approved'&&<><button className="primary" disabled={busy||!record.eligibility.eligible} onClick={()=>choose('case',record._id,'complete')}>Record refund completed</button><button disabled={busy} onClick={()=>choose('case',record._id,'reopen')}>Reopen review</button></>}</div>}
           {action&&record.active&&<div className="bo-inset"><h3>{action==='complete'?'Record a refund already completed outside this app':action==='inspect'?'Physical return inspection':action.replaceAll('_',' ')}</h3>
             {action==='inspect'&&<><label className="bo-field">Return condition<select value={outcome} onChange={e=>setOutcome(e.target.value)}><option value="good">Good condition</option><option value="damaged">Damaged · management review, no deduction</option></select></label><label className="bo-checkbox"><input type="checkbox" checked={confirmed} onChange={e=>setConfirmed(e.target.checked)}/>I physically inspected this returned bag.</label></>}

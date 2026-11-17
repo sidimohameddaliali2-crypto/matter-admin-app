@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { X, Route, MapPin, AlertTriangle, Loader2, Repeat, Printer, Clock, CheckCircle2, Truck, GripVertical } from 'lucide-react';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 
 // "HH:MM" <-> seconds-from-midnight, for the departure-time and hub-ready
 // inputs (plain <input type="time"> fields).
@@ -128,6 +129,8 @@ export default function RouteOptimizationModal({ open, onClose, deliveries = [],
   // is remembered/persisted; they only shape the next Generate Routes call.
   const [departureClock, setDepartureClock] = useState(''); // '' = let the solver float as usual
   const [hubVanIds, setHubVanIds] = useState([]); // driver ids dragged into "Hub Vans"
+  const latestHubs = useRef(hubVanIds);
+  latestHubs.current = hubVanIds;
   const [hubReadyClockByDriverId, setHubReadyClockByDriverId] = useState({});
   const [dragOverHubZone, setDragOverHubZone] = useState(false);
 
@@ -146,9 +149,15 @@ export default function RouteOptimizationModal({ open, onClose, deliveries = [],
   );
 
   const addHubVan = (driverId) => {
-    setHubVanIds((prev) => (prev.includes(driverId) ? prev : [...prev, driverId]));
+    if (latestHubs.current.includes(driverId)) return;
+    const next = [...latestHubs.current, driverId];
+    observeHubs(next);
+    latestHubs.current = next;
+    setHubVanIds(next);
   };
   const removeHubVan = (driverId) => {
+    if (latestHubs.current.includes(driverId)) observeHubs(latestHubs.current.filter(id => id !== driverId));
+    latestHubs.current = latestHubs.current.filter(id => id !== driverId);
     setHubVanIds((prev) => prev.filter((id) => id !== driverId));
     setHubReadyClockByDriverId((prev) => {
       const next = { ...prev };
@@ -158,6 +167,10 @@ export default function RouteOptimizationModal({ open, onClose, deliveries = [],
   };
   const setHubReadyClock = (driverId, clock) => {
     setHubReadyClockByDriverId((prev) => ({ ...prev, [driverId]: clock }));
+  };
+  const observeHubs = ids => {
+    const labels = values => values.map(id => getDriverDisplayName(drivers.find(driver => driver._id === id)));
+    recordActivityChange({ field: 'Hub vans', form: 'Optimize routes proposal', before: labels(latestHubs.current), after: labels(ids) });
   };
 
   const handleGenerate = async () => {
@@ -340,7 +353,7 @@ export default function RouteOptimizationModal({ open, onClose, deliveries = [],
                   {departureClock ? (
                     <button
                       type="button"
-                      onClick={() => setDepartureClock('')}
+                      onClick={() => { recordActivityChange({ field: 'Kitchen departure', form: 'Optimize routes proposal', before: departureClock, after: '' }); setDepartureClock(''); }}
                       className="text-xs text-gray-400 hover:text-gray-600 underline"
                     >
                       Clear
@@ -391,6 +404,7 @@ export default function RouteOptimizationModal({ open, onClose, deliveries = [],
                           <input
                             type="time"
                             value={hubReadyClockByDriverId[driverId] || ''}
+                            data-activity-label={`Hub ready by for ${getDriverDisplayName(driver)}`}
                             onChange={(e) => setHubReadyClock(driverId, e.target.value)}
                             className="border border-gray-300 rounded px-2 py-1 text-xs flex-shrink-0"
                           />

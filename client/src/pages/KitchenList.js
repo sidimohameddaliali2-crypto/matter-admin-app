@@ -1,4 +1,5 @@
 import KitchenInputWarnings from '../components/KitchenInputWarnings';
+import { recordActivityChange } from '../utils/activityCapture';
 import KitchenMealEditor from '../components/KitchenMealEditor';
 import useKitchenSelectionWindow from '../lib/useKitchenSelectionWindow';
 import { KitchenWorkspaceHeader, KitchenEmptyState } from '../components/KitchenWorkspace';
@@ -698,12 +699,14 @@ const KitchenList = () => {
   const removeMainMeal = (index) => {
     const current = mainMealOptionsByDate[missingCheckDate] || { mainMeals: [], subMeals: [] };
     const updatedMainMeals = (current.mainMeals || []).filter((_, i) => i !== index);
+    traceKitchenOptions('Main meal choices', current.mainMeals || [], updatedMainMeals);
     saveMainMealOptionsForDate(missingCheckDate, updatedMainMeals, current.subMeals || []);
   };
 
   const removeSubMeal = (index) => {
     const current = mainMealOptionsByDate[missingCheckDate] || { mainMeals: [], subMeals: [] };
     const updatedSubMeals = (current.subMeals || []).filter((_, i) => i !== index);
+    traceKitchenOptions('Sub meal choices', current.subMeals || [], updatedSubMeals);
     saveMainMealOptionsForDate(missingCheckDate, current.mainMeals || [], updatedSubMeals);
   };
 
@@ -723,6 +726,7 @@ const KitchenList = () => {
   const removeBreakfastOption = (index) => {
     const current = breakfastOptionsByDate[missingCheckDate] || [];
     const updated = current.filter((_, i) => i !== index);
+    traceKitchenOptions('Breakfast choices', current, updated);
     saveBreakfastOptionsForDate(missingCheckDate, updated);
   };
 
@@ -748,6 +752,8 @@ const KitchenList = () => {
     const name = matterCoreMealInput.trim();
     if (!name || !missingCheckDate) return;
     const current = matterCoreMealOptionsByDate[missingCheckDate] || [];
+    traceKitchenOptions('Matter Core meal choices', current, [...current, { name }]);
+    recordActivityChange({ field: 'Matter Core meal input', form: 'Kitchen meal choices', before: matterCoreMealInput, after: '' });
     saveMatterCoreMealOptionsForDate(missingCheckDate, [...current, { name }]);
     setMatterCoreMealInput('');
   };
@@ -755,6 +761,7 @@ const KitchenList = () => {
   const removeMatterCoreMeal = (index) => {
     const current = matterCoreMealOptionsByDate[missingCheckDate] || [];
     const updated = current.filter((_, i) => i !== index);
+    traceKitchenOptions('Matter Core meal choices', current, updated);
     saveMatterCoreMealOptionsForDate(missingCheckDate, updated);
   };
 
@@ -792,8 +799,10 @@ const KitchenList = () => {
         F: Number(snackPresetForm.F) || 0
       }
     };
+    traceKitchenOptions('Snack macro preset choices', Object.values(snackPreset.presetsByName || {}).map(item => item.snackName), Object.values(updated).map(item => item.snackName));
     try {
       await saveSnackPresets(updated);
+      for (const field of ['name', 'C', 'P', 'F']) recordActivityChange({ field: `Snack preset ${field}`, form: 'Kitchen meal choices', before: snackPresetForm[field], after: '' });
       setSnackPresetForm({ name: '', C: '', P: '', F: '' });
     } catch { /* Keep the entered values so the user can retry. */ }
   };
@@ -801,6 +810,7 @@ const KitchenList = () => {
   const removeSnackPreset = async (key) => {
     const updated = { ...snackPreset.presetsByName };
     delete updated[key];
+    traceKitchenOptions('Snack macro preset choices', Object.values(snackPreset.presetsByName || {}).map(item => item.snackName), Object.values(updated).map(item => item.snackName));
     try { await saveSnackPresets(updated); } catch { /* Preserve the saved row on failure. */ }
   };
 
@@ -1064,8 +1074,18 @@ const KitchenList = () => {
     const current = snackOptionsByDate[missingCheckDate] || { first: [], second: [] };
     const updatedFirst = pool === 'first' ? (current.first || []).filter((_, i) => i !== index) : (current.first || []);
     const updatedSecond = pool === 'second' ? (current.second || []).filter((_, i) => i !== index) : (current.second || []);
+    traceKitchenOptions(`Snack ${pool === 'first' ? 1 : 2} choices`, current[pool] || [], pool === 'first' ? updatedFirst : updatedSecond);
     saveSnackOptionsForDate(missingCheckDate, updatedFirst, updatedSecond);
   };
+
+  function traceKitchenOptions(field, before, after) {
+    const labels = entries => entries.map((item, index) => typeof item === 'string' ? item : item?.name || item?.mealName || `Option ${index + 1}`);
+    recordActivityChange({ field: `${field} on ${missingCheckDate}`, form: 'Kitchen meal choices', before: labels(before), after: labels(after) });
+  }
+  function chooseCustomerStatusFilter(value) {
+    recordActivityChange({ field: 'Customer status filter', form: 'Kitchen list', before: showOnlyAttention ? 'Needs attention' : showOnlyMissing ? 'Missing' : 'All', after: value });
+    setShowOnlyMissing(value === 'Missing'); setShowOnlyAttention(value === 'Needs attention');
+  }
 
   // The expensive part — calculateKitchenListEntry's full weight/macro/
   // escalation math plus groupMealsByDay, run once per customer — depends
@@ -2718,6 +2738,7 @@ ${body}${partnerPaperHtml(partnerData)}
                     <input
                       type="text"
                       value={matterCoreMealInput}
+                      data-activity-label="Matter Core meal input"
                       onChange={(e) => setMatterCoreMealInput(e.target.value)}
                       onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addMatterCoreMeal(); } }}
                       placeholder="Meal name"
@@ -2901,9 +2922,9 @@ ${body}${partnerPaperHtml(partnerData)}
               <input id="kitchen-customer-search" value={searchInput} onChange={(e) => setSearchInput(e.target.value)} placeholder="Customer or email" className="w-full rounded-xl border border-slate-300 py-3 pl-9 pr-3 text-sm" />
             </div>
             <div className="kitchen-filter-tabs" role="group" aria-label="Customer status filter">
-              <button type="button" aria-pressed={!showOnlyMissing && !showOnlyAttention} onClick={() => { setShowOnlyMissing(false); setShowOnlyAttention(false); }}>All</button>
-              <button type="button" aria-pressed={showOnlyMissing && !showOnlyAttention} onClick={() => { setShowOnlyMissing(true); setShowOnlyAttention(false); }}>Missing</button>
-              <button type="button" aria-pressed={showOnlyAttention} onClick={() => { setShowOnlyMissing(false); setShowOnlyAttention(true); }}>Needs attention</button>
+              <button type="button" aria-pressed={!showOnlyMissing && !showOnlyAttention} onClick={() => chooseCustomerStatusFilter('All')}>All</button>
+              <button type="button" aria-pressed={showOnlyMissing && !showOnlyAttention} onClick={() => chooseCustomerStatusFilter('Missing')}>Missing</button>
+              <button type="button" aria-pressed={showOnlyAttention} onClick={() => chooseCustomerStatusFilter('Needs attention')}>Needs attention</button>
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-3">
               <select

@@ -29,6 +29,7 @@ import { setSelectedEvent } from '../store/slices/eventSlice';
 import EventCalendarView from '../components/events/EventCalendarView';
 import EventDetailModal from '../components/events/EventDetailModal';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 import { fetchDeliveries } from '../store/slices/deliverySlice';
 import { fetchDrivers } from '../store/slices/driverSlice';
 import { logout } from '../store/slices/authSlice';
@@ -124,6 +125,30 @@ const DispatcherMobile = () => {
   const timingButtonRef = useRef(null);
   const bagLastScanTimestampRef = useRef(0);
   const bagLastScannedValueRef = useRef('');
+  // Loads and assignment responses update state without becoming browser edits.
+  const observedValues = useRef({});
+  observedValues.current = {
+    'Delivery areas': areaFilters,
+    'Delivery drivers': driverFilters, 'Delivery hours': timingFilters,
+    'Unassigned deliveries only': showUnassignedOnly, 'Collection deliveries only': showCollectionsOnly,
+    'Selected deliveries': selectedDeliveryIds, 'Delivery date': selectedDate, 'Scanned bags': scannedBagIds
+  };
+  const deliveryRefs = ids => ids.map(id => deliveries.find(delivery => delivery._id === id)?.customerId || ('Delivery ' + id));
+  const driverRefs = ids => ids.map(id => {
+    if (id === 'unassigned') return 'Unassigned';
+    const driver = drivers.find(item => item._id === id);
+    return [driver?.profile?.firstName, driver?.profile?.lastName].filter(Boolean).join(' ') || ('Driver ' + id);
+  });
+  const changeObserved = (field, next, setter, format = value => value) => {
+    const before = observedValues.current[field];
+    const after = typeof next === 'function' ? next(before) : next;
+    recordActivityChange({ field, before: format(before), after: format(after), form: 'Dispatcher filters and selection' });
+    observedValues.current[field] = after;
+    setter(after);
+  };
+  const toggleValue = (field, value, setter, format) => changeObserved(field,
+    previous => previous.includes(value) ? previous.filter(item => item !== value) : [...previous, value], setter, format);
+
   const handleLogout = () => {
     dispatch(logout());
     navigate('/login', { replace: true });
@@ -360,31 +385,10 @@ const DispatcherMobile = () => {
   const areaLabel = areaFilters.length === 0 ? 'All Areas' : areaFilters.join(', ');
   const driverLabel = driverFilters.length === 0 ? 'All Drivers' : `${driverFilters.length} Driver(s)`;
 
-  const toggleAreaSelection = (area) => {
-    setAreaFilters((prev) => {
-      if (prev.includes(area)) {
-        return prev.filter((item) => item !== area);
-      }
-      return [...prev, area];
-    });
-  };
-
-  const clearAreaFilters = () => {
-    setAreaFilters([]);
-  };
-
-  const toggleDriverSelection = (driverId) => {
-    setDriverFilters((prev) => {
-      if (prev.includes(driverId)) {
-        return prev.filter((item) => item !== driverId);
-      }
-      return [...prev, driverId];
-    });
-  };
-
-  const clearDriverFilters = () => {
-    setDriverFilters([]);
-  };
+  const toggleAreaSelection = area => toggleValue('Delivery areas', area, setAreaFilters);
+  const clearAreaFilters = () => changeObserved('Delivery areas', [], setAreaFilters);
+  const toggleDriverSelection = id => toggleValue('Delivery drivers', id, setDriverFilters, driverRefs);
+  const clearDriverFilters = () => changeObserved('Delivery drivers', [], setDriverFilters, driverRefs);
 
   const selectedDeliveries = useMemo(
     () => deliveries.filter((delivery) => selectedDeliveryIds.includes(delivery._id)),
@@ -409,25 +413,15 @@ const DispatcherMobile = () => {
     });
   }, [sortedDrivers, bagDriverSearchTerm]);
 
-  const toggleDeliverySelection = (deliveryId) => {
-    setSelectedDeliveryIds((prev) => {
-      if (prev.includes(deliveryId)) {
-        return prev.filter((id) => id !== deliveryId);
-      }
-      return [...prev, deliveryId];
-    });
-  };
-
-  const clearDeliverySelection = () => {
-    setSelectedDeliveryIds([]);
-  };
+  const toggleDeliverySelection = id => toggleValue('Selected deliveries', id, setSelectedDeliveryIds, deliveryRefs);
+  const clearDeliverySelection = () => changeObserved('Selected deliveries', [], setSelectedDeliveryIds, deliveryRefs);
 
   const normalizeScannedBagId = (raw) => {
     return String(raw || '').trim().toUpperCase();
   };
 
   const removeScannedBag = (bagId) => {
-    setScannedBagIds((prev) => prev.filter((id) => id !== bagId));
+    changeObserved('Scanned bags', previous => previous.filter(id => id !== bagId), setScannedBagIds);
   };
 
   const handleBagQrScan = useCallback((detectedCodes) => {
@@ -454,15 +448,14 @@ const DispatcherMobile = () => {
     bagLastScanTimestampRef.current = now;
     bagLastScannedValueRef.current = bagId;
 
-    setScannedBagIds((prev) => {
-      if (prev.includes(bagId)) {
-        setBagScanMessage(`${bagId} already scanned`);
-        return prev;
-      }
-      setLastScannedBagId(bagId);
-      setBagScanMessage(`Scanned ${bagId}`);
-      return [...prev, bagId];
-    });
+    const before = observedValues.current['Scanned bags'];
+    if (before.includes(bagId)) { setBagScanMessage(`${bagId} already scanned`); return; }
+    const after = [...before, bagId];
+    recordActivityChange({ field: 'Scanned bags', before, after, form: 'Dispatcher bag assignment' });
+    observedValues.current['Scanned bags'] = after;
+    setScannedBagIds(after);
+    setLastScannedBagId(bagId);
+    setBagScanMessage(`Scanned ${bagId}`);
   }, [showBagScanner]);
 
   const closeBagAssignModal = () => {
@@ -510,7 +503,7 @@ const DispatcherMobile = () => {
 
   const selectAllFilteredDeliveries = () => {
     const allFilteredIds = filteredDeliveries.map(d => d._id);
-    setSelectedDeliveryIds(allFilteredIds);
+    changeObserved('Selected deliveries', allFilteredIds, setSelectedDeliveryIds, deliveryRefs);
   };
 
   const isAllFilteredSelected = useMemo(() => {
@@ -590,7 +583,7 @@ const DispatcherMobile = () => {
         limit: 1000 
       }));
       setDriverListOpen(false);
-      clearDeliverySelection();
+      setSelectedDeliveryIds([]);
       closeAssignmentSheet();
       // Clear all filters after successful assignment
       setAreaFilters([]);
@@ -962,7 +955,7 @@ const DispatcherMobile = () => {
           />
           <button
             type="button"
-            onClick={() => setSelectedDate(getTomorrowDate())}
+            onClick={() => changeObserved('Delivery date', getTomorrowDate(), setSelectedDate)}
             className="w-full sm:w-auto text-xs font-semibold px-2 sm:px-3 py-1.5 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition"
           >
             Tomorrow
@@ -1173,7 +1166,7 @@ const DispatcherMobile = () => {
                       <span>Select Hours</span>
                       <button 
                         type="button" 
-                        onClick={() => setTimingFilters([])} 
+                        onClick={() => changeObserved('Delivery hours', [], setTimingFilters, hours => hours.map(hour => hour + 'am'))}
                         className="text-blue-500 font-semibold"
                       >
                         Clear
@@ -1185,11 +1178,7 @@ const DispatcherMobile = () => {
                         <button
                           key={hour}
                           type="button"
-                          onClick={() => setTimingFilters(prev =>
-                            prev.includes(hour)
-                              ? prev.filter(h => h !== hour)
-                              : [...prev, hour]
-                          )}
+                          onClick={() => toggleValue('Delivery hours', hour, setTimingFilters, hours => hours.map(value => value + 'am'))}
                           className={`w-full text-left px-3 sm:px-4 py-2 sm:py-3 text-xs sm:text-sm font-semibold flex items-center justify-between ${
                             isActive ? 'bg-blue-50 text-blue-600' : 'text-gray-600 hover:bg-gray-50'
                           }`}
@@ -1210,7 +1199,7 @@ const DispatcherMobile = () => {
               
               {/* Unassigned Filter Button */}
               <button
-                onClick={() => setShowUnassignedOnly(!showUnassignedOnly)}
+                onClick={() => changeObserved('Unassigned deliveries only', value => !value, setShowUnassignedOnly)}
                 className={`px-2 sm:px-3 py-1 sm:py-2 rounded-lg text-xs sm:text-sm font-semibold transition whitespace-nowrap ${
                   showUnassignedOnly
                     ? 'bg-orange-500 text-white'
@@ -1223,7 +1212,7 @@ const DispatcherMobile = () => {
 
               {/* Collections Filter Button */}
               <button
-                onClick={() => setShowCollectionsOnly(!showCollectionsOnly)}
+                onClick={() => changeObserved('Collection deliveries only', value => !value, setShowCollectionsOnly)}
                 className={`px-2 sm:px-3 py-1 sm:py-2 rounded-lg text-xs sm:text-sm font-semibold transition whitespace-nowrap ${
                   showCollectionsOnly
                     ? 'bg-teal-500 text-white'
@@ -1630,7 +1619,7 @@ const DispatcherMobile = () => {
                 <h2 className="text-lg font-semibold text-gray-900">Assign Bags To Driver</h2>
                 <p className="text-xs text-gray-500">Scan multiple bags, then choose one driver</p>
               </div>
-              <button onClick={closeBagAssignModal} className="p-2 hover:bg-gray-100 rounded-lg">
+              <button onClick={() => { changeObserved('Scanned bags', [], setScannedBagIds); closeBagAssignModal(); }} className="p-2 hover:bg-gray-100 rounded-lg">
                 <X className="w-5 h-5 text-gray-600" />
               </button>
             </div>
@@ -1653,7 +1642,7 @@ const DispatcherMobile = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        setScannedBagIds([]);
+                        changeObserved('Scanned bags', [], setScannedBagIds);
                         setLastScannedBagId('');
                         setBagScanMessage('Cleared scanned list');
                       }}

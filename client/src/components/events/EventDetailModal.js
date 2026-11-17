@@ -4,6 +4,7 @@ import { updateEvent } from '../../store/slices/eventSlice';
 import { X, MapPin, Calendar, Clock, Users, ExternalLink, Edit2, Check, AlertTriangle, MessageCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import jsPDF from 'jspdf';
+import { recordActivityChange } from '../../utils/activityCapture';
 
 const EventDetailModal = ({ isOpen, onClose }) => {
   const dispatch = useDispatch();
@@ -817,6 +818,7 @@ const EventDetailModal = ({ isOpen, onClose }) => {
                                 type="button"
                                 onClick={() => {
                                   const updated = (editData.logistics?.food || []).filter((_, idx) => idx !== i);
+                                  recordActivityChange({ field: 'Event food', form: `Edit event · ${selectedEvent.eventName}`, before: (editData.logistics?.food || []).map(row => `${row.name} × ${row.quantity || 1}`), after: updated.map(row => `${row.name} × ${row.quantity || 1}`) });
                                   handleNestedChange('logistics', 'food', updated);
                                 }}
                                 className="ml-3 text-red-500 hover:text-red-700 text-xs font-semibold"
@@ -850,6 +852,7 @@ const EventDetailModal = ({ isOpen, onClose }) => {
                             onClick={() => {
                               if (!newFoodItem.name.trim()) return;
                               const updated = [...(editData.logistics?.food || []), { name: newFoodItem.name.trim(), quantity: newFoodItem.quantity }];
+                              recordActivityChange({ field: 'Event food', form: `Edit event · ${selectedEvent.eventName}`, before: (editData.logistics?.food || []).map(row => `${row.name} × ${row.quantity || 1}`), after: updated.map(row => `${row.name} × ${row.quantity || 1}`) });
                               handleNestedChange('logistics', 'food', updated);
                               setNewFoodItem({ name: '', quantity: 1 });
                             }}

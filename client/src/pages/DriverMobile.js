@@ -45,6 +45,7 @@ import { storePhotoOffline, queueDeliveryUpdate, getPendingCount } from '../util
 import { syncOfflineData, setupAutoSync, setupAutoRetry, onSyncStatusChange, retryDeliverySync } from '../utils/offlineSync';
 import { useSyncStatus, getSyncStatusIndicator } from '../hooks/useSyncStatus';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 import HandoffCard from '../components/driver/HandoffCard';
 import DeliveryAddressDetails from '../components/driver/DeliveryAddressDetails';
 import BagHandoverPanel from '../components/driver/BagHandoverPanel';
@@ -247,6 +248,52 @@ const DriverMobile = () => {
   const { deliveries, handoffs = [], currentDelivery, isLoading, error } = useSelector(state => state.driverMobile);
   const dispatch = useDispatch();
   const navigate = useNavigate();
+  // Only gesture and scanner handlers use these helpers; GPS, hydration, sync
+  // responses and device capability updates retain the ordinary setters.
+  const activityDraft = useRef({});
+  activityDraft.current = { bagState, cameraState, filterState, historyState, activeTab, deliveryId: currentDelivery?._id };
+  const safeBagTags = values => values.map(value => /^BAG[-_](?:[A-Z])?\d{4,}$/i.test(String(value)) ? String(value).replace('_', '-').toUpperCase() : 'Unrecognized bag tag');
+  const changeBagDraft = update => {
+    const before = activityDraft.current.bagState;
+    const after = typeof update === 'function' ? update(before) : update;
+    for (const [key, field] of [['scannedBags', 'Delivery bag tags'], ['collectionScans', 'Collected bag tags'], ['toReturn', 'Returning bag tags']]) {
+      if (before[key].length !== after[key].length || before[key].some((value, index) => value !== after[key][index])) {
+        recordActivityChange({ field, before: safeBagTags(before[key]), after: safeBagTags(after[key]), form: 'Driver delivery and bag draft' });
+      }
+    }
+    if (before.qrSkipped !== after.qrSkipped) recordActivityChange({ field: 'Bag scan skipped', before: before.qrSkipped, after: after.qrSkipped, form: 'Driver delivery draft' });
+    activityDraft.current.bagState = after; setBagState(after);
+  };
+  const changeCameraDraft = (update, capture = true) => {
+    const before = activityDraft.current.cameraState;
+    const after = typeof update === 'function' ? update(before) : update;
+    for (const [key, field] of [['capturedPhoto', 'Delivery image count'], ['bagReturnPhoto', 'Bag return image count'], ['noBagsPhoto', 'Collection image count']]) {
+      if (capture && before[key] !== after[key]) recordActivityChange({ field,
+        before: before[key] && after[key] ? '1 image before replacement' : Number(Boolean(before[key])),
+        after: before[key] && after[key] ? '1 image after replacement' : Number(Boolean(after[key])), form: 'Driver image selection' });
+    }
+    activityDraft.current.cameraState = after; setCameraState(after);
+  };
+  const changeDriverFilters = (update, includeSearch = true) => {
+    const before = activityDraft.current.filterState; const after = update(before);
+    for (const [key, field] of [['searchTerm', 'Driver search'], ['selectedLetter', 'Customer initial filter'], ['sortAlphabetical', 'Alphabetical sorting'], ['showAlphabetFilter', 'Show alphabet filter']]) {
+      if (before[key] !== after[key] && (key !== 'searchTerm' || includeSearch)) recordActivityChange({ field, before: before[key], after: after[key], private: key === 'searchTerm', form: 'Driver view filters' });
+    }
+    activityDraft.current.filterState = after; setFilterState(after);
+  };
+  const changeHistoryPeriod = next => {
+    const label = value => ({ today: 'Today', week: 'Last 7 days', month: 'Last 30 days' }[value] || value);
+    recordActivityChange({ field: 'History period', before: label(activityDraft.current.historyState.period), after: label(next), form: 'Driver history' });
+    activityDraft.current.historyState = { ...activityDraft.current.historyState, period: next };
+    setHistoryState(previous => ({ ...previous, period: next }));
+  };
+  const changeDriverView = next => {
+    const label = value => ({ deliveries: 'Deliveries', tasks: 'Tasks', history: 'History', map: 'Delivery map' }[value] || value);
+    recordActivityChange({ field: 'Driver view', before: label(activityDraft.current.activeTab), after: label(next), form: 'Driver portal' });
+    activityDraft.current.activeTab = next; setActiveTab(next);
+  };
+  const returnChoice = useRef('Not answered');
+  const chooseReturn = after => { recordActivityChange({ field: 'Return bags decision', before: returnChoice.current, after, form: 'Driver delivery draft' }); returnChoice.current = after; };
   const driverAccuracyRate = typeof user?.kpi?.accuracyRate === 'number'
     ? user.kpi.accuracyRate
     : 0;
@@ -746,7 +793,7 @@ const DriverMobile = () => {
       context.drawImage(video, 0, 0, width, height);
 
       const imageData = canvas.toDataURL('image/jpeg', PHOTO_QUALITY);
-      setCameraState(prev => ({ ...prev, capturedPhoto: imageData,
+      changeCameraDraft(prev => ({ ...prev, capturedPhoto: imageData,
         photoCapturedAt: new Date().toISOString(), photoSource: 'camera' }));
       setFeedback(prev => ({ ...prev, scanSuccess: 'Photo captured successfully!' }));
       
@@ -761,6 +808,8 @@ const DriverMobile = () => {
       return;
     }
 
+    const initiatingToken = window.localStorage.getItem('token');
+    const initiatingDelivery = activityDraft.current.deliveryId;
     const imageUrl = URL.createObjectURL(file);
     const image = new Image();
 
@@ -774,8 +823,8 @@ const DriverMobile = () => {
       context.drawImage(image, 0, 0, width, height);
 
       const compressedDataUrl = canvas.toDataURL('image/jpeg', PHOTO_QUALITY);
-      setCameraState(prev => ({ ...prev, capturedPhoto: compressedDataUrl,
-        photoCapturedAt: null, photoSource: 'upload' }));
+      changeCameraDraft(prev => ({ ...prev, capturedPhoto: compressedDataUrl,
+        photoCapturedAt: null, photoSource: 'upload' }), window.localStorage.getItem('token') === initiatingToken && activityDraft.current.deliveryId === initiatingDelivery);
       setFeedback({ scanError: '', scanSuccess: 'Photo uploaded successfully.', isUploading: false });
       stopCamera();
       setTimeout(() => setFeedback(prev => ({ ...prev, scanSuccess: '' })), 5000);
@@ -850,8 +899,8 @@ const DriverMobile = () => {
     const isCollection = delivery?.type === 'Collection';
     const shouldStartBagCollection = delivery?.type === 'Task' && delivery?.taskType === 'Bag Collection';
     setCurrentStep(isCollection ? 'collection_action' : (shouldStartBagCollection ? 'bag_collection_qr' : 'delivery'));
-    setBagState({ scannedBagId: '', scannedBags: [], returnedBags: [], collectionScans: [], toReturn: [], qrSkipped: false });
-    setCameraState(prev => ({ ...prev, capturedPhoto: null }));
+    changeBagDraft({ scannedBagId: '', scannedBags: [], returnedBags: [], collectionScans: [], toReturn: [], qrSkipped: false });
+    changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));
     setFeedback({ scanError: '', scanSuccess: '', isUploading: false });
     setFlowState(prev => ({ ...prev, showReturnFlow: false, isBagCollectionFlow: shouldStartBagCollection }));
     lastScannedValueRef.current = '';
@@ -860,20 +909,20 @@ const DriverMobile = () => {
   const handleCompleteDeliveryFlow = (skipQr = false) => {
     setFeedback(prev => ({ ...prev, scanError: '' }));
     setFlowState(prev => ({ ...prev, showReturnFlow: false }));
-    setBagState(prev => ({ ...prev, scannedBagId: '', scannedBags: [] }));
+    changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [] }));
     if (!skipQr) {
-      setCameraState(prev => ({ ...prev, capturedPhoto: null }));  // Only reset photo if NOT skipping QR
+      changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));  // Only reset photo if NOT skipping QR
     }
     lastScannedValueRef.current = '';
 
     if (skipQr) {
-      setBagState(prev => ({ ...prev, qrSkipped: true }));
+      changeBagDraft(prev => ({ ...prev, qrSkipped: true }));
       setCurrentStep('photo');
       setFeedback({ scanError: '', scanSuccess: 'Skipping QR scan. Please capture a delivery photo.', isUploading: false });
       setTimeout(() => setFeedback(prev => ({ ...prev, scanSuccess: '' })), 5000);
       // Let the useEffect handle camera start when currentStep changes to 'photo'
     } else {
-      setBagState(prev => ({ ...prev, qrSkipped: false }));
+      changeBagDraft(prev => ({ ...prev, qrSkipped: false }));
       setFeedback(prev => ({ ...prev, scanSuccess: '' }));
       setCurrentStep('qr');
     }
@@ -906,7 +955,7 @@ const DriverMobile = () => {
       const context = canvas.getContext('2d');
       context.drawImage(video, 0, 0, width, height);
       const photoDataUrl = canvas.toDataURL('image/jpeg', PHOTO_QUALITY);
-      setCameraState(prev => ({...prev, bagReturnPhoto: photoDataUrl}));
+      changeCameraDraft(prev => ({...prev, bagReturnPhoto: photoDataUrl}));
       stopCamera();
     } catch (error) {
       console.error('Error capturing bag return photo:', error);
@@ -988,7 +1037,7 @@ const DriverMobile = () => {
 
   const handleCancelBagReturn = () => {
     setFlowState(prev => ({...prev, showBagReturnFlow: false}));
-    setCameraState(prev => ({...prev, bagReturnPhoto: null}));
+    changeCameraDraft(prev => ({...prev, bagReturnPhoto: null}));
     setCurrentStep('delivery');
     stopCamera();
   };
@@ -1096,7 +1145,7 @@ const DriverMobile = () => {
 
   const handleCancelBagCollectionFlow = () => {
     setFlowState(prev => ({ ...prev, isBagCollectionFlow: false }));
-    setBagState(prev => ({...prev, collectionScans: []}));
+    changeBagDraft(prev => ({...prev, collectionScans: []}));
     handleBackToDelivery();
   };
 
@@ -1142,7 +1191,7 @@ const DriverMobile = () => {
       const imageData = canvas.toDataURL('image/jpeg', PHOTO_QUALITY);
       console.log('✅ Photo captured, data URL length:', imageData.length);
       
-      setCameraState(prev => ({ ...prev, noBagsPhoto: imageData }));
+      changeCameraDraft(prev => ({ ...prev, noBagsPhoto: imageData }));
       setFeedback(prev => ({ ...prev, scanSuccess: 'Photo captured successfully!' }));
       
       // Stop camera after capture
@@ -1293,33 +1342,36 @@ const DriverMobile = () => {
 
   const handleCancelReturnBagsFlow = () => {
     setFlowState(prev => ({...prev, isReturningBags: false}));
-    setBagState(prev => ({...prev, toReturn: []}));
+    changeBagDraft(prev => ({...prev, toReturn: []}));
     setFlowState(prev => ({...prev, showReturnBagsQuestion: false}));
     setCurrentStep('delivery');
     stopCamera();
   };
 
   const handlePhotoComplete = () => {
+    returnChoice.current = 'Not answered';
     // After photo is captured, ask about returning bags
     setFlowState(prev => ({...prev, showReturnBagsQuestion: true}));
   };
 
   const handleReturnBagsYes = () => {
+    chooseReturn('Returning bags');
     setFlowState(prev => ({...prev, showReturnBagsQuestion: false, isReturningBags: true}));
-    setBagState(prev => ({...prev, toReturn: []}));
+    changeBagDraft(prev => ({...prev, toReturn: []}));
     setCurrentStep('return_bags_scan');
     startCamera();
   };
 
   const handleReturnBagsNo = () => {
+    chooseReturn('No bags to return');
     setFlowState(prev => ({...prev, showReturnBagsQuestion: false, isReturningBags: false}));
-    setBagState(prev => ({...prev, toReturn: []}));
+    changeBagDraft(prev => ({...prev, toReturn: []}));
     setCurrentStep('photo_complete');
   };
 
   const handleBagScanned = (bagId) => {
     if (!bagState.toReturn.includes(bagId)) {
-      setBagState(prev => {
+      changeBagDraft(prev => {
         const updated = { ...prev, toReturn: [...prev.toReturn, bagId] };
         return updated;
       });
@@ -1332,7 +1384,7 @@ const DriverMobile = () => {
   };
 
   const handleRemoveReturnBag = (bagId) => {
-    setBagState(prev => ({ ...prev, toReturn: prev.toReturn.filter(id => id !== bagId) }));
+    changeBagDraft(prev => ({ ...prev, toReturn: prev.toReturn.filter(id => id !== bagId) }));
   };
 
   const handleCompleteBagsReturn = async () => {
@@ -1520,11 +1572,11 @@ const DriverMobile = () => {
       console.log('[QR Scan] Processing delivery scan for:', value);
 
       // Normal delivery scan path
-      setBagState(prev => ({...prev, qrSkipped: false}));
+      changeBagDraft(prev => ({...prev, qrSkipped: false}));
       
       if (flowState.isBagCollectionFlow) {
         console.log('[QR Scan] Bag collection flow - adding to collectionScans');
-        setBagState(prev => ({
+        changeBagDraft(prev => ({
           ...prev,
           collectionScans: prev.collectionScans.includes(value)
             ? prev.collectionScans
@@ -1549,7 +1601,7 @@ const DriverMobile = () => {
       // Add bag to scannedBags array
       const updatedBags = [...bagState.scannedBags, value];
       console.log('[QR Scan] Adding bag to delivery:', value, 'Total bags:', updatedBags.length);
-      setBagState(prev => ({...prev, scannedBagId: value, scannedBags: updatedBags}));
+      changeBagDraft(prev => ({...prev, scannedBagId: value, scannedBags: updatedBags}));
       
       setFeedback(prev => ({...prev, scanSuccess: `Bag ${value} scanned! (${updatedBags.length} total)`, scanError: ''}));
       
@@ -1629,7 +1681,7 @@ const DriverMobile = () => {
         return;
       }
       
-      setBagState(prev => ({ ...prev, qrSkipped: false }));
+      changeBagDraft(prev => ({ ...prev, qrSkipped: false }));
       
       // Check for duplicate bags
       if (bagState.scannedBags.includes(enteredBagId)) {
@@ -1638,14 +1690,14 @@ const DriverMobile = () => {
       }
       
       // Add bag to scannedBags array
-      setBagState(prev => ({
+      changeBagDraft(prev => ({
         ...prev,
         scannedBags: [...prev.scannedBags, enteredBagId],
         scannedBagId: enteredBagId
       }));
       
       if (flowState.isBagCollectionFlow) {
-        setBagState(prev => ({
+        changeBagDraft(prev => ({
           ...prev,
           collectionScans: prev.collectionScans.includes(enteredBagId) ? prev.collectionScans : [...prev.collectionScans, enteredBagId]
         }));
@@ -1879,8 +1931,8 @@ const DriverMobile = () => {
     }
     setCurrentStep('delivery');
     setFeedback({ scanError: '', scanSuccess: '', isUploading: false });
-    setBagState(prev => ({ ...prev, scannedBagId: '', scannedBags: [], qrSkipped: false }));
-    setCameraState(prev => ({ ...prev, capturedPhoto: null }));
+    changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [], qrSkipped: false }));
+    changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));
     stopCamera();
     lastScannedValueRef.current = '';
   };
@@ -1892,8 +1944,8 @@ const DriverMobile = () => {
 
     setCurrentStep('qr');
     setFeedback({ scanError: '', scanSuccess: '', isUploading: false });
-    setBagState(prev => ({ ...prev, scannedBagId: '', scannedBags: [], qrSkipped: false }));
-    setCameraState(prev => ({ ...prev, capturedPhoto: null }));
+    changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [], qrSkipped: false }));
+    changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));
     stopCamera();
     lastScannedValueRef.current = '';
   };
@@ -2514,7 +2566,7 @@ const DriverMobile = () => {
 
                 <button
                   onClick={() => {
-                    setCameraState(prev => ({ ...prev, noBagsPhoto: null }));
+                    changeCameraDraft(prev => ({ ...prev, noBagsPhoto: null }));
                     startCamera();
                   }}
                   disabled={feedback.isUploading}
@@ -2526,7 +2578,7 @@ const DriverMobile = () => {
 
                 <button
                   onClick={() => {
-                    setCameraState(prev => ({ ...prev, noBagsPhoto: null }));
+                    changeCameraDraft(prev => ({ ...prev, noBagsPhoto: null }));
                     setCurrentStep('bag_collection_qr');
                   }}
                   disabled={feedback.isUploading}
@@ -2597,7 +2649,7 @@ const DriverMobile = () => {
 
           <button
             onClick={() => {
-              setCameraState(prev => ({ ...prev, noBagsPhoto: null }));
+              changeCameraDraft(prev => ({ ...prev, noBagsPhoto: null }));
               setCurrentStep('collection_photo');
             }}
             disabled={feedback.isUploading}
@@ -2759,7 +2811,7 @@ const DriverMobile = () => {
 
                 <button
                   onClick={() => {
-                    setCameraState(prev => ({ ...prev, noBagsPhoto: null }));
+                    changeCameraDraft(prev => ({ ...prev, noBagsPhoto: null }));
                     startCamera();
                   }}
                   disabled={feedback.isUploading}
@@ -2771,7 +2823,7 @@ const DriverMobile = () => {
 
                 <button
                   onClick={() => {
-                    setCameraState(prev => ({ ...prev, noBagsPhoto: null }));
+                    changeCameraDraft(prev => ({ ...prev, noBagsPhoto: null }));
                     setCurrentStep('collection_action');
                   }}
                   disabled={feedback.isUploading}
@@ -3232,7 +3284,7 @@ const DriverMobile = () => {
             ) : (
               <button
                 onClick={() => {
-                  setCameraState(prev => ({ ...prev, capturedPhoto: null }));
+                  changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));
                   startCamera();
                 }}
                 className="w-full flex items-center justify-center px-4 py-3 bg-yellow-500 text-white rounded-lg hover:bg-yellow-600"
@@ -3388,7 +3440,7 @@ const DriverMobile = () => {
                 )}
               </button>
               <button
-                onClick={() => setCameraState(prev => ({...prev, bagReturnPhoto: null}))}
+                onClick={() => changeCameraDraft(prev => ({...prev, bagReturnPhoto: null}))}
                 disabled={feedback.isUploading}
                 className="w-full bg-gray-700 text-white py-3 rounded-lg disabled:bg-gray-600"
               >
@@ -3534,7 +3586,7 @@ const DriverMobile = () => {
                   <div key={index} className="flex items-center justify-between bg-green-700 p-2 rounded">
                     <span className="font-medium">Bag {index + 1}: {bagId}</span>
                     <button
-                      onClick={() => setBagState((prev) => ({...prev, scannedBags: prev.scannedBags.filter((_, i) => i !== index)}))}
+                      onClick={() => changeBagDraft((prev) => ({...prev, scannedBags: prev.scannedBags.filter((_, i) => i !== index)}))}
                       className="p-1 hover:bg-green-800 rounded transition"
                       title="Remove this bag"
                     >
@@ -3617,7 +3669,8 @@ const DriverMobile = () => {
                       key={index}
                       onClick={() => {
                         // Set this bag as the one to return and go to return bags scan
-                        setBagState(prev => ({ ...prev, toReturn: [bagId] }));
+                        chooseReturn('Returning bags');
+                        changeBagDraft(prev => ({ ...prev, toReturn: [bagId] }));
                         setFlowState(prev => ({ ...prev, showReturnBagsQuestion: false }));
                         setFlowState(prev => ({ ...prev, isReturningBags: true }));
                         setCurrentStep('return_bags_scan');
@@ -3859,7 +3912,7 @@ const DriverMobile = () => {
               <div className="flex items-center justify-center gap-4">
                 <button
                   onClick={() => {
-                    setCameraState(prev => ({ ...prev, capturedPhoto: null }));
+                    changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));
                     startCamera();
                   }}
                   className="flex flex-col items-center justify-center w-24 h-20 rounded-2xl bg-yellow-500 text-white shadow-lg shadow-yellow-900/30 hover:bg-yellow-400 active:scale-95 transition"
@@ -4102,8 +4155,8 @@ const DriverMobile = () => {
               onClick={() => {
                 dispatch(clearCurrentDelivery());
                 setCurrentStep('delivery');
-                setBagState(prev => ({ ...prev, scannedBagId: '', scannedBags: [], qrSkipped: false }));
-                setCameraState(prev => ({ ...prev, capturedPhoto: null }));
+                changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [], qrSkipped: false }));
+                changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));
                 setFeedback(prev => ({ ...prev, scanError: '', scanSuccess: '' }));
                 lastScannedValueRef.current = '';
               }}
@@ -4841,7 +4894,7 @@ const DriverMobile = () => {
               {(filterState.searchTerm || filterState.selectedLetter) && (
                 <button
                   onClick={() => {
-                    setFilterState(prev => ({...prev, searchTerm: '', selectedLetter: ''}));
+                    changeDriverFilters(prev => ({...prev, searchTerm: '', selectedLetter: ''}));
                   }}
                   className="text-sm text-blue-600 hover:text-blue-700 font-medium"
                 >
@@ -4849,7 +4902,7 @@ const DriverMobile = () => {
                 </button>
               )}
               <button
-                onClick={() => setFilterState(prev => ({...prev, showAlphabetFilter: !prev.showAlphabetFilter}))}
+                onClick={() => changeDriverFilters(prev => ({...prev, showAlphabetFilter: !prev.showAlphabetFilter}))}
                 className={`px-3 py-1 rounded text-xs font-bold ${
                   filterState.showAlphabetFilter
                     ? 'bg-blue-500 text-white'
@@ -4866,7 +4919,7 @@ const DriverMobile = () => {
               placeholder="Search by customer name..."
               value={filterState.searchTerm}
               onChange={(e) => {
-                setFilterState(prev => ({...prev, searchTerm: e.target.value, selectedLetter: ''}));
+                changeDriverFilters(prev => ({...prev, searchTerm: e.target.value, selectedLetter: ''}), false);
               }}
               className="w-full pl-12 pr-4 py-3 border border-gray-200 rounded-2xl bg-gray-50 focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-base"
             />
@@ -4880,7 +4933,7 @@ const DriverMobile = () => {
                 <button
                   key={letter}
                   onClick={() => {
-                    setFilterState(prev => ({...prev, selectedLetter: prev.selectedLetter === letter ? '' : letter, searchTerm: ''}));
+                    changeDriverFilters(prev => ({...prev, selectedLetter: prev.selectedLetter === letter ? '' : letter, searchTerm: ''}));
                   }}
                   className={`w-8 h-8 rounded text-xs font-bold ${
                     filterState.selectedLetter === letter
@@ -4901,7 +4954,7 @@ const DriverMobile = () => {
       <div className="bg-white border-b safe-area-top">
         <div className="flex">
           <button
-            onClick={() => setActiveTab('deliveries')}
+            onClick={() => changeDriverView('deliveries')}
             className={`flex-1 py-4 text-center border-b-2 transition-colors ${
               activeTab === 'deliveries'
                 ? 'border-blue-500 text-blue-500'
@@ -4912,7 +4965,7 @@ const DriverMobile = () => {
             <span className="text-xs font-medium">Deliveries</span>
           </button>
           <button
-            onClick={() => setActiveTab('tasks')}
+            onClick={() => changeDriverView('tasks')}
             className={`flex-1 py-4 text-center border-b-2 transition-colors relative ${
               activeTab === 'tasks'
                 ? 'border-purple-500 text-purple-500'
@@ -4928,7 +4981,7 @@ const DriverMobile = () => {
             )}
           </button>
           <button
-            onClick={() => setActiveTab('history')}
+            onClick={() => changeDriverView('history')}
             className={`flex-1 py-4 text-center border-b-2 transition-colors ${
               activeTab === 'history'
                 ? 'border-green-500 text-green-500'
@@ -5190,7 +5243,7 @@ const DriverMobile = () => {
               <h3 className="font-semibold text-gray-900 mb-3">Delivery History</h3>
               <div className="flex space-x-2">
                 <button
-                  onClick={() => setHistoryState(prev => ({...prev, period: 'today'}))}
+                  onClick={() => changeHistoryPeriod('today')}
                   className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-colors ${
                     historyState.period === 'today'
                       ? 'bg-green-500 text-white'
@@ -5200,7 +5253,7 @@ const DriverMobile = () => {
                   Today
                 </button>
                 <button
-                  onClick={() => setHistoryState(prev => ({...prev, period: 'week'}))}
+                  onClick={() => changeHistoryPeriod('week')}
                   className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-colors ${
                     historyState.period === 'week'
                       ? 'bg-green-500 text-white'
@@ -5210,7 +5263,7 @@ const DriverMobile = () => {
                   Last 7 Days
                 </button>
                 <button
-                  onClick={() => setHistoryState(prev => ({...prev, period: 'month'}))}
+                  onClick={() => changeHistoryPeriod('month')}
                   className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-colors ${
                     historyState.period === 'month'
                       ? 'bg-green-500 text-white'
@@ -5352,7 +5405,7 @@ const DriverMobile = () => {
         <button
           onClick={() => {
             setFlowState(prev => ({...prev, isReturningBags: true}));
-            setBagState(prev => ({...prev, toReturn: []}));
+            changeBagDraft(prev => ({...prev, toReturn: []}));
             setCurrentStep('return_bags_scan');
             startCamera();
           }}
@@ -5407,7 +5460,7 @@ const DriverMobile = () => {
                 </button>
                 <button 
                   onClick={() => {
-                    setActiveTab('map');
+                    changeDriverView('map');
                     setShowMenu(false);
                   }}
                   className="w-full flex items-center space-x-3 p-3 text-gray-700 hover:bg-gray-100 rounded-lg text-left"

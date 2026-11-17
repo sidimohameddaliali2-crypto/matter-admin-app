@@ -1,4 +1,4 @@
-import { attachActivityContext, installActivityCapture, readCaptureStatus } from './activityCapture';
+import { attachActivityContext, installActivityCapture, readCaptureStatus, recordActivityChange } from './activityCapture';
 let cleanup;
 let fetchMock;
 const settle = async () => { for (let i = 0; i < 8; i += 1) await Promise.resolve(); };
@@ -30,6 +30,92 @@ test('captures debounced drafts with readable labels and before/after values', a
   expect(sent()[0]).not.toHaveProperty('actor'); expect(sent()[0].eventId).toMatch(/^[a-f0-9-]{36}$/);
   expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer staff-session');
   expect(fetchMock.mock.calls[0][1]).not.toHaveProperty('keepalive');
+});
+test('records each custom selection before submission and correlates its business request', async () => {
+  const request = interceptor();
+  recordActivityChange({ field: 'Assigned driver', before: 'Not assigned', after: 'Fixture driver', form: 'Assign deliveries' });
+  const write = request({ method: 'post', url: '/deliveries/assign', headers: {} });
+  recordActivityChange({ field: 'Assigned driver', before: 'Fixture driver', after: 'Not assigned', form: 'Assign deliveries' });
+  await deliver();
+  expect(sent().map(event => ({ stage: event.stage, form: event.form, changes: event.changes }))).toEqual([
+    { stage: 'form_edited', form: { title: 'Assign deliveries', field: 'Assigned driver' }, changes: [{ field: 'Assigned driver', before: 'Not assigned', after: 'Fixture driver', redacted: false }] },
+    { stage: 'form_edited', form: { title: 'Assign deliveries', field: 'Assigned driver' }, changes: [{ field: 'Assigned driver', before: 'Fixture driver', after: 'Not assigned', redacted: false }] },
+  ]);
+  expect(write.headers['X-Matter-Activity-ID']).toBe(sent()[0].actionId);
+  expect(sent().every(event => !event.actor && !event.outcome)).toBe(true);
+  expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer staff-session');
+});
+test('custom control events redact private values before the durable queue and survive reload', async () => {
+  const storage = await useDurableQueue();
+  fetchMock.mockRejectedValue(new Error('offline'));
+  recordActivityChange({ field: 'Selected dates', before: ['2026-11-17'], after: ['2026-11-17', '2026-11-18'], form: 'Delivery change' });
+  recordActivityChange({ field: 'Private notes', before: 'Prior private note', after: 'New private note', form: 'Customer Service' });
+  const element = document.createElement('div'); element.setAttribute('data-activity-private', ''); document.body.appendChild(element);
+  recordActivityChange({ field: 'A protected choice', before: 'Private option A', after: 'Private option B', element });
+  for (let i = 0; i < 10; i += 1) await settle();
+  const stored = JSON.stringify(Array.from(storage.tables.get('queue').values()));
+  expect(stored).toContain('2026-11-17, 2026-11-18');
+  for (const secret of ['Prior private note', 'New private note', 'Private option A', 'Private option B', 'staff-session']) expect(stored).not.toContain(secret);
+  expect(stored).toContain('[Not recorded]');
+  cleanup(); fetchMock.mockReset().mockResolvedValue({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({ success: true }) });
+  cleanup = installActivityCapture(); for (let i = 0; i < 5; i += 1) await settle(); await deliver();
+  expect(sent()).toHaveLength(3);
+  expect(sent()[0].changes[0]).toEqual({ field: 'Selected dates', before: '2026-11-17', after: '2026-11-17, 2026-11-18', redacted: false });
+  expect(sent()[1].changes[0].redacted).toBe(true);
+});
+test('unchanged custom selections and initial render do not claim a user edit', async () => {
+  recordActivityChange({ field: 'Driver', before: 'Fixture driver', after: 'Fixture driver' });
+  recordActivityChange({ field: 'Days', before: ['Monday', 'Tuesday'], after: ['Monday', 'Tuesday'] });
+  await deliver(); expect(sent()).toHaveLength(0);
+});
+test.each(['/traceability', '/login', '/menu-select/private-token'])('custom controls respect excluded credential and history pages at %s', async path => {
+  window.history.replaceState({}, '', path);
+  recordActivityChange({ field: 'Choice', before: 'Old', after: 'New' });
+  await deliver(); expect(fetchMock).not.toHaveBeenCalled();
+});
+test('custom events use the matching portal session and stop after capture cleanup', async () => {
+  window.history.replaceState({}, '', '/partner/portal'); localStorage.setItem('partnerToken', 'partner-session');
+  recordActivityChange({ field: 'Order quantity', before: 1, after: 2, form: 'Daily order' }); await deliver();
+  expect(fetchMock.mock.calls[0][0]).toContain('/api/traceability/capture/partner');
+  expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer partner-session');
+  expect(sent()[0].changes[0].after).toBe('2');
+  cleanup(); recordActivityChange({ field: 'Order quantity', before: 2, after: 3 }); await deliver();
+  expect(sent()).toHaveLength(1);
+});
+test('custom selection logs cannot expose credentials through unlabelled values or nested objects', async () => {
+  recordActivityChange({ field: 'Choice', before: 'Old', after: 'Bearer private-credential', form: 'Options' });
+  recordActivityChange({ field: 'Selection', before: null, after: { password: 'hidden-nested-password' }, form: 'Options' });
+  await deliver(); expect(sent()).toHaveLength(2);
+  expect(sent().every(event => event.changes[0].redacted)).toBe(true);
+  expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('private-credential');
+  expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('hidden-nested-password');
+});
+test('a custom search label identifies query typing separately from the selected issue', async () => {
+  const field = document.querySelector('input'); field.setAttribute('data-activity-label', 'Issue search');
+  focus(field); edit(field, 'delivery', 'change'); await deliver();
+  expect(sent()[0].form.field).toBe('Issue search');
+  expect(sent()[0].changes[0].field).toBe('Issue search');
+});
+test('custom list changes after a long unchanged prefix are retained with the changed portion', async () => {
+  const stops = Array.from({ length: 40 }, (_, index) => `Fixture stop ${index + 1}`);
+  recordActivityChange({ field: 'Stop order', before: stops, after: [...stops.slice(0, 39), 'Replacement last stop'], form: 'Arrange stops' });
+  await deliver(); expect(sent()).toHaveLength(1);
+  expect(sent()[0].changes[0].before).toContain('Fixture stop 40');
+  expect(sent()[0].changes[0].after).toContain('Replacement last stop');
+});
+test('comma-containing custom choices do not collapse distinct selections', async () => {
+  recordActivityChange({ field: 'Options', before: ['A', 'B'], after: ['A, B'] });
+  await deliver(); expect(sent()).toHaveLength(1);
+  expect(sent()[0].changes[0].before).not.toBe(sent()[0].changes[0].after);
+});
+test('unlinked visible labels identify native controls and protect private fields', async () => {
+  document.body.innerHTML = '<h1>Options</h1><form><div><label>Status</label><select><option value="pending">Pending</option><option value="ready">Ready</option></select></div><div><label>Allergies</label><textarea></textarea></div></form>';
+  const status = document.querySelector('select'); focus(status); edit(status, 'ready', 'change');
+  const allergies = document.querySelector('textarea'); focus(allergies); edit(allergies, 'Private medical information', 'change');
+  await deliver();
+  expect(sent()[0].changes[0]).toEqual({ field: 'Status', before: 'Pending', after: 'Ready', redacted: false });
+  expect(sent()[1].changes[0]).toEqual({ field: 'Allergies', before: '[Not recorded]', after: '[Not recorded]', redacted: true });
+  expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('Private medical information');
 });
 test('blur flushes the last edit and submit records an attempt with the same action', async () => {
   const field = document.querySelector('input'); focus(field); edit(field, 'Building B'); field.dispatchEvent(new FocusEvent('blur'));

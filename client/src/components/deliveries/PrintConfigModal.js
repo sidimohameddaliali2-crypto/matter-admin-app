@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import StickerDesignerModal from '../stickers/StickerDesignerModal';
 import BagTagPrintModal from '../BagTagPrintModal';
+import { recordActivityChange } from '../../utils/activityCapture';
 
 const CONTENT_FIELDS = [
   { key: 'showDeliveryId', label: 'Delivery ID' },
@@ -145,7 +146,7 @@ function PrintConfigModal({ deliveries, onClose, selectedDate }) {
                       <div className="inline-flex rounded-full border border-gray-200 overflow-hidden flex-shrink-0">
                         <button
                           type="button"
-                          onClick={() => setExcludedZones(new Set())}
+                          onClick={() => { recordActivityChange({ field: 'Excluded areas', form: 'Print settings', before: [...excludedZones], after: [] }); setExcludedZones(new Set()); }}
                           title="Include all areas"
                           className="flex items-center gap-1 pl-2 pr-2.5 py-1 text-[11px] font-semibold text-blue-600 bg-blue-50 hover:bg-blue-100 transition-colors border-r border-gray-200"
                         >
@@ -154,7 +155,7 @@ function PrintConfigModal({ deliveries, onClose, selectedDate }) {
                         </button>
                         <button
                           type="button"
-                          onClick={() => setExcludedZones(new Set(zones))}
+                          onClick={() => { recordActivityChange({ field: 'Excluded areas', form: 'Print settings', before: [...excludedZones], after: zones }); setExcludedZones(new Set(zones)); }}
                           title="Exclude all areas"
                           className="flex items-center gap-1 pl-2 pr-2.5 py-1 text-[11px] font-semibold text-gray-500 bg-white hover:bg-gray-50 transition-colors"
                         >

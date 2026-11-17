@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X, ChevronUp, ChevronDown, Loader2, ListOrdered } from 'lucide-react';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 
 // Owner (2026-10-09): "create an option to choose the number of delivery —
 // which one should be first, each one should be last — and this should feed
@@ -33,6 +34,8 @@ function stopSort(a, b) {
 export default function ManualOrderModal({ open, onClose, deliveries, drivers, defaultDriverId, onSaved }) {
   const [driverId, setDriverId] = useState('');
   const [order, setOrder] = useState([]); // delivery ids, in edited order
+  const latestOrder = useRef(order);
+  latestOrder.current = order;
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState(null); // { text, error }
 
@@ -74,30 +77,37 @@ export default function ManualOrderModal({ open, onClose, deliveries, drivers, d
   if (!open) return null;
 
   const move = (deliveryId, direction) => {
-    setOrder((prev) => {
-      const idx = prev.indexOf(deliveryId);
+      const current = latestOrder.current;
+      const idx = current.indexOf(deliveryId);
       const next = idx + direction;
-      if (idx === -1 || next < 0 || next >= prev.length) return prev;
-      const copy = [...prev];
+      if (idx === -1 || next < 0 || next >= current.length) return;
+      const copy = [...current];
       [copy[idx], copy[next]] = [copy[next], copy[idx]];
-      return copy;
-    });
+      changeOrder(copy);
   };
 
   const setPosition = (deliveryId, oneBasedPosition) => {
-    setOrder((prev) => {
-      const idx = prev.indexOf(deliveryId);
-      if (idx === -1) return prev;
-      const clamped = Math.min(Math.max(1, Math.round(oneBasedPosition) || 1), prev.length) - 1;
-      if (clamped === idx) return prev;
-      const copy = [...prev];
+      const current = latestOrder.current;
+      const idx = current.indexOf(deliveryId);
+      if (idx === -1) return;
+      const clamped = Math.min(Math.max(1, Math.round(oneBasedPosition) || 1), current.length) - 1;
+      if (clamped === idx) return;
+      const copy = [...current];
       const [item] = copy.splice(idx, 1);
       copy.splice(clamped, 0, item);
-      return copy;
-    });
+      changeOrder(copy, false);
   };
 
   const byId = new Map(driverDeliveries.map((d) => [d._id, d]));
+  const stopLabel = id => {
+    const name = byId.get(id)?.customerName;
+    return !name || driverDeliveries.filter(stop => stop.customerName === name).length > 1 ? `${name || 'Customer'} (${id})` : name;
+  };
+  const changeOrder = (next, observe = true) => {
+    if (observe) recordActivityChange({ field: `Stop order for ${getDriverDisplayName(drivers.find(driver => driver._id === driverId))}`, form: 'Arrange delivery order', before: latestOrder.current.map(stopLabel), after: next.map(stopLabel) });
+    latestOrder.current = next;
+    setOrder(next);
+  };
 
   const handleSave = async () => {
     if (!driverId || order.length === 0) return;
@@ -179,6 +189,7 @@ export default function ManualOrderModal({ open, onClose, deliveries, drivers, d
                         min={1}
                         max={order.length}
                         value={idx + 1}
+                        data-activity-label={`Stop position for ${stopLabel(deliveryId)}`}
                         onChange={(e) => setPosition(deliveryId, Number(e.target.value))}
                         className="w-10 text-center text-xs border border-gray-300 rounded"
                         title="Type the stop number — 1 = first"

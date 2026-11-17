@@ -43,9 +43,10 @@ const MemberExclusionPicker = ({ value = '', onChange, light = false }) => {
     : 'bg-[rgba(188,246,121,.15)] text-[#bcf679] px-2 py-0.5 rounded-full text-[11px] font-bold';
 
   return (
-    <div className={wrap}>
+    <div className={wrap} data-activity-private>
       <input
         type="text"
+        data-activity-label="Dietary exclusion search"
         value={search}
         onChange={(e) => setSearch(e.target.value)}
         placeholder="Search exclusions…"
@@ -58,6 +59,7 @@ const MemberExclusionPicker = ({ value = '', onChange, light = false }) => {
             <label key={phrase} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg cursor-pointer text-[12.5px] ${rowHover}`}>
               <input
                 type="checkbox"
+                data-activity-label="Dietary exclusions"
                 checked={on}
                 onChange={() => toggle(phrase)}
                 className={`h-3.5 w-3.5 rounded ${accent}`}

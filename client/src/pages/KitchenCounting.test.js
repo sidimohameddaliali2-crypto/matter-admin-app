@@ -2,6 +2,7 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import api from '../utils/api';
 import KitchenCounting from './KitchenCounting';
+import { installActivityCapture } from '../utils/activityCapture';
 
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn() } }));
 jest.mock('../contexts/SocketContext', () => ({useSocket: () => ({socket: null})}));
@@ -56,6 +57,21 @@ test('before choosing a date, date discovery needs one small request and no comp
   expect(api.get.mock.calls.filter(([url])=>url.endsWith('/kitchen-dates'))).toHaveLength(1);
   expect(api.get.mock.calls.filter(([url])=>url.endsWith('/selections'))).toHaveLength(0);
   expect(api.get.mock.calls.filter(([url])=>/\/(main-meal-options|breakfast-options|snack-options)$/.test(url))).toHaveLength(0);
+});
+
+test('a kitchen date chip records its unsaved selection with no automatic-load edit', async () => {
+  localStorage.setItem('token', 'fixture-session'); window.history.replaceState({}, '', '/kitchen-counting');
+  const previousFetch = window.fetch, warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const capture = jest.fn().mockResolvedValue({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({ success: true }) }); window.fetch = capture;
+  const cleanup = installActivityCapture();
+  try {
+    const chip = container.querySelector('[aria-label="Delivery dates"] button'); expect(chip).toBeTruthy();
+    await act(async () => chip.click()); await act(async () => window.dispatchEvent(new Event('pagehide')));
+    const events = capture.mock.calls.flatMap(([, options]) => JSON.parse(options.body).events);
+    expect(events).toHaveLength(1);
+    expect(events[0].changes[0]).toEqual({ field: 'Delivery date', before: '', after: A, redacted: false });
+    expect(events[0].stage).toBe('form_edited');
+  } finally { cleanup(); window.fetch = previousFetch; localStorage.clear(); warn.mockRestore(); }
 });
 
 test('obsolete date A cannot overwrite date B, and a failed refresh cannot export B as current', async () => {

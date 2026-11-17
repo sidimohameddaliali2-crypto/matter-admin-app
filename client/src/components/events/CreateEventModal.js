@@ -4,6 +4,7 @@ import { createEvent } from '../../store/slices/eventSlice';
 import api from '../../utils/api';
 import { X, Plus, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { recordActivityChange } from '../../utils/activityCapture';
 
 const CreateEventModal = ({ isOpen, onClose }) => {
     const DEFAULT_VENUE_TYPES_BY_COMPANY = {
@@ -260,6 +261,7 @@ const CreateEventModal = ({ isOpen, onClose }) => {
       setNewVenueType('');
       return;
     }
+    recordActivityChange({ field: 'Venue type', form: 'Create event', before: formData.venue.type, after: trimmedVenue });
 
     setVenueTypesByCompany((prev) => {
       const current = Array.isArray(prev?.[formData.companyName]) && prev[formData.companyName].length > 0
@@ -275,7 +277,11 @@ const CreateEventModal = ({ isOpen, onClose }) => {
     setNewVenueType('');
   };
 
-  const handleLogisticsChange = (field, value) => {
+  const handleLogisticsChange = (field, value, observe = false) => {
+    if (observe) {
+      const describe = rows => (rows || []).map((row, index) => typeof row === 'string' ? row || `Empty staff row ${index + 1}` : `${row.name || row.itemType || 'Item'} × ${row.quantity ?? row.quantityUsed ?? 1}`);
+      recordActivityChange({ field: field === 'staffNames' ? 'Event staff' : `Event ${field === 'assetsUsed' ? 'assets' : field}`, form: `Create event${formData.eventName ? ` · ${formData.eventName}` : ''}`, before: describe(formData.logistics[field]), after: describe(value) });
+    }
     setFormData((prev) => ({
       ...prev,
       logistics: {
@@ -314,12 +320,12 @@ const CreateEventModal = ({ isOpen, onClose }) => {
   };
 
   const addStaffName = () => {
-    handleLogisticsChange('staffNames', [...formData.logistics.staffNames, '']);
+    handleLogisticsChange('staffNames', [...formData.logistics.staffNames, ''], true);
   };
 
   const removeStaffName = (index) => {
     const newStaffNames = formData.logistics.staffNames.filter((_, i) => i !== index);
-    handleLogisticsChange('staffNames', newStaffNames);
+    handleLogisticsChange('staffNames', newStaffNames, true);
   };
 
   const addEquipment = () => {
@@ -327,7 +333,7 @@ const CreateEventModal = ({ isOpen, onClose }) => {
       const selectedEquip = currentEquipmentOptions.find(e => e.name === selectedEquipmentOption);
       if (selectedEquip) {
         const newItem = { ...selectedEquip, quantity: newEquipment.quantity || 1 };
-        handleLogisticsChange('equipment', [...formData.logistics.equipment, newItem]);
+        handleLogisticsChange('equipment', [...formData.logistics.equipment, newItem], true);
         setSelectedEquipmentOption('');
         setNewEquipment({ name: '', dimensions: '', description: '', quantity: 1 });
       }
@@ -337,6 +343,8 @@ const CreateEventModal = ({ isOpen, onClose }) => {
   const addNewEquipmentOption = async () => {
     if (!newEquipmentOption.name.trim()) return;
     const newOption = { name: newEquipmentOption.name.trim(), dimensions: newEquipmentOption.dimensions, description: newEquipmentOption.description };
+    recordActivityChange({ field: 'Equipment options', form: `Event options proposal · ${formData.companyName}`, before: (equipmentOptionsByCompany[formData.companyName] || []).map(item => item.name), after: [...(equipmentOptionsByCompany[formData.companyName] || []).map(item => item.name), newOption.name] });
+    recordActivityChange({ field: 'Selected equipment', form: 'Create event', before: selectedEquipmentOption, after: newOption.name });
     const updatedEquipment = [...(equipmentOptionsByCompany[formData.companyName] || []), newOption];
     const updatedFood = foodOptionsByCompany[formData.companyName] || [];
     setEquipmentOptionsByCompany((prev) => ({ ...prev, [formData.companyName]: updatedEquipment }));
@@ -351,7 +359,7 @@ const CreateEventModal = ({ isOpen, onClose }) => {
 
   const removeEquipment = (index) => {
     const newEquipmentList = formData.logistics.equipment.filter((_, i) => i !== index);
-    handleLogisticsChange('equipment', newEquipmentList);
+    handleLogisticsChange('equipment', newEquipmentList, true);
   };
 
   const addFood = () => {
@@ -359,7 +367,7 @@ const CreateEventModal = ({ isOpen, onClose }) => {
       const selectedFoodItem = currentFoodOptions.find(f => f.name === selectedFoodOption);
       if (selectedFoodItem) {
         const newItem = { ...selectedFoodItem, quantity: newFood.quantity || 1 };
-        handleLogisticsChange('food', [...formData.logistics.food, newItem]);
+        handleLogisticsChange('food', [...formData.logistics.food, newItem], true);
         setSelectedFoodOption('');
         setNewFood({ name: '', quantity: 1, description: '' });
       }
@@ -369,6 +377,8 @@ const CreateEventModal = ({ isOpen, onClose }) => {
   const addNewFoodOption = async () => {
     if (!newFoodOption.name.trim()) return;
     const newOption = { name: newFoodOption.name.trim(), description: newFoodOption.description };
+    recordActivityChange({ field: 'Food options', form: `Event options proposal · ${formData.companyName}`, before: (foodOptionsByCompany[formData.companyName] || []).map(item => item.name), after: [...(foodOptionsByCompany[formData.companyName] || []).map(item => item.name), newOption.name] });
+    recordActivityChange({ field: 'Selected food', form: 'Create event', before: selectedFoodOption, after: newOption.name });
     const updatedFood = [...(foodOptionsByCompany[formData.companyName] || []), newOption];
     const updatedEquipment = equipmentOptionsByCompany[formData.companyName] || [];
     setFoodOptionsByCompany((prev) => ({ ...prev, [formData.companyName]: updatedFood }));
@@ -383,7 +393,7 @@ const CreateEventModal = ({ isOpen, onClose }) => {
 
   const removeFood = (index) => {
     const newFoodList = formData.logistics.food.filter((_, i) => i !== index);
-    handleLogisticsChange('food', newFoodList);
+    handleLogisticsChange('food', newFoodList, true);
   };
 
   const getSelectedAssetUsedQuantity = (assetId) => {
@@ -450,7 +460,7 @@ const CreateEventModal = ({ isOpen, onClose }) => {
       totalPrice: Number(row.unitPrice || 0) * Number(row.quantityUsed || 0),
     }));
 
-    handleLogisticsChange('assetsUsed', nextAssetsUsed);
+    handleLogisticsChange('assetsUsed', nextAssetsUsed, true);
     setSelectedAssetId('');
     setSelectedAssetQuantity(1);
   };
@@ -459,7 +469,7 @@ const CreateEventModal = ({ isOpen, onClose }) => {
     const nextAssetsUsed = (formData.logistics.assetsUsed || []).filter(
       (row) => String(row.assetId) !== String(assetId)
     );
-    handleLogisticsChange('assetsUsed', nextAssetsUsed);
+    handleLogisticsChange('assetsUsed', nextAssetsUsed, true);
   };
 
   const handleDisassemblyChange = (field, value) => {

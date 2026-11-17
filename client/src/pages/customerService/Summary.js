@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Download, ArrowRight, Upload } from 'lucide-react';
 import api from '../../utils/api';
+import { recordActivityChange } from '../../utils/activityCapture';
 import ServiceOperations from '../../components/customerService/ServiceOperations';
 import GallaboxConnection from '../../components/customerService/GallaboxConnection';
 import { serviceFilterSearch, displayName, errorMessage, filterParams, formatDubai, idOf, newRequestId, ResourceState, servicePath, toDubaiInput, unpack, useServiceResource } from '../../components/customerService/serviceUtils';
@@ -17,7 +18,10 @@ function ImportCapture({ onImported }) {
   const [error, setError] = useState('');
   const [result, setResult] = useState(null);
   const request = useRef(null);
+  const formElement = useRef(null), currentRange = useRef(range);
+  currentRange.current = range;
   async function selectFile(event) {
+    const selectedForm = formElement.current;
     setError(''); setMessages(null); setResult(null); request.current = null;
     const file = event.target.files?.[0]; setFileName(file?.name || '');
     if (!file) return;
@@ -28,7 +32,11 @@ function ImportCapture({ onImported }) {
       if (!Array.isArray(rows) || !rows.length || rows.length > 500) throw new Error('The file must contain between 1 and 500 normalized messages.');
       if (rows.some(row => !row || typeof row !== 'object' || !row.externalMessageId || !row.externalConversationId || !row.sentAt || !/(Z|[+-]\d{2}:\d{2})$/i.test(row.sentAt) || Number.isNaN(new Date(row.sentAt).getTime()))) throw new Error('Every message needs externalMessageId, externalConversationId and a valid sentAt timestamp with timezone.');
       setMessages(rows);
-      if (!Array.isArray(parsed)) setRange({ from: (parsed.from || '').slice(0, 10), to: (parsed.to || '').slice(0, 10) });
+      if (!Array.isArray(parsed)) {
+        const nextRange = { from: (parsed.from || '').slice(0, 10), to: (parsed.to || '').slice(0, 10) };
+        if (selectedForm?.isConnected && formElement.current === selectedForm) for (const [key, field] of [['from', 'Coverage from (Dubai)'], ['to', 'Coverage to (Dubai)']]) recordActivityChange({ field, before: currentRange.current[key], after: nextRange[key], form: 'Import a dated conversation capture', element: selectedForm });
+        setRange(nextRange);
+      }
     } catch (failure) { setError(errorMessage(failure, 'This is not a supported JSON capture.')); }
   }
   async function submit(event) {
@@ -45,7 +53,7 @@ function ImportCapture({ onImported }) {
   }
   return <details className="cs-import"><summary>Import a dated conversation capture</summary><p className="cs-muted" style={{ marginTop: 10 }}>Import only an authorized normalized JSON export. Source IDs and recorded authors are preserved. This does not connect or change the live inbox.</p>
     {error && <div className="cs-alert" role="alert">{error}</div>}{result && <div className="cs-success" role="status">Capture saved. Received {result.received ?? 'unknown'} · inserted {result.inserted ?? 'unknown'} · duplicates {result.duplicates ?? 'unknown'} · unlinked {result.unlinked ?? 'unknown'}. Inspect capture coverage above.</div>}
-    <form onSubmit={submit} className="cs-form-stack"><label>JSON capture<input className="cs-file" type="file" accept="application/json,.json" onChange={selectFile} disabled={busy} /></label><div className="cs-form-grid"><label>Source account scope<input value={scope} required maxLength={100} onChange={event => setScope(event.target.value)} /></label><div /><label>Coverage from (Dubai)<input type="date" required value={range.from} max={range.to || undefined} onChange={event => setRange(previous => ({ ...previous, from: event.target.value }))} /></label><label>Coverage to (Dubai)<input type="date" required value={range.to} min={range.from || undefined} onChange={event => setRange(previous => ({ ...previous, to: event.target.value }))} /></label></div>{messages && <p className="cs-muted">{messages.length} messages ready for validation · {fileName}</p>}<button type="submit" disabled={busy || !messages || !scope.trim() || !range.from || !range.to}><Upload size={15} />{busy ? 'Importing…' : 'Import capture'}</button></form>
+    <form ref={formElement} onSubmit={submit} className="cs-form-stack"><label>JSON capture<input className="cs-file" type="file" accept="application/json,.json" onChange={selectFile} disabled={busy} /></label><div className="cs-form-grid"><label>Source account scope<input value={scope} required maxLength={100} onChange={event => setScope(event.target.value)} /></label><div /><label>Coverage from (Dubai)<input type="date" required value={range.from} max={range.to || undefined} onChange={event => setRange(previous => ({ ...previous, from: event.target.value }))} /></label><label>Coverage to (Dubai)<input type="date" required value={range.to} min={range.from || undefined} onChange={event => setRange(previous => ({ ...previous, to: event.target.value }))} /></label></div>{messages && <p className="cs-muted">{messages.length} messages ready for validation · {fileName}</p>}<button type="submit" disabled={busy || !messages || !scope.trim() || !range.from || !range.to}><Upload size={15} />{busy ? 'Importing…' : 'Import capture'}</button></form>
     <details style={{ marginTop: 14 }}><summary>Normalized message format</summary><pre>{JSON.stringify({ messages: [{ externalMessageId: 'source-message-id', externalConversationId: 'source-thread-id', customerId: 'Matter customer ID if linked', customerName: 'Source name', externalAuthorId: 'source-author-id', authorName: 'Recorded author', authorType: 'customer', sentAt: '2026-11-06T08:00:00Z', type: 'text', text: 'Original message text' }] }, null, 2)}</pre><p className="cs-muted">Use authorType customer, staff, bot or unknown as recorded; do not infer a staff identity from a name.</p></details></details>;
 }
 

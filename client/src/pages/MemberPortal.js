@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -7,6 +7,7 @@ import { memberLogout, updateMemberProfile } from '../store/slices/memberAuthSli
 import memberApi from '../utils/memberApi';
 import { groupExclusions } from '../constants/exclusionList';
 import MemberExclusionPicker from '../components/MemberExclusionPicker';
+import { recordActivityChange } from '../utils/activityCapture';
 
 /*  MATTER — Member ordering portal
  *  Design source: "Menu Selection Link - Gym Members.dc.html" — à la carte,
@@ -91,6 +92,8 @@ const MemberPortal = () => {
   const [ordersView, setOrdersView] = useState('up');
 
   const [cart, setCart] = useState({});           // { [iso]: { [menuItemId]: qty } }
+  const cartRef = useRef(cart);
+  useEffect(() => { cartRef.current = cart; }, [cart]);
   const [acknowledged, setAcknowledged] = useState({}); // { [menuItemId]: true }
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState('');
@@ -197,12 +200,14 @@ const MemberPortal = () => {
   // ── actions ───────────────────────────────────────────────────────────────
   const bump = (id, delta) => {
     setOrderErr('');
-    setCart((c) => {
-      const day = { ...(c[sel] || {}) };
-      const next = Math.max(0, (day[id] || 0) + delta);
-      if (next === 0) delete day[id]; else day[id] = next;
-      return { ...c, [sel]: day };
-    });
+    const current = cartRef.current;
+    const day = { ...(current[sel] || {}) };
+    const before = day[id] || 0, next = Math.max(0, before + delta);
+    if (before === next) return;
+    recordActivityChange({ field: `${titleCase(menu.find(item => item._id === id)?.name || `Meal ${id}`)} quantity on ${sel}`, form: 'Member order draft', before, after: next });
+    if (next === 0) delete day[id]; else day[id] = next;
+    cartRef.current = { ...current, [sel]: day };
+    setCart(cartRef.current);
   };
 
   const openConflictModal = (m, items) => {
@@ -213,6 +218,7 @@ const MemberPortal = () => {
       items,
       onKeep: () => {
         bump(m._id, 1);
+        recordActivityChange({ field: `Exclusion acknowledgement for ${titleCase(m.name)}`, form: 'Member order draft', before: !!acknowledged[m._id], after: true, private: true });
         setAcknowledged((a) => ({ ...a, [m._id]: true }));
         setModal(null);
         flash('Added — exclusion acknowledged');
@@ -277,7 +283,7 @@ const MemberPortal = () => {
         <header className="sticky top-0 z-20 bg-white/95 backdrop-blur px-5 py-3.5 border-b border-[#eef2f9] flex items-center justify-between gap-3">
           <img src="/images/matter-logo-navy.svg" alt="MATTER" className="h-[19px]" onError={(e) => { e.currentTarget.style.display = 'none'; }} />
           <div className="flex items-center gap-1">
-            <button onClick={() => setView(view === 'menu' ? 'orders' : 'menu')} className={ghostBtn}>
+            <button onClick={() => { recordActivityChange({ field: 'Portal view', form: 'Member portal', before: view === 'menu' ? 'Menu' : 'My orders', after: view === 'menu' ? 'My orders' : 'Menu' }); setView(view === 'menu' ? 'orders' : 'menu'); }} className={ghostBtn}>
               {view === 'menu' ? 'My orders' : '← Menu'}
             </button>
             <button onClick={logout} className="text-[12px] px-2 py-1 rounded-full text-[#4a5a7d] hover:bg-[#f7f9fd] transition-colors">Sign out</button>
@@ -291,7 +297,7 @@ const MemberPortal = () => {
               {[['up', 'Upcoming'], ['past', 'Past']].map(([v, label]) => {
                 const on = ordersView === v;
                 return (
-                  <button key={v} onClick={() => setOrdersView(v)}
+                  <button key={v} onClick={() => { recordActivityChange({ field: 'Orders filter', form: 'Member orders', before: ordersView === 'up' ? 'Upcoming' : 'Past', after: label }); setOrdersView(v); }}
                     className="flex-1 py-2 rounded-full text-[13px] font-semibold transition-colors"
                     style={{ background: on ? '#051747' : 'transparent', color: on ? '#fff' : '#4a5a7d' }}>
                     {label}
@@ -374,7 +380,7 @@ const MemberPortal = () => {
                         className="rounded-full bg-[#051747] text-white px-4 py-2 text-[13px] font-semibold hover:bg-[#050f2b] transition-colors disabled:opacity-50 inline-flex items-center gap-2">
                         {savingP && <Loader2 className="w-3.5 h-3.5 animate-spin" />} Save
                       </button>
-                      <button onClick={() => { setEditingProfile(false); setPName(member?.name || ''); setPExcl(member?.dietaryExclusions || ''); }}
+                      <button onClick={() => { recordActivityChange({ field: 'Member name', form: 'Member profile', before: pName, after: member?.name || '' }); recordActivityChange({ field: 'Dietary exclusions', form: 'Member profile', before: pExcl, after: member?.dietaryExclusions || '', private: true }); setEditingProfile(false); setPName(member?.name || ''); setPExcl(member?.dietaryExclusions || ''); }}
                         className="rounded-full border border-[#dde4f0] px-4 py-2 text-[13px] font-semibold text-[#4a5a7d] hover:bg-[#f7f9fd] transition-colors">
                         Cancel
                       </button>
@@ -398,7 +404,7 @@ const MemberPortal = () => {
                   const fg = hasItems ? '#2a3f13' : on ? '#fff' : '#051747';
                   const border = hasItems ? '#bcf679' : on ? '#1b60b4' : '#dde4f0';
                   return (
-                    <button key={iso} onClick={() => setSel(iso)}
+                    <button key={iso} aria-label={`Delivery date ${iso}`} onClick={() => { recordActivityChange({ field: 'Delivery date', form: 'Member order draft', before: sel, after: iso }); setSel(iso); }}
                       className="flex-none min-w-[54px] rounded-2xl px-1.5 py-2.5 flex flex-col items-center gap-0.5 border transition-colors"
                       style={{ background: bg, color: fg, borderColor: border }}>
                       <span className="text-[10px] tracking-[0.07em] uppercase opacity-85">{DOW[d.getDay()]}</span>

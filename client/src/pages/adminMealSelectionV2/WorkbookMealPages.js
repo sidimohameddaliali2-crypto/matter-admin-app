@@ -8,6 +8,7 @@ import WeeklyCycleBoard from './WeeklyCycleBoard';
 import ComponentExclusions from './ComponentExclusions';
 import { editorComponents } from './mealEditorState';
 import { toTitleCase } from '../../utils/textFormat';
+import { recordActivityChange } from '../../utils/activityCapture';
 
 const BASE = '/admin/meal-selection-v2';
 const componentLabel = type => type === 'Sauce 2' ? 'Salad dressing (optional)' : type;
@@ -95,6 +96,11 @@ export function MealComposer({ meal, isNew, onSave }) {
   if (!meal && !isNew) return <Notice>Meal not found. <Link to={`${BASE}/meals`}>Return to meals</Link></Notice>;
   const field = (key, value) => { setError(''); setForm(f => ({ ...f, [key]: value })); };
   const componentField = (id, key, value) => setForm(f => ({ ...f, components: f.components.map(c => c.id === id ? { ...c, [key]: value } : c) }));
+  const changeComponents = next => {
+    const describe = items => items.map(c => `${c.type}: ${c.name || 'Not named'}`);
+    recordActivityChange({ field: `Components for ${form.name || 'new meal'}`, form: 'Meal draft', before: describe(form.components), after: describe(next) });
+    field('components', next);
+  };
   const isSnack = form.mealKind === 'Snack', isBreakfast = form.mealKind === 'Breakfast';
   const allowed = ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish'].filter(type => type !== 'Vegetable' || isBreakfast || !form.isSaladBase);
   // Existing extras remain editable for both main meals and breakfasts.
@@ -134,7 +140,7 @@ export function MealComposer({ meal, isNew, onSave }) {
     catch (err) { setError(err.response?.data?.message || err.message || 'Could not save the meal.'); }
     finally { setSaving(false); }
   };
-  const renderComponent = c => <Panel className="av2-component-panel" key={c.id} title={componentLabel(c.type)} actions={<button className="av2-icon" aria-label={`Remove ${c.type} component`} onClick={() => field('components', form.components.filter(v => v.id !== c.id))}><X size={16}/></button>}>
+  const renderComponent = c => <Panel className="av2-component-panel" key={c.id} title={componentLabel(c.type)} actions={<button className="av2-icon" aria-label={`Remove ${c.type} component`} onClick={() => changeComponents(form.components.filter(v => v.id !== c.id))}><X size={16}/></button>}>
     <label className="av2-field">Component / recipe name<input value={c.name} onChange={e => componentField(c.id, 'name', e.target.value)}/></label>
     <ComponentExclusions values={c.exclusions || []} componentName={c.name || c.type} onChange={values => componentField(c.id, 'exclusions', values)}/>
     <label className="av2-field">Adaptation rule<select aria-label="Adaptation rule" value={ADAPTATIONS.includes(c.adaptation) ? c.adaptation : 'Not reviewed'} onChange={e => componentField(c.id, 'adaptation', e.target.value)}>{ADAPTATIONS.map(v => <option key={v}>{v}</option>)}</select></label>
@@ -163,7 +169,7 @@ export function MealComposer({ meal, isNew, onSave }) {
       </Panel>}
       <div className="av2-heading"><div><h2>{isBreakfast ? 'Breakfast components' : 'Meal components'}</h2><p>{isBreakfast ? 'Add protein, carb, vegetables, sauce and garnish.' : 'Add the meal components. A salad base replaces the vegetable component; its sauce is optional.'}</p></div><Action icon={Plus} onClick={() => setAdding(true)}>Add component</Action></div>
       {editableComponents.map(renderComponent)}
-      {adding && <Modal title="Add meal component" onClose={() => setAdding(false)} footer={<Action onClick={() => setAdding(false)}>Cancel</Action>}><div className="av2-choice-chips">{allowed.map(type => <button key={type} onClick={() => { field('components', [...form.components, newComponent(type)]); setAdding(false); }}>{type}</button>)}</div></Modal>}
+      {adding && <Modal title="Add meal component" onClose={() => setAdding(false)} footer={<Action onClick={() => setAdding(false)}>Cancel</Action>}><div className="av2-choice-chips">{allowed.map(type => <button key={type} onClick={() => { changeComponents([...form.components, newComponent(type)]); setAdding(false); }}>{type}</button>)}</div></Modal>}
       <Panel title="Dietary flags across all components"><Chips values={dietaryFlags(form).filter(Boolean)} tone="amber"/></Panel>
     </>}
     </fieldset>

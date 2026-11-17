@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useSelector } from 'react-redux';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 import DeliveryAddressFields from '../components/DeliveryAddressFields';
 import * as XLSX from 'xlsx';
 import { parseGPSFromLink as enhancedParseGPSFromLink } from '../utils/gpsParsing';
@@ -340,6 +341,8 @@ const AddDelivery = () => {
   });
 
   const [todoInput, setTodoInput] = useState('');
+  const latestForm = React.useRef(formData);
+  latestForm.current = formData;
 
   // Collection state
   const [collectionBagIds, setCollectionBagIds] = useState(['']);
@@ -349,6 +352,8 @@ const AddDelivery = () => {
   const [showCustomerDropdown, setShowCustomerDropdown] = useState(false);
   const customerCacheRef = React.useRef(null);
   const searchDebounceRef = React.useRef(null);
+  const collectionLocationRequest = React.useRef(0);
+  useEffect(() => () => { collectionLocationRequest.current += 1; }, []);
 
   useEffect(() => {
     fetchDrivers();
@@ -482,6 +487,7 @@ const AddDelivery = () => {
 
   const addTodoItem = () => {
     if (todoInput.trim()) {
+      recordActivityChange({ field: 'Task items', form: 'Add task', before: formData.todoList.map(item => item.text), after: [...formData.todoList.map(item => item.text), todoInput.trim()], private: true });
       setFormData(prev => ({
         ...prev,
         todoList: [...prev.todoList, { text: todoInput.trim(), completed: false }]
@@ -491,6 +497,7 @@ const AddDelivery = () => {
   };
 
   const removeTodoItem = (index) => {
+    recordActivityChange({ field: 'Task items', form: 'Add task', before: formData.todoList.map(item => item.text), after: formData.todoList.filter((_, i) => i !== index).map(item => item.text), private: true });
     setFormData(prev => ({
       ...prev,
       todoList: prev.todoList.filter((_, i) => i !== index)
@@ -498,6 +505,9 @@ const AddDelivery = () => {
   };
 
   const handleTabChange = (tab) => {
+    recordActivityChange({ field: 'Delivery entry method', form: 'Add delivery', before: activeTab, after: tab });
+    recordActivityChange({ field: 'Delivery type', form: 'Add delivery', before: formData.type, after: tab === 'task' ? 'Task' : tab === 'collection' ? 'Collection' : 'Delivery' });
+    collectionLocationRequest.current += 1;
     setActiveTab(tab);
     // Set type based on active tab
     if (tab === 'manual') {
@@ -555,7 +565,12 @@ const AddDelivery = () => {
   };
 
   const selectCustomer = (customer) => {
+    const locationRequest = ++collectionLocationRequest.current;
+    const initiatingToken = localStorage.getItem('token');
+    const initiatingPage = window.location.pathname;
     const name = `${customer.firstName || ''} ${customer.lastName || ''}`.trim();
+    const label = (customerName, customerId) => customerName ? `${customerName}${customerId ? ` (${customerId})` : ''}` : 'Not selected';
+    recordActivityChange({ field: 'Collection customer', form: 'Add collection', before: label(formData.customerName, formData.customerId === 'CUST-' ? '' : formData.customerId), after: label(name || 'Customer', customer.customerId) });
     setFormData(prev => ({
       ...prev,
       customerId: customer.customerId || '',
@@ -570,7 +585,15 @@ const AddDelivery = () => {
       api.get(`/customers/${encodeURIComponent(customer.customerId)}/location`)
         .then(res => {
           const loc = res?.data?.data;
-          if (!loc) return;
+          if (!loc || collectionLocationRequest.current !== locationRequest || localStorage.getItem('token') !== initiatingToken || window.location.pathname !== initiatingPage || latestForm.current.customerId !== customer.customerId) return;
+          const current = latestForm.current;
+          const nextGps = loc.gpsLocation ? { lat: loc.gpsLocation.lat || '', lng: loc.gpsLocation.lng || '', link: loc.gpsLocation.link || '' } : current.gpsLocation;
+          const coordinates = point => point && point.lat !== '' && point.lng !== '' && Number.isFinite(Number(point.lat)) && Number.isFinite(Number(point.lng)) ? `${Number(point.lat).toFixed(6)}, ${Number(point.lng).toFixed(6)}` : 'Not set';
+          const captureForm = `Add collection · ${name || customer.customerId}`;
+          recordActivityChange({ field: 'Collection address', form: captureForm, before: current.address, after: loc.address || current.address });
+          recordActivityChange({ field: 'Collection area', form: captureForm, before: current.zone, after: loc.zone || current.zone });
+          recordActivityChange({ field: 'Collection coordinates', form: captureForm, before: coordinates(current.gpsLocation), after: coordinates(nextGps) });
+          recordActivityChange({ field: 'Collection map link', form: captureForm, before: current.gpsLocation?.link || '', after: nextGps?.link || '' });
           setFormData(prev => ({
             ...prev,
             address: loc.address || prev.address,
@@ -584,8 +607,9 @@ const AddDelivery = () => {
     }
   };
 
-  const addBagIdField = () => setCollectionBagIds(prev => [...prev, '']);
-  const removeBagIdField = (index) => setCollectionBagIds(prev => prev.filter((_, i) => i !== index));
+  const bagRowLabels = values => values.map((value, index) => value || `Empty bag row ${index + 1}`);
+  const addBagIdField = () => { recordActivityChange({ field: 'Collection bags', form: 'Add collection', before: bagRowLabels(collectionBagIds), after: bagRowLabels([...collectionBagIds, '']) }); setCollectionBagIds(prev => [...prev, '']); };
+  const removeBagIdField = (index) => { recordActivityChange({ field: 'Collection bags', form: 'Add collection', before: bagRowLabels(collectionBagIds), after: bagRowLabels(collectionBagIds.filter((_, i) => i !== index)) }); setCollectionBagIds(prev => prev.filter((_, i) => i !== index)); };
   const updateBagId = (index, value) => setCollectionBagIds(prev => prev.map((b, i) => i === index ? value : b));
 
   const handleFileUpload = e => {
@@ -1654,6 +1678,7 @@ const AddDelivery = () => {
                     <input
                       type="text"
                       value={bagId}
+                      data-activity-label={`Collection bag ${index + 1}`}
                       onChange={e => updateBagId(index, e.target.value)}
                       placeholder={`Bag ID ${index + 1}`}
                       className={`flex-1 ${inputCls}`}

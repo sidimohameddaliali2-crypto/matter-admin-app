@@ -5,6 +5,7 @@ import { selectionComponentDetails, selectionHasWarning } from '../utils/selecti
 import { loadMenuSelectionSummaries, loadMenuSelectionDetails } from '../lib/menuSelectionLoading';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
 import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
 import { copyManagedMenuItem, managedMenuPayload } from '../utils/managedMenuItems';
@@ -133,6 +134,15 @@ const MenuManagement = () => {
     setWeeklyItemsState(next);
   }, []);
   const [cycleWeek, setCycleWeek] = useState('Week 1');
+  const editWeeklyItems = update => {
+    const before = weeklyItemsRef.current;
+    const next = typeof update === 'function' ? update(before) : update;
+    next.forEach(day => {
+      const describe = items => items.map((item, index) => `${item.mealName || 'Untitled meal'} · ${item.mealType || 'main'} · slot ${index + 1}`);
+      recordActivityChange({ field: `Menu meals on ${day.date}`, form: 'Weekly menu draft', before: describe(before.find(old => old.date === day.date)?.items || []), after: describe(day.items) });
+    });
+    setWeeklyItems(next);
+  };
   const [selectionMenuId, setSelectionMenuId] = useState(null);
   const [menuSelections, setMenuSelections] = useState([]);
   const [selectionLoading, setSelectionLoading] = useState(false);
@@ -349,7 +359,7 @@ const MenuManagement = () => {
   // editor — matches the design's "+ Meal" → editor-opens-on-the-new-item flow.
   const handleAddItemForDay = (dayIndex) => {
     const newIndex = weeklyItems[dayIndex]?.items.length || 0;
-    setWeeklyItems((prev) => {
+    editWeeklyItems((prev) => {
       const updated = [...prev];
       updated[dayIndex] = { ...updated[dayIndex] };
       updated[dayIndex].items = [
@@ -382,7 +392,7 @@ const MenuManagement = () => {
   };
 
   const handleRemoveItemForDay = (dayIndex, itemIndex) => {
-    setWeeklyItems((prev) => {
+    editWeeklyItems((prev) => {
       const updated = [...prev];
       updated[dayIndex] = { ...updated[dayIndex] };
       updated[dayIndex].items = updated[dayIndex].items.filter((_, idx) => idx !== itemIndex);
@@ -393,7 +403,7 @@ const MenuManagement = () => {
 
   const handleDuplicateItem = (dayIndex, itemIndex) => {
     const newIndex = weeklyItems[dayIndex]?.items.length || 0;
-    setWeeklyItems((prev) => {
+    editWeeklyItems((prev) => {
       const updated = [...prev];
       updated[dayIndex] = { ...updated[dayIndex] };
       const source = updated[dayIndex].items[itemIndex];
@@ -412,7 +422,7 @@ const MenuManagement = () => {
   // duplicating twice — or onto a day that already has something planned —
   // never silently deletes existing meals.
   const handleDuplicateDay = (sourceDayIndex, targetDayIndex) => {
-    setWeeklyItems((prev) => {
+    editWeeklyItems((prev) => {
       const source = prev[sourceDayIndex];
       if (!source || source.items.length === 0) return prev;
       const updated = [...prev];
@@ -1849,6 +1859,7 @@ const MenuManagement = () => {
 
               {weeklyItems.length > 0 && (() => {
                 const editingItem = editingSlot ? weeklyItems[editingSlot.dayIndex]?.items[editingSlot.itemIndex] : null;
+                const activityContext = editingSlot ? `${weeklyItems[editingSlot.dayIndex]?.date} · ${editingItem?.mealName || `Meal ${editingSlot.itemIndex + 1}`}` : 'Weekly meal';
                 const updateEditingField = (field, value) => {
                   if (!editingSlot) return;
                   handleWeeklyItemChange(editingSlot.dayIndex, editingSlot.itemIndex, field, value);
@@ -1891,6 +1902,9 @@ const MenuManagement = () => {
                           ? { portionType: guessPortionType(recipe.name) }
                           : {})
                       };
+                  const ingredientField = component === 'main' ? 'ingredients' : INGREDIENTS_FIELD_BY_COMPONENT[component];
+                  const describeIngredients = value => Array.isArray(value) ? value.map(tag => `${tag.name} (${tag.visible ? 'shown to customer' : 'backend only'})`) : value || '';
+                  recordActivityChange({ field: `${activityContext} · ${component} ingredients`, form: 'Weekly menu meal', before: describeIngredients(editingItem[ingredientField]), after: describeIngredients(nextItem[ingredientField]) });
                   setWeeklyItems((prev) => {
                     const updated = [...prev];
                     updated[editingSlot.dayIndex] = { ...updated[editingSlot.dayIndex] };
@@ -1904,6 +1918,7 @@ const MenuManagement = () => {
                   const next = editingAllergens.includes(label)
                     ? editingAllergens.filter((a) => a !== label)
                     : [...editingAllergens, label];
+                  recordActivityChange({ field: `Allergens · ${activityContext}`, form: 'Weekly menu meal', before: editingAllergens, after: next });
                   updateEditingField('allergens', next.join(', '));
                 };
                 const dayLabel = (dateKey) => {
@@ -2102,6 +2117,7 @@ const MenuManagement = () => {
                               </label>
                               {isSingleRecipeMeal ? (
                                 <SupyRecipeSearch
+                                  activityLabel={`${activityContext} · main recipe`}
                                   value={editingItem.mealName}
                                   onChangeText={(text) => updateEditingField('mealName', text)}
                                   onSelect={(recipe) => applyRecipeSelection('main', recipe)}
@@ -2123,6 +2139,7 @@ const MenuManagement = () => {
                                 <div>
                                   <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">PORTION — searches Supy</label>
                                   <SupyRecipeSearch
+                                    activityLabel={`${activityContext} · portion recipe`}
                                     value={editingItem.proteinSource}
                                     onChangeText={(text) => updateEditingField('proteinSource', text)}
                                     onSelect={(recipe) => applyRecipeSelection('portion', recipe)}
@@ -2130,6 +2147,7 @@ const MenuManagement = () => {
                                   />
                                   <label className="block text-[11px] font-semibold text-matter-neutral-500 mt-2 mb-1">Portion ingredients</label>
                                   <IngredientTagEditor
+                                    activityLabel={`${activityContext} · portion ingredients`}
                                     value={editingItem.portionIngredients}
                                     onChange={(tags) => updateEditingField('portionIngredients', tags)}
                                   />
@@ -2137,6 +2155,7 @@ const MenuManagement = () => {
                                 <div>
                                   <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">CARB — searches Supy</label>
                                   <SupyRecipeSearch
+                                    activityLabel={`${activityContext} · carb recipe`}
                                     value={editingItem.carbs}
                                     onChangeText={(text) => updateEditingField('carbs', text)}
                                     onSelect={(recipe) => applyRecipeSelection('carb', recipe)}
@@ -2144,6 +2163,7 @@ const MenuManagement = () => {
                                   />
                                   <label className="block text-[11px] font-semibold text-matter-neutral-500 mt-2 mb-1">Carb ingredients</label>
                                   <IngredientTagEditor
+                                    activityLabel={`${activityContext} · carb ingredients`}
                                     value={editingItem.carbIngredients}
                                     onChange={(tags) => updateEditingField('carbIngredients', tags)}
                                   />
@@ -2151,6 +2171,7 @@ const MenuManagement = () => {
                                 <div>
                                   <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">VEG — searches Supy</label>
                                   <SupyRecipeSearch
+                                    activityLabel={`${activityContext} · veg recipe`}
                                     value={editingItem.veg}
                                     onChangeText={(text) => updateEditingField('veg', text)}
                                     onSelect={(recipe) => applyRecipeSelection('veg', recipe)}
@@ -2158,6 +2179,7 @@ const MenuManagement = () => {
                                   />
                                   <label className="block text-[11px] font-semibold text-matter-neutral-500 mt-2 mb-1">Veg ingredients</label>
                                   <IngredientTagEditor
+                                    activityLabel={`${activityContext} · veg ingredients`}
                                     value={editingItem.vegIngredients}
                                     onChange={(tags) => updateEditingField('vegIngredients', tags)}
                                   />
@@ -2165,6 +2187,7 @@ const MenuManagement = () => {
                                 <div>
                                   <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">SAUCE — searches Supy</label>
                                   <SupyRecipeSearch
+                                    activityLabel={`${activityContext} · sauce recipe`}
                                     value={editingItem.sauce}
                                     onChangeText={(text) => updateEditingField('sauce', text)}
                                     onSelect={(recipe) => applyRecipeSelection('sauce', recipe)}
@@ -2172,6 +2195,7 @@ const MenuManagement = () => {
                                   />
                                   <label className="block text-[11px] font-semibold text-matter-neutral-500 mt-2 mb-1">Sauce ingredients</label>
                                   <IngredientTagEditor
+                                    activityLabel={`${activityContext} · sauce ingredients`}
                                     value={editingItem.sauceIngredients}
                                     onChange={(tags) => updateEditingField('sauceIngredients', tags)}
                                   />
@@ -3029,6 +3053,7 @@ const MenuManagement = () => {
                                       type="button"
                                       onClick={e => {
                                         e.stopPropagation();
+                                        recordActivityChange({ field: `${mealType} slot ${slotIndex + 1} on ${dateKey}`, form: `Customer meal selections · ${selectedCustomerDetail.firstName || 'Customer'}`, before: slotMeal.mealName || 'Untitled meal', after: 'Empty slot', element: e.currentTarget });
                                         setEditDraft(prev => {
                                           const copy = [...prev];
                                           const globalIdx = prev.indexOf(slotMeal);
@@ -3055,6 +3080,7 @@ const MenuManagement = () => {
                                       key={menuItem._id}
                                       type="button"
                                       onClick={() => {
+                                        recordActivityChange({ field: `${mealType} slot ${slotIndex + 1} on ${dateKey}`, form: `Customer meal selections · ${selectedCustomerDetail.firstName || 'Customer'}`, before: isEmpty ? 'Empty slot' : slotMeal.mealName || 'Untitled meal', after: menuItem.mealName || 'Untitled meal' });
                                         setEditDraft(prev => {
                                           const copy = [...prev];
                                           if (isEmpty) {

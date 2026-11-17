@@ -43,9 +43,22 @@ function accessibleLabel(element) {
   const labelled = refs?.split(/\s+/).map(id => labelText(document.getElementById(id))).filter(Boolean).join(' ');
   return safeLabel(labelled || element.getAttribute('aria-label'));
 }
+function nearbyLabel(field) {
+  // Older screens place a visible label beside an input without for/id.
+  // Use it only when a small enclosing group contains this single control.
+  for (let group = field.parentElement, depth = 0; group && depth < 3 && group !== document.body; group = group.parentElement, depth += 1) {
+    const controls = Array.from(group.querySelectorAll('input,textarea,select,[contenteditable]')).filter(candidate => editable(candidate) === candidate);
+    if (controls.length !== 1 || controls[0] !== field) continue;
+    const label = group.querySelector('label');
+    if (label && (!label.htmlFor || label.htmlFor === field.id)) return labelText(label);
+  }
+  return '';
+}
 function fieldLabel(field) {
+  const captureLabel = safeLabel(field.getAttribute('data-activity-label'));
+  if (captureLabel) return captureLabel;
   const associated = Array.from(field.labels || []).map(labelText).filter(Boolean).join(' ');
-  return associated || labelText(field.closest('label')) || accessibleLabel(field) || safeLabel(field.name) || safeLabel(field.getAttribute('placeholder')) || 'Text field';
+  return associated || labelText(field.closest('label')) || accessibleLabel(field) || nearbyLabel(field) || safeLabel(field.name) || safeLabel(field.getAttribute('placeholder')) || 'Text field';
 }
 function containerFor(field) {
   return field.form || field.closest('form,[role="form"],[role="dialog"],fieldset') || document.body;
@@ -76,6 +89,37 @@ function snapshot(field, initial = false) {
   else value = initial ? field.defaultValue : field.value;
   if (SECRET_VALUE.test(String(value || ''))) return { value: MASK, redacted: true };
   return { value: shorten(value), redacted: false };
+}
+function customText(value) {
+  const text = item => String(item ?? '');
+  return Array.isArray(value) ? value.map(item => /[,"\n\r]/.test(text(item)) ? JSON.stringify(text(item)) : text(item)).join(', ') : text(value);
+}
+function customSnapshot(value, field, isPrivate) {
+  if (isPrivate || PRIVATE_FIELD.test(field)) return { value: MASK, redacted: true };
+  const scalar = item => item == null || ['string', 'boolean'].includes(typeof item) || (typeof item === 'number' && Number.isFinite(item));
+  // Callers supply readable values, never whole records. Unknown structures
+  // fail closed rather than serializing credentials or private domain objects.
+  if (!(Array.isArray(value) ? value.every(scalar) : scalar(value))) return { value: MASK, redacted: true };
+  const text = customText(value);
+  return SECRET_VALUE.test(text) ? { value: MASK, redacted: true } : { value: shorten(text), redacted: false };
+}
+function focusCustomDifference(before, after, a, b) {
+  if (a.redacted || b.redacted || (customText(before).length <= 300 && customText(after).length <= 300)) return;
+  let start = 0;
+  if (Array.isArray(before) && Array.isArray(after)) {
+    while (start < Math.min(before.length, after.length) && Object.is(before[start], after[start])) start += 1;
+    const excerpt = value => shorten(`${value.length} items · from position ${start + 1}: ${customText(value.slice(start)) || 'None'}`);
+    a.value = excerpt(before); b.value = excerpt(after);
+  } else {
+    const oldText = customText(before), newText = customText(after);
+    while (start < Math.min(oldText.length, newText.length) && oldText[start] === newText[start]) start += 1;
+    start = Math.max(0, start - 60);
+    const excerpt = text => shorten(`${start ? `… from character ${start + 1}: ` : ''}${text.slice(start)}`);
+    a.value = excerpt(oldText); b.value = excerpt(newText);
+  }
+}
+function sameCustomValue(before, after) {
+  return Object.is(before, after) || (Array.isArray(before) && Array.isArray(after) && before.length === after.length && before.every((value, index) => Object.is(value, after[index])));
 }
 function sameAppOrigin(url) {
   try {
@@ -179,6 +223,13 @@ function updateCaptureQueue(db, mutate) {
 
 export function readCaptureStatus() {
   return runtime ? runtime.status() : { ...previousStatus };
+}
+
+// Custom widgets call this at the user-change boundary, including when the
+// value never reaches Save. Initial rendering and remote loads do not call it.
+// Actor identity is deliberately absent; capture authentication supplies it.
+export function recordActivityChange(change) {
+  return runtime?.recordChange(change) || false;
 }
 
 export function installActivityCapture() {
@@ -296,10 +347,10 @@ export function installActivityCapture() {
     queue.push(item); persist(item);
     notify(); schedule();
   }
-  function sessionFor(container, context, freshAfterSubmit = false) {
+  function sessionFor(container, context, freshAfterSubmit = false, scope) {
     let session = sessions.get(container);
-    if (!session || session.page !== context.page || session.token !== context.token || session.key !== context.key || (freshAfterSubmit && session.submitted)) {
-      session = { id: newId(), page: context.page, token: context.token, key: context.key, changes: new Map(), submitted: false, validationFields: new Set(), nativeValidationObserved: false };
+    if (!session || session.scope !== scope || session.page !== context.page || session.token !== context.token || session.key !== context.key || (freshAfterSubmit && session.submitted)) {
+      session = { id: newId(), scope, page: context.page, token: context.token, key: context.key, changes: new Map(), submitted: false, validationFields: new Set(), nativeValidationObserved: false };
       sessions.set(container, session);
     }
     activeAction = { id: session.id, at: Date.now(), page: context.page, key: context.key, token: context.token };
@@ -307,6 +358,31 @@ export function installActivityCapture() {
   }
   function eventFor(stage, context, container, session, changes = [], field) {
     return { eventId: newId(), actionId: session.id, stage, page: context.page, form: { title: formTitle(container), ...(field ? { field } : {}) }, changes, occurredAt: new Date().toISOString() };
+  }
+  function recordChange(input) {
+    if (stopped || !input || typeof input.field !== 'string' || sameCustomValue(input.before, input.after)) return false;
+    const context = currentContext();
+    const field = safeLabel(input.field);
+    if (!context || !field) return false;
+    const element = input.element?.nodeType === 1 ? input.element : null;
+    const container = element ? containerFor(element) : document.body;
+    const isPrivate = input.private === true || !!element?.closest('[data-activity-private],[data-no-capture]');
+    const before = customSnapshot(input.before, field, isPrivate);
+    const after = customSnapshot(input.after, field, isPrivate);
+    focusCustomDifference(input.before, input.after, before, after);
+    const title = typeof input.form === 'string' && input.form.trim() ? safeLabel(input.form) : formTitle(container);
+    const session = sessionFor(container, context, true, title);
+    const change = changeFor(field, before, after);
+    const earlier = session.changes.get(field);
+    const combined = earlier ? { ...change, before: earlier.before, redacted: earlier.redacted || change.redacted } : change;
+    if (combined.redacted) { combined.before = MASK; combined.after = MASK; }
+    if (session.changes.size >= MAX_FIELDS && !session.changes.has(field)) session.changes.delete(session.changes.keys().next().value);
+    session.changes.set(field, combined);
+    const event = eventFor('form_edited', context, container, session, [change], field);
+    event.form.title = title;
+    restore(context);
+    enqueue(event, context);
+    return true;
   }
   function checkRenderedValidation(container, context, session) {
     window.clearTimeout(validationChecks.get(container));
@@ -504,7 +580,7 @@ export function installActivityCapture() {
   window.addEventListener('pageshow', resume);
   window.addEventListener('online', resume);
   window.addEventListener('storage', resume);
-  runtime = { status, action: () => activeAction };
+  runtime = { status, action: () => activeAction, recordChange };
   notify();
   return () => {
     if (stopped) return;
