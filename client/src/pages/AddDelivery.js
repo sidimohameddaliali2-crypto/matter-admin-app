@@ -515,8 +515,10 @@ const AddDelivery = () => {
   const handleTabChange = (tab) => {
     recordActivityChange({ field: 'Delivery entry method', form: 'Add delivery', before: activeTab, after: tab });
     recordActivityChange({ field: 'Delivery type', form: 'Add delivery', before: formData.type, after: tab === 'task' ? 'Task' : tab === 'collection' ? 'Collection' : 'Delivery' });
-    collectionLocationRequest.current += 1;
-    importFileRequest.current += 1;
+    if (tab !== activeTab) {
+      collectionLocationRequest.current += 1;
+      importFileRequest.current += 1;
+    }
     setActiveTab(tab);
     // Set type based on active tab
     if (tab === 'manual') {

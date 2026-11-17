@@ -94,6 +94,28 @@ test.each(['token','page','clear','unmount','replacement','tab'])('file completi
   }
 });
 
+test('clicking the active Bulk Entry tab preserves its pending file read',async()=>{
+  await render(<AddDelivery/>);await click('Bulk Entry');await chooseFile();
+  await click('Bulk Entry');await completeFile(readers[0],'Current row');await deliver();
+  expect(XLSX.read).toHaveBeenCalledTimes(1);
+  expect(changes()).toContainEqual(expect.objectContaining({field:'Imported row count',after:'1'}));
+  expect(host.textContent).toContain('Current row');
+});
+
+test('clicking the active Collection tab preserves its pending customer location lookup',async()=>{
+  let finish;
+  api.get.mockImplementation(async path=>{
+    if(path==='/customers/CUST-1/location')return new Promise(resolve=>{finish=()=>resolve({data:{data:{address:'Fixture saved address',zone:'Marina'}}});});
+    return {data:{data:path==='/customers'?[{customerId:'CUST-1',firstName:'Aster'}]:[]}};
+  });
+  await render(<AddDelivery/>);await click('Collection');
+  input(host.querySelector('[placeholder="Type customer name or ID to search..."]'),'Aster');
+  await act(async()=>{jest.advanceTimersByTime(150);});
+  await act(async()=>[...host.querySelectorAll('button')].find(node=>node.textContent.includes('Aster')).dispatchEvent(new MouseEvent('mousedown',{bubbles:true})));
+  await click('Collection');await act(async()=>finish());await deliver();
+  expect(changes()).toContainEqual(expect.objectContaining({field:'Collection address',before:'',after:'Fixture saved address'}));
+});
+
 test('successful bulk-import cleanup does not become a second human clear action',async()=>{
   await render(<AddDelivery/>);await click('Bulk Entry');await chooseFile();await completeFile(readers[0]);await deliver();
   const before=changes().length;const submit=[...host.querySelectorAll('button')].find(node=>node.textContent.includes('Import 1'));
