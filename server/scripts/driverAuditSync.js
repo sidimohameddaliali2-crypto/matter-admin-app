@@ -37,7 +37,7 @@ async function main(){
  await privateAuditDirectory(baselineRoot);
  await verifyAuditBuilder(codeRoot,builderSha256);
  const load=name=>import(pathToFileURL(path.join(codeRoot,name)).href);
- const [{automaticReleaseBasis,createAutomaticRelease},{createAutomaticReleaseSource},{buildAutomaticRelease,compactDirectBuildVersion},{validateAutomaticCandidate}]=await Promise.all([
+ const [{automaticReleaseBasis,createAutomaticRelease},{createAutomaticReleaseSource,supportsManagedArchiveCache},{buildAutomaticRelease,compactDirectBuildVersion},{validateAutomaticCandidate}]=await Promise.all([
   load('integration/cloud/automatic-release.mjs'),
   load('integration/cloud/automatic-release-source.mjs'),
   load('integration/cloud/automatic-release-build.mjs'),
@@ -58,9 +58,13 @@ async function main(){
   const readHead=async()=>(await control.findOne({_id:'head'}))?.head;
   const seed=await readHead();
   if(seed?.directImport?.version!==1)throw Error('Verified direct audit seed required');
-  const backend=await createDriverAuditDataBackend({db});
+  const nativeCacheDirectory=path.join(root,'work','archive-cache');
+  const backend=await createDriverAuditDataBackend({db,env:native?
+   {...process.env,MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY:nativeCacheDirectory}:process.env});
   const rpc=backend.rpc,state=createCloudState({rpc}),remote=backend.archive;
   await remote.assertPrivate();
+  if(native&&(supportsManagedArchiveCache!==true||remote.managedReadCache!==true||backend.archiveCacheDirectory!==nativeCacheDirectory))
+   throw Error('The qualified native archive cache and builder are required');
   const retentionRequested=process.env.DRIVER_AUDIT_REPLICA_GC_ENABLED==='1';
   const [retentionReceipt,implementationSha256]=retentionRequested?await Promise.all([
    privateAuditJson(path.join(root,'deployment-sync.json')).catch(()=>null),
@@ -98,7 +102,8 @@ async function main(){
    return disk.bavail*disk.bsize;
   };
   const localArchiveRoots=[baselineRoot];
-  const loadSource=createAutomaticReleaseSource({secret,stateStore:sourceState,cacheRoot:path.join(work,'archive-cache'),localRoots:localArchiveRoots,archiveTransport:{readObject:archive.readBounded}});
+  const loadSource=createAutomaticReleaseSource({secret,stateStore:sourceState,cacheRoot:path.join(work,'archive-cache'),localRoots:localArchiveRoots,
+   skipCacheWrite:native,archiveTransport:{readObject:archive.readBounded,managedReadCache:remote.managedReadCache===true}});
   let pinned;
   const transferBlockFile=path.join(work,'transfer-block.private.json');
   const transferPolicy={version:1,maxBytes:maxAuditPackageBytes,builderSha256,

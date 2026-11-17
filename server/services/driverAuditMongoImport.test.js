@@ -76,7 +76,8 @@ test('native activation requires exact preservation proof and a final fence for 
   { skip: !uri }, async t => {
     const f = await fixture(t);
     await importDriverAuditMongoDocuments({ ...f, documents: original, importSha256: firstHash });
-    const env = { DRIVER_AUDIT_DATA_STORE: 'mongo', DRIVER_AUDIT_NATIVE_CAPACITY_BYTES: String(capacityBytes) };
+    const env = { DRIVER_AUDIT_DATA_STORE: 'mongo', DRIVER_AUDIT_NATIVE_CAPACITY_BYTES: String(capacityBytes),
+      MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: '/tmp/fictional-driver-report-cache' };
     await assert.rejects(createDriverAuditDataBackend({ db: f.db, env }), /verified native/);
     const proof = await verifyDriverAuditMongoAuthority({
       ...f, original, importSha256: firstHash,

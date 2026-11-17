@@ -14,6 +14,8 @@ import tls from 'node:tls';
 import { pathToFileURL } from 'node:url';
 import { getHeapStatistics } from 'node:v8';
 import { DRIVER_AUDIT_SOURCE_CACHE_ENV, driverAuditSourceHash as sha256, invokeDriverAuditSourceHandler } from '../services/driverAuditSource.js';
+import { createDriverAuditFixedHostBudgetFactory } from '../services/driverAuditFixedHostBudget.js';
+import { createDriverAuditReadCache } from '../services/driverAuditReadCache.js';
 
 const MiB = 1024 * 1024;
 const OriginalDate = Date;
@@ -77,7 +79,7 @@ function createLocalTransport(roots, fallback) {
   };
 }
 
-function createReplayState(state, day, time, capture) {
+function createReplayState(state, day, time, capture, { nativeReplay }) {
   const prior = state.get('collector-state');
   const publication = JSON.parse(prior.body);
   const recentDays = Array.from({ length: 3 }, (_, offset) =>
@@ -88,17 +90,19 @@ function createReplayState(state, day, time, capture) {
     lastDay: day, sourceAttempts: { ...publication.schedule?.sourceAttempts, ...attempts },
     lastAttempts: { ...publication.schedule?.lastAttempts, ...attempts } };
   state.set('collector-state', { ...prior, body: JSON.stringify(publication) });
-  const budget = state.get('worker-budget');
-  const document = JSON.parse(budget.body);
-  const period = new OriginalDate(time).toISOString().slice(0, 7);
-  document.latestPeriod = period;
-  document.periods = { [period]: { usedMicros: 0, admissions: 0, settlements: 0 } };
-  document.active = {};
-  state.set('worker-budget', { ...budget, body: JSON.stringify(document) });
+  if (!nativeReplay) {
+    const budget = state.get('worker-budget');
+    const document = JSON.parse(budget.body);
+    const period = new OriginalDate(time).toISOString().slice(0, 7);
+    document.latestPeriod = period;
+    document.periods = { [period]: { usedMicros: 0, admissions: 0, settlements: 0 } };
+    document.active = {};
+    state.set('worker-budget', { ...budget, body: JSON.stringify(document) });
+  }
   return publication;
 }
 
-function createReplayTransport(state, time, readObject, { failPublication, reject }) {
+function createReplayTransport(state, time, readObject, { failPublication, reject, nativeReplay }) {
   const writes = new Map();
   const reservations = new Map();
   const archiveReads = { requests: 0, bytes: 0 };
@@ -160,7 +164,28 @@ function createReplayTransport(state, time, readObject, { failPublication, rejec
     }
   };
   const read = (key, limit) => writes.get(key) ?? readObject(key, limit);
+  const nativeBackend = {
+    kind: 'mongo', rpc: async (name, args) => rpc(name, args),
+    createExecutionBudget: createDriverAuditFixedHostBudgetFactory(),
+    archive: {
+      async assertPrivate() { return { public: false }; },
+      async readObject(key, { maxBytes = 16 * MiB } = {}) {
+        assert(archiveKey.test(key) && Number.isSafeInteger(maxBytes) && maxBytes > 0 && maxBytes <= 16 * MiB);
+        const body = await read(key, maxBytes);
+        assert(body.length <= maxBytes);
+        archiveReads.requests++;
+        archiveReads.bytes += body.length;
+        return [body];
+      },
+      async putVerifiedObject(key, bytes) {
+        assert(Buffer.isBuffer(bytes) && bytes.length <= 16 * MiB && sha256(bytes) + '.gz' === key);
+        writes.set(key, Buffer.from(bytes));
+        return { key, bytes: bytes.length, sha256: sha256(bytes), verified: true };
+      },
+    },
+  };
   globalThis.fetch = async (input, options = {}) => {
+    if (nativeReplay) return reject();
     const url = new URL(input);
     if (url.origin !== 'https://trhhjfgfmxofxhnzocks.supabase.co' || url.search) return reject();
     if (url.pathname.startsWith('/rest/v1/rpc/') && options.method === 'POST') {
@@ -184,12 +209,16 @@ function createReplayTransport(state, time, readObject, { failPublication, rejec
     }
     return reject();
   };
-  return { read, writes, store, archiveReads, leaseReleased: () => lease === null, failedOnce: () => failedOnce,
+  return { read, writes, store, archiveReads, nativeBackend, leaseReleased: () => lease === null, failedOnce: () => failedOnce,
     reservationsReleased: () => [...reservations.values()].every(item => item.released) };
 }
 
-async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsRoot, expected, failPublication, archiveCacheDirectory }) {
+async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsRoot, expected, failPublication,
+  archiveCacheDirectory, nativeReplay = false }) {
+  assert.equal(typeof nativeReplay, 'boolean');
   const state = await readState(stateFile);
+  const executionLedgers = () => [...state].filter(([key]) => /^(?:worker|reader)-budget(?:-|$)/.test(key));
+  const preservedExecutionLedgers = structuredClone(executionLedgers());
   const prior = JSON.parse(state.get('collector-state').body);
   const { day, observedAt } = prior.head.source;
   const time = Date.parse(observedAt);
@@ -197,20 +226,26 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
   const readObject = createLocalTransport([[objectsRoot, false]]);
   const originalCapture = JSON.parse(await readObject(capture.ref.key));
   assert.equal(originalCapture.snapshot.rows.length, expected.sourceRows);
-  createReplayState(state, day, time, capture);
+  createReplayState(state, day, time, capture, { nativeReplay });
   assert(archiveCacheDirectory === undefined || archiveCacheDirectory === path.join(path.dirname(root), 'source-archive-cache'));
-  const environment = archiveCacheDirectory === undefined ? fakeEnvironment
-    : { ...fakeEnvironment, [DRIVER_AUDIT_SOURCE_CACHE_ENV]: archiveCacheDirectory };
+  const environment = { ...fakeEnvironment, ...(nativeReplay ? { DRIVER_AUDIT_DATA_STORE: 'mongo' } : {}),
+    ...(archiveCacheDirectory === undefined ? {} : { [DRIVER_AUDIT_SOURCE_CACHE_ENV]: archiveCacheDirectory }) };
   Object.assign(process.env, environment);
   globalThis.Date = class extends OriginalDate {
     constructor(...args) { super(...(args.length ? args : [time])); }
     static now() { return time; }
   };
   let forbidden = 0;
-  const fixture = createReplayTransport(state, time, readObject, { failPublication, reject() {
+  const fixture = createReplayTransport(state, time, readObject, { failPublication, nativeReplay, reject() {
     forbidden++;
     throw new Error('Request outside saved collector fixture.');
   } });
+  if (nativeReplay) {
+    fixture.nativeBackend.archive = createDriverAuditReadCache({ archive: fixture.nativeBackend.archive,
+      cacheDirectory: archiveCacheDirectory });
+    assert.equal(fixture.nativeBackend.archive.managedReadCache, true);
+    globalThis[Symbol.for('matter.driver-audit.native-backend')] = fixture.nativeBackend;
+  }
   const handler = (await load(path.join(runtimeRoot, entrypoint.module))).default;
   const invoke = () => invokeDriverAuditSourceHandler(handler, { entrypoint, environment });
   let firstArchiveReads;
@@ -259,12 +294,15 @@ async function replaySource({ root, runtimeRoot, entrypoint, stateFile, objectsR
     generation: current.head.manifest.sha256, retainedSignature },
   Object.fromEntries(['records', 'history', 'reportHash', 'acceptedGrades', 'generation', 'retainedSignature'].map(key => [key, expected[key]])));
   assert.equal(forbidden, 0);
+  if (nativeReplay) assert.deepEqual(executionLedgers(), preservedExecutionLedgers, 'Native execution changed a preserved hosting ledger.');
   const saved = { revision: published.revision, body: published.body };
   await fs.writeFile(path.join(root, 'replayed-source.private.json'), JSON.stringify(saved), { flag: 'wx', mode: 0o600 });
   for (const [key, bytes] of fixture.writes) await fs.writeFile(path.join(root, key), bytes, { flag: 'wx', mode: 0o600 });
   return { status: 'verified', reportHash: current.head.reportHash, generation: current.head.manifest.sha256, records: rows.length,
     history: current.historyCount, acceptedGrades: expected.acceptedGrades, sourceRows: expected.sourceRows,
-    outputObjects: fixture.writes.size, handlerPeakRssBytes, failureRetry: !!failPublication, archiveReads: firstArchiveReads };
+    outputObjects: fixture.writes.size, handlerPeakRssBytes, failureRetry: !!failPublication, archiveReads: firstArchiveReads,
+    ...(nativeReplay ? { executionAdmission: 'fixed-host-v1', executionLedgersPreserved: true,
+      nativeManagedArchiveCache: true, nativeArchiveCacheEnabled: archiveCacheDirectory !== undefined } : {}) };
 }
 
 function archiveFromParent(key, maxBytes) {
@@ -280,16 +318,30 @@ function archiveFromParent(key, maxBytes) {
   });
 }
 
-async function replayBuilder({ root, objectsRoot, sourceRoot, builder, diskReserve }) {
+async function replayBuilder({ root, objectsRoot, sourceRoot, builder, diskReserve, nativeReplay = false, archiveCacheDirectory }) {
+  assert.equal(typeof nativeReplay, 'boolean');
+  assert(archiveCacheDirectory === undefined || archiveCacheDirectory === path.join(path.dirname(root), 'source-archive-cache'));
   const read = createLocalTransport([[sourceRoot, false], [objectsRoot, false],
     [builder.cacheRoot, false], [builder.archiveBaseline, true], [builder.initialBaseline, true]], archiveFromParent);
-  const transport = { readObject: async (key, { maxBytes } = {}) => Readable.from([await read(key, maxBytes)]) };
+  const original = { readObject: async (key, { maxBytes } = {}) => Readable.from([await read(key, maxBytes)]) };
+  const transport = nativeReplay ? createDriverAuditReadCache({ archive: original, cacheDirectory: archiveCacheDirectory }) : original;
   const [{ automaticReleaseBasis }, { createCloudRepository }, { buildAutomaticRelease, compactDirectBuildVersion }, { validateAutomaticCandidate }] =
     await Promise.all(['integration/cloud/automatic-release.mjs', 'integration/cloud/repository.mjs',
       'integration/cloud/automatic-release-build.mjs', 'scripts/run-automatic-report.mjs'].map(file => load(path.join(builder.codeRoot, file))));
   const savedState = await json(path.join(sourceRoot, 'replayed-source.private.json'));
-  const repository = await createCloudRepository({ stateStore: { read: async () => savedState }, transport, key: 'collector-state' }).pin();
-  const source = { savedState, publication: repository.publication, repository, transport };
+  const stateStore = { read: async () => savedState };
+  let source;
+  if (nativeReplay) {
+    const { createAutomaticReleaseSource, supportsManagedArchiveCache } =
+      await load(path.join(builder.codeRoot, 'integration/cloud/automatic-release-source.mjs'));
+    assert.equal(supportsManagedArchiveCache, true, 'The builder must delegate native cache ownership.');
+    assert.equal(transport.managedReadCache, true);
+    source = await createAutomaticReleaseSource({ stateStore, archiveTransport: transport,
+      cacheRoot: archiveCacheDirectory ?? builder.cacheRoot, skipCacheWrite: true })();
+  } else {
+    const repository = await createCloudRepository({ stateStore, transport, key: 'collector-state' }).pin();
+    source = { savedState, publication: repository.publication, repository, transport };
+  }
   const checkSpace = async (minimum = diskReserve.inProgress) => {
     const disk = await fs.statfs(root);
     if (disk.bavail * disk.bsize < minimum) throw Object.assign(new Error('Qualification workspace reserve unavailable.'), { code: 'AUDIT_CAPACITY' });
@@ -303,7 +355,8 @@ async function replayBuilder({ root, objectsRoot, sourceRoot, builder, diskReser
   const validation = await validateAutomaticCandidate(candidate, { journals: builder.journals });
   assert.equal(validation.ok, true);
   return { status: 'verified', builderSha256: builder.builderSha256, baselineManifestSha256: builder.baselineManifestSha256,
-    candidateManifestSha256: validation.manifestSha256 };
+    candidateManifestSha256: validation.manifestSha256,
+    ...(nativeReplay ? { nativeManagedArchiveCache: true, nativeArchiveCacheEnabled: archiveCacheDirectory !== undefined } : {}) };
 }
 
 async function main() {

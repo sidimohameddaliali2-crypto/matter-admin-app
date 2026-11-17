@@ -97,6 +97,17 @@ test('start accepts only a complete exact Linux host qualification receipt', asy
   const reference = await save(complete);
   assert.deepEqual(await verify(reference), complete);
   await assert.rejects(verify({ ...reference, receiptSha256: digest('0') }), /integrity/i);
+  const nativeConfig = { ...config, environment: { DRIVER_AUDIT_DATA_STORE: 'mongo' } };
+  const verifyNative = reference => verifyDriverAuditSourceHostQualification({ config: nativeConfig, commit, reference,
+    builder, nodeExecutable, nodeVersion, nodeArgs });
+  await assert.rejects(verifyNative(reference), /incomplete|changed/i);
+  const native = { ...complete,
+    builder: { ...complete.builder, nativeManagedArchiveCache: true },
+    source: { ...complete.source, executionAdmission: 'fixed-host-v1', executionLedgersPreserved: true, nativeManagedArchiveCache: true },
+    sourceAfterBuilder: { ...complete.sourceAfterBuilder, executionAdmission: 'fixed-host-v1', executionLedgersPreserved: true,
+      nativeManagedArchiveCache: true } };
+  assert.deepEqual(await verifyNative(await save(native)), native);
+  await save(complete);
 
   const cacheRoot = path.join(root, 'archive-cache');
   const verifySharedCache = (reference, cacheDirectory = cacheRoot) => verifyDriverAuditSourceHostQualification({
@@ -113,9 +124,24 @@ test('start accepts only a complete exact Linux host qualification receipt', asy
   await assert.rejects(verifySharedCache(await save({ ...shared, sourceAfterBuilder: {
     ...shared.sourceAfterBuilder, archiveReads: { requests: 50, bytes: 147_000_000 },
   } })), /archive cache/i);
+  const nativeShared = { ...native, sourceArchiveCacheDirectory: cacheRoot,
+    source: { ...native.source, nativeArchiveCacheEnabled: true, archiveReads: { requests: 50, bytes: 147_000_000 } },
+    sourceAfterBuilder: { ...native.sourceAfterBuilder, nativeArchiveCacheEnabled: true, archiveReads: { requests: 3, bytes: 230_000 } },
+    builder: { ...native.builder, nativeArchiveCacheEnabled: true } };
+  const verifyNativeShared = reference => verifyDriverAuditSourceHostQualification({
+    config: { ...nativeConfig, archiveCacheDirectory: cacheRoot }, commit, reference,
+    builder: { ...builder, cacheRoot }, nodeExecutable, nodeVersion, nodeArgs,
+  });
+  assert.deepEqual(await verifyNativeShared(await save(nativeShared)), nativeShared);
+  await assert.rejects(verifyNativeShared(await save({ ...nativeShared,
+    builder: { ...nativeShared.builder, nativeArchiveCacheEnabled: false } })), /archive cache/i);
+  await assert.rejects(verifyNativeShared(await save({ ...nativeShared,
+    source: { ...nativeShared.source, nativeArchiveCacheEnabled: false } })), /archive cache/i);
+  await assert.rejects(verifyNativeShared(await save({ ...nativeShared,
+    builder: { ...nativeShared.builder, nativeManagedArchiveCache: false } })), /incomplete|changed/i);
 });
 
-async function replayFixture(t, { network = false } = {}) {
+async function replayFixture(t, { network = false, nativeReplay = false } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'audit-child-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const work = path.join(root, 'work');
@@ -149,6 +175,22 @@ async function replayFixture(t, { network = false } = {}) {
     'let called = false;',
     'export default async function (request, response) {',
     '  assert.equal(process.env.QUALIFICATION_PROTECTED_VALUE, undefined);',
+    nativeReplay ? [
+      '  assert.equal(process.env.DRIVER_AUDIT_DATA_STORE, "mongo");',
+      '  assert.equal(process.env.MONGODB_URI, undefined);',
+      '  const backend = globalThis[Symbol.for("matter.driver-audit.native-backend")];',
+      '  assert.equal(backend.kind, "mongo");',
+      '  assert.equal(backend.archive.managedReadCache, true);',
+      '  const archived = Buffer.concat(await backend.archive.readObject(' + JSON.stringify(key) + '));',
+      '  assert.equal(archived.toString(), ' + JSON.stringify(capture.toString()) + ');',
+      '  const before = await backend.rpc("matter_hosted_state_read", {p_key:"worker-budget"});',
+      '  assert.equal(before.body_text, "{}");',
+      '  const budget = backend.createExecutionBudget();',
+      '  const reservation = await budget.reserve();',
+      '  assert.equal(reservation.allowed, true);',
+      '  assert.equal((await budget.settle(reservation, {elapsedMs:0})).chargedMicros, 0);',
+      '  assert.deepEqual(await backend.rpc("matter_hosted_state_read", {p_key:"worker-budget"}), before);',
+    ].join('\n') : '  assert.equal(process.env.DRIVER_AUDIT_DATA_STORE, undefined);',
     '  await assert.rejects(fs.readFile(' + JSON.stringify(outside) + '), { code:"ERR_ACCESS_DENIED" });',
     network ? '  try { await fetch("https://source.invalid/"); } catch {}' : '',
     '  response.end(JSON.stringify(called ? {status:"not-due"} : {status:"complete",collected:1,failed:0}));',
@@ -157,7 +199,7 @@ async function replayFixture(t, { network = false } = {}) {
   ].join('\n'));
   const entrypoint = { module: 'source/collector.mjs', method: 'GET', path: '/api/collector?task=delivery', schedule: '* * * * *' };
   const inputFile = path.join(work, 'input.private.json');
-  await fs.writeFile(inputFile, JSON.stringify({ root: work, runtimeRoot, entrypoint, stateFile, objectsRoot, expected }));
+  await fs.writeFile(inputFile, JSON.stringify({ root: work, runtimeRoot, entrypoint, stateFile, objectsRoot, expected, nativeReplay }));
   return { mode: 'source', root: work, inputFile, executable: process.execPath, args: ['--max-old-space-size=3072'],
     readRoots: [runtimeRoot], timeoutMs: 5000 };
 }
@@ -182,7 +224,61 @@ test('qualification child rejects a handler that attempts an undeclared request'
   finally { await child.stop(); }
 });
 
-test('qualification builder reads immutable bytes through the parent and stays available for retained RSS measurement', async t => {
+test('native qualification uses fixed host admission and preserved saved ledgers without credentials or network', async t => {
+  const child = runDriverAuditQualificationChild(await replayFixture(t, { nativeReplay: true }));
+  try {
+    const receipt = await child.result;
+    assert.equal(receipt.status, 'verified');
+    assert.equal(receipt.executionAdmission, 'fixed-host-v1');
+    assert.equal(receipt.executionLedgersPreserved, true);
+    assert.equal(receipt.networkAttempts, 0);
+  } finally { await child.stop(); }
+});
+
+test('native qualification rejects accidental legacy HTTP access instead of accepting a simulated hosted write', async t => {
+  const fixture = await replayFixture(t, { nativeReplay: true });
+  const input = JSON.parse(await fs.readFile(fixture.inputFile));
+  await fs.appendFile(path.join(input.runtimeRoot, 'source/collector.mjs'),
+    '\nawait fetch("https://legacy-reporting.invalid/rest/v1/rpc/matter_hosted_state_read",' +
+    '{method:"POST",body:JSON.stringify({p_key:"worker-budget"})});\n');
+  const child = runDriverAuditQualificationChild(fixture);
+  try { await assert.rejects(child.result, /isolated qualification failed/i); }
+  finally { await child.stop(); }
+});
+
+test('native qualification reuses the managed isolated disk cache across cold and warm processes', async t => {
+  const cold = await replayFixture(t, { nativeReplay: true });
+  const input = JSON.parse(await fs.readFile(cold.inputFile));
+  const cacheDirectory = path.join(path.dirname(cold.root), 'source-archive-cache');
+  await fs.mkdir(cacheDirectory, { mode: 0o700 });
+  await fs.writeFile(cold.inputFile, JSON.stringify({ ...input, archiveCacheDirectory: cacheDirectory }));
+  const coldChild = runDriverAuditQualificationChild({ ...cold, archiveCacheDirectory: cacheDirectory });
+  let first;
+  try { first = await coldChild.result; }
+  finally { await coldChild.stop(); }
+  assert.equal(first.nativeManagedArchiveCache, true);
+  assert.equal(first.nativeArchiveCacheEnabled, true);
+  assert.equal(first.archiveReads.requests, 1);
+  assert.ok(first.archiveReads.bytes > 0);
+
+  const warmRoot = path.join(path.dirname(cold.root), 'source-after-builder');
+  await fs.mkdir(warmRoot, { mode: 0o700 });
+  const warmInput = path.join(warmRoot, 'input.private.json');
+  await fs.writeFile(warmInput, JSON.stringify({ ...input, root: warmRoot, archiveCacheDirectory: cacheDirectory }));
+  const warmChild = runDriverAuditQualificationChild({ ...cold, root: warmRoot, inputFile: warmInput,
+    archiveCacheDirectory: cacheDirectory, readRoots: [...cold.readRoots, cold.root] });
+  try {
+    const second = await warmChild.result;
+    assert.equal(second.nativeManagedArchiveCache, true);
+    assert.equal(second.nativeArchiveCacheEnabled, true);
+    assert.equal(second.archiveReads.requests, 0);
+    assert.equal(second.archiveReads.bytes, 0);
+    assert.equal(second.reportHash, first.reportHash);
+  } finally { await warmChild.stop(); }
+});
+
+for (const mode of ['legacy', 'native', 'unqualified']) test('qualification builder ' + mode + ' cache ownership is checked before building', async t => {
+  const nativeReplay = mode !== 'legacy';
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'audit-builder-child-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const work = path.join(root, 'work');
@@ -192,8 +288,10 @@ test('qualification builder reads immutable bytes through the parent and stays a
   const objectsRoot = path.join(root, 'objects');
   const baselineRoot = path.join(work, 'baseline');
   const cacheRoot = path.join(root, 'cache');
+  const archiveCacheDirectory = nativeReplay ? path.join(root, 'source-archive-cache') : undefined;
   for (const directory of [work, archiveBaseline, sourceRoot, objectsRoot, baselineRoot, cacheRoot,
     path.join(codeRoot, 'integration/cloud'), path.join(codeRoot, 'scripts')]) await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  if (archiveCacheDirectory) await fs.mkdir(archiveCacheDirectory, { mode: 0o700 });
   const asset = Buffer.from('expected immutable dependency');
   const key = hash(asset) + '.gz';
   const builderSha256 = 'b'.repeat(64);
@@ -202,12 +300,24 @@ test('qualification builder reads immutable bytes through the parent and stays a
   await fs.writeFile(path.join(codeRoot, 'integration/cloud/automatic-release.mjs'), 'export const automaticReleaseBasis=()=>"basis";');
   await fs.writeFile(path.join(codeRoot, 'integration/cloud/repository.mjs'),
     'export const createCloudRepository=()=>({pin:async()=>({publication:{}})});');
+  if (nativeReplay) await fs.writeFile(path.join(codeRoot, 'integration/cloud/automatic-release-source.mjs'), [
+    'import assert from "node:assert/strict";',
+    'export const supportsManagedArchiveCache=' + (mode === 'native') + ';',
+    'export let sourceCalled=false;',
+    'export function createAutomaticReleaseSource({stateStore,archiveTransport,cacheRoot,skipCacheWrite}) {',
+    '  assert.equal(skipCacheWrite,true);',
+    '  assert.equal(archiveTransport.managedReadCache,true);',
+    '  assert.equal(cacheRoot,' + JSON.stringify(archiveCacheDirectory) + ');',
+    '  return async()=>{sourceCalled=true;return {savedState:await stateStore.read("collector-state"),publication:{},transport:archiveTransport};};',
+    '}',
+  ].join('\n'));
   await fs.writeFile(path.join(codeRoot, 'integration/cloud/automatic-release-build.mjs'), [
     'import assert from "node:assert/strict";',
     'import fs from "node:fs/promises";',
     'import path from "node:path";',
     'export const compactDirectBuildVersion=1;',
     'export async function buildAutomaticRelease({source,output,baselineRoot,checkSpace}) {',
+    nativeReplay ? '  assert.equal((await import("./automatic-release-source.mjs")).sourceCalled,true);' : '',
     '  await checkSpace();',
     '  await assert.rejects(fs.writeFile(' + JSON.stringify(path.join(archiveBaseline, 'forbidden')) + ', ""), {code:"ERR_ACCESS_DENIED"});',
     '  let data = "";',
@@ -222,11 +332,12 @@ test('qualification builder reads immutable bytes through the parent and stays a
     'export const validateAutomaticCandidate=async()=>({ok:true,manifestSha256:' + JSON.stringify(candidateManifestSha256) + '});');
   const inputFile = path.join(work, 'input.private.json');
   await fs.writeFile(inputFile, JSON.stringify({ root: work, sourceRoot, objectsRoot, diskReserve: { start: 1, inProgress: 1 },
+    nativeReplay, archiveCacheDirectory,
     builder: { codeRoot, baselineRoot, archiveBaseline, initialBaseline: archiveBaseline, cacheRoot, builderSha256,
       baselineManifestSha256: 'd'.repeat(64), compactDirectBuildVersion: 1 } }));
   const requests = [];
   const child = runDriverAuditQualificationChild({ mode: 'builder', root: work, inputFile, executable: process.execPath, args: [],
-    readRoots: [sourceRoot, objectsRoot, archiveBaseline, codeRoot, cacheRoot], timeoutMs: 5000,
+    readRoots: [sourceRoot, objectsRoot, archiveBaseline, codeRoot, cacheRoot], timeoutMs: 5000, archiveCacheDirectory,
     async readArchive(objectKey, maxBytes) {
       requests.push({ key: objectKey, maxBytes });
       const file = path.join(work, objectKey);
@@ -234,10 +345,21 @@ test('qualification builder reads immutable bytes through the parent and stays a
       return file;
     } });
   try {
+    if (mode === 'unqualified') {
+      await assert.rejects(child.result, /isolated qualification failed/i);
+      assert.deepEqual(requests, []);
+      return;
+    }
     const result = await child.result;
     assert.equal(result.builderSha256, builderSha256);
     assert.equal(result.candidateManifestSha256, candidateManifestSha256);
     assert.equal(result.networkAttempts, 0);
+    if (nativeReplay) {
+      assert.equal(result.nativeManagedArchiveCache, true);
+      assert.equal(result.nativeArchiveCacheEnabled, true);
+      assert.deepEqual(await fs.readFile(path.join(archiveCacheDirectory, key)), asset);
+      assert.deepEqual(await fs.readdir(cacheRoot), []);
+    }
     assert.deepEqual(requests, [{ key, maxBytes: 64 }]);
     assert.doesNotThrow(() => process.kill(child.pid, 0));
   } finally { await child.stop(); }

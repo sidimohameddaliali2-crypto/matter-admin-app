@@ -122,6 +122,17 @@ async function main() {
     throw Error('Unexpected production checkout');
   }
   const operation = process.env.NATIVE_HANDOFF_OPERATION;
+  if (['prepare-transfer', 'receive-transfer'].includes(operation)) {
+    phase = 'encrypted-native-transfer';
+    const { stdout: result } = await exec(process.execPath, [path.join(appRoot, 'server/scripts/driverAuditNativeTransfer.js')], {
+      cwd: appRoot, env: process.env, timeout: 55 * 60 * 1000, maxBuffer: 256 * 1024,
+    });
+    const values = result.trim().split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line));
+    const receipt = values.find(value => /^transfer-(?:prepared|received|already-received)$/.test(value.status || ''));
+    if (!receipt) throw Error('Native transfer receipt is unavailable');
+    console.log(JSON.stringify(receipt));
+    return;
+  }
   if (['pause-builder', 'resume-builder'].includes(operation)) {
     phase = 'builder-' + operation.split('-')[0];
     const action = operation === 'pause-builder' ? 'deploy-worker-pause' : 'deploy-worker-resume';
