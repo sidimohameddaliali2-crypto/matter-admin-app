@@ -219,6 +219,111 @@ async function hostFixture(t, { latest = false } = {}) {
     afterRoot(fn) { afterRoot = fn; } };
 }
 
+async function legacyEventGitFixture(t) {
+  const f = await hostFixture(t), original = f.adapters.exec;
+  const git = args => new Promise((resolve, reject) => childProcess.execFile('git', args, {
+    cwd: f.appRoot, env: { PATH: process.env.PATH, HOME: f.appRoot, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' },
+    timeout: 10000, maxBuffer: 1024 * 1024,
+  }, (error, stdout, stderr) => error ? reject(error) : resolve({ stdout, stderr })));
+  const write = async (name, bytes) => { const file = path.join(f.appRoot, name); await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 }); await fs.writeFile(file, bytes, { mode: 0o600 }); return file; };
+  await write('.gitignore', 'server/.private/\n');
+  for (const name of ['server/package.json', 'server/package-lock.json', 'server/vendor/driver-audits/integration/hosted/worker-lock.mjs',
+    'server/routes/events.js', 'server/models/Event.js']) await write(name, '// tracked fixture: never executed\n');
+  await git(['init', '--initial-branch=main', f.appRoot]);
+  await git(['config', 'user.email', 'fixture@example.invalid']); await git(['config', 'user.name', 'Local fixture']);
+  await git(['add', '.gitignore', 'server/package.json', 'server/package-lock.json', 'server/vendor/driver-audits/integration/hosted/worker-lock.mjs', 'server/routes/events.js', 'server/models/Event.js']);
+  await git(['-c', 'commit.gpgsign=false', 'commit', '-m', 'Local canary fixture']);
+  f.p.base = (await git(['rev-parse', 'HEAD'])).stdout.trim();
+  const event = await write('server/routes/Event.js', 'globalThis.__canaryUntrackedEventExecuted = true; throw Error("Untracked file must never execute");\n');
+  await fs.chmod(event, 0o664);
+  f.adapters.exec = (file, args, options) => file === 'git' && args[1] === f.appRoot ? git(args) : original(file, args, options);
+  const run = async (operation = 'probe', extra = {}) => subject.runDriverAuditSupabaseCanaryControl({ appRoot: f.appRoot,
+    expectedSha: f.p.base, recipientPublicKey, operation,
+    ...(operation === 'probe' ? {} : { preparedReceiptSha256: sha(await fs.readFile(path.join(f.syncRoot, 'staging.private.json'))) }), ...extra }, f.adapters);
+  return { ...f, git, event, run, original };
+}
+
+test('real Git admits only the exact legacy untracked Event file and preserves every byte and file identity without executing it', async t => {
+  const f = await legacyEventGitFixture(t), before = await fs.lstat(f.event, { bigint: true }), bytes = await fs.readFile(f.event);
+  assert.equal((await f.git(['status', '--porcelain', '--untracked-files=all', '--', 'server'])).stdout, '?? server/routes/Event.js\n');
+  const result = await f.run(); assert.equal(result.readOnly, true); assert.deepEqual(f.sudo, ['probe']);
+  const after = await fs.lstat(f.event, { bigint: true });
+  for (const key of ['dev', 'ino', 'uid', 'gid', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']) assert.equal(after[key], before[key]);
+  assert.deepEqual(await fs.readFile(f.event), bytes); assert.equal(globalThis.__canaryUntrackedEventExecuted, undefined);
+  assert.equal((await f.git(['rev-parse', 'HEAD'])).stdout.trim(), f.p.base);
+});
+
+test('real Git unknown files or tracked changes cannot hide behind the exact legacy Event exception', async t => {
+  for (const name of ['server/routes/Other.js', 'server/routes/events.js']) {
+    const f = await legacyEventGitFixture(t), before = await fs.readFile(f.event);
+    await fs.writeFile(path.join(f.appRoot, name), 'independent local edit\n', { mode: 0o600 });
+    await assert.rejects(f.run(), /Supabase canary control stopped at checkout/);
+    assert.deepEqual(await fs.readFile(f.event), before); assert.equal(await fs.readFile(path.join(f.appRoot, name), 'utf8'), 'independent local edit\n');
+    assert.equal(f.sudo.length, 0);
+  }
+});
+
+test('legacy Event changes during the read-only probe stop admission and preserve the independent edit', async t => {
+  const f = await legacyEventGitFixture(t); f.afterRoot(async operation => { if (operation === 'probe') await fs.appendFile(f.event, '// independent later edit\n'); });
+  await assert.rejects(f.run(), /Supabase canary control stopped/);
+  assert((await fs.readFile(f.event, 'utf8')).endsWith('// independent later edit\n')); assert.deepEqual(f.sudo, ['probe']);
+  assert.equal(f.urls.length, 0); assert.equal(globalThis.__canaryUntrackedEventExecuted, undefined);
+});
+
+test('an initially clean base cannot acquire a newly introduced Event exception during the operation', async t => {
+  const f = await legacyEventGitFixture(t), bytes = await fs.readFile(f.event); await fs.unlink(f.event);
+  f.afterRoot(async operation => { if (operation === 'probe') await fs.writeFile(f.event, bytes, { mode: 0o600 }); });
+  await assert.rejects(f.run(), /Supabase canary control stopped/);
+  assert.deepEqual(await fs.readFile(f.event), bytes); assert.deepEqual(f.sudo, ['probe']); assert.equal(f.urls.length, 0);
+});
+
+test('a legacy Event parent directory identity change rejects while preserving the unchanged source leaf', async t => {
+  const f = await legacyEventGitFixture(t), before = await fs.lstat(f.event, { bigint: true }), bytes = await fs.readFile(f.event);
+  f.afterRoot(async operation => { if (operation === 'probe') await fs.chmod(path.dirname(f.event), 0o775); });
+  await assert.rejects(f.run(), /Supabase canary control stopped/);
+  assert.deepEqual(await fs.readFile(f.event), bytes); const after = await fs.lstat(f.event, { bigint: true });
+  for (const key of ['ino', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']) assert.equal(after[key], before[key]);
+  assert.equal((await fs.stat(path.dirname(f.event))).mode & 0o777, 0o775); assert.deepEqual(f.sudo, ['probe']);
+});
+
+test('a legacy Event path swap at FD open fails without reading or modifying the outside file', async t => {
+  const f = await legacyEventGitFixture(t), outside = path.join(f.appRoot, 'outside.private.txt'), open = fs.open;
+  await fs.writeFile(outside, 'outside untouched\n', { mode: 0o600 }); const before = await fs.lstat(outside, { bigint: true });
+  let reached = false, outsideReads = 0;
+  fs.open = async (file, ...args) => {
+    if (file === outside) outsideReads++;
+    const fd = await open(file, ...args);
+    if (file === f.event && !reached) { reached = true; await fs.rename(f.event, f.event + '.preserved'); await fs.symlink(outside, f.event); }
+    return fd;
+  };
+  try { await assert.rejects(f.run(), /Supabase canary control stopped at checkout/); } finally { fs.open = open; }
+  assert(reached); assert.equal(outsideReads, 0); assert.equal(f.sudo.length, 0);
+  assert.equal(await fs.readFile(outside, 'utf8'), 'outside untouched\n');
+  const after = await fs.lstat(outside, { bigint: true }); for (const key of ['ino', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs']) assert.equal(after[key], before[key]);
+});
+
+test('the exact Event path is rejected as a symlink, hardlink, executable, special-mode or oversized file without alteration', async t => {
+  for (const kind of ['symlink', 'hardlink', 'executable', 'special-mode', 'oversized']) {
+    const f = await legacyEventGitFixture(t), outside = path.join(f.appRoot, 'outside.private.txt'); await fs.writeFile(outside, 'outside untouched\n', { mode: 0o600 });
+    if (kind === 'symlink' || kind === 'hardlink') { await fs.unlink(f.event); await fs[kind === 'symlink' ? 'symlink' : 'link'](outside, f.event); }
+    if (kind === 'executable') await fs.chmod(f.event, 0o755);
+    if (kind === 'special-mode') { await fs.chmod(f.event, 0o4600); assert.equal((await fs.stat(f.event)).mode & 0o7777, 0o4600); }
+    if (kind === 'oversized') await fs.writeFile(f.event, Buffer.alloc(512 * 1024 + 1, 97));
+    await assert.rejects(f.run(), /Supabase canary control stopped at checkout/);
+    assert.equal(await fs.readFile(outside, 'utf8'), 'outside untouched\n'); assert.equal(f.sudo.length, 0);
+  }
+});
+
+test('the isolated release still rejects the same exact Event path', async t => {
+  const f = await hostFixture(t), original = f.adapters.exec;
+  await fs.mkdir(path.join(f.base, 'routes'), { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(f.base, 'routes/Event.js'), '// preserved legacy fixture\n', { mode: 0o600 });
+  f.adapters.exec = async (file, args, options) => file === 'git' && args.includes('--porcelain')
+    ? { stdout: '?? server/routes/Event.js\n' } : original(file, args, options);
+  await assert.rejects(f.run('plan'), /Supabase canary control stopped at prepared-host/);
+  assert.deepEqual(f.sudo, ['probe']); assert.equal(f.urls.length, 0);
+});
+
 test('the host probes first, checks only loopback health and keeps an owner-private sealed handshake', async t => {
   const f = await hostFixture(t);
   const probe = await f.run('probe'); assert.equal(probe.readOnly, true); assert.deepEqual(f.sudo, ['probe']);

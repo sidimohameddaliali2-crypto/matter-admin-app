@@ -479,11 +479,58 @@ async function checkedNpm(adapters) {
   return { ...npm, identitySha256: sha(JSON.stringify([npm.realpath, npm.sha256])) };
 }
 
-async function checkout(root, expected, exec, files) {
+async function preservedBaseEvent(root) {
+  const name = 'server/routes/Event.js', file = path.join(root, name), parents = [];
+  need(path.isAbsolute(root) && path.normalize(root) === root);
+  try {
+    for (const folder of [root, path.join(root, 'server'), path.join(root, 'server/routes')]) {
+      const before = await fs.lstat(folder, { bigint: true });
+      need(before.isDirectory() && before.uid === BigInt(process.getuid()) && !(Number(before.mode) & 0o002)
+        && await fs.realpath(folder) === folder);
+      const handle = await fs.open(folder, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      parents.push({ folder, before, handle });
+      need(directoryIdentity(await handle.stat({ bigint: true })) === directoryIdentity(before));
+    }
+    const checkParents = async () => {
+      for (const item of parents) need(directoryIdentity(await item.handle.stat({ bigint: true })) === directoryIdentity(item.before)
+        && directoryIdentity(await fs.lstat(item.folder, { bigint: true })) === directoryIdentity(item.before)
+        && await fs.realpath(item.folder) === item.folder);
+    };
+    await checkParents();
+    const before = await fs.lstat(file, { bigint: true });
+    need(before.isFile() && before.uid === BigInt(process.getuid()) && before.nlink === 1n
+      && [0o600, 0o644, 0o664].includes(Number(before.mode) & 0o7777) && before.size <= 512n * 1024n
+      && await fs.realpath(file) === file);
+    const openedPath = process.platform === 'linux' ? '/proc/self/fd/' + parents.at(-1).handle.fd + '/Event.js' : file;
+    const handle = await fs.open(openedPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const check = async () => {
+        for (const info of [await handle.stat({ bigint: true }), await fs.lstat(file, { bigint: true })])
+          need(signature(info) === signature(before) && info.nlink === 1n);
+        need(await fs.realpath(file) === file); await checkParents();
+      };
+      await check(); const bytes = Buffer.alloc(Number(before.size));
+      for (let offset = 0; offset < bytes.length;) {
+        const result = await handle.read(bytes, offset, bytes.length - offset, offset);
+        need(result.bytesRead > 0); offset += result.bytesRead;
+      }
+      need((await handle.read(Buffer.alloc(1), 0, 1, bytes.length)).bytesRead === 0); await check();
+      return { path: name, sha256: sha(bytes), bytes: bytes.length,
+        signature: [signature(before), ...parents.map(item => directoryIdentity(item.before))].join('|'), nlink: '1' };
+    } finally { await handle.close(); }
+  } finally { for (const item of parents.reverse()) await item.handle.close(); }
+}
+
+async function checkout(root, expected, exec, files, { preserveBaseEvent = false, preservedBaseFiles } = {}) {
   need((await exec('git', ['-C', root, 'rev-parse', 'HEAD'])).stdout.trim() === expected
     && (await exec('git', ['-C', root, 'rev-parse', '--show-toplevel'])).stdout.trim() === root);
   await exec('git', ['-C', root, 'ls-files', '--error-unmatch', ...files.map(name => 'server/' + name)]);
-  need(!(await exec('git', ['-C', root, 'status', '--porcelain', '--untracked-files=all', '--', 'server'])).stdout.trim());
+  const status = (await exec('git', ['-C', root, 'status', '--porcelain', '--untracked-files=all', '--', 'server'])).stdout;
+  need(status === '' || preserveBaseEvent && status === '?? server/routes/Event.js\n');
+  const preserved = status ? [await preservedBaseEvent(root)] : [];
+  if (preserved.length) need((await exec('git', ['-C', root, 'status', '--porcelain', '--untracked-files=all', '--', 'server'])).stdout === status);
+  if (preservedBaseFiles !== undefined) need(same(preserved, preservedBaseFiles));
+  return preserved;
 }
 
 async function verifiedTree(root, files, manifestName) {
@@ -519,8 +566,8 @@ async function admittedContext(args, adapters, exec, setPhase) {
     && receipt.sourceEnvironmentSha256 === p.sourceEnvironment && digest(receipt.appEnvironmentSha256)
     && receipt.seedSelected === false && receipt.registrationsChanged === false && receipt.workersStarted === false && receipt.routingChanged === false);
   setPhase('checkout');
-  await checkout(appRoot, expectedSha, exec, ['loadEnv.js', 'package.json', 'package-lock.json', 'services/driverAuditTransferCodec.js',
-    'vendor/driver-audits/integration/hosted/worker-lock.mjs']);
+  const preservedBaseFiles = await checkout(appRoot, expectedSha, exec, ['loadEnv.js', 'package.json', 'package-lock.json', 'services/driverAuditTransferCodec.js',
+    'vendor/driver-audits/integration/hosted/worker-lock.mjs'], { preserveBaseEvent: true });
   await checkout(releaseRoot, p.release, exec, codeFiles);
   need(!await read(path.join(releaseRoot, '.git/objects/info/alternates'), { optional: true, privateMode: false }));
   setPhase('node'); const node = await checkedNode(adapters), npm = await checkedNpm(adapters);
@@ -597,7 +644,7 @@ async function admittedContext(args, adapters, exec, setPhase) {
   need(bootstrap.version === 1 && bootstrap.releaseSha === p.release && bootstrap.packageLockSha256 === lock.sha256);
   const controlRoot = path.join(syncRoot, 'controls');
   return { p, appRoot, releaseRoot, server, syncRoot, sourceRoot, controlRoot, receipt, receiptFile, preparedReceiptSha256,
-    node, npm, load, env, envFile, envBytes, sourceEnvironment, config, source, sync, syncFile, bootstrap, retainedPackages,
+    node, npm, load, env, envFile, envBytes, sourceEnvironment, config, source, sync, syncFile, bootstrap, retainedPackages, preservedBaseFiles,
     fixedFiles: [saved, configFile, sourceEnvironment, syncFile, builderFile, sourceManifest, bootstrapFile, dependencyBytes, lock, ...presenceFiles] };
 }
 
@@ -1522,7 +1569,8 @@ export async function runDriverAuditSupabaseControl(args = {}, adapters = {}) {
     const sourceDeploymentFile = path.join(context.sourceRoot, 'source-deployment.lock');
     const recheck = async () => {
       signal.throwIfAborted(); await checkout(context.appRoot, args.expectedSha, exec,
-        ['loadEnv.js', 'package.json', 'package-lock.json', 'services/driverAuditTransferCodec.js']);
+        ['loadEnv.js', 'package.json', 'package-lock.json', 'services/driverAuditTransferCodec.js'],
+        { preserveBaseEvent: true, preservedBaseFiles: context.preservedBaseFiles });
       await checkout(context.releaseRoot, context.p.release, exec, codeFiles);
       for (const file of context.fixedFiles) need((await read(file.path, { maximum: Math.max(file.bytes, 1),
         privateMode: !file.path.endsWith('/package-lock.json') })).sha256 === file.sha256);
