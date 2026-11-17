@@ -5,7 +5,7 @@ import { DayPicker } from 'react-day-picker';
 import 'react-day-picker/dist/style.css';
 import { createDeliveryChange } from '../store/slices/deliveryChangeSlice';
 import api from '../utils/api';
-import { recordActivityChange } from '../utils/activityCapture';
+import { recordActivityChange, activityReference } from '../utils/activityCapture';
 
 const dateLabel = date => date ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}` : '';
 
@@ -68,7 +68,8 @@ const AddDeliveryChange = () => {
   }, [customerSearch, manualCustomerEntry]);
 
   const handleSelectCustomer = (customer) => {
-    recordActivityChange({ field: 'Customer', form: 'Add delivery change', before: manualForm.customerName || 'Not selected', after: `${customer.firstName || ''} ${customer.lastName || ''}`.trim() || customer.customerId || 'Customer' });
+    recordActivityChange({ field: 'Customer', form: 'Add delivery change', before: manualForm.customerId ? activityReference(manualForm.customerName || 'Customer', manualForm.customerId) : 'Not selected', after: activityReference(`${customer.firstName || ''} ${customer.lastName || ''}`.trim() || 'Customer', customer.customerId || customer._id) });
+    recordActivityChange({ field: 'Customer search', form: 'Add delivery change', before: customerSearch, after: '', private: true });
     setManualForm((prev) => ({
       ...prev,
       customerId: customer.customerId || prev.customerId,
@@ -79,7 +80,7 @@ const AddDeliveryChange = () => {
   };
 
   const handleClearCustomer = () => {
-    recordActivityChange({ field: 'Customer', form: 'Add delivery change', before: manualForm.customerName || 'Not selected', after: 'Not selected' });
+    recordActivityChange({ field: 'Customer', form: 'Add delivery change', before: manualForm.customerId ? activityReference(manualForm.customerName || 'Customer', manualForm.customerId) : 'Not selected', after: 'Not selected' });
     setManualForm((prev) => ({ ...prev, customerId: '', customerName: '' }));
   };
 

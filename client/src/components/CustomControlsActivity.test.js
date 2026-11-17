@@ -24,7 +24,7 @@ import AddDelivery from '../pages/AddDelivery';
 import WebsiteSubscription from '../pages/WebsiteSubscription';
 import AdminPartners from '../pages/AdminPartners';
 
-jest.mock('../utils/activityCapture', () => ({ recordActivityChange: jest.fn() }));
+jest.mock('../utils/activityCapture', () => ({ ...jest.requireActual('../utils/activityCapture'), recordActivityChange: jest.fn() }));
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn(), put: jest.fn() } }));
 jest.mock('../utils/partnerApi', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn() } }));
 jest.mock('react-router-dom', () => ({ Link: ({ children }) => <span>{children}</span>, useNavigate: () => jest.fn(), useParams: () => ({ id: 'subscription' }) }), { virtual: true });
@@ -119,17 +119,17 @@ test('weekly placement and removal record readable board changes even if persist
   const onSaveBoards = jest.fn().mockRejectedValue(new Error('Offline'));
   await render(<WeeklyCycleBoard initialBoards={{}} meals={[{ id: 'meal', name: 'Roast chicken', mealKind: 'Main meal', components: [] }]} onSaveBoards={onSaveBoards}/>);
   act(() => host.querySelector('.av2-library-card').click()); await click('Add to draft');
-  expect(changes()[0]).toMatchObject({ before: [], after: ['Roast chicken'] });
+  expect(changes()[0]).toMatchObject({ before: [], after: ['Roast chicken (meal)'] });
   expect(host.textContent).toContain('Offline');
   await click('Remove meal from Monday');
-  expect(changes()[1]).toMatchObject({ before: ['Roast chicken'], after: [] });
+  expect(changes()[1]).toMatchObject({ before: ['Roast chicken (meal)'], after: [] });
 });
 
 test('dragging a selected van into hub vans records a proposal before generation', async () => {
   await render(<RouteOptimizationModal open deliveries={[]} drivers={[{ _id: 'van', profile: { firstName: 'Aster', vehicleType: 'van' } }]} initialSelectedDriverIds={['van']}/>);
   const drop = new Event('drop', { bubbles: true }); Object.defineProperty(drop, 'dataTransfer', { value: { getData: () => 'van' } });
   act(() => host.querySelector('.border-dashed').dispatchEvent(drop));
-  expect(changes()[0]).toMatchObject({ before: [], after: ['Aster'] });
+  expect(changes()[0]).toMatchObject({ before: [], after: ['Aster (van)'] });
   act(() => host.querySelector('.border-dashed').dispatchEvent(drop));
   expect(recordActivityChange).toHaveBeenCalledTimes(1); expect(api.post).not.toHaveBeenCalled();
 });
@@ -151,7 +151,7 @@ test('recipe selection observes the chosen result after search, without claiming
   await render(<SupyRecipeSearch value="Old recipe" onSelect={jest.fn()}/>);
   input(host.querySelector('input'), 'Roast');
   await act(async () => { jest.advanceTimersByTime(300); }); await click('Roast chicken');
-  expect(changes()[0]).toMatchObject({ before: 'Old recipe', after: 'Roast chicken' });
+  expect(changes()[0]).toMatchObject({ before: 'Old recipe', after: 'Roast chicken (recipe)' });
   expect(api.post).not.toHaveBeenCalled();
 });
 
@@ -191,9 +191,9 @@ test('choosing a role observes the new role and resulting permission defaults be
 test('adding and removing a meal component records the unsaved composition', async () => {
   await render(<MealComposer isNew meal={{ id: 'meal', name: 'Chicken', mealKind: 'Main meal', mealType: 'Chicken', components: [{ id: 'protein', type: 'Protein', name: 'Roast' }] }} onSave={jest.fn()}/>);
   await click('Remove Protein component');
-  expect(changes()[0]).toMatchObject({ before: ['Protein: Roast'], after: [] });
+  expect(changes()[0]).toMatchObject({ before: ['Protein: Roast (protein)'], after: [] });
   await click('Add component'); await click('Carb');
-  expect(changes()[1]).toMatchObject({ before: [], after: ['Carb: Not named'] });
+  expect(changes()[1]).toMatchObject({ before: [], after: [expect.stringMatching(/^Carb: Not named \(component-/)] });
 });
 
 test('route map arrows capture a draft sequence before apply and preserve rapid moves', async () => {
@@ -218,8 +218,8 @@ test('simulation driver, area and hub button choices record readable proposals',
   act(() => host.querySelector('[data-testid="sim-hub-vans"] button').click());
   act(() => host.querySelector('[data-testid="sim-drivers"] button').click());
   expect(changes().some(change => change.field === 'Excluded areas' && change.after.includes('Marina'))).toBe(true);
-  expect(changes().some(change => change.field === 'Hub vans' && change.after.includes('Aster'))).toBe(true);
-  expect(changes().some(change => change.field === 'Excluded drivers' && change.after.includes('Aster'))).toBe(true);
+  expect(changes().some(change => change.field === 'Hub vans' && change.after.includes('Aster (driver)'))).toBe(true);
+  expect(changes().some(change => change.field === 'Excluded drivers' && change.after.includes('Aster (driver)'))).toBe(true);
 });
 
 test('sticker border buttons and bulk area exclusions observe draft changes', async () => {

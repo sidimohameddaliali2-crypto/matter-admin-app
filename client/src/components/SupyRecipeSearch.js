@@ -1,13 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import api from '../utils/api';
-import { recordActivityChange } from '../utils/activityCapture';
+import { activityReference, recordActivityChange } from '../utils/activityCapture';
 
 // Typeahead over Supy recipes. Renders a text input the user types a recipe
 // name into; after a short pause it searches Supy and shows matches below
 // the input. Picking one hands the full recipe (name + ingredients) back to
 // the caller via onSelect — the caller decides what to do with the ingredients
 // (a lunch/dinner meal merges per-component, breakfast/snack uses it whole).
-const SupyRecipeSearch = ({ value, onChangeText, onSelect, placeholder, className, activityLabel = 'Recipe' }) => {
+const SupyRecipeSearch = ({ value, onChangeText, onSelect, placeholder, className, activityLabel = 'Recipe', activityScope }) => {
   const [query, setQuery] = useState(value || '');
   const [results, setResults] = useState([]);
   const [isOpen, setIsOpen] = useState(false);
@@ -16,6 +16,7 @@ const SupyRecipeSearch = ({ value, onChangeText, onSelect, placeholder, classNam
   const [error, setError] = useState(null);
   const debounceRef = useRef(null);
   const containerRef = useRef(null);
+  const selectedRecipe = useRef(null);
 
   useEffect(() => {
     setQuery(value || '');
@@ -71,7 +72,11 @@ const SupyRecipeSearch = ({ value, onChangeText, onSelect, placeholder, classNam
   };
 
   const handleSelect = (recipe) => {
-    recordActivityChange({ field: activityLabel, form: 'Weekly menu meal', before: value || '', after: recipe.name, element: containerRef.current });
+    const scope = activityScope ?? activityLabel;
+    const previousId = selectedRecipe.current?.scope === scope && selectedRecipe.current.name === value ? selectedRecipe.current.id : undefined;
+    const id = recipe.id ?? recipe._id;
+    recordActivityChange({ field: activityLabel, form: 'Weekly menu meal', before: value ? activityReference(value, previousId) : '', after: activityReference(recipe.name, id), element: containerRef.current });
+    selectedRecipe.current = { scope, name: recipe.name, id };
     setQuery(recipe.name);
     setIsOpen(false);
     setResults([]);

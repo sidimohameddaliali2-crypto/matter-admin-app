@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import partnerApi from '../utils/partnerApi';
 import PartnerOrderCalendar from './PartnerOrderCalendar';
 import PartnerDailyMenu from './PartnerDailyMenu';
-import { recordActivityChange } from '../utils/activityCapture';
+import { recordActivityChange, activityReference } from '../utils/activityCapture';
 import { DELIVERY_WINDOWS, deliveryDays, makePlanDay, dayTotal, dayQuantity, assertDayReady, assertAcceptedPlanDayMatches, quotePlanDay, submitPlanDay, dateClosed } from '../utils/partnerDailyPlan';
 
 const heading = { fontFamily: "'Archivo Black', sans-serif" };
@@ -119,7 +119,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
     const before = items[item._id]?.quantity || 0;
     const quantity = Math.max(0, before + delta);
     if (quantity === before) return;
-    recordActivityChange({ field: `${item.name} quantity on ${active.date}`, form: 'Daily order plan', before, after: quantity });
+    recordActivityChange({ field: `${activityReference(item.name, item._id)} quantity on ${active.date}`, form: 'Daily order plan', before, after: quantity });
     if (quantity) items[item._id] = { id: item._id, name: item.name, price: Number(item.price), quantity };
     else delete items[item._id];
     updateDay({ items });

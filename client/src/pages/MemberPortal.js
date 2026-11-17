@@ -7,7 +7,7 @@ import { memberLogout, updateMemberProfile } from '../store/slices/memberAuthSli
 import memberApi from '../utils/memberApi';
 import { groupExclusions } from '../constants/exclusionList';
 import MemberExclusionPicker from '../components/MemberExclusionPicker';
-import { recordActivityChange } from '../utils/activityCapture';
+import { recordActivityChange, activityReference } from '../utils/activityCapture';
 
 /*  MATTER — Member ordering portal
  *  Design source: "Menu Selection Link - Gym Members.dc.html" — à la carte,
@@ -204,7 +204,7 @@ const MemberPortal = () => {
     const day = { ...(current[sel] || {}) };
     const before = day[id] || 0, next = Math.max(0, before + delta);
     if (before === next) return;
-    recordActivityChange({ field: `${titleCase(menu.find(item => item._id === id)?.name || `Meal ${id}`)} quantity on ${sel}`, form: 'Member order draft', before, after: next });
+    recordActivityChange({ field: `${activityReference(titleCase(menu.find(item => item._id === id)?.name || 'Meal'), id)} quantity on ${sel}`, form: 'Member order draft', before, after: next });
     if (next === 0) delete day[id]; else day[id] = next;
     cartRef.current = { ...current, [sel]: day };
     setCart(cartRef.current);

@@ -4,7 +4,7 @@ import { load } from '@2gis/mapgl';
 import TrackerVisitCard from './deliveries/TrackerVisitCard';
 import { X, Route, MapPin, Clock, AlertTriangle, Loader2, Repeat, Pencil, CheckCircle2, FlaskConical, ArrowLeft, ChevronDown, ChevronUp, Search as SearchIcon, UserPlus, ListOrdered } from 'lucide-react';
 import api from '../utils/api';
-import { recordActivityChange } from '../utils/activityCapture';
+import { activityReference, recordActivityChange } from '../utils/activityCapture';
 import { getDeliveryLatLng, haversineKm, MAX_PLAUSIBLE_DISTANCE_KM } from '../utils/deliveryCoords';
 import { formatBusinessTime, formatClockFromSecondsSinceMidnight, toBusinessComponents } from '../utils/businessTime';
 
@@ -47,6 +47,11 @@ const driverDisplayName = (driver) => {
   if (!driver) return 'Unassigned';
   const parts = [driver.profile?.firstName, driver.profile?.lastName].filter(Boolean);
   return parts.length > 0 ? parts.join(' ') : driver.email || 'Driver';
+};
+
+const driverActivityReference = (drivers, id) => {
+  const driver = drivers.find(item => String(item._id) === String(id));
+  return activityReference([driver?.profile?.firstName, driver?.profile?.lastName].filter(Boolean).join(' ') || driver?.name || 'Driver', id);
 };
 
 // Optimized order first (routeOrder), then scheduled time for unoptimized days.
@@ -674,7 +679,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
     const old = dragStart === undefined ? latestPins.current[stop._id] || stop.coords || getDeliveryLatLng(stop) : dragStart;
     if (old?.lat === lat && old?.lng === lng) return;
     const describe = point => point ? `${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}` : 'Not set';
-    recordActivityChange({ field: `Proposed location for ${stop.customerName || 'Customer'} (${stop._id})`, form: 'Driver Routes location edit', before: describe(old), after: describe({ lat, lng }) });
+    recordActivityChange({ field: `Proposed location for ${activityReference(stop.customerName || 'Customer', stop._id)}`, form: 'Driver Routes location edit', before: describe(old), after: describe({ lat, lng }) });
     latestPins.current = { ...latestPins.current, [stop._id]: { lat, lng } };
     setManualOverrides((prev) => ({ ...prev, [stop._id]: { lat, lng } }));
     setSavingId(stop._id);
@@ -869,7 +874,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         const stop = listGroup.stops.find(item => item._id === id);
         return !stop?.customerName || listGroup.stops.filter(item => item.customerName === stop.customerName).length > 1 ? `${stop?.customerName || 'Customer'} (${id})` : stop.customerName;
       };
-      recordActivityChange({ field: `Stop order for ${listGroup.name} on ${date}`, form: 'Driver Routes order draft', before: prev.map(label), after: copy.map(label) });
+      recordActivityChange({ field: `Stop order for ${activityReference(listGroup.name, listGroup.id)} on ${date}`, form: 'Driver Routes order draft', before: prev.map(label), after: copy.map(label) });
       latestOrder.current = copy;
       setReorderIds(copy);
   };
@@ -1174,7 +1179,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         marker.getContent().setAttribute('data-hub-van-id', driverId);
         if (container) {
           makeMarkerDraggable(marker, map, container, ([lng, lat], old) => {
-            recordActivityChange({ field: `Hub location for ${driverDisplayName(van)}`, form: 'Route simulation proposal', before: old ? `${old.lat.toFixed(6)}, ${old.lng.toFixed(6)}` : 'Use route stop', after: `${lat.toFixed(6)}, ${lng.toFixed(6)}` });
+            recordActivityChange({ field: `Hub location for ${driverActivityReference(drivers, driverId)}`, form: 'Route simulation proposal', before: old ? `${old.lat.toFixed(6)}, ${old.lng.toFixed(6)}` : 'Use route stop', after: `${lat.toFixed(6)}, ${lng.toFixed(6)}` });
             latestSimulation.current.locations = { ...latestSimulation.current.locations, [driverId]: { lat, lng } };
             setSimHubLocation((prev) => ({ ...prev, [driverId]: { lat, lng } }));
           }, () => latestSimulation.current.locations[driverId] || null);
@@ -1481,7 +1486,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   const toggleSimExcludedDriver = (driverId) => {
     const before = latestSimulation.current.drivers;
     const next = before.includes(driverId) ? before.filter(id => id !== driverId) : [...before, driverId];
-    const labels = ids => ids.map(id => driverDisplayName(drivers.find(driver => String(driver._id) === id)));
+    const labels = ids => ids.map(id => driverActivityReference(drivers, id));
     recordActivityChange({ field: 'Excluded drivers', form: 'Route simulation proposal', before: labels(before), after: labels(next) });
     latestSimulation.current.drivers = next;
     setSimExcludedDriverIds((prev) => (
@@ -1500,7 +1505,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   const toggleSimHubVan = (driverId) => {
     const before = latestSimulation.current.hubs;
     const next = before.includes(driverId) ? before.filter(id => id !== driverId) : [...before, driverId];
-    const labels = ids => ids.map(id => driverDisplayName(drivers.find(driver => String(driver._id) === id)));
+    const labels = ids => ids.map(id => driverActivityReference(drivers, id));
     recordActivityChange({ field: 'Hub vans', form: 'Route simulation proposal', before: labels(before), after: labels(next) });
     latestSimulation.current.hubs = next;
     if (before.includes(driverId)) {
@@ -1512,7 +1517,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
 
   const resetSimHubLocation = (driverId) => {
     const old = latestSimulation.current.locations[driverId];
-    if (old) recordActivityChange({ field: `Hub location for ${driverDisplayName(drivers.find(driver => String(driver._id) === driverId))}`, form: 'Route simulation proposal', before: `${old.lat.toFixed(6)}, ${old.lng.toFixed(6)}`, after: 'Use route stop' });
+    if (old) recordActivityChange({ field: `Hub location for ${driverActivityReference(drivers, driverId)}`, form: 'Route simulation proposal', before: `${old.lat.toFixed(6)}, ${old.lng.toFixed(6)}`, after: 'Use route stop' });
     const nextLocations = { ...latestSimulation.current.locations };
     delete nextLocations[driverId];
     latestSimulation.current.locations = nextLocations;
@@ -1520,7 +1525,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
   };
   const clearSimulationRule = field => {
     const before = latestSimulation.current[field];
-    recordActivityChange({ field: field === 'drivers' ? 'Excluded drivers' : 'Excluded areas', form: 'Route simulation proposal', before: field === 'drivers' ? before.map(id => driverDisplayName(drivers.find(driver => String(driver._id) === id))) : before, after: [] });
+    recordActivityChange({ field: field === 'drivers' ? 'Excluded drivers' : 'Excluded areas', form: 'Route simulation proposal', before: field === 'drivers' ? before.map(id => driverActivityReference(drivers, id)) : before, after: [] });
     latestSimulation.current[field] = [];
     (field === 'drivers' ? setSimExcludedDriverIds : setSimExcludedAreas)([]);
   };
@@ -1883,7 +1888,7 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
                         <input
                           type="time"
                           value={simHubReady[id] || ''}
-                          data-activity-label={`Hub ready by for ${driverDisplayName(d)}`}
+                          data-activity-label={`Hub ready by for ${driverActivityReference(drivers, id)}`}
                           onChange={(e) => setSimHubReady((r) => ({ ...r, [id]: e.target.value }))}
                           className="border border-orange-300 rounded px-1 py-0 text-[11px]"
                         />

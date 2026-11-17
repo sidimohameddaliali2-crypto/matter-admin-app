@@ -5,7 +5,7 @@ import { selectionComponentDetails, selectionHasWarning } from '../utils/selecti
 import { loadMenuSelectionSummaries, loadMenuSelectionDetails } from '../lib/menuSelectionLoading';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import api from '../utils/api';
-import { recordActivityChange } from '../utils/activityCapture';
+import { activityReference, recordActivityChange } from '../utils/activityCapture';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
 import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
 import { copyManagedMenuItem, managedMenuPayload } from '../utils/managedMenuItems';
@@ -138,7 +138,7 @@ const MenuManagement = () => {
     const before = weeklyItemsRef.current;
     const next = typeof update === 'function' ? update(before) : update;
     next.forEach(day => {
-      const describe = items => items.map((item, index) => `${item.mealName || 'Untitled meal'} · ${item.mealType || 'main'} · slot ${index + 1}`);
+      const describe = items => items.map((item, index) => `${activityReference(item.mealName || 'Untitled meal', (typeof item.menuItemId === 'object' ? item.menuItemId?._id : item.menuItemId) || item._id || item.cycleMeal?.id)} · ${item.mealType || 'main'} · slot ${index + 1}`);
       recordActivityChange({ field: `Menu meals on ${day.date}`, form: 'Weekly menu draft', before: describe(before.find(old => old.date === day.date)?.items || []), after: describe(day.items) });
     });
     setWeeklyItems(next);
@@ -1859,7 +1859,8 @@ const MenuManagement = () => {
 
               {weeklyItems.length > 0 && (() => {
                 const editingItem = editingSlot ? weeklyItems[editingSlot.dayIndex]?.items[editingSlot.itemIndex] : null;
-                const activityContext = editingSlot ? `${weeklyItems[editingSlot.dayIndex]?.date} · ${editingItem?.mealName || `Meal ${editingSlot.itemIndex + 1}`}` : 'Weekly meal';
+                const editingItemId = (typeof editingItem?.menuItemId === 'object' ? editingItem.menuItemId?._id : editingItem?.menuItemId) || editingItem?._id || editingItem?.cycleMeal?.id;
+                const activityContext = editingSlot ? `${weeklyItems[editingSlot.dayIndex]?.date} · ${activityReference(editingItem?.mealName || `Meal ${editingSlot.itemIndex + 1}`, editingItemId)} · slot ${editingSlot.itemIndex + 1}` : 'Weekly meal';
                 const updateEditingField = (field, value) => {
                   if (!editingSlot) return;
                   handleWeeklyItemChange(editingSlot.dayIndex, editingSlot.itemIndex, field, value);
@@ -2118,6 +2119,7 @@ const MenuManagement = () => {
                               {isSingleRecipeMeal ? (
                                 <SupyRecipeSearch
                                   activityLabel={`${activityContext} · main recipe`}
+                                    activityScope={`${editingMenuId || 'new'}:${editingSlot.dayIndex}:${editingSlot.itemIndex}:main`}
                                   value={editingItem.mealName}
                                   onChangeText={(text) => updateEditingField('mealName', text)}
                                   onSelect={(recipe) => applyRecipeSelection('main', recipe)}
@@ -2140,6 +2142,7 @@ const MenuManagement = () => {
                                   <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">PORTION — searches Supy</label>
                                   <SupyRecipeSearch
                                     activityLabel={`${activityContext} · portion recipe`}
+                                    activityScope={`${editingMenuId || 'new'}:${editingSlot.dayIndex}:${editingSlot.itemIndex}:portion`}
                                     value={editingItem.proteinSource}
                                     onChangeText={(text) => updateEditingField('proteinSource', text)}
                                     onSelect={(recipe) => applyRecipeSelection('portion', recipe)}
@@ -2156,6 +2159,7 @@ const MenuManagement = () => {
                                   <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">CARB — searches Supy</label>
                                   <SupyRecipeSearch
                                     activityLabel={`${activityContext} · carb recipe`}
+                                    activityScope={`${editingMenuId || 'new'}:${editingSlot.dayIndex}:${editingSlot.itemIndex}:carb`}
                                     value={editingItem.carbs}
                                     onChangeText={(text) => updateEditingField('carbs', text)}
                                     onSelect={(recipe) => applyRecipeSelection('carb', recipe)}
@@ -2172,6 +2176,7 @@ const MenuManagement = () => {
                                   <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">VEG — searches Supy</label>
                                   <SupyRecipeSearch
                                     activityLabel={`${activityContext} · veg recipe`}
+                                    activityScope={`${editingMenuId || 'new'}:${editingSlot.dayIndex}:${editingSlot.itemIndex}:veg`}
                                     value={editingItem.veg}
                                     onChangeText={(text) => updateEditingField('veg', text)}
                                     onSelect={(recipe) => applyRecipeSelection('veg', recipe)}
@@ -2188,6 +2193,7 @@ const MenuManagement = () => {
                                   <label className="block text-xs font-semibold text-matter-neutral-700 mb-1.5">SAUCE — searches Supy</label>
                                   <SupyRecipeSearch
                                     activityLabel={`${activityContext} · sauce recipe`}
+                                    activityScope={`${editingMenuId || 'new'}:${editingSlot.dayIndex}:${editingSlot.itemIndex}:sauce`}
                                     value={editingItem.sauce}
                                     onChangeText={(text) => updateEditingField('sauce', text)}
                                     onSelect={(recipe) => applyRecipeSelection('sauce', recipe)}
@@ -3053,7 +3059,7 @@ const MenuManagement = () => {
                                       type="button"
                                       onClick={e => {
                                         e.stopPropagation();
-                                        recordActivityChange({ field: `${mealType} slot ${slotIndex + 1} on ${dateKey}`, form: `Customer meal selections · ${selectedCustomerDetail.firstName || 'Customer'}`, before: slotMeal.mealName || 'Untitled meal', after: 'Empty slot', element: e.currentTarget });
+                                        recordActivityChange({ field: `${mealType} slot ${slotIndex + 1} on ${dateKey}`, form: `Customer meal selections · ${activityReference(selectedCustomerDetail.firstName || 'Customer', selectedCustomerDetail._id || selectedCustomerDetail.matterCustomerId)}`, before: activityReference(slotMeal.mealName || 'Untitled meal', typeof slotMeal.menuItemId === 'object' ? slotMeal.menuItemId?._id : slotMeal.menuItemId), after: 'Empty slot', element: e.currentTarget });
                                         setEditDraft(prev => {
                                           const copy = [...prev];
                                           const globalIdx = prev.indexOf(slotMeal);
@@ -3080,7 +3086,7 @@ const MenuManagement = () => {
                                       key={menuItem._id}
                                       type="button"
                                       onClick={() => {
-                                        recordActivityChange({ field: `${mealType} slot ${slotIndex + 1} on ${dateKey}`, form: `Customer meal selections · ${selectedCustomerDetail.firstName || 'Customer'}`, before: isEmpty ? 'Empty slot' : slotMeal.mealName || 'Untitled meal', after: menuItem.mealName || 'Untitled meal' });
+                                        recordActivityChange({ field: `${mealType} slot ${slotIndex + 1} on ${dateKey}`, form: `Customer meal selections · ${activityReference(selectedCustomerDetail.firstName || 'Customer', selectedCustomerDetail._id || selectedCustomerDetail.matterCustomerId)}`, before: isEmpty ? 'Empty slot' : activityReference(slotMeal.mealName || 'Untitled meal', typeof slotMeal.menuItemId === 'object' ? slotMeal.menuItemId?._id : slotMeal.menuItemId), after: activityReference(menuItem.mealName || 'Untitled meal', menuItem._id) });
                                         setEditDraft(prev => {
                                           const copy = [...prev];
                                           if (isEmpty) {

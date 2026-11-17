@@ -25,7 +25,7 @@ import { setSelectedEvent } from '../store/slices/eventSlice';
 import EventCalendarView from '../components/events/EventCalendarView';
 import EventDetailModal from '../components/events/EventDetailModal';
 import api from '../utils/api';
-import { recordActivityChange } from '../utils/activityCapture';
+import { activityReference, recordActivityChange } from '../utils/activityCapture';
 import DispatcherMapAssignModal from '../components/DispatcherMapAssignModal';
 import RouteOptimizationModal from '../components/RouteOptimizationModal';
 import ManualOrderModal from '../components/ManualOrderModal';
@@ -147,7 +147,7 @@ const DispatcherDesktop = () => {
   const driverRefs = ids => ids.map(id => {
     if (id === 'unassigned') return 'Unassigned';
     const driver = drivers.find(item => item._id === id);
-    return [driver?.profile?.firstName, driver?.profile?.lastName].filter(Boolean).join(' ') || ('Driver ' + id);
+    return activityReference([driver?.profile?.firstName, driver?.profile?.lastName].filter(Boolean).join(' ') || driver?.name || 'Driver', id);
   });
   const changeObserved = (field, next, setter, format = value => value) => {
     const before = observedValues.current[field];

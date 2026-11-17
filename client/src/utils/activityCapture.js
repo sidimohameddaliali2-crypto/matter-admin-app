@@ -32,6 +32,9 @@ const shorten = (value, max = 300) => {
 };
 const readable = value => shorten(String(value || '').replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_\[\].-]+/g, ' ').replace(/\s+/g, ' ').trim(), 120);
 const safeLabel = value => SECRET_VALUE.test(String(value || '')) ? 'Private field' : readable(value);
+// Explicit control labels are already human-readable. Keep their record IDs,
+// dates and punctuation intact rather than treating them as source-code keys.
+const safeControlLabel = value => SECRET_VALUE.test(String(value || '')) ? 'Private field' : shorten(String(value || '').replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim(), 120);
 function labelText(element) {
   if (!element) return '';
   const copy = element.cloneNode(true);
@@ -55,7 +58,7 @@ function nearbyLabel(field) {
   return '';
 }
 function fieldLabel(field) {
-  const captureLabel = safeLabel(field.getAttribute('data-activity-label'));
+  const captureLabel = safeControlLabel(field.getAttribute('data-activity-label'));
   if (captureLabel) return captureLabel;
   const associated = Array.from(field.labels || []).map(labelText).filter(Boolean).join(' ');
   return associated || labelText(field.closest('label')) || accessibleLabel(field) || nearbyLabel(field) || safeLabel(field.name) || safeLabel(field.getAttribute('placeholder')) || 'Text field';
@@ -83,8 +86,12 @@ function snapshot(field, initial = false) {
   let value;
   if (field.type === 'checkbox' || field.type === 'radio') value = (initial ? field.defaultChecked : field.checked) ? 'Selected' : 'Not selected';
   else if (field.tagName === 'SELECT') {
-    const options = Array.from(field.options).filter(option => initial ? option.defaultSelected : option.selected);
-    value = (options.length ? options : initial ? Array.from(field.options).slice(0, 1) : []).map(option => option.textContent || option.value).join(', ');
+    const all = Array.from(field.options);
+    const options = all.filter(option => initial ? option.defaultSelected : option.selected);
+    const labels = new Map();
+    const key = option => String(option.textContent || option.value).trim().toLowerCase().replace(/\s+/g, ' ');
+    all.forEach(option => labels.set(key(option), (labels.get(key(option)) || 0) + 1));
+    value = (options.length ? options : initial ? all.slice(0, 1) : []).map(option => labels.get(key(option)) > 1 ? activityReference(option.textContent || 'Option', option.value) : option.textContent || option.value).join(', ');
   } else if (field.matches('[contenteditable]')) value = initial ? '' : field.textContent;
   else value = initial ? field.defaultValue : field.value;
   if (SECRET_VALUE.test(String(value || ''))) return { value: MASK, redacted: true };
@@ -229,6 +236,13 @@ export function readCaptureStatus() {
   return runtime ? runtime.status() : { ...previousStatus };
 }
 
+// Display names are not unique. Keep the actual record reference in observed
+// entity choices, while bounding the readable name so repeated-row context fits.
+export function activityReference(label, id) {
+  const name = shorten(safeControlLabel(label) || 'Record', 40);
+  return (typeof id === 'string' && id) || (typeof id === 'number' && Number.isFinite(id)) ? `${name} (${id})` : name;
+}
+
 // Custom widgets call this at the user-change boundary, including when the
 // value never reaches Save. Initial rendering and remote loads do not call it.
 // Actor identity is deliberately absent; capture authentication supplies it.
@@ -366,7 +380,7 @@ export function installActivityCapture() {
   function recordChange(input) {
     if (stopped || !input || typeof input.field !== 'string' || sameCustomValue(input.before, input.after)) return false;
     const context = currentContext();
-    const field = safeLabel(input.field);
+    const field = safeControlLabel(input.field);
     if (!context || !field) return false;
     const element = input.element?.nodeType === 1 ? input.element : null;
     const container = element ? containerFor(element) : document.body;
@@ -374,7 +388,7 @@ export function installActivityCapture() {
     const before = customSnapshot(input.before, field, isPrivate);
     const after = customSnapshot(input.after, field, isPrivate);
     focusCustomDifference(input.before, input.after, before, after);
-    const title = typeof input.form === 'string' && input.form.trim() ? safeLabel(input.form) : formTitle(container);
+    const title = typeof input.form === 'string' && input.form.trim() ? safeControlLabel(input.form) : formTitle(container);
     const session = sessionFor(container, context, true, title);
     const change = changeFor(field, before, after);
     const earlier = session.changes.get(field);

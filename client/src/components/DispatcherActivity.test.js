@@ -138,3 +138,23 @@ test('map choices distinguish two deliveries belonging to the same customer in t
     expect(events[1].changes[0].before).toContain('(a)'); expect(events[1].changes[0].after).toContain('(b)');
   } finally { cleanup(); window.fetch = oldFetch; localStorage.clear(); warn.mockRestore(); }
 });
+
+test.each([DispatcherDesktop, DispatcherMobile])('driver filters distinguish identical full names through the real queue', async Component => {
+  recordActivityChange.mockImplementation(change => jest.requireActual('../utils/activityCapture').recordActivityChange(change));
+  const priorDrivers = mockState.driver.drivers;
+  mockState.driver.drivers = ['driver-a', 'driver-b'].map(_id => ({ _id, profile: { firstName: 'Alex', lastName: 'Same' } }));
+  const capture = jest.fn().mockResolvedValue({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({ success: true }) });
+  const oldFetch = window.fetch, warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); window.fetch = capture;
+  localStorage.setItem('token', 'fixture-session'); window.history.replaceState({}, '', '/dispatcher');
+  const cleanup = jest.requireActual('../utils/activityCapture').installActivityCapture();
+  try {
+    await render(<Component/>); const trigger = [...host.querySelectorAll('button')].find(node => node.textContent.trim() === 'All Drivers');
+    act(() => trigger.click());
+    const choose = index => act(() => [...trigger.parentElement.querySelectorAll('button')].filter(node => node !== trigger && node.textContent.includes('Alex Same'))[index].click());
+    choose(0); choose(1);
+    await act(async () => window.dispatchEvent(new Event('pagehide')));
+    const edits = capture.mock.calls.flatMap(([, options]) => JSON.parse(options.body).events).filter(event => event.form.field === 'Delivery drivers').map(event => event.changes[0]);
+    expect(edits).toHaveLength(2); expect(edits[0].after).toContain('driver-a'); expect(edits[1].before).toContain('driver-a'); expect(edits[1].after).toContain('driver-b');
+    expect(api.post).not.toHaveBeenCalled();
+  } finally { cleanup(); mockState.driver.drivers = priorDrivers; window.fetch = oldFetch; localStorage.clear(); warn.mockRestore(); }
+});

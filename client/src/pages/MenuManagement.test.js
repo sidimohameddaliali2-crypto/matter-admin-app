@@ -4,7 +4,7 @@ import api from '../utils/api';
 import MenuManagement from './MenuManagement';
 import { mealCreationStore } from '../utils/mealCreationStore';
 import { recordActivityChange } from '../utils/activityCapture';
-jest.mock('../utils/activityCapture',()=>({recordActivityChange:jest.fn()}));
+jest.mock('../utils/activityCapture',()=>({...jest.requireActual('../utils/activityCapture'),recordActivityChange:jest.fn()}));
 jest.mock('../utils/mealCreationStore',()=>({mealCreationStore:{flush:jest.fn(async()=>{}),getSnapshot:()=>({error:''}),load:jest.fn()}}));
 jest.mock('../utils/api',()=>({__esModule:true,default:{get:jest.fn(),post:jest.fn(),put:jest.fn(),delete:jest.fn()}}));
 jest.mock('../components/SupyRecipeSearch',()=>()=>null);
@@ -44,9 +44,9 @@ test('customer meal replacement and removal observe the unsaved selected slot',a
     await act(async()=>node.querySelector('.cursor-pointer.border-2').click());await click('Edit Selections');
     act(()=>[...node.querySelectorAll('.cursor-pointer')].find(element=>element.textContent.includes('Original meal')&&element.textContent.includes('▼ change')).click());
     act(()=>[...node.querySelectorAll('button')].find(button=>button.textContent.includes('Replacement meal')).click());
-    expect(recordActivityChange.mock.calls.some(([change])=>change.before==='Original meal'&&change.after==='Replacement meal')).toBe(true);
+    expect(recordActivityChange.mock.calls.some(([change])=>change.before==='Original meal (old)'&&change.after==='Replacement meal (new)')).toBe(true);
     act(()=>node.querySelector('button[title="Remove"]').click());
-    expect(recordActivityChange.mock.calls.some(([change])=>change.before==='Replacement meal'&&change.after==='Empty slot')).toBe(true);
+    expect(recordActivityChange.mock.calls.some(([change])=>change.before==='Replacement meal (new)'&&change.after==='Empty slot')).toBe(true);
     expect(api.put).not.toHaveBeenCalled();
   }finally{await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
 });

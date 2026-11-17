@@ -120,6 +120,14 @@ test('opens with one clear issue sentence, its person and time, and a visible De
   expect(container.textContent).not.toMatch(/private-request|saved-driver|Access declarations|HTTP|API routes/);
   expect(api.get.mock.calls[0][1].params).toEqual({ limit: 100, issues: '1' });
 });
+test('draft rows stay plain while Details retains the exact record identity', async () => {
+  const id = '111111111111111111111111';
+  api.get.mockResolvedValue(response({ ...activity, events: [{ ...events[1], summary: `Sara edited Rice bowl (${id}) quantity.`, changes: [{ field: `Rice bowl (${id}) quantity`, before: '1', after: '2' }] }] }));
+  await render();
+  const row = container.querySelector('.trace-event-button');
+  expect(row.textContent).toContain('Sara edited Rice bowl quantity.'); expect(row.textContent).not.toContain(id);
+  await click(row); expect(container.querySelector('[aria-label="Activity details"]').textContent).toContain(id);
+});
 
 test('labels failed attempted values as entered values rather than a saved before-and-after change', async () => {
   api.get.mockResolvedValueOnce(response({ ...activity, events: [{ ...events[2], changes: [{ field: 'Driver', before: 'Previous driver', after: 'Attempted driver' }] }] }));

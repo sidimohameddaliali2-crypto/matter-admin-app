@@ -74,6 +74,16 @@ test('member custom view and order-period choices retain their before and after 
     { field: 'Orders filter', before: 'Upcoming', after: 'Past', redacted: false },
   ]);
 });
+test('same-named menu items keep distinct identities in member quantity history', async () => {
+  memberApi.get.mockImplementation(async path => ({ data: { success: true, data: path === '/member/orders' ? [] : [meal, { ...meal, _id: 'another-meal' }] } }));
+  await mountPortal('member', MemberPortal);
+  const buttons = [...container.querySelectorAll('button')].filter(button => button.textContent === '+');
+  await act(async () => buttons[0].click()); await act(async () => buttons[1].click()); await deliver();
+  const quantity = observations().filter(event => event.form.field.includes('quantity'));
+  expect(quantity).toHaveLength(2);
+  expect(new Set(quantity.map(event => event.form.field)).size).toBe(2);
+  expect(quantity[0].form.field).toContain('fixture-meal'); expect(quantity[1].form.field).toContain('another-meal');
+});
 test('partner existing-order quantity and window changes are captured before saving or cancel', async () => {
   await mountPortal('partner', PartnerPortal);
   await click('My Orders'); await click('Edit meals'); await deliver(); fetchCapture.mockClear();

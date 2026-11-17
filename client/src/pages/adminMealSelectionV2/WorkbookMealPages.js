@@ -8,7 +8,7 @@ import WeeklyCycleBoard from './WeeklyCycleBoard';
 import ComponentExclusions from './ComponentExclusions';
 import { editorComponents } from './mealEditorState';
 import { toTitleCase } from '../../utils/textFormat';
-import { recordActivityChange } from '../../utils/activityCapture';
+import { activityReference, recordActivityChange } from '../../utils/activityCapture';
 
 const BASE = '/admin/meal-selection-v2';
 const componentLabel = type => type === 'Sauce 2' ? 'Salad dressing (optional)' : type;
@@ -97,7 +97,7 @@ export function MealComposer({ meal, isNew, onSave }) {
   const field = (key, value) => { setError(''); setForm(f => ({ ...f, [key]: value })); };
   const componentField = (id, key, value) => setForm(f => ({ ...f, components: f.components.map(c => c.id === id ? { ...c, [key]: value } : c) }));
   const changeComponents = next => {
-    const describe = items => items.map(c => `${c.type}: ${c.name || 'Not named'}`);
+    const describe = items => items.map(c => `${c.type}: ${activityReference(c.name || 'Not named', c.id)}`);
     recordActivityChange({ field: `Components for ${form.name || 'new meal'}`, form: 'Meal draft', before: describe(form.components), after: describe(next) });
     field('components', next);
   };
@@ -142,7 +142,7 @@ export function MealComposer({ meal, isNew, onSave }) {
   };
   const renderComponent = c => <Panel className="av2-component-panel" key={c.id} title={componentLabel(c.type)} actions={<button className="av2-icon" aria-label={`Remove ${c.type} component`} onClick={() => changeComponents(form.components.filter(v => v.id !== c.id))}><X size={16}/></button>}>
     <label className="av2-field">Component / recipe name<input value={c.name} onChange={e => componentField(c.id, 'name', e.target.value)}/></label>
-    <ComponentExclusions values={c.exclusions || []} componentName={c.name || c.type} onChange={values => componentField(c.id, 'exclusions', values)}/>
+    <ComponentExclusions values={c.exclusions || []} componentName={c.name || c.type} componentId={c.id} onChange={values => componentField(c.id, 'exclusions', values)}/>
     <label className="av2-field">Adaptation rule<select aria-label="Adaptation rule" value={ADAPTATIONS.includes(c.adaptation) ? c.adaptation : 'Not reviewed'} onChange={e => componentField(c.id, 'adaptation', e.target.value)}>{ADAPTATIONS.map(v => <option key={v}>{v}</option>)}</select></label>
     <label className="av2-field">Preparation / option notes<textarea value={c.notes || ''} rows={2} onChange={e => componentField(c.id, 'notes', e.target.value)}/></label>
   </Panel>;
@@ -154,7 +154,7 @@ export function MealComposer({ meal, isNew, onSave }) {
     <Panel title="Create as"><fieldset className="av2-choice-chips"><legend>Choose what to create</legend>{['Main meal', 'Breakfast', 'Snack'].map(kind => <label key={kind}><input type="radio" name="meal-kind" checked={form.mealKind === kind} onChange={() => changeKind(kind)}/>{kind}</label>)}</fieldset></Panel>
     <Panel title={isSnack ? 'Snack details' : 'Meal details'}>
       <label className="av2-field">{isSnack ? 'Snack name' : 'Meal name'}<input value={form.name} onChange={e => field('name', e.target.value)}/></label>
-      {isSnack ? <ComponentExclusions values={snack?.exclusions || []} componentName={form.name || 'snack'} onChange={values => field('components', [{ ...(snack || newComponent('Snack')), name: form.name, exclusions: values }])}/> : <>
+      {isSnack ? <ComponentExclusions values={snack?.exclusions || []} componentName={form.name || 'snack'} componentId={snack?.id} onChange={values => field('components', [{ ...(snack || newComponent('Snack')), name: form.name, exclusions: values }])}/> : <>
         <div className="av2-form-grid">{!isBreakfast && <label>Meal type<select aria-label="Meal type" value={form.mealType} onChange={e => field('mealType', e.target.value)}><option value="">Choose meal type...</option>{MEAL_TYPES.map(type => <option key={type}>{type}</option>)}</select></label>}<label>Temperature<select aria-label="Temperature" value={form.temperature} onChange={e => field('temperature', e.target.value)}><option>WARM</option><option>COLD</option></select></label></div>
         {isBreakfast && <label className="av2-field"><span><input type="checkbox" checked={form.isOatmeal} onChange={e => field('isOatmeal', e.target.checked)}/>Oatmeal</span></label>}
         {!isBreakfast && <label className="av2-field"><span><input type="checkbox" checked={form.isSaladBase} onChange={e => toggleSalad(e.target.checked)}/>Includes a salad base</span></label>}
@@ -163,9 +163,9 @@ export function MealComposer({ meal, isNew, onSave }) {
     {!isSnack && <>
       {!isBreakfast && form.isSaladBase && <Panel title="Salad base"><p>The salad is the vegetable component for this meal.</p>
         <label className="av2-field">Salad name<input value={salad?.name || ''} onChange={e => salad ? componentField(salad.id, 'name', e.target.value) : field('components', [...form.components, { ...newComponent('Salad'), name: e.target.value }])}/></label>
-        <ComponentExclusions values={salad?.exclusions || []} componentName={salad?.name || 'salad'} onChange={values => salad ? componentField(salad.id, 'exclusions', values) : field('components', [...form.components, { ...newComponent('Salad'), exclusions: values }])}/>
+        <ComponentExclusions values={salad?.exclusions || []} componentName={salad?.name || 'salad'} componentId={salad?.id} onChange={values => salad ? componentField(salad.id, 'exclusions', values) : field('components', [...form.components, { ...newComponent('Salad'), exclusions: values }])}/>
         <label className="av2-field">Salad sauce (optional extra sauce)<input value={dressing?.name || ''} onChange={e => dressing ? componentField(dressing.id, 'name', e.target.value) : field('components', [...form.components, { ...newComponent('Sauce 2'), name: e.target.value }])}/></label>
-        <ComponentExclusions values={dressing?.exclusions || []} componentName={dressing?.name || 'salad sauce'} onChange={values => dressing ? componentField(dressing.id, 'exclusions', values) : field('components', [...form.components, { ...newComponent('Sauce 2'), exclusions: values }])}/>
+        <ComponentExclusions values={dressing?.exclusions || []} componentName={dressing?.name || 'salad sauce'} componentId={dressing?.id} onChange={values => dressing ? componentField(dressing.id, 'exclusions', values) : field('components', [...form.components, { ...newComponent('Sauce 2'), exclusions: values }])}/>
       </Panel>}
       <div className="av2-heading"><div><h2>{isBreakfast ? 'Breakfast components' : 'Meal components'}</h2><p>{isBreakfast ? 'Add protein, carb, vegetables, sauce and garnish.' : 'Add the meal components. A salad base replaces the vegetable component; its sauce is optional.'}</p></div><Action icon={Plus} onClick={() => setAdding(true)}>Add component</Action></div>
       {editableComponents.map(renderComponent)}

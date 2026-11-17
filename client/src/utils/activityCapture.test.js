@@ -125,6 +125,12 @@ test('unlinked visible labels identify native controls and protect private field
   expect(sent()[1].changes[0]).toEqual({ field: 'Allergies', before: '[Not recorded]', after: '[Not recorded]', redacted: true });
   expect(JSON.stringify(fetchMock.mock.calls)).not.toContain('Private medical information');
 });
+test('same-named native select options retain their different record identifiers', async () => {
+  document.body.innerHTML = '<h1>Dispatch</h1><form><label>Driver<select><option value="driver-a">Same driver</option><option value="driver-b">Same driver</option></select></label></form>';
+  const field = document.querySelector('select'); focus(field); edit(field, 'driver-b', 'change'); await deliver();
+  expect(sent()).toHaveLength(1);
+  expect(sent()[0].changes[0]).toEqual({ field: 'Driver', before: 'Same driver (driver-a)', after: 'Same driver (driver-b)', redacted: false });
+});
 test('blur flushes the last edit and submit records an attempt with the same action', async () => {
   const field = document.querySelector('input'); focus(field); edit(field, 'Building B'); field.dispatchEvent(new FocusEvent('blur'));
   document.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })); await deliver();

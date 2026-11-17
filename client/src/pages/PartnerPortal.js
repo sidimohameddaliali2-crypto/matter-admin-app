@@ -10,7 +10,7 @@ import partnerApi from '../utils/partnerApi';
 import PartnerDailyOrderPlanner from '../components/PartnerDailyOrderPlanner';
 import { FIXED_SELECTION_DEADLINES, isPastSelectionDeadline } from '../utils/selectionDeadlines';
 import { groupExclusions } from '../constants/exclusionList';
-import { recordActivityChange } from '../utils/activityCapture';
+import { recordActivityChange, activityReference } from '../utils/activityCapture';
 
 /*  MATTER — Partner portal
  *  Dark navy / lime brand. Design source: "MATTER Partner.dc.html" (mobile)
@@ -269,7 +269,7 @@ const PartnerPortal = () => {
   const changeQuantity = (id, delta) => {
     const current = cartRef.current, before = current[id] || 0, after = Math.max(0, before + delta);
     if (before === after) return;
-    recordActivityChange({ field: `${titleCase(menu.find(item => item._id === id)?.name || `Meal ${id}`)} quantity`, form: editing ? `Edit order ${editing.ref}` : 'Partner order draft', before, after });
+    recordActivityChange({ field: `${activityReference(titleCase(menu.find(item => item._id === id)?.name || 'Meal'), id)} quantity`, form: editing ? `Edit order ${editing.ref}` : 'Partner order draft', before, after });
     const next = { ...current };
     if (!after) delete next[id]; else next[id] = after;
     cartRef.current = next; setCart(next);
@@ -296,7 +296,7 @@ const PartnerPortal = () => {
   };
   const cancelEdit = () => {
     const form = editing ? `Edit order ${editing.ref}` : 'Partner order draft';
-    const describe = values => Object.entries(values).map(([id, quantity]) => `${titleCase(menu.find(item => item._id === id)?.name || `Meal ${id}`)} × ${quantity}`);
+    const describe = values => Object.entries(values).map(([id, quantity]) => `${activityReference(titleCase(menu.find(item => item._id === id)?.name || 'Meal'), id)} × ${quantity}`);
     recordActivityChange({ field: 'Selected meals cleared', form, before: describe(cartRef.current), after: [] });
     recordActivityChange({ field: 'Delivery window', form, before: deliveryWindow, after: DELIVERY_WINDOWS[0] });
     setEditing(null);

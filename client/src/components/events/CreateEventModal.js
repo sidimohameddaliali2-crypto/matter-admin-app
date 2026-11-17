@@ -4,7 +4,7 @@ import { createEvent } from '../../store/slices/eventSlice';
 import api from '../../utils/api';
 import { X, Plus, Trash2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { recordActivityChange } from '../../utils/activityCapture';
+import { activityReference, recordActivityChange } from '../../utils/activityCapture';
 
 const CreateEventModal = ({ isOpen, onClose }) => {
     const DEFAULT_VENUE_TYPES_BY_COMPANY = {
@@ -279,7 +279,7 @@ const CreateEventModal = ({ isOpen, onClose }) => {
 
   const handleLogisticsChange = (field, value, observe = false) => {
     if (observe) {
-      const describe = rows => (rows || []).map((row, index) => typeof row === 'string' ? row || `Empty staff row ${index + 1}` : `${row.name || row.itemType || 'Item'} × ${row.quantity ?? row.quantityUsed ?? 1}`);
+      const describe = rows => (rows || []).map((row, index) => typeof row === 'string' ? row || `Empty staff row ${index + 1}` : `${activityReference(row.name || row.itemType || 'Item', (typeof row.assetId === 'object' ? row.assetId?._id : row.assetId) || row._id || row.id)} × ${row.quantity ?? row.quantityUsed ?? 1}`);
       recordActivityChange({ field: field === 'staffNames' ? 'Event staff' : `Event ${field === 'assetsUsed' ? 'assets' : field}`, form: `Create event${formData.eventName ? ` · ${formData.eventName}` : ''}`, before: describe(formData.logistics[field]), after: describe(value) });
     }
     setFormData((prev) => ({
@@ -343,7 +343,8 @@ const CreateEventModal = ({ isOpen, onClose }) => {
   const addNewEquipmentOption = async () => {
     if (!newEquipmentOption.name.trim()) return;
     const newOption = { name: newEquipmentOption.name.trim(), dimensions: newEquipmentOption.dimensions, description: newEquipmentOption.description };
-    recordActivityChange({ field: 'Equipment options', form: `Event options proposal · ${formData.companyName}`, before: (equipmentOptionsByCompany[formData.companyName] || []).map(item => item.name), after: [...(equipmentOptionsByCompany[formData.companyName] || []).map(item => item.name), newOption.name] });
+    const equipmentReferences = (equipmentOptionsByCompany[formData.companyName] || []).map(item => activityReference(item.name, item._id || item.id));
+    recordActivityChange({ field: 'Equipment options', form: `Event options proposal · ${formData.companyName}`, before: equipmentReferences, after: [...equipmentReferences, newOption.name] });
     recordActivityChange({ field: 'Selected equipment', form: 'Create event', before: selectedEquipmentOption, after: newOption.name });
     const updatedEquipment = [...(equipmentOptionsByCompany[formData.companyName] || []), newOption];
     const updatedFood = foodOptionsByCompany[formData.companyName] || [];
@@ -377,7 +378,8 @@ const CreateEventModal = ({ isOpen, onClose }) => {
   const addNewFoodOption = async () => {
     if (!newFoodOption.name.trim()) return;
     const newOption = { name: newFoodOption.name.trim(), description: newFoodOption.description };
-    recordActivityChange({ field: 'Food options', form: `Event options proposal · ${formData.companyName}`, before: (foodOptionsByCompany[formData.companyName] || []).map(item => item.name), after: [...(foodOptionsByCompany[formData.companyName] || []).map(item => item.name), newOption.name] });
+    const foodReferences = (foodOptionsByCompany[formData.companyName] || []).map(item => activityReference(item.name, item._id || item.id));
+    recordActivityChange({ field: 'Food options', form: `Event options proposal · ${formData.companyName}`, before: foodReferences, after: [...foodReferences, newOption.name] });
     recordActivityChange({ field: 'Selected food', form: 'Create event', before: selectedFoodOption, after: newOption.name });
     const updatedFood = [...(foodOptionsByCompany[formData.companyName] || []), newOption];
     const updatedEquipment = equipmentOptionsByCompany[formData.companyName] || [];

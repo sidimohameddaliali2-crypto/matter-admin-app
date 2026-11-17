@@ -27,6 +27,8 @@ This map refers to mounted paths inspected in the November 17 change. Native sel
 
 Use `recordActivityChange({ field, before, after, form, element, private })` from `client/src/utils/activityCapture.js` in the actual user-change handler. Supply readable scalar values or arrays of readable values. Give a repeated row, route, meal, day or record enough context to distinguish it. Do not pass whole domain objects, actor claims, file objects or credentials.
 
+Use `activityReference(label, id)` for existing entities. A display name is not an identity: two same-named customers, drivers, meals, recipes or components can still be different records. Entity-specific quantity/timing and native Core labels retain their record context too. Native selects add option values when displayed labels are ambiguous. Machine references stay in the retained event and Details; the first draft sentence keeps the name readable.
+
 - Record all accepted changes, including returning to the original value. A no-op selection is not another change.
 - Record dependent defaults, clears and restored edits at the same user boundary. Never record from render, a React state-updater function, polling, mounting or draft recovery.
 - For asynchronous lookup/device callbacks, preserve the initiating account/page/selection and discard obsolete results. Do not attribute another session's callback to the current account.

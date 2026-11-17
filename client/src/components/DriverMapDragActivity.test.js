@@ -2,7 +2,7 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import api from '../utils/api';
 import { recordActivityChange } from '../utils/activityCapture';
-jest.mock('../utils/activityCapture',()=>({recordActivityChange:jest.fn()}));
+jest.mock('../utils/activityCapture',()=>({...jest.requireActual('../utils/activityCapture'),recordActivityChange:jest.fn()}));
 jest.mock('../utils/api',()=>({__esModule:true,default:{get:jest.fn(),post:jest.fn()}}));
 let mockMarkers=[];
 jest.mock('@2gis/mapgl',()=>({load:async()=>({
@@ -36,9 +36,9 @@ test('a simulation hub marker drag and reset observe proposal coordinates withou
   await render();await click('Simulate');
   await act(async()=>host.querySelector('[data-testid="sim-hub-vans"] button').click());
   await drag('data-hub-van-id');
-  expect(recordActivityChange).toHaveBeenCalledWith(expect.objectContaining({field:'Hub location for Aster',before:'Use route stop',after:'25.300000, 55.400000'}));
+  expect(recordActivityChange).toHaveBeenCalledWith(expect.objectContaining({field:'Hub location for Aster (driver)',before:'Use route stop',after:'25.300000, 55.400000'}));
   await click('📍 pinned · reset');
-  expect(recordActivityChange).toHaveBeenCalledWith(expect.objectContaining({field:'Hub location for Aster',before:'25.300000, 55.400000',after:'Use route stop'}));
+  expect(recordActivityChange).toHaveBeenCalledWith(expect.objectContaining({field:'Hub location for Aster (driver)',before:'25.300000, 55.400000',after:'Use route stop'}));
   expect(api.post).not.toHaveBeenCalledWith('/deliveries/stop/manual-coords',expect.anything());
 });
 

@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useSelector } from 'react-redux';
 import api from '../utils/api';
-import { recordActivityChange } from '../utils/activityCapture';
+import { activityReference, recordActivityChange } from '../utils/activityCapture';
 import DeliveryAddressFields from '../components/DeliveryAddressFields';
 import * as XLSX from 'xlsx';
 import { parseGPSFromLink as enhancedParseGPSFromLink } from '../utils/gpsParsing';
@@ -580,7 +580,7 @@ const AddDelivery = () => {
     const initiatingToken = localStorage.getItem('token');
     const initiatingPage = window.location.pathname;
     const name = `${customer.firstName || ''} ${customer.lastName || ''}`.trim();
-    const label = (customerName, customerId) => customerName ? `${customerName}${customerId ? ` (${customerId})` : ''}` : 'Not selected';
+    const label = (customerName, customerId) => customerName ? activityReference(customerName, customerId) : 'Not selected';
     recordActivityChange({ field: 'Collection customer', form: 'Add collection', before: label(formData.customerName, formData.customerId === 'CUST-' ? '' : formData.customerId), after: label(name || 'Customer', customer.customerId) });
     setFormData(prev => ({
       ...prev,
@@ -627,7 +627,7 @@ const AddDelivery = () => {
     const before = latestImportRows.current;
     const describe = rows => rows.slice(0, 5).map((row, index) => {
       const sourceIndex = /^temp-(\d+)$/.exec(row._id || '');
-      return `Row ${sourceIndex ? Number(sourceIndex[1]) + 2 : index + 2} · ${String(row.customerId || 'Customer').slice(0, 40)} · ${String(row.customerName || 'Not named').slice(0, 60)}`;
+      return `Row ${sourceIndex ? Number(sourceIndex[1]) + 2 : index + 2} · ${activityReference(row.customerName || 'Not named', row.customerId)}`;
     });
     recordActivityChange({ field: 'Imported row count', form: 'Bulk delivery import', before: before.length, after: next.length, element });
     recordActivityChange({ field: 'Imported rows (first 5)', form: 'Bulk delivery import', before: describe(before), after: describe(next), element });

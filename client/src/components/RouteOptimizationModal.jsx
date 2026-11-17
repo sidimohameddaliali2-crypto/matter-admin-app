@@ -1,7 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { X, Route, MapPin, AlertTriangle, Loader2, Repeat, Printer, Clock, CheckCircle2, Truck, GripVertical } from 'lucide-react';
 import api from '../utils/api';
-import { recordActivityChange } from '../utils/activityCapture';
+import { activityReference, recordActivityChange } from '../utils/activityCapture';
 
 // "HH:MM" <-> seconds-from-midnight, for the departure-time and hub-ready
 // inputs (plain <input type="time"> fields).
@@ -169,7 +169,7 @@ export default function RouteOptimizationModal({ open, onClose, deliveries = [],
     setHubReadyClockByDriverId((prev) => ({ ...prev, [driverId]: clock }));
   };
   const observeHubs = ids => {
-    const labels = values => values.map(id => getDriverDisplayName(drivers.find(driver => driver._id === id)));
+    const labels = values => values.map(id => { const driver = drivers.find(item => item._id === id); return activityReference([driver?.profile?.firstName, driver?.profile?.lastName].filter(Boolean).join(' ') || driver?.name || 'Driver', id); });
     recordActivityChange({ field: 'Hub vans', form: 'Optimize routes proposal', before: labels(latestHubs.current), after: labels(ids) });
   };
 
@@ -404,7 +404,7 @@ export default function RouteOptimizationModal({ open, onClose, deliveries = [],
                           <input
                             type="time"
                             value={hubReadyClockByDriverId[driverId] || ''}
-                            data-activity-label={`Hub ready by for ${getDriverDisplayName(driver)}`}
+                            data-activity-label={`Hub ready by for ${activityReference([driver?.profile?.firstName, driver?.profile?.lastName].filter(Boolean).join(' ') || driver?.name || 'Driver', driverId)}`}
                             onChange={(e) => setHubReadyClock(driverId, e.target.value)}
                             className="border border-gray-300 rounded px-2 py-1 text-xs flex-shrink-0"
                           />

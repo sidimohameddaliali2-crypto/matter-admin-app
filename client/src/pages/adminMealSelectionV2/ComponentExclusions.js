@@ -3,13 +3,13 @@ import { Plus, X } from 'lucide-react';
 import { EXCLUSION_LIST } from '../../constants/exclusionList';
 import { Action } from './components';
 import { toTitleCase } from '../../utils/textFormat';
-import { recordActivityChange } from '../../utils/activityCapture';
+import { activityReference, recordActivityChange } from '../../utils/activityCapture';
 
-export default function ComponentExclusions({ values, onChange, componentName }) {
+export default function ComponentExclusions({ values, onChange, componentName, componentId }) {
   const [input, setInput] = useState('');
   const optionsId = useId();
   const change = next => {
-    recordActivityChange({ field: `Exclusions for ${componentName}`, form: 'Meal components', before: values, after: next });
+    recordActivityChange({ field: `Exclusions for ${activityReference(componentName, componentId)}`, form: 'Meal components', before: values, after: next });
     onChange(next);
   };
   const add = () => {
@@ -22,7 +22,7 @@ export default function ComponentExclusions({ values, onChange, componentName })
   return <fieldset className="av2-exclusions-editor"><legend>Exclusions / dietary flags</legend>
     <small>Choose from the list or add a custom exclusion. Supports ten or more exclusions per component.</small>
     <div className="av2-exclusion-chips">{values.filter(Boolean).map((value, index) => <span key={`${value}-${index}`}>{toTitleCase(value)}<button type="button" aria-label={`Remove exclusion ${toTitleCase(value)}`} onClick={() => change(values.filter((_, i) => i !== index))}><X size={12}/></button></span>)}{!values.length && <small>No flags recorded</small>}</div>
-    <div className="av2-add-exclusion"><input aria-label={`Add exclusion for ${componentName}`} list={optionsId} placeholder="Choose or type an exclusion..." value={input} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); add(); } }}/><Action icon={Plus} disabled={!input.trim()} onClick={add}>Add exclusion</Action></div>
+    <div className="av2-add-exclusion"><input aria-label={`Add exclusion for ${componentName}`} data-activity-label={`Add exclusion for ${activityReference(componentName, componentId)}`} list={optionsId} placeholder="Choose or type an exclusion..." value={input} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); add(); } }}/><Action icon={Plus} disabled={!input.trim()} onClick={add}>Add exclusion</Action></div>
     <datalist id={optionsId}>{[...new Set(EXCLUSION_LIST.map(toTitleCase))].map(value => <option key={value} value={value}/>)}</datalist>
   </fieldset>;
 }
