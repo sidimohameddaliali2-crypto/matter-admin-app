@@ -13,6 +13,10 @@ on:
           - inspect-supabase-host
           - inspect-supabase-routing
           - prepare-supabase-host
+          - prepare-supabase-serving
+          - start-supabase-report
+          - qualify-supabase-source-held
+          - run-supabase-report-once
           - pause-builder
           - resume-builder
           - prepare-transfer
@@ -91,6 +95,7 @@ jobs:
           case "$OPERATION" in
             inspect-supabase-host|prepare-supabase-host) operator=supabase-handoff ;;
             inspect-supabase-routing) operator=supabase-routing ;;
+            prepare-supabase-serving|start-supabase-report|qualify-supabase-source-held|run-supabase-report-once) operator=supabase-control ;;
             inspect-database-config) operator=database-check ;;
             prepare-object-store|externalize-native-archive) operator=object-store ;;
             plan-native-cleanup|apply-native-cleanup) operator=cleanup ;;
@@ -101,7 +106,7 @@ jobs:
             stage-native-proofs|export-native-controls) operator=proofs ;;
             *) operator=import ;;
           esac
-          if [[ "$operator" == supabase-handoff || "$operator" == supabase-routing ]]; then
+          if [[ "$operator" == supabase-handoff || "$operator" == supabase-routing || "$operator" == supabase-control ]]; then
             operator_file=".github/scripts/driver-audit-$operator.mjs"
           else
             operator_file=".github/scripts/driver-audit-native-$operator.mjs"

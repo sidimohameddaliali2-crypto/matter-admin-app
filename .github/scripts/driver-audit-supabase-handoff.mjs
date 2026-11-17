@@ -567,24 +567,98 @@ async function prepareDependencies({ targetServer, packageLockSha256, npmIdentit
       && (await read(receiptFile)).data.equals(bytes)); } };
 }
 
+async function secureReleasePackageCopies({ releaseRoot, targetServer, exec, releaseCheck }) {
+  await directory(releaseRoot); await releaseCheck();
+  await inDirectory(releaseRoot, async anchored => {
+    const before = await fs.lstat(targetServer, { bigint: true });
+    need(before.isDirectory() && before.uid === BigInt(process.getuid()) && [0o700, 0o755, 0o775].includes(Number(before.mode) & 0o7777)
+      && await fs.realpath(targetServer) === targetServer);
+    const serverHandle = await fs.open(path.join(anchored, 'server'), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const files = [];
+    const serverCheck = async expected => need(signature(await serverHandle.stat({ bigint: true })) === signature(expected)
+      && signature(await fs.lstat(targetServer, { bigint: true })) === signature(expected) && await fs.realpath(targetServer) === targetServer);
+    try {
+      await serverCheck(before);
+      const parent = process.platform === 'linux' ? '/proc/self/fd/' + serverHandle.fd : targetServer;
+      for (const name of ['package.json', 'package-lock.json']) {
+        const result = await exec('git', ['-C', releaseRoot, 'show', '--no-ext-diff', '--no-textconv', 'HEAD:server/' + name],
+          { encoding: 'buffer', maxBuffer: 2 * 1024 ** 2 });
+        const blob = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout, 'utf8');
+        need(blob.length > 0 && blob.length <= 2 * 1024 ** 2);
+        const file = path.join(targetServer, name), initial = await fs.lstat(file, { bigint: true });
+        need(initial.isFile() && initial.uid === BigInt(process.getuid()) && initial.nlink === 1n
+          && [0o600, 0o644, 0o664].includes(Number(initial.mode) & 0o7777)
+          && initial.size === BigInt(blob.length) && await fs.realpath(file) === file);
+        const handle = await fs.open(path.join(parent, name), constants.O_RDONLY | constants.O_NOFOLLOW);
+        files.push({ file, initial, handle, sha256: sha(blob) });
+        need(signature(await handle.stat({ bigint: true })) === signature(initial));
+        const bytes = Buffer.alloc(blob.length);
+        for (let offset = 0; offset < bytes.length;) {
+          const result = await handle.read(bytes, offset, bytes.length - offset, offset);
+          need(result.bytesRead > 0); offset += result.bytesRead;
+        }
+        need((await handle.read(Buffer.alloc(1), 0, 1, bytes.length)).bytesRead === 0 && bytes.equals(blob));
+      }
+      // Only these new checkout copies are tightened. Never follow a changed
+      // pathname or chmod a shared inode, original package or retained data.
+      await releaseCheck(); await serverCheck(before);
+      const fileCheck = async ({ file, handle }, expected) => {
+        const opened = await handle.stat({ bigint: true }), named = await fs.lstat(file, { bigint: true });
+        need(opened.nlink === 1n && named.nlink === 1n && signature(opened) === signature(expected)
+          && signature(named) === signature(expected) && await fs.realpath(file) === file);
+      };
+      for (const file of files) await fileCheck(file, file.initial);
+      if ((Number(before.mode) & 0o7777) !== 0o700) await serverHandle.chmod(0o700);
+      const after = await serverHandle.stat({ bigint: true });
+      need(after.ino === before.ino && after.dev === before.dev && after.uid === before.uid && after.gid === before.gid
+        && after.size === before.size && after.mtimeNs === before.mtimeNs && (Number(after.mode) & 0o7777) === 0o700);
+      await serverCheck(after);
+      for (const file of files) {
+        await fileCheck(file, file.initial); await serverCheck(after);
+        if ((Number(file.initial.mode) & 0o7777) !== 0o600) await file.handle.chmod(0o600);
+        const checked = await file.handle.stat({ bigint: true });
+        need(checked.ino === file.initial.ino && checked.dev === file.initial.dev && checked.uid === file.initial.uid
+          && checked.gid === file.initial.gid && checked.size === file.initial.size && checked.nlink === 1n
+          && checked.mtimeNs === file.initial.mtimeNs && (Number(checked.mode) & 0o7777) === 0o600);
+        await fileCheck(file, checked);
+        need((await read(file.file)).sha256 === file.sha256); await fileCheck(file, checked);
+      }
+      await serverCheck(after); await releaseCheck();
+    } finally {
+      for (const file of files) await file.handle.close();
+      await serverHandle.close();
+    }
+  });
+}
+
 const receiptCodePaths = ['scripts/driverAuditSync.js', 'services/driverAuditDataBackend.js',
   'vendor/driver-audits/integration/hosted/supabase-archive.mjs', 'vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs'];
 const receiptArchive = { project: 'https://trhhjfgfmxofxhnzocks.supabase.co', bucket: 'matter-report-archive' };
 
-async function archiveReceiptNamespace(server, exec, appRoot, target = false) {
+async function archiveReceiptNamespace(server, exec, appRoot, target = false, expectedCommit) {
   const names = [...receiptCodePaths, ...(target ? ['services/driverAuditSupabaseAppBackend.js', 'services/driverAuditSupabaseArchive.js'] : [])];
+  need(commit(expectedCommit));
+  const clean = async () => {
+    need((await exec('git', ['-C', appRoot, 'rev-parse', 'HEAD'])).stdout.trim() === expectedCommit);
+    await exec('git', ['-C', appRoot, 'diff', '--quiet', '--no-ext-diff', '--no-textconv', 'HEAD', '--', ...names.map(name => 'server/' + name)]);
+  };
+  await clean();
   await exec('git', ['-C', appRoot, 'ls-files', '--error-unmatch', ...names.map(name => 'server/' + name)]);
   const files = [];
   for (const name of names) {
-    const value = await read(path.join(server, name), { maximum: 512 * 1024, privateMode: false });
-    files.push({ name, sha256: value.sha256, bytes: value.bytes });
+    const result = await exec('git', ['-C', appRoot, 'show', '--no-ext-diff', '--no-textconv', 'HEAD:server/' + name],
+      { encoding: 'buffer', maxBuffer: 512 * 1024 });
+    const bytes = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.from(result.stdout, 'utf8');
+    need(bytes.length > 0 && bytes.length <= 512 * 1024);
+    files.push({ name, sha256: sha(bytes), bytes: bytes.length });
     if (name.endsWith('/supabase-archive.mjs')) {
-      const text = value.data.toString('utf8');
+      const text = bytes.toString('utf8');
       need(/\bconst\s+base\s*=\s*(['"])https:\/\/trhhjfgfmxofxhnzocks\.supabase\.co\/storage\/v1\1\s*;/.test(text)
         && /\bconst\s+bucket\s*=\s*(['"])matter-report-archive\1\s*[,;]/.test(text));
     }
-    if (name.endsWith('/driver-audit-handoff.mjs')) need(/\bconst\s+archiveName\s*=\s*(['"])matter-report-archive\1\s*;/.test(value.data.toString('utf8')));
+    if (name.endsWith('/driver-audit-handoff.mjs')) need(/\bconst\s+archiveName\s*=\s*(['"])matter-report-archive\1\s*;/.test(bytes.toString('utf8')));
   }
+  await clean();
   return { archiveIdentitySha256: sha(JSON.stringify(receiptArchive)), files };
 }
 
@@ -641,7 +715,7 @@ async function originalArchiveReceiptSource({ server, before, exec, load }) {
     && typeof secret === 'string' && secret.length > 0 && secret.length <= 8192 && !/[\r\n]/.test(secret)
     && (effective.NODE_OPTIONS === undefined || /^--max-old-space-size=\d{3,5}$/.test(effective.NODE_OPTIONS))
     && (settings.node_args === undefined || JSON.stringify(settings.node_args) === '[]'));
-  const namespace = await archiveReceiptNamespace(server, exec, path.dirname(server));
+  const namespace = await archiveReceiptNamespace(server, exec, path.dirname(server), false, before.metadata.applicationCommit);
   const source = { applicationCommit: before.metadata.applicationCommit, syncRoot: before.metadata.sync.config.root,
     syncConfigSha256: before.metadata.sync.configFile.sha256, dataStore: 'supabase', environmentPin: before.configurationPin,
     runtimeSelectionSha256: sha(JSON.stringify([row.pm_id, effective.DRIVER_AUDIT_DATA_STORE || 'supabase', effective.DRIVER_AUDIT_EXECUTION_HOST || null,
@@ -650,7 +724,7 @@ async function originalArchiveReceiptSource({ server, before, exec, load }) {
 }
 
 async function stageArchiveReceiptPrefix({ saved, syncRoot, targetServer, releaseRoot, releaseSha, stagingReceiptSha256, exec }) {
-  const namespace = await archiveReceiptNamespace(targetServer, exec, releaseRoot, true);
+  const namespace = await archiveReceiptNamespace(targetServer, exec, releaseRoot, true, releaseSha);
   need(saved.source.archiveIdentitySha256 === namespace.archiveIdentitySha256);
   const target = path.join(syncRoot, 'archive-receipts'); await mkdirPrivate(target);
   for (const row of saved.inventory.files) {
@@ -674,7 +748,7 @@ async function stageArchiveReceiptPrefix({ saved, syncRoot, targetServer, releas
     const actual = await archiveReceiptInventory(target, syncRoot), byName = new Map(actual.files.map(row => [row.name, row]));
     for (const row of saved.inventory.files) need(byName.get(row.name)?.sha256 === row.sha256 && byName.get(row.name)?.bytes === row.bytes);
     need((await read(proofFile, { maximum: 32 * 1024 ** 2 })).sha256 === sha(bytes)
-      && JSON.stringify(await archiveReceiptNamespace(targetServer, exec, releaseRoot, true)) === JSON.stringify(namespace));
+      && JSON.stringify(await archiveReceiptNamespace(targetServer, exec, releaseRoot, true, releaseSha)) === JSON.stringify(namespace));
   };
   await recheck();
   const result = { path: proofFile, sha256: sha(bytes), bytes: bytes.length, receipts: proof.receipts.length,
@@ -809,6 +883,7 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
       'server/services/driverAuditSupabaseReplica.js', 'server/services/driverAuditSupabaseSync.js']);
   };
   setPhase('release-readback'); await releaseCheck();
+  setPhase('release-permissions'); await secureReleasePackageCopies({ releaseRoot, targetServer, exec, releaseCheck });
   const originalLock = await read(path.join(server, 'package-lock.json'), { privateMode: false });
   const targetLock = await read(path.join(targetServer, 'package-lock.json'), { privateMode: false });
   need(originalLock.sha256 === bootstrap.packageLockSha256 && targetLock.sha256 === originalLock.sha256);
@@ -1026,7 +1101,7 @@ async function sealedPreparationFailure({ phase, operation, expectedSha, recipie
 }
 
 export async function runDriverAuditSupabaseHandoff({ operation, appRoot, expectedSha, recipientPublicKey, bootstrapSha256 }, adapters = {}) {
-  let phase = 'inputs', failureTarget, recipientKey; const locks = [];
+  let phase = 'inputs', failureTarget, recipientKey, originalUmask; const locks = [];
   const exec = adapters.exec ?? ((file, args, options = {}) => execute(file, args,
     { cwd: appRoot, timeout: 10_000, maxBuffer: 8 * 1024 ** 2, ...options }));
   const load = adapters.load ?? (name => import(pathToFileURL(path.join(appRoot, 'server', name)).href));
@@ -1034,6 +1109,7 @@ export async function runDriverAuditSupabaseHandoff({ operation, appRoot, expect
     need(['inspect-supabase-host', 'prepare-supabase-host'].includes(operation) && (adapters.platform ?? process.platform) === 'linux' && commit(expectedSha)
       && (operation !== 'prepare-supabase-host' || digest(bootstrapSha256))
       && path.isAbsolute(appRoot) && await fs.realpath(appRoot) === appRoot);
+    if (operation === 'prepare-supabase-host') originalUmask = process.umask(0o077);
     const key = recipient(recipientPublicKey), server = path.join(appRoot, 'server'); recipientKey = key;
     const checkout = async () => {
       need((await exec('git', ['rev-parse', 'HEAD'])).stdout.trim() === expectedSha);
@@ -1114,6 +1190,7 @@ export async function runDriverAuditSupabaseHandoff({ operation, appRoot, expect
   finally {
     let failed = false;
     for (const lock of locks.reverse()) try { await lock.release(); } catch { failed = true; }
+    if (originalUmask !== undefined) process.umask(originalUmask);
     if (failed) throw Object.assign(Error('Supabase handoff stopped at cleanup'), { phase: 'cleanup' });
   }
 }

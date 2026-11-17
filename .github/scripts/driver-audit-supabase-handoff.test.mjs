@@ -425,7 +425,11 @@ async function preparationFixture(t) {
       for(const name of receiptCode)await f.write(path.join(target,'server',name),await fs.readFile(path.join(f.server,name)));
       return { stdout: '' };
     }
-    if (file === 'git' && args[0] === '-C') return { stdout: args[2] === 'rev-parse' ? (args[3] === '--show-toplevel' ? args[1] : releaseSha) + '\n' : '' };
+    if (file === 'git' && args.includes('show')) {
+      const name=args.at(-1);assert(name.startsWith('HEAD:server/'));assert(args.includes('--no-ext-diff')&&args.includes('--no-textconv'));
+      return{stdout:await fs.readFile(path.join(args[1],name.slice(5)))};
+    }
+    if (file === 'git' && args[0] === '-C') return { stdout: args[2] === 'rev-parse' ? (args[3] === '--show-toplevel' ? args[1] : args[1]===f.appRoot?commit:releaseSha) + '\n' : '' };
     if (file === '/usr/bin/npm') {
       if (args[0] === 'ci') {
         await f.write(path.join(options.cwd, 'node_modules/fictional-package/index.js'), 'module.exports = "isolated";\n');
@@ -530,6 +534,20 @@ test('receipt reuse binds the real stopped Sync backend selection and fixed revi
   const file=path.join(other.server,'vendor/driver-audits/integration/hosted/supabase-archive.mjs');
   await other.write(file,(await fs.readFile(file,'utf8')).replace('https://trhhjfgfmxofxhnzocks.supabase.co/storage/v1','https://fictional.invalid/storage/v1'));
   await assert.rejects(other.runPrepare(),/Supabase handoff stopped at prepare-archive-receipts-source/);
+});
+
+test('receipt namespace uses only bounded clean Git blobs and refuses dirty code or HEAD drift',async t=>{
+  for(const kind of ['dirty','head']){
+    const f=await preparationFixture(t);await originalArchiveReceipt(f);const execute=f.adapters.exec;let changed=false;
+    f.adapters.exec=async(file,args,options)=>{
+      if(file==='git'&&args[1]===f.appRoot&&args.includes('diff')&&args.includes('--no-textconv')&&kind==='dirty')throw Error('Fictional dirty tracked code');
+      if(file==='git'&&args[1]===f.appRoot&&args.includes('rev-parse')&&changed)return{stdout:'f'.repeat(40)+'\n'};
+      const result=await execute(file,args,options);
+      if(file==='git'&&args[1]===f.appRoot&&args.includes('show')){assert.equal(options.encoding,'buffer');assert.equal(options.maxBuffer,512*1024);if(kind==='head')changed=true;}
+      return result;
+    };
+    await assert.rejects(f.runPrepare(),/Supabase handoff stopped at prepare-archive-receipts-source/);
+  }
 });
 
 test('new prefix proof can adopt an existing immutable staging receipt and rejects conflicting targets or original drift',async t=>{
@@ -766,7 +784,7 @@ test('the host bridge forwards only the bootstrap hash and recipient before any 
   assert.deepEqual(JSON.parse(result.stdout), { status: 'supabase-host-prepared', workersStarted: false, mongoConnections: 0 });
 });
 
-test('real local Git staging checks out the reviewed release while the original checkout and private inputs remain exact', async t => {
+async function realGitPreparationFixture(t) {
   const f = await preparationFixture(t), execute = promisify(execFile);
   const git = async args => execute('git', args, { cwd: f.appRoot, timeout: 10000, maxBuffer: 1024 * 1024 });
   await f.write(path.join(f.appRoot, '.gitignore'), '/server/.private/\n/server/.env*\n/server/node_modules/\n');
@@ -774,6 +792,7 @@ test('real local Git staging checks out the reviewed release while the original 
     'services/driverAuditSupabaseReplica.js', 'services/driverAuditSupabaseSync.js',
     'services/driverAuditTransferCodec.js', 'vendor/driver-audits/integration/hosted/worker-lock.mjs',
     'loadEnv.js']) await f.write(path.join(f.server, name), 'export {};\n');
+  const legacyCode=path.join(f.server,'vendor/driver-audits/integration/hosted/supabase-archive.mjs');await fs.chmod(legacyCode,0o664);
   await git(['init', '--quiet']); await git(['add', '.']);
   const commitArgs = ['-c', 'user.name=Fictional Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m'];
   await git([...commitArgs, 'Original fixture']);
@@ -792,22 +811,135 @@ test('real local Git staging checks out the reviewed release while the original 
   f.pins.release = releaseSha;
   f.bootstrap.expected.sourceEnvironmentSha256 = hash(JSON.stringify(f.expectedEnvironment()));
   f.bootstrap.inspectionMetadataSha256 = (await operator.runDriverAuditSupabaseHandoff({ ...common, operation: 'inspect-supabase-host' }, f.adapters)).metadataSha256;
-  const before = await fs.readFile(f.configFile), current = await fs.readFile(path.join(f.root, 'work/current.private.json'));
-  const result = await operator.runDriverAuditSupabaseHandoff({ ...common, operation: 'prepare-supabase-host',
-    bootstrapSha256: hash(gzipSync(Buffer.from(JSON.stringify(f.bootstrap)))) }, f.adapters).catch(error => {
-    assert.fail(error.phase + ': ' + JSON.stringify(statuses));
-  });
-  assert.equal(result.releaseCommit, releaseSha); assert.equal((await git(['rev-parse', 'HEAD'])).stdout.trim(), base);
-  await operator.runDriverAuditSupabaseHandoff({ ...common, operation: 'prepare-supabase-host',
-    bootstrapSha256: hash(gzipSync(Buffer.from(JSON.stringify(f.bootstrap)))) }, f.adapters);
-  assert.equal((await git(['status', '--porcelain'])).stdout, '');
-  assert.deepEqual(await fs.readFile(f.configFile), before); assert.deepEqual(await fs.readFile(path.join(f.root, 'work/current.private.json')), current);
   const release = path.join(f.server, '.private/driver-report-app-releases', releaseSha);
+  const run = () => operator.runDriverAuditSupabaseHandoff({ ...common, operation: 'prepare-supabase-host',
+    bootstrapSha256: hash(gzipSync(Buffer.from(JSON.stringify(f.bootstrap)))) }, f.adapters);
+  return { ...f, git, base, releaseSha, release, run, legacyCode, statuses };
+}
+
+test('real local Git staging checks out the reviewed release while the original checkout and private inputs remain exact', async t => {
+  const f = await realGitPreparationFixture(t), { git, base, releaseSha, legacyCode, release } = f;
+  const before = await fs.readFile(f.configFile), current = await fs.readFile(path.join(f.root, 'work/current.private.json'));
+  const result = await f.run().catch(error => { assert.fail(error.phase + ': ' + JSON.stringify(f.statuses)); });
+  assert.equal(result.releaseCommit, releaseSha); assert.equal((await git(['rev-parse', 'HEAD'])).stdout.trim(), base);
+  await f.run();
+  assert.equal((await git(['status', '--porcelain'])).stdout, '');
+  assert.equal((await fs.stat(legacyCode)).mode&0o777,0o664);
+  assert.deepEqual(await fs.readFile(f.configFile), before); assert.deepEqual(await fs.readFile(path.join(f.root, 'work/current.private.json')), current);
   assert.equal((await git(['-C', release, 'rev-parse', 'HEAD'])).stdout.trim(), releaseSha);
   await assert.rejects(fs.access(path.join(release, '.git/objects/info/alternates')), { code: 'ENOENT' });
   assert((await fs.lstat(path.join(release, 'server/node_modules'))).isDirectory());
   await f.write(path.join(f.server, 'node_modules/business-app-only.js'), 'independent business dependency change');
   await assert.rejects(fs.access(path.join(release, 'server/node_modules/business-app-only.js')), { code: 'ENOENT' });
+});
+
+test('real Git checkout under ordinary002 umask creates a664 lockfile and does not normalize it silently',async t=>{
+  const root=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'report-git-mode-')));t.after(()=>fs.rm(root,{recursive:true,force:true}));
+  const source=path.join(root,'source'),target=path.join(root,'target');await fs.mkdir(path.join(source,'server'),{recursive:true,mode:0o700});
+  await fs.writeFile(path.join(source,'server/package-lock.json'),'{}',{mode:0o600});
+  const execute=promisify(execFile),git=args=>execute('git',args,{cwd:source,timeout:10000,maxBuffer:65536});
+  await git(['init','--quiet']);await git(['add','.']);await git(['-c','user.name=Fictional Fixture','-c','user.email=fixture@example.invalid','commit','--quiet','-m','Fixture']);
+  const before=process.umask(0o002);try{await git(['clone','--quiet','--no-checkout','--',source,target]);await git(['-C',target,'checkout','--quiet','--detach','HEAD']);}
+  finally{process.umask(before);}
+  assert.equal((await fs.stat(path.join(target,'server/package-lock.json'))).mode&0o777,0o664);
+  assert.equal((await fs.stat(path.join(target,'server'))).mode&0o777,0o775);
+  assert.equal((await fs.stat(path.join(source,'server/package-lock.json'))).mode&0o777,0o600);
+});
+
+test('a fresh real Git preparation pins its own077 umask and restores the caller mask without changing original code', async t => {
+  const f = await realGitPreparationFixture(t), originalMode = (await fs.stat(f.legacyCode)).mode;
+  const previous = process.umask(0o002);
+  try {
+    await f.run(); assert.equal(process.umask(), 0o002);
+    assert.equal((await fs.stat(path.join(f.release, 'server'))).mode & 0o777, 0o700);
+    for (const name of ['package.json', 'package-lock.json'])
+      assert.equal((await fs.stat(path.join(f.release, 'server', name))).mode & 0o777, 0o600);
+    assert.equal((await fs.stat(f.legacyCode)).mode, originalMode);
+  } finally { process.umask(previous); }
+});
+
+async function existingOrdinaryGitRelease(t) {
+  const f = await realGitPreparationFixture(t);
+  await fs.mkdir(f.release, { recursive: true, mode: 0o700 });
+  const previous = process.umask(0o002);
+  try {
+    await f.git(['clone', '--quiet', '--shared', '--dissociate', '--no-checkout', '--', f.appRoot, f.release]);
+    await f.git(['-C', f.release, 'checkout', '--quiet', '--detach', f.releaseSha]);
+  } finally { process.umask(previous); }
+  assert.equal((await fs.stat(path.join(f.release, 'server'))).mode & 0o777, 0o775);
+  for (const name of ['package.json', 'package-lock.json'])
+    assert.equal((await fs.stat(path.join(f.release, 'server', name))).mode & 0o777, 0o664);
+  return f;
+}
+
+test('an existing ordinary002 clone tightens only its server directory and two tracked package leaves through exact byte-checked descriptors', async t => {
+  const f = await existingOrdinaryGitRelease(t), names = ['package.json', 'package-lock.json'];
+  const snapshot = async file => { const stat = await fs.stat(file, { bigint: true });
+    return { ino: stat.ino, dev: stat.dev, mtimeNs: stat.mtimeNs, bytes: await fs.readFile(file) }; };
+  const before = await Promise.all(names.map(name => snapshot(path.join(f.release, 'server', name))));
+  const stableStat = stat => Object.fromEntries(Object.entries(stat).filter(([name]) => !name.startsWith('atime')));
+  const original = await Promise.all([...names, 'vendor/driver-audits/integration/hosted/supabase-archive.mjs'].map(async name => ({
+    name, stat: stableStat(await fs.stat(path.join(f.server, name), { bigint: true })), bytes: await fs.readFile(path.join(f.server, name)) })));
+  await f.run(); await f.run();
+  assert.equal((await fs.stat(path.join(f.release, 'server'))).mode & 0o777, 0o700);
+  for (const [index, name] of names.entries()) {
+    const file = path.join(f.release, 'server', name); assert.equal((await fs.stat(file)).mode & 0o777, 0o600);
+    assert.deepEqual(await snapshot(file), before[index]);
+  }
+  for (const item of original) { assert.deepEqual(stableStat(await fs.stat(path.join(f.server, item.name), { bigint: true })), item.stat);
+    assert.deepEqual(await fs.readFile(path.join(f.server, item.name)), item.bytes); }
+  assert.equal((await fs.stat(path.join(f.release, 'server/services'))).mode & 0o777, 0o775);
+});
+
+test('existing release metadata repair rejects symlinks, shared inodes and independent bytes without changing their targets', async t => {
+  for (const kind of ['symlink', 'hardlink', 'bytes', 'git-drift']) {
+    const f = await existingOrdinaryGitRelease(t), file = path.join(f.release, 'server/package-lock.json');
+    const outside = path.join(f.appRoot, 'outside-package'); await f.write(outside, await fs.readFile(file)); await fs.chmod(outside, 0o664);
+    const stableStat = stat => Object.fromEntries(Object.entries(stat).filter(([name]) => !name.startsWith('atime')));
+    const beforeBytes = await fs.readFile(outside);
+    if (kind === 'symlink' || kind === 'hardlink') {
+      await fs.unlink(file); if (kind === 'symlink') await fs.symlink(outside, file); else await fs.link(outside, file);
+    } else if (kind === 'bytes') await fs.writeFile(file, '{"independent":true}');
+    else { const exec = f.adapters.exec; f.adapters.exec = async (command, args, options) => {
+      const result = await exec(command, args, options);
+      if (command === 'git' && args.includes('show') && args.at(-1) === 'HEAD:server/package-lock.json')
+        await fs.writeFile(file, '{"independent":true}');
+      return result;
+    }; }
+    const before = stableStat(await fs.stat(outside, { bigint: true })), originalUmask = process.umask();
+    await assert.rejects(f.run(), error => /^prepare-release-/.test(error.phase)); assert.equal(process.umask(), originalUmask);
+    assert.deepEqual(stableStat(await fs.stat(outside, { bigint: true })), before); assert.deepEqual(await fs.readFile(outside), beforeBytes);
+    assert(!f.commands.some(row => row.file === '/usr/bin/npm' && row.args[0] === 'ci'));
+  }
+});
+
+test('target-only permission tightening rejects an exposed boundary, wrong owner or pathname swap without chmodding an outside object', async t => {
+  for (const kind of ['boundary', 'owner', 'swap']) {
+    const f = await existingOrdinaryGitRelease(t), file = path.join(f.release, 'server/package-lock.json');
+    const outside = path.join(f.appRoot, 'outside-repair-target'); await f.write(outside, await fs.readFile(file)); await fs.chmod(outside, 0o664);
+    const bytes = await fs.readFile(outside), initial = await fs.stat(outside, { bigint: true });
+    const originalOpen = fs.open, originalLstat = fs.lstat; let reached = false;
+    if (kind === 'boundary') await fs.chmod(f.release, 0o755);
+    if (kind === 'owner') fs.lstat = async (name, options) => {
+      const info = await originalLstat(name, options);
+      if (name === path.join(f.release, 'server') && options?.bigint) {
+        reached = true; const changed = Object.create(info); Object.defineProperty(changed, 'uid', { value: info.uid + 1n }); return changed;
+      }
+      return info;
+    };
+    if (kind === 'swap') fs.open = async (name, ...args) => {
+      const handle = await originalOpen(name, ...args);
+      if (name === file && !reached) { reached = true; await fs.rename(file, file + '.retained'); await fs.symlink(outside, file); }
+      return handle;
+    };
+    try { await assert.rejects(f.run(), error => /^prepare-release(?:-|$)/.test(error.phase)); }
+    finally { fs.open = originalOpen; fs.lstat = originalLstat; }
+    if (kind !== 'boundary') assert(reached);
+    const after = await fs.stat(outside, { bigint: true });
+    for (const key of ['ino', 'dev', 'mode', 'uid', 'gid', 'size', 'mtimeNs', 'ctimeNs']) assert.equal(after[key], initial[key]);
+    assert.deepEqual(await fs.readFile(outside), bytes);
+    assert(!f.commands.some(row => row.file === '/usr/bin/npm' && row.args[0] === 'ci'));
+  }
 });
 
 test('preparation rejects a linked private parent before creating any directory outside the release', async t => {
@@ -1151,7 +1283,7 @@ test('release transport failures seal the bounded private cause and retain exact
 test('a release readback guard seals its private stack and fixed metadata without accepting or changing the release', async t => {
   const f = await preparationFixture(t), execute = f.adapters.exec;
   f.adapters.exec = async (file, args, options) => {
-    if (file === 'git' && args[0] === '-C' && args[2] === 'rev-parse' && args[3] === 'HEAD') return { stdout: 'f'.repeat(40) + '\n' };
+    if (file === 'git' && args[0] === '-C' && args[1] !== f.appRoot && args[2] === 'rev-parse' && args[3] === 'HEAD') return { stdout: 'f'.repeat(40) + '\n' };
     return execute(file, args, options);
   };
   await assert.rejects(f.runPrepare(), error => {
