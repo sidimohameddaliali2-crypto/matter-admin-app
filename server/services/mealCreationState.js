@@ -1,6 +1,7 @@
 import { validateCycleMealSnapshot } from './menuComponentSnapshot.js';
 import { createHash } from 'node:crypto';
 import { deduplicateMeals, mealFingerprint, rewriteDuplicateBoards } from './mealLibraryDuplicates.js';
+import { updateMealCycles, recoverMealCycles, cycleIdentity } from './mealCreationCycles.js';
 
 const fail = (message, statusCode = 400) => { throw Object.assign(new Error(message), { statusCode }); };
 const plain = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -77,6 +78,7 @@ export function changeMealCreationState(current, change, missingOnly = false) {
   if (!plain(change)) fail('A library change is required.');
   if (change.skipDuplicates !== undefined && typeof change.skipDuplicates !== 'boolean') fail('The duplicate handling option must be true or false.');
   const catalogue = clone(current.catalogue), boards = clone(current.boards);
+  const imported = [];
   const initial = deduplicateMeals(catalogue.meals, current.aliases || []);
   catalogue.meals = initial.meals;
   let aliases = initial.aliases;
@@ -87,6 +89,7 @@ export function changeMealCreationState(current, change, missingOnly = false) {
     for (const meal of incoming.meals) {
       const canonicalId = fingerprints.get(mealFingerprint(meal));
       if ((change.skipDuplicates || missingOnly) && canonicalId) {
+        imported.push({ meal, mealId: canonicalId, source: incoming.source });
         if (!byId.has(meal.id) && meal.id !== canonicalId) aliases.push({ from: meal.id, to: canonicalId });
         const canonical = byId.get(canonicalId);
         const cycleDays = [...new Set([canonical.day, ...(canonical.cycleDays || []), meal.day, ...(meal.cycleDays || [])].filter(Boolean))];
@@ -101,29 +104,44 @@ export function changeMealCreationState(current, change, missingOnly = false) {
           const importedMealId = meal.id, base = `${meal.id}~${createHash('sha256').update(mealFingerprint(meal)).digest('hex').slice(0,12)}`;
           let id = base, suffix = 2; while (byId.has(id)) id = `${base}-${suffix++}`;
           const variant = { ...meal, id, importedMealId };
-          byId.set(id, variant); fingerprints.set(mealFingerprint(variant), id); continue;
+          byId.set(id, variant); fingerprints.set(mealFingerprint(variant), id);
+          imported.push({ meal, mealId: id, source: incoming.source }); continue;
         }
         const previous = byId.get(meal.id);
         if (previous && fingerprints.get(mealFingerprint(previous)) === meal.id) fingerprints.delete(mealFingerprint(previous));
         byId.set(meal.id, meal);
         if (!fingerprints.has(mealFingerprint(meal))) fingerprints.set(mealFingerprint(meal), meal.id);
       }
+      if (change.skipDuplicates || missingOnly || incoming.source) imported.push({ meal, mealId: meal.id, source: incoming.source });
     }
     catalogue.meals = [...byId.values()];
     if (incoming.source && (!missingOnly || !catalogue.source)) catalogue.source = incoming.source;
   }
   const unique = deduplicateMeals(catalogue.meals, aliases); catalogue.meals = unique.meals; aliases = unique.aliases;
-  if (change.boards !== undefined) for (const [key, value] of Object.entries(checkedBoards(change.boards, catalogue.meals, aliases))) {
-    if (!missingOnly || !Object.hasOwn(boards, key)) boards[key] = value;
+  const replacements = new Map(aliases.map(alias => [alias.from, alias.to]));
+  const cycles = updateMealCycles(current, catalogue, aliases, imported.map(value => ({ ...value, mealId: replacements.get(value.mealId) || value.mealId })));
+  if (change.cycleId !== undefined && (typeof change.cycleId !== 'string' || !cycles.some(cycle => cycle.id === change.cycleId))) fail('Choose a saved cycle before updating its week.');
+  if (change.boards !== undefined) {
+    const target = change.cycleId ? cycles.find(cycle => cycle.id === change.cycleId).boards : boards;
+    for (const [key, value] of Object.entries(checkedBoards(change.boards, catalogue.meals, aliases))) {
+      if (!missingOnly || !Object.hasOwn(target, key)) target[key] = value;
+    }
+    if (change.cycleId) {
+      const cycle = cycles.find(value => value.id === change.cycleId);
+      for (const mealId of new Set(Object.values(cycle.boards).flat(3).map(entry => entry.mealId))) {
+        if (!cycle.meals.some(item => item.mealId === mealId)) cycle.meals.push({ mealId, sourceMealId: mealId, day: '' });
+      }
+    }
   }
-  const state = { catalogue, boards: compatibleBoards(rewriteDuplicateBoards(boards, aliases), catalogue.meals), aliases };
+  for (const cycle of cycles) cycle.boards = compatibleBoards(rewriteDuplicateBoards(cycle.boards, aliases), catalogue.meals);
+  const state = { catalogue, boards: compatibleBoards(rewriteDuplicateBoards(boards, aliases), catalogue.meals), aliases, cycles };
   // Stay below MongoDB's document limit and return a useful error before writing.
   if (Buffer.byteLength(JSON.stringify(state)) > 8 * 1024 * 1024) fail('The meal library is too large to save. No data was changed.', 413);
   return state;
 }
 
-// Called on initial server-library creation only. Saved menus and their items
-// are read, never changed. Newest menu snapshots win among historical copies.
+// Used for initial creation and repair of older shared documents. Saved menus
+// and their items are read, never changed. Newest historical snapshots win.
 export function recoverMealCreationState(menus) {
   const byId = new Map(), boards = {};
   let skippedSnapshots = 0;
@@ -147,13 +165,56 @@ export function recoverMealCreationState(menus) {
     for (const [key, board] of Object.entries(menuBoards)) if (!Object.hasOwn(boards, key)) boards[key] = board;
   }
   const catalogue = { meals: [...byId.values()], source: byId.size ? 'Recovered from saved menus' : '' };
-  return { catalogue, boards: compatibleBoards(boards, catalogue.meals), recovery: { meals: byId.size, weeks: Object.keys(boards).length, skippedSnapshots } };
+  const cycles = recoverMealCycles(menus, catalogue, checkedMeal).map(cycle => ({ ...cycle, boards: compatibleBoards(cycle.boards, catalogue.meals) }));
+  return { catalogue, boards: compatibleBoards(boards, catalogue.meals), cycles, recovery: { meals: byId.size, weeks: Object.keys(boards).length, skippedSnapshots } };
+}
+
+// A one-time migration/repair for older shared documents. Newer recipes and
+// existing (including deliberately empty) weeks always win over saved copies.
+export function repairMealCreationState(current, recovered) {
+  const baseline = changeMealCreationState(current, {});
+  const repaired = changeMealCreationState(current, { catalogue: recovered.catalogue, boards: recovered.boards }, true);
+  const mapped = new Map(repaired.aliases.map(alias => [alias.from, alias.to]));
+  repaired.aliases = deduplicateMeals(repaired.catalogue.meals, [
+    ...(recovered.aliases || []).map(alias => ({ from: alias.from, to: mapped.get(alias.to) || alias.to })),
+    ...repaired.aliases,
+  ]).aliases;
+  const replacements = new Map(repaired.aliases.map(alias => [alias.from, alias.to]));
+  const latestLegacy = baseline.cycles.find(cycle => cycle.source === current.catalogue.source) || baseline.cycles.at(-1);
+  const storedWeek = (cycle, key) => {
+    if (current.cycles !== undefined) return Object.hasOwn(current.cycles.find(value => value.id === cycle.id)?.boards || {}, key);
+    if (!Object.hasOwn(current.boards, key)) return false;
+    const ids = new Set(cycle.meals.map(item => item.mealId));
+    return cycle.id === latestLegacy?.id || current.boards[key].flat(2).some(entry => ids.has(replacements.get(entry.mealId) || entry.mealId));
+  };
+  for (const source of recovered.cycles) {
+    let target = repaired.cycles.find(cycle => cycle.id === source.id);
+    if (!target) { target = { ...clone(source), meals: [], boards: {} }; repaired.cycles.push(target); }
+    const existing = baseline.cycles.find(cycle => cycle.id === source.id);
+    if (!existing) target.boards = {};
+    for (const item of source.meals) {
+      const mapped = { ...item, mealId: replacements.get(item.mealId) || item.mealId };
+      const index = target.meals.findIndex(value => value.mealId === mapped.mealId && value.sourceMealId === mapped.sourceMealId);
+      if (index < 0) target.meals.push(mapped);
+      else if (current.cycles === undefined && !current.catalogue.meals.some(meal => meal.id === mapped.sourceMealId || meal.importedMealId === mapped.sourceMealId)) {
+        // Alias-only migration could only guess the original source days. An
+        // intact saved occurrence is better evidence than that fallback.
+        target.meals[index] = mapped;
+      }
+    }
+    for (const [key, board] of Object.entries(source.boards)) if (!existing || !storedWeek(existing, key)) {
+      target.boards[key] = compatibleBoards(checkedBoards({ [key]: board }, repaired.catalogue.meals, repaired.aliases), repaired.catalogue.meals)[key];
+    }
+  }
+  if (Buffer.byteLength(JSON.stringify(repaired)) > 8 * 1024 * 1024) fail('The meal library is too large to save. No data was changed.', 413);
+  return repaired;
 }
 
 // Old per-tab drafts are a one-way, additive migration. An old browser must
 // never replace a newer database recipe or reset an intentionally empty week.
 export function mergeLegacyDraft(current, legacy, missingOnly = true) {
   if (!legacy) return changeMealCreationState(current, {});
+  const existingCycles = updateMealCycles(current, current.catalogue, current.aliases || []);
   const merged = changeMealCreationState(current, { catalogue: legacy.catalogue }, missingOnly);
   const boards = {};
   for (const [key, days] of Object.entries(legacy.boards || {})) {
@@ -161,6 +222,15 @@ export function mergeLegacyDraft(current, legacy, missingOnly = true) {
     // Keep the original browser draft available if it has unrecoverable IDs.
     try { Object.assign(boards, checkedBoards({ [key]: days }, merged.catalogue.meals, merged.aliases)); }
     catch { continue; }
+  }
+  const sourceCycles = new Set(legacy.catalogue.meals.map(meal => cycleIdentity(meal, legacy.catalogue.source).id));
+  for (const cycle of merged.cycles) {
+    const ids = new Set(cycle.meals.map(item => item.mealId));
+    for (const [key, days] of Object.entries(boards)) {
+      if (missingOnly && Object.hasOwn(existingCycles.find(saved => saved.id === cycle.id)?.boards || {}, key)) continue;
+      const filtered = days.map(groups => groups.map(entries => entries.filter(entry => ids.has(entry.mealId))));
+      if (sourceCycles.has(cycle.id) || filtered.some(groups => groups.some(entries => entries.length))) cycle.boards[key] = compatibleBoards({ [key]: filtered }, merged.catalogue.meals)[key];
+    }
   }
   return { ...merged, boards: compatibleBoards(rewriteDuplicateBoards({ ...merged.boards, ...boards }, merged.aliases), merged.catalogue.meals) };
 }

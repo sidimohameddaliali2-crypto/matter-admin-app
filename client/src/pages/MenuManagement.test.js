@@ -311,3 +311,23 @@ test('Cycle import supplies a dated title when no title was entered',async()=>{
     await click('Create from Cycle Menu');expect(node.querySelector('input[placeholder="Menu Title"]').value).toBe('Week 1 · 2026-11-16 – 2026-11-22');
   }finally{await act(async()=>root.unmount());node.remove();sessionStorage.clear();jest.clearAllMocks();}
 });
+
+
+test('first cycle migration asks staff to choose instead of silently copying the first cycle',async()=>{
+  const meal={id:'NOV3-004',name:'Shared dish',mealKind:'Main meal',mealType:'Chicken',components:[{id:'p',type:'Protein',name:'Chicken',exclusions:[]}]};
+  const board=Array.from({length:7},()=>Array.from({length:4},()=>[]));board[0][1]=[{mealId:meal.id,isMatterCore:false}];
+  const cycles=['NOV3','NOV4'].map(id=>({id,name:id,meals:[{mealId:meal.id,sourceMealId:id+'-004',day:'DAY 1'}],boards:{'Main menu:Week 1':board}}));
+  mealCreationStore.load.mockResolvedValue({catalogue:{meals:[meal]},boards:{},cycles,revision:1});
+  api.get.mockResolvedValue({data:{success:true,data:[]}});api.post.mockClear();
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const click=async text=>act(async()=>[...node.querySelectorAll('button')].find(button=>button.textContent.trim()===text).click());
+  const fill=async(label,value)=>act(async()=>{const input=node.querySelector(`input[aria-label="${label}"]`);Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});
+  try{
+    await act(async()=>root.render(<MenuManagement/>));await click('New menu');await fill('Menu start date','2026-11-16');await fill('Menu end date','2026-11-22');
+    await click('Create from Cycle Menu');expect(node.textContent).toContain('Saved cycles loaded. Choose the cycle and week');
+    expect(node.querySelector('select[aria-label="Saved cycle"]')).not.toBeNull();
+    expect(node.querySelector('input[placeholder="Menu Title"]').value).toBe('');expect(api.post).not.toHaveBeenCalled();
+    await act(async()=>{const select=node.querySelector('select[aria-label="Saved cycle"]');select.value='NOV4';select.dispatchEvent(new Event('change',{bubbles:true}));});
+    await click('Create from Cycle Menu');expect(node.querySelector('input[placeholder="Menu Title"]').value).toContain('NOV4');
+  }finally{await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
+});

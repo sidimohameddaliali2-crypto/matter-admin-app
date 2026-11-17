@@ -37,17 +37,17 @@ function readDrafts(meals, saved = {}) {
   } catch { return {}; }
 }
 
-export default function WeeklyCycleBoard({ meals, source, onImport, importDialog, initialBoards = {}, revision = 0, onSaveBoards }) {
+export default function WeeklyCycleBoard({ meals, libraryMeals = meals, cycleSelector, source, onImport, importDialog, initialBoards = {}, revision = 0, onSaveBoards }) {
   const menu = 'Main menu';
   const [week, setWeek] = useState('Week 1');
-  const [boards, setBoards] = useState(() => readDrafts(meals, initialBoards));
+  const [boards, setBoards] = useState(() => readDrafts(libraryMeals, initialBoards));
   const pending = useRef(0), acceptedRevision = useRef(revision);
   useEffect(() => {
     if (!pending.current && revision >= acceptedRevision.current) {
       acceptedRevision.current = revision;
-      setBoards(readDrafts(meals, initialBoards));
+      setBoards(readDrafts(libraryMeals, initialBoards));
     }
-  }, [initialBoards, meals, revision]);
+  }, [initialBoards, libraryMeals, revision]);
   const [query, setQuery] = useState(''), [protein, setProtein] = useState(''), [slot, setSlot] = useState('');
   const [showWeekend, setShowWeekend] = useState(false), [importing, setImporting] = useState(false), [history, setHistory] = useState(false);
   const [selected, setSelected] = useState(null), [targetDay, setTargetDay] = useState('0'), [targetSlot, setTargetSlot] = useState('1');
@@ -55,7 +55,7 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
   const [dragMealId, setDragMealId] = useState(null), [dropTarget, setDropTarget] = useState(null);
   const key = `${menu}:${week}`;
   const board = boards[key] || (menu === 'Main menu' && week === 'Week 1' ? seedBoard(meals) : emptyBoard());
-  const byId = new Map(meals.map(meal => [meal.id, meal]));
+  const byId = new Map(libraryMeals.map(meal => [meal.id, meal]));
   const persistBoards = async updates => {
     pending.current++;
     setBoards(current => ({ ...current, ...updates }));
@@ -72,7 +72,7 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
   };
   const changeBoard = update => persistBoards({ [key]: update(board) });
   const entryCount = board.reduce((total, day) => total + day.flat().filter(entry => byId.has(entry.mealId)).length, 0);
-  const library = meals.filter(meal => meal.name.toLowerCase().includes(query.toLowerCase()) && (!protein || mealType(meal) === protein) && (!slot || cycleSlots(meal).includes(Number(slot))));
+  const library = libraryMeals.filter(meal => meal.name.toLowerCase().includes(query.toLowerCase()) && (!protein || mealType(meal) === protein) && (!slot || cycleSlots(meal).includes(Number(slot))));
   const addMeal = (meal, dayIndex, groupIndex) => {
     if (!cycleSlots(meal).includes(groupIndex)) { setMessage(`${meal.name} can only be placed in ${cycleSlots(meal).map(index => GROUPS[index]).join(' or ')}.`); return; }
     changeBoard(current => current.map((day, di) => di !== dayIndex ? day : day.map((group, gi) => gi !== groupIndex ? group : [...group, { mealId: meal.id, isMatterCore: false }])));
@@ -101,6 +101,7 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
   };
   return <div className="av2-weekly-board">
     <div className="av2-page-heading"><div><h1>Cycle Menu Planner</h1><p>One menu per group of plans. Add meals to each day and tag Matter Core meals.</p></div><Badge>Draft</Badge></div>
+    {cycleSelector}
     <div className="av2-actions av2-toolbar">
       <Action icon={Save} onClick={() => changeBoard(current => current).then(ok => { if (ok) setMessage('Cycle draft saved.'); })}>Save draft</Action>
       <Action primary icon={Check} disabled title="Publishing requires verified live recipe links">Publish</Action>

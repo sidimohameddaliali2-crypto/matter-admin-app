@@ -83,3 +83,64 @@ test('the full library and cycle survive creating a weekly menu, navigation and 
     expect(JSON.stringify(state)).toBe(before);
   }finally{await act(async()=>root.unmount());host.remove();sessionStorage.clear();}
 });
+
+
+test('selected named cycles and all meals survive copying and saving a dated menu',async()=>{
+  mockPath='/admin/meal-selection-v2/meals';global.IS_REACT_ACT_ENVIRONMENT=true;
+  const meal={id:'NOV3-004',name:'Shared chicken recipe',mealKind:'Main meal',mealType:'Chicken',carbCombined:'No',components:[{id:'p',type:'Protein',name:'Chicken',exclusions:['Nuts']}]};
+  const week=day=>{const value=Array.from({length:7},()=>Array.from({length:4},()=>[]));value[day][1]=[{mealId:meal.id,isMatterCore:day===0}];return value;};
+  const state={catalogue:{meals:[meal],source:'November4.xlsx'},boards:{},cycles:[
+    {id:'NOV3',name:'NOV3',source:'November3.xlsx',meals:[{mealId:meal.id,sourceMealId:'NOV3-004',day:'DAY 1'}],boards:{'Main menu:Week 1':week(0)}},
+    {id:'NOV4',name:'NOV4',source:'November4.xlsx',meals:[{mealId:meal.id,sourceMealId:'NOV4-020',day:'DAY 4'}],boards:{'Main menu:Week 1':week(3)}},
+  ],revision:5};
+  const before=JSON.stringify(state);let weekly;
+  const ok=data=>({data:{success:true,data:JSON.parse(JSON.stringify(data))}});
+  api.get.mockImplementation(async url=>ok(url==='/meal-creation'?state:url==='/menus'?weekly?[weekly]:[]:{}));
+  api.post.mockImplementation(async(url,body)=>{if(url==='/meal-creation/bootstrap')return ok(state);expect(url).toBe('/menus');weekly={_id:'named-weekly',...body};return ok(weekly);});
+  api.put.mockClear();
+  const host=document.createElement('div');document.body.appendChild(host);let root=createRoot(host);
+  const render=async view=>act(async()=>root.render(view));
+  const click=async text=>act(async()=>[...host.querySelectorAll('button')].find(button=>button.textContent.trim()===text).click());
+  const select=async value=>act(async()=>{const element=host.querySelector('select[aria-label="Saved cycle"]');element.value=value;element.dispatchEvent(new Event('change',{bubbles:true}));});
+  const fill=async(selector,value)=>act(async()=>{const element=host.querySelector(selector);Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(element,value);element.dispatchEvent(new Event('input',{bubbles:true}));});
+  try{
+    await render(<AdminMealSelectionV2/>);expect(host.querySelectorAll('.av2-meal-id')).toHaveLength(1);
+    await select('NOV4');expect(host.querySelector('.av2-meal-id').textContent).toBe('NOV4-020');expect(host.querySelector('.av2-meal-id').parentElement.textContent).toContain('DAY 4');
+    mockPath='/admin/meal-selection-v2/weekly-menu';await render(<AdminMealSelectionV2/>);
+    expect(host.querySelector('[aria-label="Thursday Main drop area"]').textContent).toContain(meal.name);
+    expect(host.querySelector('[aria-label="Monday Main drop area"]').textContent).not.toContain(meal.name);
+    await act(async()=>root.unmount());root=createRoot(host);await render(<MenuManagement/>);await click('New menu');await select('NOV4');
+    await fill('input[aria-label="Menu start date"]','2026-11-16');await fill('input[aria-label="Menu end date"]','2026-11-22');
+    await click('Create from Cycle Menu');await click('Save draft');
+    expect(weekly.days[3].items[0].cycleMeal.cycleSource).toMatchObject({cycleId:'NOV4',sourceMealId:'NOV4-020'});
+    expect(api.put).not.toHaveBeenCalled();expect(JSON.stringify(state)).toBe(before);
+    await act(async()=>root.unmount());root=createRoot(host);sessionStorage.clear();mockPath='/admin/meal-selection-v2/weekly-menu';await render(<AdminMealSelectionV2/>);
+    await select('NOV3');expect(host.querySelector('[aria-label="Monday Main drop area"]').textContent).toContain(meal.name);
+    await select('NOV4');expect(host.querySelector('[aria-label="Thursday Main drop area"]').textContent).toContain(meal.name);expect(JSON.stringify(state)).toBe(before);
+  }finally{await act(async()=>root.unmount());host.remove();}
+});
+
+
+test('a new unscheduled recipe remains visible after saving from a selected cycle',async()=>{
+  global.IS_REACT_ACT_ENVIRONMENT=true;
+  mockPath='/admin/meal-selection-v2/meals';
+  const state={catalogue:{meals:[{id:'NOV3-001',name:'Existing dish',day:'DAY 1',mealKind:'Main meal',mealType:'Chicken',components:[{id:'p',type:'Protein',name:'Chicken',exclusions:[]}]}],source:'NOV3.xlsx'},boards:{},cycles:[{id:'NOV3',name:'NOV3',source:'NOV3.xlsx',meals:[{mealId:'NOV3-001',sourceMealId:'NOV3-001',day:'DAY 1'}],boards:{}}],revision:0};
+  const ok=data=>({data:{success:true,data:JSON.parse(JSON.stringify(data))}});
+  api.post.mockReset().mockImplementation(async()=>ok(state));
+  api.put.mockReset().mockImplementation(async(url,body)=>{state.catalogue.meals.push(...body.catalogue.meals);state.revision++;return ok(state);});
+  const host=document.createElement('div');document.body.appendChild(host);const root=createRoot(host);
+  const click=async text=>act(async()=>[...host.querySelectorAll('button')].find(button=>button.textContent.trim()===text).click());
+  try{
+    await act(async()=>root.render(<AdminMealSelectionV2/>));
+    await act(async()=>{const select=host.querySelector('select[aria-label="Saved cycle"]');select.value='NOV3';select.dispatchEvent(new Event('change',{bubbles:true}));});
+    mockPath='/admin/meal-selection-v2/meals/new';await act(async()=>root.render(<AdminMealSelectionV2/>));
+    await act(async()=>[...host.querySelectorAll('input[type=radio]')].find(input=>input.parentElement.textContent==='Snack').click());
+    await act(async()=>{const input=host.querySelector('label.av2-field input:not([type])');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'New unscheduled snack');input.dispatchEvent(new Event('input',{bubbles:true}));});
+    await click('Save draft');
+    expect(api.put).toHaveBeenCalledTimes(1);
+    mockPath='/admin/meal-selection-v2/meals';await act(async()=>root.render(<AdminMealSelectionV2/>));
+    expect(host.querySelector('select[aria-label="Saved cycle"]').value).toBe('');
+    expect(host.textContent).toContain('New unscheduled snack');
+    expect(state.cycles[0].meals).toHaveLength(1);
+  }finally{await act(async()=>root.unmount());host.remove();}
+});

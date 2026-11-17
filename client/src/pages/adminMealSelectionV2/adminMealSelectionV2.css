@@ -45,3 +45,6 @@
 
 /* Keep the meal library in view within the admin's scrolling workspace. */
 @media(min-width:1101px){.av2-weekly-board .av2-library{position:sticky;top:16px;align-self:start;max-height:calc(100dvh - 104px)}}
+
+.av2-cycle-selector { display: flex; align-items: center; gap: 12px; margin: 12px 0; font-size: 14px; font-weight: 600; }
+.av2-cycle-selector select { max-width: 100%; min-width: 180px; padding: 8px 12px; border: 1px solid var(--av2-line, #e5e7eb); border-radius: 6px; background: white; color: inherit; }

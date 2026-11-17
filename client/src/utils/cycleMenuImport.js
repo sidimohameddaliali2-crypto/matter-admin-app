@@ -20,8 +20,12 @@ const seed = meals => {
   return board;
 };
 
-// A one-way copy into a NEW dated menu. Neither browser cycle store is written.
-export function importCycleMenu({ catalogue, boards, week, startDate, endDate }) {
+// A one-way copy into a NEW dated menu. The saved library and cycles are never written.
+export function importCycleMenu({ catalogue, boards, cycles = [], cycleId, week, startDate, endDate }) {
+  const cycle = cycleId ? cycles.find(item => item.id === cycleId) : null;
+  if (cycleId && !cycle) fail('The selected saved cycle could not be found. Reload the saved cycles.');
+  if (cycles.length && !cycle) fail('Choose a saved cycle before importing.');
+  if (cycle) boards = cycle.boards;
   if (!['Week 1', 'Week 2'].includes(week)) fail('Choose Week 1 or Week 2.');
   const start = dateKey(startDate), end = dateKey(endDate);
   if (start.getUTCDay() !== 1 || end.getTime() !== start.getTime() + 6 * 86400000) fail('Choose a Monday start date and the following Sunday end date for cycle import.');
@@ -33,7 +37,7 @@ export function importCycleMenu({ catalogue, boards, week, startDate, endDate })
   });
   if (boards === null || typeof boards !== 'object' || Array.isArray(boards)) fail('The saved Cycle Menu board could not be read.');
   const key = `Main menu:${week}`;
-  const board = Object.prototype.hasOwnProperty.call(boards, key) ? boards[key] : week === 'Week 1' ? seed(catalogue.meals) : null;
+  const board = Object.prototype.hasOwnProperty.call(boards, key) ? boards[key] : !cycle && week === 'Week 1' ? seed(catalogue.meals) : null;
   if (!Array.isArray(board) || board.length !== 7) fail('Save the selected Cycle Menu week before importing it.');
   let total = 0;
   const days = board.map((groups, day) => {
@@ -52,6 +56,7 @@ export function importCycleMenu({ catalogue, boards, week, startDate, endDate })
       const dishKey = `${type}:${meal.name.trim().toLowerCase()}`;
       if (seenIds.has(meal.id) || seenNames.has(dishKey)) fail(`${meal.name} appears more than once on ${date}; remove duplicate assignments before importing.`);
       seenIds.add(meal.id); seenNames.add(dishKey); total++;
+      const occurrence = cycle?.meals.find(entry => entry.mealId === meal.id && cycleDayIndexes(entry).includes(day)) || cycle?.meals.find(entry => entry.mealId === meal.id);
       return {
         mealName: meal.name.trim(), mealType: type,
         proteinSource: nameOf(meal, ['Protein', 'Breakfast', 'Snack']), carbs: nameOf(meal, ['Carb']),
@@ -60,7 +65,7 @@ export function importCycleMenu({ catalogue, boards, week, startDate, endDate })
         usedForCorePlan: type === 'main' && !!entry.isMatterCore,
         ingredients: '', intolerances: '', allergens: '',
         portionIngredients: [], carbIngredients: [], vegIngredients: [], sauceIngredients: [],
-        cycleMeal: clone({ ...meal, cycleSource: { workbook: catalogue.source || '', week, day: day + 1 } }),
+        cycleMeal: clone({ ...meal, cycleSource: { workbook: cycle?.source || catalogue.source || '', week, day: day + 1, ...(cycle ? { cycleId: cycle.id, cycleName: cycle.name, sourceMealId: occurrence?.sourceMealId || meal.id, sourceDay: occurrence?.day || '', sourceDays: occurrence?.cycleDays || [] } : {}) } }),
       };
     }));
     return { date, items };

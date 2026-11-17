@@ -50,12 +50,43 @@ test('routes are staff-authenticated and require effective menus permission',()=
 });
 
 test('bootstrap removes existing duplicate records once, remaps Core placements and retains aliases',()=>fixtures(async saved=>{
+  saved.menus=[];
   const canonical=meal('first'),duplicate={...meal('second'),name:'FIRST'};
   const week=board();week[4][2]=[{mealId:'second',isMatterCore:true}];
   saved.state={_id:'shared',catalogue:{meals:[canonical,duplicate],source:'Own.xlsx'},boards:{'Main menu:Week 2':week},revision:3,aliases:[]};
   const response=res();await route('post','/bootstrap')({body:{}},response);
   assert.equal(response.statusCode,200);assert.equal(response.body.data.catalogue.meals.length,1);assert.deepEqual(response.body.data.boards['Main menu:Week 2'][4][2],[{mealId:'first',isMatterCore:true}]);assert.deepEqual(response.body.data.aliases,[{from:'second',to:'first'}]);assert.equal(response.body.data.revision,4);
   const again=res();await route('post','/bootstrap')({body:{}},again);assert.equal(saved.writes,1);assert.deepEqual(again.body.data,response.body.data);
+}));
+
+test('bootstrap repairs an existing empty shared document from saved cycles without changing dated menus',()=>fixtures(async saved=>{
+  saved.state={_id:'shared',catalogue:{meals:[],source:''},boards:{},cycles:[],aliases:[],revision:7};
+  saved.menus=['NOV4','NOV3'].map((id,index)=>({meals:[{mealType:'main',items:[{cycleMeal:{...meal(id+'-004'),day:'DAY '+(index+1),cycleSource:{workbook:id+'.xlsx',week:'Week 1',day:index+1}},rotationCategory:'sub',usedForCorePlan:true}]}]}));
+  const before=JSON.stringify(saved.menus), response=res();await route('post','/bootstrap')({body:{}},response);
+  assert.equal(response.statusCode,200);assert.equal(response.body.data.catalogue.meals.length,2);assert.equal(response.body.data.cycles.length,2);
+  assert.equal(response.body.data.cycles.find(cycle=>cycle.id==='NOV3').boards['Main menu:Week 1'][1][2][0].isMatterCore,true);
+  const writes=saved.writes,again=res();await route('post','/bootstrap')({body:{}},again);assert.equal(saved.writes,writes);assert.deepEqual(again.body.data,response.body.data);assert.equal(JSON.stringify(saved.menus),before);
+}));
+
+test('one-time legacy migration repairs missing saved cycles while preserving edited recipes and empty saved weeks',()=>fixtures(async saved=>{
+  const existing={...meal('NOV3-004'),name:'Edited recipe',day:'DAY 1'};
+  saved.state={_id:'shared',catalogue:{meals:[existing],source:'NOV3.xlsx'},boards:{'Main menu:Week 1':board()},revision:2,aliases:[]};
+  saved.menus=['NOV4','NOV3'].map(id=>({meals:[{mealType:'main',items:[{cycleMeal:{...meal(id+'-004'),day:'DAY 1',cycleSource:{workbook:id+'.xlsx',week:'Week 1',day:1}},rotationCategory:'sub',usedForCorePlan:true}]}]}));
+  const before=JSON.stringify(saved.menus), response=res();await route('post','/bootstrap')({body:{}},response);
+  assert.equal(response.statusCode,200);assert.equal(response.body.data.catalogue.meals.find(value=>value.id==='NOV3-004').name,'Edited recipe');
+  assert.deepEqual(response.body.data.cycles.find(value=>value.id==='NOV3').boards['Main menu:Week 1'],board());
+  assert.equal(response.body.data.cycles.find(value=>value.id==='NOV4').boards['Main menu:Week 1'][0][2][0].isMatterCore,true);
+  assert.equal(JSON.stringify(saved.menus),before);
+  const writes=saved.writes;await route('post','/bootstrap')({body:{}},res());assert.equal(saved.writes,writes);
+}));
+
+test('selected cycle board updates persist independently with the revision guard',()=>fixtures(async saved=>{
+  saved.menus=[];await route('post','/bootstrap')({body:{}},res());
+  let response=res();await route('put','/')({body:{revision:0,catalogue:{meals:[{...meal('NOV3-004'),day:'DAY 1'},{...meal('NOV4-004'),day:'DAY 2'}],source:'November.xlsx'},skipDuplicates:true}},response);
+  assert.equal(response.statusCode,200);const other=structuredClone(response.body.data.cycles.find(value=>value.id==='NOV4'));
+  const changed=board();changed[5][2]=[{mealId:'NOV3-004',isMatterCore:true}];response=res();await route('put','/')({body:{revision:1,cycleId:'NOV3',boards:{'Main menu:Week 1':changed}}},response);
+  assert.equal(response.statusCode,200);assert.deepEqual(response.body.data.cycles.find(value=>value.id==='NOV4'),other);assert.deepEqual(response.body.data.boards,{});
+  const reload=res();await route('get','/')({},reload);assert.deepEqual(reload.body.data.cycles,response.body.data.cycles);
 }));
 
 test('repeat upload skips a duplicate recipe and later board saves accept its old import ID',()=>fixtures(async saved=>{
