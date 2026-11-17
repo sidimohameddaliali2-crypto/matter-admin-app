@@ -272,3 +272,62 @@ test('worker and second-census failures identify their fixed boundary without ex
     && error.message === 'Supabase handoff stopped at readback-seed');
   assert.equal(await fs.readFile(path.join(f.root, 'seed.json'), 'utf8'), f.secret);
 });
+
+async function stagedSource(f, names, { writeFiles = false } = {}) {
+  const files = names.map(name => ({ path: name, sha256: hash('export {};\n'), bytes: 11 }));
+  const manifest = JSON.stringify({ schemaVersion: 1, files, entrypoints: [] }), manifestSha256 = hash(manifest);
+  const root = path.join(f.server, '.private/driver-audit-source', manifestSha256), runtimeRoot = path.join(root, 'runtime');
+  for (const name of writeFiles ? names : []) {
+    await f.write(path.join(runtimeRoot, name), 'export {};\n');
+  }
+  await f.write(path.join(runtimeRoot, 'manifest.private.json'), manifest);
+  const environment = await f.write(path.join(root, 'environment.private.json'), '{}');
+  await f.write(path.join(root, 'source.json'), JSON.stringify({ version: 1, root, runtimeRoot, manifestSha256,
+    environment, nodeExecutable: process.execPath, nodeVersion: process.version }));
+  return { root, runtimeRoot };
+}
+
+test('listed source and builder paths retain legitimate leading-dot files and underscore directories', async t => {
+  const f = await fixture(t), { gunzipSync } = await import('node:zlib');
+  await stagedSource(f, ['source/.vercelignore', 'source/_lib/handler.mjs'], { writeFiles: true });
+  const builderFile = path.join(f.root, 'builder/runtime-manifest.json'), builder = JSON.parse(await fs.readFile(builderFile));
+  for (const name of ['.private-build-config', '_lib/reader.mjs']) builder.files[name] = (await f.write(path.join(f.root, 'builder', name), 'export {};\n')).sha256;
+  const saved = await f.write(builderFile, JSON.stringify(builder));
+  await f.write(f.configFile, JSON.stringify({ ...f.config, builderSha256: saved.sha256 }));
+  const result = await f.run(), sealed = openTransferSecrets(privateKey, result.capsule);
+  const evidence = JSON.parse(gunzipSync(Buffer.from(sealed.metadataGzipBase64, 'base64')));
+  assert.equal(evidence.source.releases[0].files, 2);
+  assert.equal(evidence.sync.builder.files, 75);
+  assert.equal(evidence.mongoConnections, 0);
+});
+
+test('listed paths still reject traversal, absolute, backslash, encoded and non-normalized identities', async t => {
+  for (const name of ['source/../escape.mjs', '/source/file.mjs', 'source\\file.mjs', 'source/%2e%2e/escape.mjs',
+    'source/%2fescape.mjs', 'source/./file.mjs', 'source//file.mjs', 'source/file.mjs/', 'source/..',
+    'source/file.mjs\u0000', 'source/C:/file.mjs', 'source/' + 'a'.repeat(1024)]) {
+    const f = await fixture(t); await stagedSource(f, [name]);
+    await assert.rejects(f.run(), error => error.phase === 'inspect-source');
+    const b = await fixture(t), file = path.join(b.root, 'builder/runtime-manifest.json');
+    const manifest = JSON.parse(await fs.readFile(file)); manifest.files[name] = hash('unread');
+    const saved = await b.write(file, JSON.stringify(manifest));
+    await b.write(b.configFile, JSON.stringify({ ...b.config, builderSha256: saved.sha256 }));
+    await assert.rejects(b.run(), error => error.phase === 'inspect-builder-tree');
+  }
+});
+
+test('legitimate leading-dot paths still reject symlinked files and parent directories', async t => {
+  for (const parent of [false, true]) {
+    const f = await fixture(t), source = await stagedSource(f, ['source/.vercelignore', 'source/_lib/handler.mjs'], { writeFiles: true });
+    if (parent) {
+      const directory = path.join(source.runtimeRoot, 'source/_lib');
+      await fs.rm(directory, { recursive: true });
+      const outside = path.join(f.server, '.private/outside');
+      await f.write(path.join(outside, 'handler.mjs'), 'export {};\n');
+      await fs.symlink(outside, directory);
+    } else {
+      const file = path.join(source.runtimeRoot, 'source/.vercelignore');
+      await fs.unlink(file); await fs.symlink(path.join(f.server, '.env'), file);
+    }
+    await assert.rejects(f.run(), error => error.phase === 'inspect-source');
+  }
+});
