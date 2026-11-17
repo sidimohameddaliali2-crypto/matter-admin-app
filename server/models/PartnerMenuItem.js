@@ -19,6 +19,8 @@ const partnerMenuItemSchema = new mongoose.Schema({
   // offer a repeated Monday/Friday dish on the intervening days.
   availableDates: { type: [Date], default: undefined },
   menuSelectionDatesByMenu: { type: Map, of: [Date], default: undefined },
+  breakfastSyncKey: { type: String, default: undefined },
+  breakfastScheduleRevision: { type: Number, default: 0 },
   category: { type: String, default: '' },
   ingredients: { type: [String], default: [] },
   sortOrder: { type: Number, default: 0 },
@@ -29,5 +31,9 @@ const partnerMenuItemSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 partnerMenuItemSchema.index({ mealType: 1, sortOrder: 1 });
+// Only normalized breakfast keys participate; legacy items can be adopted
+// without deleting or re-keying order/invoice references.
+partnerMenuItemSchema.index({ breakfastSyncKey: 1 }, { unique: true,
+  partialFilterExpression: { source: 'menu-selection', mealType: 'breakfast', breakfastSyncKey: { $type: 'string' } } });
 
 export default mongoose.model('PartnerMenuItem', partnerMenuItemSchema);

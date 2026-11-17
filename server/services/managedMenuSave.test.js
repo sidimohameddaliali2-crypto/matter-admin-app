@@ -367,3 +367,27 @@ test('publish-only updates preserve an existing title, and explicit titles are t
   await saveManagedMenu({menuId,body:{title:'  Revised menu  '},buildMealName,mergeUploadedSnackPools:()=>{}});
   assert.equal(store.menu.title,'Revised menu');
 });
+
+test('the unpublish API removes breakfast dates only after commit and preserves other menus', async t => {
+  const {store} = fixture(t);
+  store.menu.isPublished = true;
+  const item = {_id: 'breakfast', breakfastScheduleRevision: 0,
+    menuSelectionDatesByMenu: {[menuId]: [new Date('2026-10-30')], other: [new Date('2026-11-10')]}};
+  t.mock.method(PartnerItem, 'findOne', () => assert.fail('Unpublish must not create dishes'));
+  t.mock.method(PartnerItem, 'find', () => ({lean: async () => {
+    assert.equal(store.committed, true); return [structuredClone(item)];
+  }}));
+  t.mock.method(PartnerItem, 'findById', () => ({lean: async () => structuredClone(item)}));
+  t.mock.method(PartnerItem, 'updateOne', async (filter, update) => {
+    assert.equal(store.committed, true);
+    assert.equal(filter.breakfastScheduleRevision, item.breakfastScheduleRevision);
+    Object.assign(item, update.$set); item.breakfastScheduleRevision++;
+    return {matchedCount: 1};
+  });
+  const res = response();
+  await handler('/:id', 'put')({params: {id: menuId}, user: {_id: new mongoose.Types.ObjectId()}, body: {isPublished: false}}, res);
+  assert.equal(res.statusCode, 200); assert.deepEqual(res.body.warnings, []);
+  assert.equal(store.menu.isPublished, false);
+  assert.deepEqual(Object.keys(item.menuSelectionDatesByMenu), ['other']);
+  assert.deepEqual(item.availableDates.map(date => date.toISOString().slice(0, 10)), ['2026-11-10']);
+});
