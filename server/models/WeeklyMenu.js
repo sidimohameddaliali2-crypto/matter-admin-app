@@ -210,6 +210,9 @@ const weeklyMenuSchema = new mongoose.Schema({
     default: 0
   },
   
+  // Internal transaction fence; does not alter the staff edit timestamp.
+  partnerBreakfastSyncRevision: { type: Number, default: 0 },
+
   // Tracking
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,

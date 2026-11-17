@@ -95,7 +95,8 @@ const fixture = t => {
   let active, operations;
   const writes = [], deleted = [], tags = [];
   const query = value => ({ session() { return this; }, select() { return this; }, lean: async () => value });
-  t.mock.method(mongoose.connection, 'transaction', async callback => {
+  t.mock.method(mongoose.connection, 'transaction', async (callback, options) => {
+    if (options?.readPreference === 'primary') return callback({breakfastSync: true});
     active = { transaction: true }; operations = []; store.committed = false;
     const result = await callback(active);
     for (const operation of operations) operation();
@@ -371,13 +372,14 @@ test('publish-only updates preserve an existing title, and explicit titles are t
 test('the unpublish API removes breakfast dates only after commit and preserves other menus', async t => {
   const {store} = fixture(t);
   store.menu.isPublished = true;
-  const item = {_id: 'breakfast', breakfastScheduleRevision: 0,
+  t.mock.method(Menu, 'findOneAndUpdate', () => ({lean: async () => structuredClone(store.menu)}));
+  const item = {_id: 'breakfast', name: 'Egg Toast', breakfastScheduleRevision: 0,
     menuSelectionDatesByMenu: {[menuId]: [new Date('2026-10-30')], other: [new Date('2026-11-10')]}};
   t.mock.method(PartnerItem, 'findOne', () => assert.fail('Unpublish must not create dishes'));
   t.mock.method(PartnerItem, 'find', () => ({lean: async () => {
     assert.equal(store.committed, true); return [structuredClone(item)];
   }}));
-  t.mock.method(PartnerItem, 'findById', () => ({lean: async () => structuredClone(item)}));
+  t.mock.method(PartnerItem, 'findById', () => ({session() {return this;}, lean: async () => structuredClone(item)}));
   t.mock.method(PartnerItem, 'updateOne', async (filter, update) => {
     assert.equal(store.committed, true);
     assert.equal(filter.breakfastScheduleRevision, item.breakfastScheduleRevision);

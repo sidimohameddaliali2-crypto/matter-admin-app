@@ -1,3 +1,5 @@
+import mongoose from 'mongoose';
+import WeeklyMenu from '../models/WeeklyMenu.js';
 import PartnerMenuItem from '../models/PartnerMenuItem.js';
 import MenuItem from '../models/MenuItem.js';
 import { assignItemToAllActivePartners } from './partnerMenuAssignment.js';
@@ -48,24 +50,37 @@ const schedulePatch = schedule => {
     availableFrom: dates.length ? new Date(dates[0]) : null, availableTo: dates.length ? new Date(dates.at(-1)) : null};
 };
 
-// Optimistic updates work across PM2 processes. Every successful writer
-// increments the revision, so a stale snapshot cannot replace newer dates.
-async function updateSchedule(id, menuId, dates, syncKey) {
+// Take a write fence on the source menu in the same transaction as each
+// schedule write. Concurrent source saves conflict with this fence, so the
+// transaction retries from the current source rather than a request snapshot.
+async function updateSchedule(id, menuId, syncKey) {
   for (let attempt = 0; attempt < 10; attempt++) {
-    const item = await PartnerMenuItem.findById(id).lean();
-    if (!item) throw new Error('The breakfast item changed during synchronization. Please retry.');
-    const schedule = Object.fromEntries(entries(item.menuSelectionDatesByMenu));
-    if (dates === null) {
-      if (!Object.hasOwn(schedule, menuId)) return false;
-      delete schedule[menuId];
-    } else schedule[menuId] = dates.map(date => new Date(date));
-    const fields = {...schedulePatch(schedule), category: 'Breakfast of the day'};
-    if (syncKey !== undefined) fields.breakfastSyncKey = syncKey;
-    const revision = item.breakfastScheduleRevision;
-    const result = await PartnerMenuItem.updateOne({ _id: id,
-      breakfastScheduleRevision: revision === undefined ? { $exists: false } : revision },
-      { $set: fields, $inc: { breakfastScheduleRevision: 1 } });
-    if (result.matchedCount === 1) return true;
+    const applied = await mongoose.connection.transaction(async session => {
+      const menu = await WeeklyMenu.findOneAndUpdate({_id: menuId},
+        {$inc: {partnerBreakfastSyncRevision: 1}}, {new: true, session, timestamps: false}).lean();
+      if (!menu) throw new Error('The source menu no longer exists. Please refresh the menus.');
+      const item = await PartnerMenuItem.findById(id).session(session).lean();
+      if (!item) throw new Error('The breakfast item changed during synchronization. Please retry.');
+      const ids = menu.isPublished ? (menu.meals || []).filter(day => day.mealType === 'breakfast')
+        .flatMap(day => day.items || []).map(id => String(id?._id || id)) : [];
+      const items = ids.length ? await MenuItem.find({_id: {$in: ids}, mealType: 'breakfast', isAvailable: true})
+        .session(session).select('mealName itemDate isAvailable').lean() : [];
+      const dish = menu.isPublished ? partnerBreakfastDays(menu, items)
+        .find(dish => partnerMenuNameKey(dish.name) === partnerMenuNameKey(item.name)) : null;
+      const schedule = Object.fromEntries(entries(item.menuSelectionDatesByMenu));
+      if (!dish) {
+        if (!Object.hasOwn(schedule, menuId)) return true;
+        delete schedule[menuId];
+      } else schedule[menuId] = dish.dates.map(date => new Date(date));
+      const fields = {...schedulePatch(schedule), category: 'Breakfast of the day'};
+      if (syncKey !== undefined) fields.breakfastSyncKey = syncKey;
+      const revision = item.breakfastScheduleRevision;
+      const result = await PartnerMenuItem.updateOne({_id: id,
+        breakfastScheduleRevision: revision === undefined ? {$exists: false} : revision},
+        {$set: fields, $inc: {breakfastScheduleRevision: 1}}, {session});
+      return result.matchedCount === 1;
+    }, {readPreference: 'primary'});
+    if (applied) return true;
   }
   throw new Error('Breakfast dates changed repeatedly during synchronization. Please retry saving the menu.');
 }
@@ -103,14 +118,14 @@ export async function syncMenuSelectionBreakfastsToPartnerMenu(menu) {
         id = winner._id; updated++;
       }
     } else updated++;
-    try { await updateSchedule(id, menuId, dish.dates, key); }
+    try { await updateSchedule(id, menuId, key); }
     catch (error) {
       if (error.code !== 11000) throw error;
       // Two workers may also race to adopt pre-existing casing duplicates.
       const winner = await canonicalBreakfast(key);
       if (!winner) throw error;
       id = winner._id;
-      await updateSchedule(id, menuId, dish.dates, key);
+      await updateSchedule(id, menuId, key);
     }
     retained.add(String(id));
     await assignItemToAllActivePartners(id);
@@ -120,7 +135,7 @@ export async function syncMenuSelectionBreakfastsToPartnerMenu(menu) {
   const previous = await PartnerMenuItem.find({source: 'menu-selection', mealType: 'breakfast', [`menuSelectionDatesByMenu.${menuId}`]: {$exists: true}}).lean();
   for (const item of previous) {
     if (retained.has(String(item._id))) continue;
-    if (await updateSchedule(item._id, menuId, null)) updated++;
+    if (await updateSchedule(item._id, menuId)) updated++;
   }
   return {created, updated};
 }
