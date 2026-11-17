@@ -128,6 +128,15 @@ test('draft rows stay plain while Details retains the exact record identity', as
   expect(row.textContent).toContain('Sara edited Rice bowl quantity.'); expect(row.textContent).not.toContain(id);
   await click(row); expect(container.querySelector('[aria-label="Activity details"]').textContent).toContain(id);
 });
+test('unsaved changes show the observed before and after and preserve a literal record reference', async () => {
+  const field = 'Delivery dates (11111111-1111-4111-8111-111111111111)';
+  api.get.mockResolvedValue(response({ ...activity, events: [{ ...events[1], changes: [{ field, before: '2026-11-18, 2026-11-20', after: '2026-11-20' }] }] }));
+  await render(); await click(container.querySelector('.trace-event-button'));
+  const details = container.querySelector('[aria-label="Activity details"]');
+  expect(details.querySelector('h4').textContent).toBe(field);
+  expect(details.textContent).toContain('Before edit'); expect(details.textContent).toContain('After edit');
+  expect(details.textContent).toContain('2026-11-18, 2026-11-20'); expect(details.textContent).toContain('Form edit · not saved');
+});
 
 test('labels failed attempted values as entered values rather than a saved before-and-after change', async () => {
   api.get.mockResolvedValueOnce(response({ ...activity, events: [{ ...events[2], changes: [{ field: 'Driver', before: 'Previous driver', after: 'Attempted driver' }] }] }));
