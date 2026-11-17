@@ -56,6 +56,52 @@ function configuration(uri){
  return{present,valid:identity!==null,...(identity||{})};
 }
 
+const environmentLimit=256*1024;
+const environmentStat=info=>({dev:info.dev,ino:info.ino,size:info.size,mtimeMs:info.mtimeMs,
+ ctimeMs:info.ctimeMs,mode:info.mode,uid:info.uid,gid:info.gid});
+
+// Match the installed dotenv parser's assignment grammar only to count Mongo
+// definitions. Values always come from dotenv.parse, never from this counter.
+function mongoDefinitions(bytes){
+ const line=/(?:^|^)\s*(?:export\s+)?([\w.-]+)(?:\s*=\s*?|:\s+?)(\s*'(?:\\'|[^'])*'|\s*"(?:\\"|[^"])*"|\s*`(?:\\`|[^`])*`|[^#\r\n]+)?\s*(?:#.*)?(?:$|$)/mg;
+ return[...bytes.toString().replace(/\r\n?/mg,'\n').matchAll(line)].filter(match=>match[1]==='MONGODB_URI').length;
+}
+
+async function ownedEnvironmentFile(file,parse){
+ let before;
+ try{before=await fs.lstat(file);}catch(error){if(error.code!=='ENOENT')throw error;return{present:false,pin:null,uri:undefined,mongoKeyPresent:false,definitions:0};}
+ check(before.isFile()&&!before.isSymbolicLink()&&before.uid===process.getuid()
+  &&!(before.mode&0o022)&&before.size<=environmentLimit);
+ const handle=await fs.open(file,constants.O_RDONLY|constants.O_NOFOLLOW);
+ try{
+  const opened=await handle.stat();check(isDeepStrictEqual(environmentStat(before),environmentStat(opened)));
+  const bytes=Buffer.alloc(opened.size);let offset=0;
+  while(offset<bytes.length){const part=await handle.read(bytes,offset,bytes.length-offset,offset);check(part.bytesRead>0);offset+=part.bytesRead;}
+  check((await handle.read(Buffer.alloc(1),0,1,offset)).bytesRead===0);
+  const after=await handle.stat(),pathAfter=await fs.lstat(file);
+  check(isDeepStrictEqual(environmentStat(opened),environmentStat(after))
+   &&isDeepStrictEqual(environmentStat(opened),environmentStat(pathAfter))&&await fs.realpath(file)===file);
+  const parsed=parse(bytes);check(parsed&&typeof parsed==='object'&&!Array.isArray(parsed));
+  const mongoKeyPresent=Object.hasOwn(parsed,'MONGODB_URI');check(!mongoKeyPresent||typeof parsed.MONGODB_URI==='string');
+  return{present:true,pin:{...environmentStat(opened),sha256:hash(bytes)},uri:mongoKeyPresent?parsed.MONGODB_URI:undefined,
+   mongoKeyPresent,definitions:mongoDefinitions(bytes)};
+ }finally{await handle.close();}
+}
+
+async function durableEnvironment(server,parse){
+ const base=await ownedEnvironmentFile(path.join(server,'.env'),parse),local=await ownedEnvironmentFile(path.join(server,'.env.local'),parse);
+ return{base,local,uri:local.mongoKeyPresent?local.uri:base.uri};
+}
+
+function durableFileMetadata(value,apiStartedAt){
+ const modified=value.present?value.pin.mtimeMs:null;
+ return{present:value.present,ownerPrivate:value.present?!(value.pin.mode&0o077):null,
+  bytes:value.present?value.pin.size:0,mongoKeyPresent:value.mongoKeyPresent,mongoKeyDefinitions:value.definitions,
+  duplicateMongoKeyDefinitions:Math.max(0,value.definitions-1),
+  modifiedAt:modified===null?null:new Date(modified).toISOString(),
+  modifiedAfterApiStart:modified===null||apiStartedAt===null?null:modified>apiStartedAt};
+}
+
 async function systemFileIdentity(file){
  const realpath=await fs.realpath(file),before=await fs.lstat(realpath);
  check(before.isFile()&&before.size>0&&before.size<=64*1024);
@@ -154,6 +200,9 @@ export async function runDriverAuditNativeDatabaseCheck({operation,appRoot,expec
   };
   phase='checkout';await checkout();
   const load=adapters.load||(name=>import(pathToFileURL(path.join(server,name)).href));
+  phase='durable-files';const dotenv=await load('node_modules/dotenv/lib/main.js');
+  const parse=dotenv.default?.parse||dotenv.parse;check(typeof parse==='function');
+  const durable=await durableEnvironment(server,parse);
   phase='environment';await load('loadEnv.js');const effectiveUri=env.MONGODB_URI;
   phase='processes';const processes=async()=>JSON.parse((await execute('pm2',['jlist'],{cwd:appRoot,timeout:5000,maxBuffer:8*1024*1024})).stdout);
   const snapshot=await apiSnapshot(await processes(),appRoot,adapters.systemFile||systemFileIdentity);
@@ -163,23 +212,33 @@ export async function runDriverAuditNativeDatabaseCheck({operation,appRoot,expec
   phase='read-only-probes';
   const loadEnv=await freshProbe({uri:effectiveUri,MongoClient,timeoutMs});
   const apiPm2Snapshot=await freshProbe({uri:snapshot.uri,ambiguous:snapshot.ambiguous,MongoClient,timeoutMs});
+  const durableMerged=await freshProbe({uri:durable.uri,MongoClient,timeoutMs});
   phase='recheck';await checkout();const after=await apiSnapshot(await processes(),appRoot,adapters.systemFile||systemFileIdentity);
   check(isDeepStrictEqual(snapshot,after)&&env.MONGODB_URI===effectiveUri);
+  const durableAfter=await durableEnvironment(server,parse);
+  check(isDeepStrictEqual(durable.base.pin,durableAfter.base.pin)&&isDeepStrictEqual(durable.local.pin,durableAfter.local.pin));
   const current=configuration(effectiveUri),api=configuration(snapshot.uri);
   const configurationsEqual=snapshot.ambiguous||!current.present||!api.present?null:effectiveUri===snapshot.uri;
   const sameCredentialFreeLocation=snapshot.ambiguous||!current.valid||!api.valid?null:current.locationSha256===api.locationSha256;
+  const loadEnvEqualsDurableMerged=typeof effectiveUri==='string'&&typeof durable.uri==='string'?effectiveUri===durable.uri:null;
   const evidence={version:1,kind:'read-only-native-database-config-diagnostic',applicationCommit:expectedSha,
    checkedAt:new Date().toISOString(),targetDatabaseSha256:hash(targetDatabase),
    loadEnv:{...current,selection:'actual-loadEnv-effective-value'},
    apiPm2Snapshot:{...api,ambiguous:snapshot.ambiguous,registration:snapshot.registration,sources:snapshot.sources,
     selection:'pm2-launch-environment-snapshot',currentApiDriverConnectionProven:false},
-   comparison:{configurationsEqual,sameCredentialFreeLocation},attempts:{loadEnv,apiPm2Snapshot},
+   durableMerged:{...configuration(durable.uri),selection:'physical-dotenv-base-then-local',inheritedEnvironmentIgnored:true,
+    currentApiDriverConnectionProven:false,physicalConfigIntegrityRechecked:true,
+    files:{base:durableFileMetadata(durable.base,snapshot.registration.startedAt),local:durableFileMetadata(durable.local,snapshot.registration.startedAt)},
+    mongoKeyDefinitions:durable.base.definitions+durable.local.definitions,
+    duplicateMongoKeyDefinitions:Math.max(0,durable.base.definitions+durable.local.definitions-1)},
+   comparison:{configurationsEqual,sameCredentialFreeLocation,loadEnvEqualsDurableMerged},attempts:{loadEnv,apiPm2Snapshot,durableMerged},
    readOnly:true,authorityChanged:false,credentialsExported:false,uriValuesExported:false};
   const evidenceBytes=Buffer.from(JSON.stringify(evidence));check(evidenceBytes.length<=32*1024);
   const {sealTransferSecrets}=await load('services/driverAuditTransferCodec.js');
   const capsule=sealTransferSecrets(key,evidence);
   return{version:1,status:'database-config-inspected',applicationCommit:expectedSha,
    loadEnvAvailable:loadEnv.available,apiPm2SnapshotAvailable:apiPm2Snapshot.available,
+   durableMergedAvailable:durableMerged.available,loadEnvEqualsDurableMerged,
    apiEnvironmentAmbiguous:snapshot.ambiguous,configurationsEqual,sameCredentialFreeLocation,
    recipientSha256:hash(recipientPublicKey),evidenceSha256:hash(evidenceBytes),capsule,readOnly:true,authorityChanged:false};
  }catch{throw Object.assign(Error('Database configuration diagnostic stopped'),{phase});}
