@@ -51,9 +51,10 @@ const weekTabs = () => {
   return out;
 };
 
-const COURSE_ORDER = ['main', 'bowl', 'wraps-buns', 'oats', 'snack'];
-const COURSE_LABEL = { main: 'Main Meal', bowl: 'Bowl', 'wraps-buns': 'Wraps/Buns', oats: 'Oats', snack: 'Snacks' };
+const COURSE_ORDER = ['breakfast', 'main', 'bowl', 'wraps-buns', 'oats', 'snack'];
+const COURSE_LABEL = { breakfast: 'Breakfast of the day', main: 'Main Meal', bowl: 'Bowl', 'wraps-buns': 'Wraps/Buns', oats: 'Oats', snack: 'Snacks' };
 const BAG = {
+  breakfast: { bg: '#f3e8d2', fg: '#5c4420' },
   main: { bg: '#d9eaff', fg: '#143f7a' },
   bowl: { bg: '#eafbd0', fg: '#2a3f13' },
   'wraps-buns': { bg: '#ffe9d9', fg: '#7a3b14' },
@@ -182,13 +183,13 @@ const MemberPortal = () => {
   const orderList = ordersView === 'up' ? upcoming : past;
   const existingCount = ordersByDate[sel]?.length || 0;
 
-  // 'lunch'/'dinner'/'breakfast' predate the Bowl/Wraps-Buns/Oats categories
+  // 'lunch'/'dinner' predate the Bowl/Wraps-Buns/Oats categories
   // and are no longer valid on PartnerMenuItem — normalize here so any menu
   // item still saved under one of those still groups under Main Meal instead
   // of disappearing from every course.
   const normalizeCourseKey = (mealType) => {
     const t = String(mealType || '').toLowerCase();
-    return (t === 'lunch' || t === 'dinner' || t === 'breakfast') ? 'main' : (t || 'main');
+    return (t === 'lunch' || t === 'dinner') ? 'main' : (t || 'main');
   };
 
   const courses = useMemo(() => {

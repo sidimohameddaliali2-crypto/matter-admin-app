@@ -1,3 +1,4 @@
+import { syncMenuSelectionBreakfastsToPartnerMenu } from '../services/partnerBreakfastMenuSync.js';
 import express from 'express';
 import kitchenMealEditsRouter from './kitchenMealEdits.js';
 import crypto from 'crypto';
@@ -1420,13 +1421,16 @@ router.put('/:id/breakfast-options', protect, async (req, res) => {
     }
 
     await menu.save();
+    const warnings = [];
+    try { await syncMenuSelectionBreakfastsToPartnerMenu(menu); }
+    catch (error) { console.error('Partner breakfast sync failed:', error.message); warnings.push('Breakfast options saved. Partner synchronization failed; save again to retry.'); }
 
     const optionsByDate = {};
     for (const [key, opts] of menu.breakfastOptionsByDate.entries()) {
       optionsByDate[key] = opts || [];
     }
 
-    res.json({ success: true, data: optionsByDate });
+    res.json({ success: true, data: optionsByDate, warnings });
   } catch (error) {
     console.error('Error saving breakfast options:', error);
     res.status(500).json({ success: false, message: error.message });
@@ -2852,12 +2856,13 @@ const saveMenuResponse = async (req, res, creating) => {
       try { await cacheDelete(`menu:share:${menu.shareLink.token}`); }
       catch { warnings.push('Menu saved, but its public cache could not be refreshed. Retry the public menu shortly.'); }
     }
-    if (menu.isPublished) {
-      try { await syncMenuSelectionMainMealsToPartnerMenu(menu); }
-      catch (error) {
-        console.error('Partner menu sync failed after menu commit:', error.message);
-        warnings.push('Menu saved. Partner synchronization failed; retry publishing to synchronize partner dishes.');
-      }
+    try {
+      if (menu.isPublished) await syncMenuSelectionMainMealsToPartnerMenu(menu);
+      // A saved withdrawal must remove its breakfast dates as well.
+      await syncMenuSelectionBreakfastsToPartnerMenu(menu);
+    } catch (error) {
+      console.error('Partner menu sync failed after menu commit:', error.message);
+      warnings.push('Menu saved. Partner synchronization failed; retry saving the menu to synchronize partner dishes.');
     }
     return res.status(creating ? 201 : 200).json({
       success: true, message: creating ? 'Menu created successfully' : 'Menu updated successfully', data: menu, warnings,

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import usePartnerKitchenOrders from '../lib/usePartnerKitchenOrders';
 
-const LABELS = { main: 'Main', snack: 'Snack', bowl: 'Bowl', 'wraps-buns': 'Wraps/Buns', oats: 'Oats' };
+const LABELS = { breakfast: 'Breakfast of the day', main: 'Main', snack: 'Snack', bowl: 'Bowl', 'wraps-buns': 'Wraps/Buns', oats: 'Oats' };
 const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Dubai' });
 
 export const partnerKitchenCsv = (data, counting) => {
