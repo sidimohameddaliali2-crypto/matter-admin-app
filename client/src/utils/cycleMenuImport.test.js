@@ -51,3 +51,30 @@ test('storage reader performs no writes and reports malformed saved JSON', () =>
   expect(importSavedCycleMenu({ ...options, storage })).toHaveLength(7); expect(storage.setItem).not.toHaveBeenCalled();
   storage.getItem.mockReturnValue('{bad');expect(()=>importSavedCycleMenu({ ...options,storage })).toThrow('could not be read');
 });
+
+test('a deduplicated recipe seeds every original workbook occurrence once',()=>{
+  const options=input();options.catalogue.meals=[{...options.catalogue.meals[0],day:'DAY 1',cycleDays:['DAY 1','DAY 6 & 7']}];options.boards={};
+  const days=importCycleMenu(options);expect(days.map(day=>day.items.length)).toEqual([1,0,0,0,0,1,1]);expect(days[6].items[0].cycleMeal.id).toBe('Main');
+});
+
+test('NOV3, NOV4 and DEC1 import independently without consuming shared recipes or cycles',()=>{
+  const options=input(), first=board(), second=board(), third=board();
+  first[0][1]=[{mealId:'Main',isMatterCore:true}];second[3][2]=[{mealId:'Main',isMatterCore:false}];third[4][1]=[{mealId:'Main',isMatterCore:true}];
+  options.cycles=[
+    {id:'NOV3',name:'NOV3',source:'November_Cycle_3.xlsx',meals:[{mealId:'Main',sourceMealId:'NOV3-004',day:'DAY 1'}],boards:{'Main menu:Week 1':first}},
+    {id:'NOV4',name:'NOV4',source:'November_Cycle_4.xlsx',meals:[{mealId:'Main',sourceMealId:'NOV4-020',day:'DAY 4'}],boards:{'Main menu:Week 1':second}},
+    {id:'DEC1',name:'DEC1',source:'December_Cycle_1.xlsx',meals:[{mealId:'Main',sourceMealId:'DEC1-001',day:'DAY 5'}],boards:{'Main menu:Week 1':third}},
+  ];
+  const before=JSON.stringify(options);
+  for(const [index,cycleId]of ['NOV3','NOV4','DEC1'].entries()){
+    const days=importCycleMenu({...options,cycleId});const expected=[0,3,4][index];
+    expect(days.map(day=>day.items.length)).toEqual(Array.from({length:7},(_,day)=>day===expected?1:0));
+    const item=days[expected].items[0];expect(item.cycleMeal.cycleSource).toMatchObject({cycleId,sourceMealId:options.cycles[index].meals[0].sourceMealId,workbook:options.cycles[index].source});
+    item.cycleMeal.components[0].exclusions.push('Dairy');
+  }
+  expect(JSON.stringify(options)).toBe(before);
+  expect(()=>importCycleMenu(options)).toThrow('Choose a saved cycle');
+  expect(()=>importCycleMenu({...options,cycleId:'MISSING'})).toThrow('could not be found');
+  options.cycles[1].boards['Main menu:Week 1']=board();
+  expect(()=>importCycleMenu({...options,cycleId:'NOV4'})).toThrow('empty');
+});

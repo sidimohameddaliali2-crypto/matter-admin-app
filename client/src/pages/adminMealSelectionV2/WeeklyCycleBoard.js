@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Save, Check, Upload, Copy, History, Eye, X, GripVertical } from 'lucide-react';
 import { Action, Badge, Tabs, SearchBox, Modal, Notice } from './components';
-import { componentName, mealType, mealFormat, cycleSlots } from './workbookMeals';
+import { componentName, mealType, mealFormat, cycleSlots, cycleDayIndexes } from './workbookMeals';
 import { activityReference, recordActivityChange } from '../../utils/activityCapture';
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -12,8 +12,7 @@ const slotFor = meal => mealFormat(meal) === 'Breakfast' ? 0 : mealFormat(meal) 
 function seedBoard(meals) {
   const board = emptyBoard();
   meals.forEach(meal => {
-    const days = meal.day === 'DAY 6 & 7' ? [5, 6] : [/^DAY ([1-5])$/.test(meal.day) ? Number(meal.day.slice(-1)) - 1 : -1];
-    days.filter(day => day >= 0).forEach(day => board[day][slotFor(meal)].push({ mealId: meal.id, isMatterCore: false }));
+    cycleDayIndexes(meal).forEach(day => board[day][slotFor(meal)].push({ mealId: meal.id, isMatterCore: false }));
   });
   return board;
 }
@@ -39,17 +38,17 @@ function readDrafts(meals, saved = {}) {
   } catch { return {}; }
 }
 
-export default function WeeklyCycleBoard({ meals, source, onImport, importDialog, initialBoards = {}, revision = 0, onSaveBoards }) {
+export default function WeeklyCycleBoard({ meals, libraryMeals = meals, cycleSelector, source, onImport, importDialog, initialBoards = {}, revision = 0, onSaveBoards }) {
   const menu = 'Main menu';
   const [week, setWeek] = useState('Week 1');
-  const [boards, setBoards] = useState(() => readDrafts(meals, initialBoards));
+  const [boards, setBoards] = useState(() => readDrafts(libraryMeals, initialBoards));
   const pending = useRef(0), acceptedRevision = useRef(revision);
   useEffect(() => {
     if (!pending.current && revision >= acceptedRevision.current) {
       acceptedRevision.current = revision;
-      setBoards(readDrafts(meals, initialBoards));
+      setBoards(readDrafts(libraryMeals, initialBoards));
     }
-  }, [initialBoards, meals, revision]);
+  }, [initialBoards, libraryMeals, revision]);
   const [query, setQuery] = useState(''), [protein, setProtein] = useState(''), [slot, setSlot] = useState('');
   const [showWeekend, setShowWeekend] = useState(false), [importing, setImporting] = useState(false), [history, setHistory] = useState(false);
   const [selected, setSelected] = useState(null), [targetDay, setTargetDay] = useState('0'), [targetSlot, setTargetSlot] = useState('1');
@@ -57,7 +56,7 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
   const [dragMealId, setDragMealId] = useState(null), [dropTarget, setDropTarget] = useState(null);
   const key = `${menu}:${week}`;
   const board = boards[key] || (menu === 'Main menu' && week === 'Week 1' ? seedBoard(meals) : emptyBoard());
-  const byId = new Map(meals.map(meal => [meal.id, meal]));
+  const byId = new Map(libraryMeals.map(meal => [meal.id, meal]));
   const latestBoards = useRef(boards);
   latestBoards.current = boards;
   const persistBoards = async (updates, observe = true) => {
@@ -85,7 +84,7 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
   };
   const changeBoard = (update, observe = true) => persistBoards({ [key]: update(latestBoards.current[key] || board) }, observe);
   const entryCount = board.reduce((total, day) => total + day.flat().filter(entry => byId.has(entry.mealId)).length, 0);
-  const library = meals.filter(meal => meal.name.toLowerCase().includes(query.toLowerCase()) && (!protein || mealType(meal) === protein) && (!slot || cycleSlots(meal).includes(Number(slot))));
+  const library = libraryMeals.filter(meal => meal.name.toLowerCase().includes(query.toLowerCase()) && (!protein || mealType(meal) === protein) && (!slot || cycleSlots(meal).includes(Number(slot))));
   const addMeal = (meal, dayIndex, groupIndex) => {
     if (!cycleSlots(meal).includes(groupIndex)) { setMessage(`${meal.name} can only be placed in ${cycleSlots(meal).map(index => GROUPS[index]).join(' or ')}.`); return; }
     changeBoard(current => current.map((day, di) => di !== dayIndex ? day : day.map((group, gi) => gi !== groupIndex ? group : [...group, { mealId: meal.id, isMatterCore: false }])));
@@ -114,6 +113,7 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
   };
   return <div className="av2-weekly-board">
     <div className="av2-page-heading"><div><h1>Cycle Menu Planner</h1><p>One menu per group of plans. Add meals to each day and tag Matter Core meals.</p></div><Badge>Draft</Badge></div>
+    {cycleSelector}
     <div className="av2-actions av2-toolbar">
       <Action icon={Save} onClick={() => changeBoard(current => current).then(ok => { if (ok) setMessage('Cycle draft saved.'); })}>Save draft</Action>
       <Action primary icon={Check} disabled title="Publishing requires verified live recipe links">Publish</Action>

@@ -134,6 +134,8 @@ const MenuManagement = () => {
     setWeeklyItemsState(next);
   }, []);
   const [cycleWeek, setCycleWeek] = useState('Week 1');
+  const [savedCycles, setSavedCycles] = useState(() => mealCreationStore.getSnapshot().data?.cycles || []);
+  const [cycleId, setCycleId] = useState('');
   const editWeeklyItems = update => {
     const before = weeklyItemsRef.current;
     const next = typeof update === 'function' ? update(before) : update;
@@ -702,8 +704,17 @@ const MenuManagement = () => {
     setWeeklyItems([]);
   };
 
+  useEffect(() => {
+    if (!showCreateForm || editingMenuId) return;
+    let active = true;
+    api.get('/meal-creation').then(response => {
+      if (active && response.data?.success) setSavedCycles(response.data.data.cycles || []);
+    }).catch(() => { /* The import performs bootstrap and reports any load error. */ });
+    return () => { active = false; };
+  }, [showCreateForm, editingMenuId]);
+
   const cycleImportScope = useRef('');
-  cycleImportScope.current = `${showCreateForm}:${editingMenuId}:${cycleWeek}:${formData.startDate}:${formData.endDate}`;
+  cycleImportScope.current = `${showCreateForm}:${editingMenuId}:${cycleId}:${cycleWeek}:${formData.startDate}:${formData.endDate}`;
   const cycleImportRequest = useRef(0);
   const handleImportCycleMenu = async () => {
     if (editingMenuId) return;
@@ -714,10 +725,18 @@ const MenuManagement = () => {
       if (mealCreationStore.getSnapshot().error) throw new Error(mealCreationStore.getSnapshot().error);
       const saved = await mealCreationStore.load();
       if (!current()) return;
-      const days = importCycleMenu({ catalogue: saved.catalogue, boards: saved.boards, week: cycleWeek, startDate: formData.startDate, endDate: formData.endDate });
+      const selectedCycleId = cycleId || savedCycles[0]?.id;
+      const selectedCycle = saved.cycles?.find(item => item.id === selectedCycleId);
+      setSavedCycles(saved.cycles || []);
+      if (saved.cycles?.length && !selectedCycleId) {
+        setCycleId(saved.cycles[0].id);
+        setUploadError('Saved cycles loaded. Choose the cycle and week, then click Create from Cycle Menu.');
+        return;
+      }
+      const days = importCycleMenu({ catalogue: saved.catalogue, boards: saved.boards, cycles: saved.cycles, cycleId: selectedCycleId, week: cycleWeek, startDate: formData.startDate, endDate: formData.endDate });
       if (weeklyItemsRef.current.some(day => day.items?.length) && !window.confirm('Replace the meals in this unsaved menu draft?')) return;
       setWeeklyItems(days); setEditingSlot(null); setUploadError(null);
-      setFormData(current => ({ ...current, title: current.title.trim() ? current.title : `${cycleWeek} · ${current.startDate} – ${current.endDate}` }));
+      setFormData(current => ({ ...current, title: current.title.trim() ? current.title : `${selectedCycle ? selectedCycle.name + ' · ' : ''}${cycleWeek} · ${current.startDate} – ${current.endDate}` }));
     } catch (err) { if (current()) setUploadError(err.message); }
   };
 
@@ -1770,7 +1789,7 @@ const MenuManagement = () => {
               {!editingMenuId && <div className="border border-dashed border-matter-neutral-300 rounded-lg p-4 bg-matter-neutral-100">
                 <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                   <div><p className="font-semibold text-matter-navy">Create from Cycle Menu</p><p className="text-xs text-matter-neutral-600">Copy a saved cycle week into a new Monday–Sunday menu draft. The library and cycle remain unchanged.</p></div>
-                  <div className="flex gap-2"><select aria-label="Cycle week" value={cycleWeek} onChange={event => setCycleWeek(event.target.value)} className="px-3 py-2 text-sm bg-white border border-matter-neutral-300 rounded-lg"><option>Week 1</option><option>Week 2</option></select><button type="button" onClick={handleImportCycleMenu} className="px-3 py-2 text-sm bg-matter-navy text-white rounded-lg hover:bg-matter-blueblack">Create from Cycle Menu</button></div>
+                  <div className="flex gap-2 flex-wrap">{savedCycles.length > 0 && <select aria-label="Saved cycle" value={cycleId || savedCycles[0].id} onChange={event => setCycleId(event.target.value)} className="px-3 py-2 text-sm bg-white border border-matter-neutral-300 rounded-lg">{savedCycles.map(cycle => <option key={cycle.id} value={cycle.id}>{cycle.name}</option>)}</select>}<select aria-label="Cycle week" value={cycleWeek} onChange={event => setCycleWeek(event.target.value)} className="px-3 py-2 text-sm bg-white border border-matter-neutral-300 rounded-lg"><option>Week 1</option><option>Week 2</option></select><button type="button" onClick={handleImportCycleMenu} className="px-3 py-2 text-sm bg-matter-navy text-white rounded-lg hover:bg-matter-blueblack">Create from Cycle Menu</button></div>
                 </div>
               </div>}
 
