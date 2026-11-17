@@ -321,6 +321,239 @@ test('cutover requires fresh hash-pinned recovery, parity, credential and stoppe
   await assert.rejects(verifyDriverAuditSourceRelease(checked, { path: releaseFile, sha256: hash(bytes) }, now), /receipt|integrity/i);
 });
 
+async function capabilityFenceFixture(t) {
+  const f = await configuredFixture(t);
+  const config = { ...await readDriverAuditSourceConfig(f.configFile), dataStore: 'mongo',
+    environment: { ...f.environment, DRIVER_AUDIT_DATA_STORE: 'mongo' } };
+  const release = { version: 1, verified: true, configSha256: config.configSha256,
+    runtimeManifestSha256: config.manifestSha256, environmentSha256: config.environmentReference.sha256,
+    nodeVersion: process.version, initialCursor: '2026-11-16T04:00:00.000Z',
+    verifiedAt: '2026-11-16T04:10:00.000Z', validUntil: '2026-11-16T04:25:00.000Z' };
+  const save = async (name, value) => {
+    const raw = JSON.stringify(value), file = path.join(f.root, name + '.private.json');
+    await fs.writeFile(file, raw, { mode: 0o600 });
+    return { path: name + '.private.json', sha256: hash(raw) };
+  };
+  const backup = { version: 1, verified: true, kind: 'backup', uncertainAttemptsBaseline: {
+    count: 5, sha256: 'c'.repeat(64), snapshotId: 'fictional-final-snapshot',
+    sourceSnapshotSha256: 'd'.repeat(64), restoreVerificationSha256: 'e'.repeat(64),
+  } };
+  for (const kind of ['backup', 'parity', 'credentials']) release[kind] = await save(kind,
+    kind === 'backup' ? backup : { version: 1, verified: true, kind });
+  const common = { version: 1, verified: true, sourceProjectRef: 'trhhjfgfmxofxhnzocks',
+    legacyRuntimeSha256: 'a'.repeat(64), legacyEntrypointsSha256: 'b'.repeat(64),
+    admissionBlockedAt: '2026-11-16T04:00:10.000Z', checkedAt: '2026-11-16T04:06:30.000Z' };
+  const mutators = ['archive_consume(uuid,uuid,bigint)', 'archive_consume(uuid,uuid,bigint,text)',
+    'archive_release(uuid)', 'archive_reserve(uuid,bigint)', 'collector_cas(uuid,bigint,bigint,text,text,text,text)',
+    'collector_cas_review(uuid,bigint,bigint,bigint,text,text,text,text)', 'lease_acquire(uuid,integer)',
+    'lease_release(uuid,bigint)', 'qualification_cas(uuid,bigint,bigint,text,text,text,text)',
+    'qualification_lease_acquire(uuid,integer)', 'qualification_lease_release(uuid,bigint)',
+    'state_cas(text,bigint,text,text,text,text)'];
+  const fenced = [...mutators.map(name => 'matter_reporting_hosted.' + name), ...mutators.map(name => 'public.matter_hosted_' + name),
+    'public.matter_hosted_gps_retention_register(jsonb,jsonb,jsonb)', 'public.matter_hosted_preview_road_cache(text,text,uuid,jsonb)'];
+  const internal = ['archive_capacity(bigint)', 'deny_receipt_change()', 'gps_retention_watch()',
+    'lease_assert(uuid,bigint)', 'membership_lookup(uuid)', 'membership_provision(uuid,text,boolean,bigint,text,text)',
+    'qualification_lease_assert(uuid,bigint)', 'session_active(uuid,uuid)', 'state_cas_internal(text,bigint,text,text,text,text)',
+    'state_read(text)', 'state_receipts(text,bigint,integer)'];
+  const publicReads = ['archive_capacity(bigint)', 'gps_retention_inventory(text)', 'lease_assert(uuid,bigint)',
+    'membership_lookup(uuid)', 'membership_provision(uuid,text,boolean,bigint,text,text)', 'qualification_lease_assert(uuid,bigint)',
+    'session_active(uuid,uuid)', 'state_read(text)', 'state_read_if_changed(text,bigint)', 'state_receipts(text,bigint,integer)'];
+  const functions = [...fenced, ...internal.map(name => 'matter_reporting_hosted.' + name),
+    ...publicReads.map(name => 'public.matter_hosted_' + name)].map(identity => ({ identity, owner: 'postgres',
+    beforeDefinitionSha256: hash(identity), definitionSha256: hash(identity), beforeAclSha256: hash(identity + '-acl'),
+    aclSha256: hash(identity + (fenced.includes(identity) ? '-revoked' : '-acl')),
+    beforeApiExecutableRoles: ['matter_reporting_hosted.state_cas_internal(text,bigint,text,text,text,text)',
+      'matter_reporting_hosted.deny_receipt_change()', 'matter_reporting_hosted.gps_retention_watch()'].includes(identity) ? [] : ['service_role'],
+    apiExecutableRoles: fenced.includes(identity) || ['matter_reporting_hosted.state_cas_internal(text,bigint,text,text,text,text)',
+      'matter_reporting_hosted.deny_receipt_change()', 'matter_reporting_hosted.gps_retention_watch()'].includes(identity) ? [] : ['service_role'] }));
+  const fingerprints = Object.fromEntries(['documents', 'receipts', 'archive', 'reservations', 'roadCache', 'capabilities']
+    .map(name => [name, hash('fictional-' + name)]));
+  const uncertainAttempts = { beforeCount: 5, afterCount: 5, beforeSha256: 'c'.repeat(64), afterSha256: 'c'.repeat(64) };
+  const proofs = {
+    capabilityAudit: { ...common, id: 'capabilities-1', kind: 'reporting-capability-audit',
+      capabilitySha256: fingerprints.capabilities,
+      baselineCatalogSha256: hash('fictional-baseline'), functions, apiRoles: ['PUBLIC', 'anon', 'authenticated', 'service_role'],
+      ownerBypassRoles: ['postgres', 'supabase_admin'], roleMembershipSha256: hash('fictional-membership'), serviceRoleCannotAssumeOwner: true,
+      roadCache: { identity: 'matter_preview_cache.road_geometry', apiWritableRoles: [], selectPreserved: true,
+        beforeAclSha256: hash('road-before'), aclSha256: hash('road-after') },
+      sqlCron: [4, 5].map(id => ({ id, active: false, owner: 'postgres', beforeCommandSha256: hash('job-' + id), commandSha256: hash('job-' + id) })),
+      unrelatedBeforeSha256: hash('unrelated'), unrelatedAfterSha256: hash('unrelated'), rawStorageAndGatewayRevoked: false },
+    drainAudit: { ...common, id: 'drain-1', kind: 'reporting-drain-audit', activeLeases: 0, activeReportingTransactions: 0,
+      activeSqlCronRuns: 0, activeProviderWork: 0, privilegedReportingWriters: 0,
+      admissionGraphSha256: hash('fictional-admission-graph'), ownerAuditSha256: hash('fictional-owner-audit'), uncertainAttempts },
+    quietAudit: { ...common, id: 'quiet-1', kind: 'reporting-quiet-window',
+      samples: [{ id: 'sample-before', at: '2026-11-16T04:00:30.000Z', sha256: hash('sample-before'), fingerprints },
+        { id: 'sample-after', at: '2026-11-16T04:05:30.000Z', sha256: hash('sample-after'), fingerprints: { ...fingerprints } }] },
+    checkpoint: { ...common, id: 'checkpoint-1', kind: 'reporting-final-checkpoint', snapshotId: 'fictional-final-snapshot',
+      sourceSnapshotSha256: backup.uncertainAttemptsBaseline.sourceSnapshotSha256,
+      restoreVerificationSha256: backup.uncertainAttemptsBaseline.restoreVerificationSha256,
+      capturedAt: '2026-11-16T04:06:30.000Z', initialCursor: release.initialCursor, collectorRevision: 7, reviewRevision: 1,
+      backupReceiptSha256: release.backup.sha256, parityReceiptSha256: release.parity.sha256,
+      fingerprints: { ...fingerprints }, uncertainAttempts: { ...uncertainAttempts } },
+  };
+  const fence = { ...common, id: 'fence-1', mode: 'reporting-database-capability-v1', writersStopped: false,
+    checkedAt: '2026-11-16T04:07:00.000Z', initialCursor: release.initialCursor, validUntil: release.validUntil };
+  async function verify(now = new Date(release.verifiedAt)) {
+    for (const [name, proof] of Object.entries(proofs)) fence[name] = { ...await save(name, proof), id: proof.id };
+    release.sourceFence = await save('sourceFence', fence);
+    const reference = await save('release', release);
+    return verifyDriverAuditSourceRelease(config, { ...reference, path: path.join(f.root, reference.path) }, now);
+  }
+  return { ...f, config, fence, proofs, release, backup, verify, save };
+}
+
+test('native cutover accepts identified database capability evidence without claiming stopped cron processes', async t => {
+  const f = await capabilityFenceFixture(t);
+  const checked = await f.verify();
+  assert.equal(checked.release.initialCursor, f.release.initialCursor);
+  assert.equal(f.fence.writersStopped, false);
+  assert.equal(f.proofs.drainAudit.uncertainAttempts.afterCount, 5);
+});
+
+test('database capability mode cannot replace the legacy stopped-process proof', async t => {
+  const f = await capabilityFenceFixture(t);
+  f.config.dataStore = 'supabase';
+  delete f.config.environment.DRIVER_AUDIT_DATA_STORE;
+  await assert.rejects(f.verify(), /native|capability/i);
+});
+
+test('capability fence refuses incomplete rights, altered scope and undrained provider or owner work', async t => {
+  const cases = [
+    f => { f.fence.writersStopped = true; },
+    f => { f.fence.processesStopped = true; },
+    f => { delete f.proofs.drainAudit.id; },
+    f => { f.proofs.capabilityAudit.functions.pop(); },
+    f => { f.proofs.capabilityAudit.functions[1].identity = f.proofs.capabilityAudit.functions[0].identity; },
+    f => { f.proofs.capabilityAudit.functions[0].apiExecutableRoles = ['service_role']; },
+    f => { f.proofs.capabilityAudit.functions[0].definitionSha256 = 'f'.repeat(64); },
+    f => { f.proofs.capabilityAudit.functions[26].aclSha256 = 'f'.repeat(64); },
+    f => { f.proofs.capabilityAudit.functions.find(row => row.identity.startsWith('matter_reporting_hosted.state_cas_internal(')).apiExecutableRoles = ['service_role']; },
+    f => { f.proofs.capabilityAudit.functions.find(row => row.identity === 'matter_reporting_hosted.deny_receipt_change()').apiExecutableRoles = ['service_role']; },
+    f => { f.proofs.capabilityAudit.functions.find(row => row.identity === 'matter_reporting_hosted.gps_retention_watch()').apiExecutableRoles = ['service_role']; },
+    f => { f.proofs.capabilityAudit.functions.find(row => row.identity === 'public.matter_hosted_state_read(text)').apiExecutableRoles = []; },
+    f => { f.proofs.capabilityAudit.roadCache.apiWritableRoles = ['service_role']; },
+    f => { f.proofs.capabilityAudit.sqlCron[1].active = true; },
+    f => { f.proofs.capabilityAudit.unrelatedAfterSha256 = 'f'.repeat(64); },
+    f => { f.proofs.capabilityAudit.serviceRoleCannotAssumeOwner = false; },
+    f => { f.proofs.drainAudit.activeProviderWork = 1; },
+    f => { f.proofs.drainAudit.activeLeases = 1; },
+    f => { f.proofs.drainAudit.activeReportingTransactions = 1; },
+    f => { f.proofs.drainAudit.privilegedReportingWriters = 1; },
+    f => { f.proofs.drainAudit.activeSqlCronRuns = 1; },
+    f => { delete f.proofs.drainAudit.admissionGraphSha256; },
+    f => { f.proofs.drainAudit.uncertainAttempts.afterCount = 0; },
+  ];
+  for (const [index, change] of cases.entries()) await t.test(String(index), async t => {
+    const f = await capabilityFenceFixture(t); change(f);
+    await assert.rejects(f.verify(), /capability|fence|catalog|drain|uncertain/i);
+  });
+});
+
+test('capability fence requires fresh independent quiet samples and a later matching final checkpoint', async t => {
+  const cases = [
+    f => { f.proofs.drainAudit.id = f.proofs.capabilityAudit.id; },
+    f => { f.proofs.drainAudit.legacyRuntimeSha256 = 'f'.repeat(64); },
+    f => { f.proofs.drainAudit.sourceProjectRef = 'another-project'; },
+    f => { f.proofs.quietAudit.samples[1].at = '2026-11-16T04:05:29.999Z'; },
+    f => { f.proofs.quietAudit.samples[0].at = '2026-11-16T03:59:59.000Z'; },
+    f => { f.proofs.quietAudit.samples[1].id = f.proofs.quietAudit.samples[0].id; },
+    f => { f.proofs.quietAudit.samples[1].fingerprints.receipts = 'f'.repeat(64); },
+    f => { f.proofs.capabilityAudit.capabilitySha256 = 'f'.repeat(64); },
+    f => { f.proofs.checkpoint.fingerprints.archive = 'f'.repeat(64); },
+    f => { f.proofs.checkpoint.capturedAt = '2026-11-16T04:05:29.000Z'; },
+    f => { f.proofs.checkpoint.backupReceiptSha256 = 'f'.repeat(64); },
+    f => { f.proofs.checkpoint.initialCursor = '2026-11-16T03:59:00.000Z'; },
+    f => { f.proofs.checkpoint.uncertainAttempts.afterSha256 = 'f'.repeat(64); },
+    f => { f.fence.checkedAt = '2026-11-16T04:11:00.000Z'; },
+    f => { f.fence.validUntil = '2026-11-16T04:24:59.999Z'; },
+  ];
+  for (const [index, change] of cases.entries()) await t.test(String(index), async t => {
+    const f = await capabilityFenceFixture(t); change(f);
+    await assert.rejects(f.verify(), /capability|fence|quiet|checkpoint|uncertain/i);
+  });
+});
+
+test('capability fence independently pins each proof file and both native configuration fields', async t => {
+  const f = await capabilityFenceFixture(t);
+  await f.verify();
+  const file = path.join(f.root, 'release.private.json'), raw = await fs.readFile(file);
+  const reference = { path: file, sha256: hash(raw) };
+  await fs.appendFile(path.join(f.root, 'drainAudit.private.json'), ' ');
+  await assert.rejects(verifyDriverAuditSourceRelease(f.config, reference, new Date(f.release.verifiedAt)), /integrity/i);
+  await f.verify();
+  delete f.config.environment.DRIVER_AUDIT_DATA_STORE;
+  await assert.rejects(f.verify(), /native|capability/i);
+});
+
+test('self-consistent attempt claims must match the independently pinned restored backup baseline', async t => {
+  const f = await capabilityFenceFixture(t);
+  for (const proof of [f.proofs.drainAudit, f.proofs.checkpoint]) {
+    proof.uncertainAttempts = { beforeCount: 0, afterCount: 0, beforeSha256: 'f'.repeat(64), afterSha256: 'f'.repeat(64) };
+  }
+  await assert.rejects(f.verify(), /uncertain|baseline/i);
+});
+
+test('native fence requires the restored backup baseline and binds its complete snapshot identity', async t => {
+  for (const field of ['count', 'sha256', 'snapshotId', 'sourceSnapshotSha256', 'restoreVerificationSha256']) {
+    await t.test('missing ' + field, async t => {
+      const f = await capabilityFenceFixture(t);
+      delete f.backup.uncertainAttemptsBaseline[field];
+      f.release.backup = await f.save('backup', f.backup);
+      f.proofs.checkpoint.backupReceiptSha256 = f.release.backup.sha256;
+      await assert.rejects(f.verify(), /baseline|checkpoint|uncertain/i);
+    });
+  }
+  for (const field of ['snapshotId', 'sourceSnapshotSha256', 'restoreVerificationSha256']) {
+    await t.test('different ' + field, async t => {
+      const f = await capabilityFenceFixture(t);
+      f.proofs.checkpoint[field] = field === 'snapshotId' ? 'another-snapshot' : 'f'.repeat(64);
+      await assert.rejects(f.verify(), /checkpoint|baseline/i);
+    });
+  }
+});
+
+test('native quiet evidence expires against the actual verification time before a still-valid release expires', async t => {
+  const f = await capabilityFenceFixture(t);
+  f.release.validUntil = f.fence.validUntil = '2026-11-16T04:40:00.000Z';
+  // Quiet evidence ended at 04:05:30. The release remains valid until 04:40.
+  await assert.rejects(f.verify(new Date('2026-11-16T04:35:30.001Z')), /quiet|fresh/i);
+  assert.equal((await f.verify(new Date('2026-11-16T04:35:30.000Z'))).release.verified, true);
+  await assert.rejects(f.verify(new Date('2026-11-16T04:39:59.999Z')), /fence|quiet|fresh/i);
+  // Restart verification deliberately uses the recorded activation instant.
+  assert.equal((await f.verify(new Date(f.release.verifiedAt))).release.verified, true);
+});
+
+test('the independently pinned backup baseline identifies the restored snapshot and exact uncertain attempts', async t => {
+  const cases = [
+    backup => { delete backup.uncertainAttemptsBaseline; },
+    backup => { delete backup.uncertainAttemptsBaseline.count; },
+    backup => { backup.uncertainAttemptsBaseline.count = -1; },
+    backup => { backup.uncertainAttemptsBaseline.sha256 = 'f'.repeat(64); },
+    backup => { backup.uncertainAttemptsBaseline.snapshotId = 'another-snapshot'; },
+    backup => { backup.uncertainAttemptsBaseline.sourceSnapshotSha256 = 'f'.repeat(64); },
+    backup => { delete backup.uncertainAttemptsBaseline.restoreVerificationSha256; },
+    backup => { backup.uncertainAttemptsBaseline.restoreVerificationSha256 = 'f'.repeat(64); },
+  ];
+  for (const [index, change] of cases.entries()) await t.test(String(index), async t => {
+    const f = await capabilityFenceFixture(t), backup = JSON.parse(await fs.readFile(path.join(f.root, 'backup.private.json')));
+    change(backup);
+    f.release.backup = await f.save('backup', backup);
+    f.proofs.checkpoint.backupReceiptSha256 = f.release.backup.sha256;
+    await assert.rejects(f.verify(), /baseline|checkpoint|uncertain/i);
+  });
+  const f = await capabilityFenceFixture(t), backup = JSON.parse(await fs.readFile(path.join(f.root, 'backup.private.json')));
+  // The restored count is the authority; the validator does not hardcode five.
+  backup.uncertainAttemptsBaseline.count = 6;
+  backup.uncertainAttemptsBaseline.sha256 = hash('fictional restored six-attempt inventory');
+  f.release.backup = await f.save('backup', backup);
+  f.proofs.checkpoint.backupReceiptSha256 = f.release.backup.sha256;
+  for (const proof of [f.proofs.drainAudit, f.proofs.checkpoint]) proof.uncertainAttempts = {
+    beforeCount: 6, afterCount: 6, beforeSha256: backup.uncertainAttemptsBaseline.sha256,
+    afterSha256: backup.uncertainAttemptsBaseline.sha256,
+  };
+  assert.equal((await f.verify()).release.verified, true);
+});
+
 test('source config rejects stale OIDC values and requires a bound Gateway key when grading is enabled', async t => {
   const f = await configuredFixture(t);
   async function setEnvironment(value, gatewayCredential = null) {

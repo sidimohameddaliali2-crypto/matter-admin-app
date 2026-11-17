@@ -35,7 +35,7 @@ test('technical history selection requires a pinned complete backup and preserve
 const digest = text => createHash('sha256').update(text).digest('hex');
 const sourceBasis = revision => digest('fictional source ' + revision);
 
-async function censusFixture(t) {
+async function censusFixture(t, { manifest = { 'fixture.private.json': digest('fictional file') } } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'driver-audit-root-census-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const write = async (relative, value) => {
@@ -43,7 +43,6 @@ async function censusFixture(t) {
     await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
     await fs.writeFile(file, JSON.stringify(value), { mode: 0o600 });
   };
-  const manifest = { 'fixture.private.json': digest('fictional file') };
   const manifestSha256 = digest(JSON.stringify(manifest));
   const seed = (revision, mode, bundleRoot) => {
     const generation = digest('fictional generation ' + revision), reportHash = digest('fictional report ' + revision);
@@ -120,6 +119,27 @@ test('published current with an abbreviated previous resolves the original accep
   const result = await f.collect();
   assert.deepEqual(result.collectorRevisions, [2, 4, 8, 10, 11]);
   assert.ok(result.roots.some(row => row.kind === 'sync-previous' && row.revision === 4));
+});
+
+test('census accepts a pinned package inventory above one MiB using the existing sixteen MiB contract', async t => {
+  const manifest = Object.fromEntries(Array.from({ length: 14000 }, (_, n) => ['fixture-' + n + '.private.json', digest('file ' + n)]));
+  assert.ok(Buffer.byteLength(JSON.stringify(manifest)) > 1024 * 1024);
+  const f = await censusFixture(t, { manifest });
+  assert.deepEqual((await f.collect()).collectorRevisions, [2, 4, 8, 10, 11]);
+});
+
+test('census retains nested package entries accepted by the builder inventory contract', async t => {
+  const f = await censusFixture(t, { manifest: { 'report-data/detail-fixture.json': digest('fictional detail') } });
+  assert.deepEqual((await f.collect()).collectorRevisions, [2, 4, 8, 10, 11]);
+});
+
+test('census refuses traversal, empty or absolute package entry paths', async t => {
+  for (const name of ['../outside.json', '/absolute.json', 'report-data//detail.json', 'report-data/./detail.json']) {
+    await t.test(name, async sub => {
+      const f = await censusFixture(sub, { manifest: { [name]: digest('fictional') } });
+      await assert.rejects(f.collect(), /manifest.*differs/);
+    });
+  }
 });
 
 test('abbreviated previous can resolve exact seed-only and retired identities', async t => {

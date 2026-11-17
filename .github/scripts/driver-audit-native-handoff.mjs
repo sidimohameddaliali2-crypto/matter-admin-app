@@ -86,13 +86,21 @@ async function inspect(appRoot) {
         retired: safe(await optional(relative + '/retired-workspace.private.json')) });
     }
     const code = await readPrivateDriverAuditSource(path.join(config.codeRoot, 'integration/cloud/automatic-release.mjs'), 1024 * 1024);
+    const bootstrap = await optional('seed.json');
+    const baselineFile = path.join(syncRoot, 'baseline/files.private.json');
+    const baselineInfo = await fs.lstat(baselineFile);
+    const baselinePrivate = baselineInfo.isFile() && !(baselineInfo.mode & 0o077) && baselineInfo.uid === process.getuid();
+    const baselineManifest = { bytes: baselineInfo.size, ownerPrivate: baselinePrivate,
+      sha256: baselinePrivate && baselineInfo.size <= 16 * 1024 * 1024
+        ? hash(await readPrivateDriverAuditSource(baselineFile, 16 * 1024 * 1024)) : undefined };
     console.log(JSON.stringify({ status: 'target-metadata', sourceRevision: collector.revision,
       targetDatabase: connection.db.databaseName, mongo: await readDriverAuditDataCapacity(connection.db),
       mongoLocation: mongoLocation(process.env.MONGODB_URI, new Set(['localhost', '127.0.0.1', '::1', os.hostname(),
         ...Object.values(os.networkInterfaces()).flatMap(rows => (rows || []).map(row => row.address))])),
       serving: { current: safe(control?.head), previous: safe(control?.head?.previous),
         currentManifest: digest(control?.head?.directImport?.manifestSha256), previousManifest: digest(control?.head?.previous?.directImport?.manifestSha256) },
-      pointer: safe(pointer), previousPointer: safe(pointer?.previous), workspaces, builderModuleSha256: hash(code) }));
+      pointer: safe(pointer), previousPointer: safe(pointer?.previous), workspaces,
+      bootstrap: safe(bootstrap), baselineManifest, builderModuleSha256: hash(code) }));
     phase = 'collector-census';
     const census = await collectDriverAuditReceiptRoots({ db: connection.db,
       documents: [{ key: 'collector-state', revision: collector.revision, body_text: collector.body }], syncRoot });
@@ -122,6 +130,61 @@ async function main() {
     throw Error('Unexpected production checkout');
   }
   const operation = process.env.NATIVE_HANDOFF_OPERATION;
+  if (operation === 'inspect-bindings') {
+    phase = 'private-host-bindings';
+    const encoded = process.env.NATIVE_TRANSFER_PLAN_B64;
+    if (!encoded || encoded.length > 24576 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Bounded public recipient required');
+    const load = name => import(pathToFileURL(path.join(appRoot, 'server', name)).href);
+    const { validateDriverAuditTransferPlan } = await load('services/driverAuditTransferSession.js');
+    const { sealTransferSecrets } = await load('services/driverAuditTransferCodec.js');
+    const { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory } = await load('services/driverAuditSource.js');
+    const request = validateDriverAuditTransferPlan(JSON.parse(Buffer.from(encoded, 'base64').toString('utf8')));
+    const { stdout } = await exec(process.execPath, [path.join(appRoot, 'server/scripts/driverAuditSourceDeploy.js'), 'audit-source-host-check'], {
+      cwd: appRoot, env: { ...process.env, DRIVER_AUDIT_DEPLOY_SHA: expected }, timeout: 60000, maxBuffer: 256 * 1024,
+    });
+    const checked = stdout.trim().split('\n').filter(line => line.startsWith('{')).map(line => JSON.parse(line))
+      .find(value => value.status === 'host-checked' && value.deployedSha === expected);
+    if (!checked) throw Error('Private host bindings are unavailable');
+    const entries = JSON.parse((await exec('pm2', ['jlist'], { timeout: 5000, maxBuffer: 8 * 1024 * 1024 })).stdout);
+    const workers = entries.filter(row => row.name === 'matter-driver-audit-sync');
+    const args = workers[0]?.pm2_env?.args;
+    if (workers.length !== 1 || !Array.isArray(args) || args.length !== 2 || args[0] !== '--config' || !path.isAbsolute(args[1])) {
+      throw Error('The managed reporting configuration is required');
+    }
+    const syncRoot = path.dirname(args[1]);
+    if (!syncRoot.startsWith(path.join(appRoot, 'server/.private/driver-audits') + '/')) throw Error('Unexpected managed reporting root');
+    await requirePrivateDriverAuditSourceDirectory(syncRoot);
+    const config = JSON.parse(await readPrivateDriverAuditSource(args[1], 1024 * 1024));
+    if (config.root !== syncRoot || config.codeRoot !== path.join(syncRoot, 'builder')) throw Error('Unexpected managed reporting configuration');
+    const seed = JSON.parse(await readPrivateDriverAuditSource(path.join(syncRoot, 'seed.json'), 1024 * 1024));
+    const capsule = sealTransferSecrets(request.recipientPublicKey, { version: 1, applicationCommit: expected,
+      appRoot, syncRoot, host: checked, bootstrap: { collectorRevision: seed.collectorRevision, manifestSha256: seed.manifestSha256 },
+      checkedAt: new Date().toISOString() });
+    console.log(JSON.stringify({ status: 'private-bindings-inspected', applicationCommit: expected,
+      recipientSha256: hash(request.recipientPublicKey), capsule }));
+    return;
+  }
+  if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder'].includes(operation)) {
+    phase = 'native-import-' + operation;
+    const encoded = process.env.NATIVE_IMPORT_CODE;
+    if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
+    const code = Buffer.from(encoded, 'base64');
+    if (code.toString('base64') !== encoded) throw Error('Reviewed import operator encoding differs');
+    const load = name => import(pathToFileURL(path.join(appRoot, 'server', name)).href);
+    const { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory } = await load('services/driverAuditSource.js');
+    const operators = path.join(appRoot, 'server/.private/driver-audit-native-operators');
+    await fs.mkdir(operators, { recursive: true, mode: 0o700 });
+    await requirePrivateDriverAuditSourceDirectory(operators);
+    const filename = path.join(operators, hash(code) + '.mjs');
+    try { await fs.writeFile(filename, code, { flag: 'wx', mode: 0o600 }); }
+    catch (error) { if (error.code !== 'EEXIST') throw error; }
+    if (hash(await readPrivateDriverAuditSource(filename, 256 * 1024)) !== hash(code)) throw Error('Reviewed import operator hash differs');
+    const { runDriverAuditNativeImport } = await import(pathToFileURL(filename).href);
+    console.log(JSON.stringify(await runDriverAuditNativeImport({ operation, appRoot, expectedSha: expected,
+      sessionId: process.env.NATIVE_TRANSFER_SESSION_ID, templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256,
+      profileSha256: process.env.NATIVE_IMPORT_PROFILE_SHA256 || undefined })));
+    return;
+  }
   if (['prepare-transfer', 'receive-transfer'].includes(operation)) {
     phase = 'encrypted-native-transfer';
     const { stdout: result } = await exec(process.execPath, [path.join(appRoot, 'server/scripts/driverAuditNativeTransfer.js')], {

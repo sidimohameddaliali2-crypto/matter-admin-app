@@ -216,6 +216,145 @@ export async function readDriverAuditSourceConfig(file) {
     environmentReference: config.environment, environment, gatewayCredential, archiveCacheDirectory, dataStore };
 }
 
+const capabilityFenceMode = 'reporting-database-capability-v1';
+const originalReportingProject = 'trhhjfgfmxofxhnzocks';
+const proofId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+const fingerprintNames = ['documents', 'receipts', 'archive', 'reservations', 'roadCache', 'capabilities'];
+const mutatorSignatures = [
+  'archive_consume(uuid,uuid,bigint)', 'archive_consume(uuid,uuid,bigint,text)', 'archive_release(uuid)',
+  'archive_reserve(uuid,bigint)', 'collector_cas(uuid,bigint,bigint,text,text,text,text)',
+  'collector_cas_review(uuid,bigint,bigint,bigint,text,text,text,text)', 'lease_acquire(uuid,integer)',
+  'lease_release(uuid,bigint)', 'qualification_cas(uuid,bigint,bigint,text,text,text,text)',
+  'qualification_lease_acquire(uuid,integer)', 'qualification_lease_release(uuid,bigint)',
+  'state_cas(text,bigint,text,text,text,text)',
+];
+const fencedFunctions = new Set([
+  ...mutatorSignatures.map(name => 'matter_reporting_hosted.' + name),
+  ...mutatorSignatures.map(name => 'public.matter_hosted_' + name),
+  'public.matter_hosted_gps_retention_register(jsonb,jsonb,jsonb)',
+  'public.matter_hosted_preview_road_cache(text,text,uuid,jsonb)',
+]);
+const ownerOnlyFunctions = new Set(['matter_reporting_hosted.state_cas_internal(text,bigint,text,text,text,text)',
+  'matter_reporting_hosted.deny_receipt_change()', 'matter_reporting_hosted.gps_retention_watch()']);
+const catalogFunctions = new Set([...fencedFunctions,
+  ...['archive_capacity(bigint)', 'deny_receipt_change()', 'gps_retention_watch()', 'lease_assert(uuid,bigint)',
+    'membership_lookup(uuid)', 'membership_provision(uuid,text,boolean,bigint,text,text)',
+    'qualification_lease_assert(uuid,bigint)', 'session_active(uuid,uuid)', 'state_cas_internal(text,bigint,text,text,text,text)',
+    'state_read(text)', 'state_receipts(text,bigint,integer)'].map(name => 'matter_reporting_hosted.' + name),
+  ...['archive_capacity(bigint)', 'gps_retention_inventory(text)', 'lease_assert(uuid,bigint)', 'membership_lookup(uuid)',
+    'membership_provision(uuid,text,boolean,bigint,text,text)', 'qualification_lease_assert(uuid,bigint)',
+    'session_active(uuid,uuid)', 'state_read(text)', 'state_read_if_changed(text,bigint)', 'state_receipts(text,bigint,integer)']
+    .map(name => 'public.matter_hosted_' + name),
+]);
+
+function sourceReceiptReference(saved, directory) {
+  return typeof saved?.path === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}\.private\.json$/.test(saved.path)
+    ? { ...saved, path: path.join(directory, saved.path) } : saved;
+}
+
+function sameFingerprints(left, right) {
+  return fingerprintNames.every(name => hashPattern.test(left?.[name] ?? '') && left[name] === right?.[name]);
+}
+
+function retainedUncertainAttempts(value, baseline) {
+  return value?.beforeCount === baseline.count && value.afterCount === baseline.count
+    && value.beforeSha256 === baseline.sha256 && value.afterSha256 === baseline.sha256;
+}
+
+// This mode proves closure of the audited legacy reporting admissions. It does
+// not claim cron processes stopped or revoke shared raw Storage/Gateway keys.
+async function verifyCapabilityFence(config, fence, release, backup, directory, verifiedAt, expires, nowMs) {
+  const blockedAt = Date.parse(fence.admissionBlockedAt), checkedAt = Date.parse(fence.checkedAt);
+  const baseline = backup?.uncertainAttemptsBaseline;
+  requireSource(Number.isSafeInteger(baseline?.count) && baseline.count >= 0 && hashPattern.test(baseline.sha256 ?? '')
+    && proofId(baseline.snapshotId) && hashPattern.test(baseline.sourceSnapshotSha256 ?? '')
+    && hashPattern.test(baseline.restoreVerificationSha256 ?? ''),
+  'The independently pinned restored backup uncertain-attempt baseline is required.');
+  requireSource(config.dataStore === 'mongo' && config.environment?.DRIVER_AUDIT_DATA_STORE === 'mongo'
+    && fence.writersStopped === false && fence.processesStopped !== true
+    && fence.sourceProjectRef === originalReportingProject && proofId(fence.id)
+    && hashPattern.test(fence.legacyRuntimeSha256 ?? '') && hashPattern.test(fence.legacyEntrypointsSha256 ?? '')
+    && Number.isFinite(blockedAt) && Number.isFinite(checkedAt) && blockedAt <= checkedAt && checkedAt <= verifiedAt
+    && nowMs - checkedAt <= 30 * minuteMs && fence.initialCursor === release.initialCursor
+    && Date.parse(fence.initialCursor) <= blockedAt && Date.parse(fence.validUntil) >= expires,
+  'The native database capability fence is incomplete or not fresh.');
+  const proofs = {}, ids = new Set([fence.id]), hashes = new Set(), paths = new Set();
+  for (const [name, kind] of [['capabilityAudit', 'reporting-capability-audit'], ['drainAudit', 'reporting-drain-audit'],
+    ['quietAudit', 'reporting-quiet-window'], ['checkpoint', 'reporting-final-checkpoint']]) {
+    const reference = sourceReceiptReference(fence[name], directory);
+    requireSource(proofId(reference?.id) && !ids.has(reference.id) && !hashes.has(reference.sha256)
+      && !paths.has(reference.path), 'Independent pinned capability fence proofs are required.');
+    ids.add(reference.id); hashes.add(reference.sha256); paths.add(reference.path);
+    const value = await readPinnedJson(reference, 'capability fence ' + name);
+    const at = Date.parse(value.checkedAt);
+    requireSource(value.version === 1 && value.verified === true && value.id === reference.id && value.kind === kind
+      && value.sourceProjectRef === fence.sourceProjectRef && value.legacyRuntimeSha256 === fence.legacyRuntimeSha256
+      && value.legacyEntrypointsSha256 === fence.legacyEntrypointsSha256 && value.admissionBlockedAt === fence.admissionBlockedAt
+      && Number.isFinite(at) && at >= blockedAt && at <= checkedAt, 'Capability fence proof identity or clock differs.');
+    proofs[name] = value;
+  }
+  const { capabilityAudit: capabilities, drainAudit: drain, quietAudit: quiet, checkpoint } = proofs;
+  const roles = ['PUBLIC', 'anon', 'authenticated', 'service_role'];
+  const exact = (actual, expected) => Array.isArray(actual) && actual.length === expected.length
+    && new Set(actual).size === actual.length && expected.every(value => actual.includes(value));
+  requireSource(hashPattern.test(capabilities.baselineCatalogSha256 ?? '') && exact(capabilities.apiRoles, roles)
+    && exact(capabilities.ownerBypassRoles, ['postgres', 'supabase_admin'])
+    && hashPattern.test(capabilities.roleMembershipSha256 ?? '') && capabilities.serviceRoleCannotAssumeOwner === true
+    && capabilities.rawStorageAndGatewayRevoked === false
+    && hashPattern.test(capabilities.unrelatedBeforeSha256 ?? '')
+    && capabilities.unrelatedAfterSha256 === capabilities.unrelatedBeforeSha256,
+  'Capability fence role scope or preserved unrelated access differs.');
+  const seen = new Set();
+  requireSource(Array.isArray(capabilities.functions) && capabilities.functions.length === catalogFunctions.size,
+    'The capability fence needs the exact reporting function catalog.');
+  for (const row of capabilities.functions) {
+    requireSource(catalogFunctions.has(row?.identity) && !seen.has(row.identity) && row.owner === 'postgres'
+      && hashPattern.test(row.beforeDefinitionSha256 ?? '') && row.definitionSha256 === row.beforeDefinitionSha256
+      && hashPattern.test(row.beforeAclSha256 ?? '') && hashPattern.test(row.aclSha256 ?? '')
+      && Array.isArray(row.beforeApiExecutableRoles) && new Set(row.beforeApiExecutableRoles).size === row.beforeApiExecutableRoles.length
+      && row.beforeApiExecutableRoles.every(role => roles.includes(role))
+      && Array.isArray(row.apiExecutableRoles) && new Set(row.apiExecutableRoles).size === row.apiExecutableRoles.length
+      && row.apiExecutableRoles.every(role => roles.includes(role))
+      && (!(fencedFunctions.has(row.identity) || ownerOnlyFunctions.has(row.identity)) || row.apiExecutableRoles.length === 0)
+      && (fencedFunctions.has(row.identity) || row.aclSha256 === row.beforeAclSha256
+        && exact(row.apiExecutableRoles, row.beforeApiExecutableRoles)),
+    'Capability fence function definitions, effective execution or preserved catalog differ.');
+    seen.add(row.identity);
+  }
+  const road = capabilities.roadCache;
+  requireSource(road?.identity === 'matter_preview_cache.road_geometry' && exact(road.apiWritableRoles, [])
+    && road.selectPreserved === true && hashPattern.test(road.beforeAclSha256 ?? '') && hashPattern.test(road.aclSha256 ?? '')
+    && Array.isArray(capabilities.sqlCron) && capabilities.sqlCron.length === 2
+    && exact(capabilities.sqlCron.map(job => job.id), [4, 5]) && capabilities.sqlCron.every(job => job.active === false
+      && job.owner === 'postgres' && hashPattern.test(job.beforeCommandSha256 ?? '') && job.commandSha256 === job.beforeCommandSha256),
+  'Capability fence direct reporting writes or owner SQL cron remain available.');
+  requireSource(['activeLeases', 'activeReportingTransactions', 'activeSqlCronRuns', 'activeProviderWork', 'privilegedReportingWriters']
+    .every(name => drain[name] === 0) && hashPattern.test(drain.admissionGraphSha256 ?? '')
+    && hashPattern.test(drain.ownerAuditSha256 ?? '') && retainedUncertainAttempts(drain.uncertainAttempts, baseline),
+  'The capability fence needs drained work and preserved uncertain attempts.');
+  requireSource(Array.isArray(quiet.samples) && quiet.samples.length === 2, 'Independent quiet source samples are required.');
+  requireSource(quiet.samples.every(value => value && typeof value === 'object'), 'Independent quiet source samples are required.');
+  const [start, end] = quiet.samples, from = Date.parse(start.at), to = Date.parse(end.at);
+  requireSource(proofId(start.id) && proofId(end.id) && start.id !== end.id
+    && hashPattern.test(start.sha256 ?? '') && hashPattern.test(end.sha256 ?? '') && start.sha256 !== end.sha256
+    && Number.isFinite(from) && Number.isFinite(to) && from >= blockedAt && to - from >= 5 * minuteMs
+    && to - from <= 30 * minuteMs && nowMs - to <= 30 * minuteMs
+    && sameFingerprints(start.fingerprints, end.fingerprints)
+    && capabilities.capabilitySha256 === end.fingerprints.capabilities
+    && [capabilities, drain, quiet].every(value => Date.parse(value.checkedAt) >= to),
+  'The capability fence needs fresh unchanged reporting evidence across a bounded quiet window.');
+  const capturedAt = Date.parse(checkpoint.capturedAt);
+  requireSource(checkpoint.snapshotId === baseline.snapshotId && checkpoint.sourceSnapshotSha256 === baseline.sourceSnapshotSha256
+    && checkpoint.restoreVerificationSha256 === baseline.restoreVerificationSha256
+    && Number.isFinite(capturedAt) && capturedAt >= Date.parse(drain.checkedAt) && nowMs - capturedAt <= 30 * minuteMs
+    && capturedAt <= Date.parse(checkpoint.checkedAt) && checkpoint.initialCursor === release.initialCursor
+    && Number.isSafeInteger(checkpoint.collectorRevision) && checkpoint.collectorRevision > 0
+    && Number.isSafeInteger(checkpoint.reviewRevision) && checkpoint.reviewRevision >= 0
+    && checkpoint.backupReceiptSha256 === release.backup.sha256 && checkpoint.parityReceiptSha256 === release.parity.sha256
+    && sameFingerprints(checkpoint.fingerprints, end.fingerprints) && retainedUncertainAttempts(checkpoint.uncertainAttempts, baseline),
+  'The final capability fence checkpoint or retained uncertain attempts differ.');
+}
+
 export async function verifyDriverAuditSourceRelease(config, reference, now = new Date()) {
   const release = await readPinnedJson(reference, 'source release receipt');
   const verifiedAt = Date.parse(release.verifiedAt);
@@ -228,16 +367,22 @@ export async function verifyDriverAuditSourceRelease(config, reference, now = ne
   'Source release receipt does not match the qualified configuration.');
   requireSource(Number.isFinite(verifiedAt) && Number.isFinite(expires) && expires > verifiedAt && expires - verifiedAt <= 30 * minuteMs
     && now.getTime() >= verifiedAt && now.getTime() < expires, 'Source release fence is expired or not fresh.');
+  const receipts = {};
   for (const kind of ['backup', 'parity', 'credentials', 'sourceFence']) {
     const saved = release[kind];
-    const receiptReference = typeof saved?.path === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}\.private\.json$/.test(saved.path)
-      ? { ...saved, path: path.join(path.dirname(reference.path), saved.path) } : saved;
+    const receiptReference = sourceReceiptReference(saved, path.dirname(reference.path));
     const receipt = await readPinnedJson(receiptReference, kind + ' receipt');
     requireSource(receipt.version === 1 && receipt.verified === true, `The ${kind} receipt is not verified.`);
+    receipts[kind] = receipt;
     if (kind === 'sourceFence') {
-      requireSource(receipt.writersStopped === true && receipt.leasesDrained === true
-        && receipt.initialCursor === release.initialCursor && Date.parse(receipt.validUntil) >= expires,
-      'The source fence does not match the stopped and drained writers.');
+      if (receipt.mode === capabilityFenceMode) {
+        await verifyCapabilityFence(config, receipt, release, receipts.backup,
+          path.dirname(receiptReference.path), verifiedAt, expires, now.getTime());
+      } else {
+        requireSource(receipt.writersStopped === true && receipt.leasesDrained === true
+          && receipt.initialCursor === release.initialCursor && Date.parse(receipt.validUntil) >= expires,
+        'The source fence does not match the stopped and drained writers.');
+      }
     }
   }
   return { release, sha256: reference.sha256 };
