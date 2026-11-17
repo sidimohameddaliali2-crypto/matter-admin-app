@@ -400,6 +400,36 @@ test('a failed read-only privilege probe prevents readiness reads, file writes a
   assert.deepEqual(await fs.readdir(path.join(f.base, '.private/driver-report-supabase-handoff')), before);
 });
 
+function openedPrivilegeFailure(failure) {
+  const receipt = failure.supabaseControlStopped; assert(receipt);
+  assert.deepEqual(Object.keys(receipt).sort(), ['status', 'applicationCommit', 'operatorPhase', 'metadataSha256', 'capsule'].sort());
+  assert.equal(receipt.operatorPhase, 'privilege-probe'); const capsule = openTransferSecrets(privateKey, receipt.capsule);
+  assert.equal(capsule.kind, 'supabase-canary-privilege-failure-capsule-v1');
+  const packed = Buffer.from(capsule.metadataGzipBase64, 'base64'); assert.equal(sha(packed), capsule.metadataGzipSha256);
+  const raw = gunzipSync(packed, { maxOutputLength: 32 * 1024 }); assert.equal(sha(raw), receipt.metadataSha256);
+  const metadata = JSON.parse(raw); assert.equal(metadata.kind, 'supabase-canary-privilege-first-failure-v1');
+  assert.equal(metadata.readOnly, true); assert.equal(metadata.acceptedAsVerified, false); assert.equal(metadata.guardChanged, false);
+  return { receipt, metadata, raw };
+}
+
+test('a privilege-probe exception retains its private cause only in the bounded encrypted first-failure capsule', async t => {
+  const f = await hostFixture(t), before = await fs.readdir(path.join(f.base, '.private/driver-report-supabase-handoff'));
+  f.adapters.rootCommand = async () => { throw Object.assign(Error('fictional sudo cause ' + f.secret), { code: 'EACCES' }); };
+  let error; await assert.rejects(f.run('probe'), e => { error = e; return e.phase === 'privilege-probe'; });
+  const { receipt, metadata } = openedPrivilegeFailure(error);
+  assert(metadata.cause.message.includes(f.secret)); assert.equal(metadata.cause.code, 'EACCES');
+  assert.deepEqual(metadata.executableChecks.map(row => row.path), ['/usr/bin/sudo', '/usr/bin/node']);
+  assert(!JSON.stringify(error).includes(f.secret)); assert(!JSON.stringify(receipt).includes(f.secret));
+  assert.equal(f.urls.length, 0); assert.deepEqual(await fs.readdir(path.join(f.base, '.private/driver-report-supabase-handoff')), before);
+});
+
+test('a rejected fixed executable identity is reported privately before any privileged process is spawned', async t => {
+  const f = await hostFixture(t); f.adapters.executable = async file => ({ path: file, uid: 1000, mode: 0o100775, signature: 'fictional wrong owner' });
+  let error; await assert.rejects(f.run('probe'), e => { error = e; return e.phase === 'privilege-probe'; });
+  const { metadata } = openedPrivilegeFailure(error); assert.equal(metadata.executableChecks[0].observed.uid, 1000);
+  assert.equal(metadata.executableChecks[0].guardAccepted, false); assert.deepEqual(f.sudo, []); assert.equal(f.urls.length, 0);
+});
+
 test('a source writer, running sync, broad listener or wrong report identity blocks canary planning', async t => {
   for (const mutate of [
     f => f.rows.push({ name: 'matter-driver-audit-source' }),
@@ -455,6 +485,57 @@ test('privilege transport failures never return raw stderr or continue to readin
   syncBuiltinESMExports();
   try { await assert.rejects(f.run('plan'), error => error.phase === 'privilege-probe' && !JSON.stringify(error).includes(f.secret)); assert.equal(f.urls.length, 0); }
   finally { childProcess.spawn = original; syncBuiltinESMExports(); }
+});
+
+test('actual privilege transport seals bounded stderr/stdout and exit facts while retaining fixed sudo arguments and waiting for close', async t => {
+  const f = await hostFixture(t), original = childProcess.spawn; delete f.adapters.rootCommand;
+  let closed = false;
+  childProcess.spawn = (file, args, options) => {
+    assert.equal(file, '/usr/bin/sudo'); assert.deepEqual(args, ['-n', '--', '/usr/bin/node', '--input-type=module', '-']);
+    assert.deepEqual(options.env, { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C' });
+    const child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.kill = () => true;
+    child.stdin.on('finish', () => { child.stdout.end('local private stdout ' + f.secret); child.stderr.end((f.secret + '\n').repeat(10000));
+      setTimeout(() => { closed = true; child.emit('close', 1, null); }, 10); }); return child;
+  }; syncBuiltinESMExports();
+  let error; try { await assert.rejects(f.run('probe'), e => { error = e; return e.phase === 'privilege-probe'; }); }
+  finally { childProcess.spawn = original; syncBuiltinESMExports(); }
+  assert(closed); const { receipt, metadata } = openedPrivilegeFailure(error);
+  assert.equal(metadata.transport.exitCode, 1); assert.equal(metadata.transport.signal, null);
+  assert(metadata.transport.stderr.includes(f.secret)); assert(metadata.transport.stderrTruncated);
+  assert(Buffer.byteLength(metadata.transport.stderr) <= 4096); assert(metadata.transport.stderrBytes > 4096);
+  assert(metadata.transport.stdout.includes(f.secret)); assert(!JSON.stringify(receipt).includes(f.secret)); assert.equal(f.urls.length, 0);
+});
+
+test('a malformed successful local privileged response remains a stopped operation and is only retained inside encryption', async t => {
+  const f = await hostFixture(t); f.adapters.rootCommand = async () => 'not-json-' + f.secret;
+  let error; await assert.rejects(f.run('probe'), e => { error = e; return e.phase === 'privilege-probe'; });
+  const { receipt, metadata } = openedPrivilegeFailure(error); assert(metadata.rootResponse.stdout.includes(f.secret));
+  assert(!JSON.stringify(receipt).includes(f.secret)); assert.equal(f.urls.length, 0);
+});
+
+test('oversized local privileged output still stops at the original cap and records its close signal privately', async t => {
+  const f = await hostFixture(t), original = childProcess.spawn; delete f.adapters.rootCommand; let kills = 0, closed = false;
+  childProcess.spawn = () => {
+    const child = new EventEmitter(); child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    child.kill = signal => { assert.equal(signal, 'SIGTERM'); kills++; setImmediate(() => { closed = true; child.emit('close', null, 'SIGTERM'); }); return true; };
+    child.stdin.on('finish', () => { child.stderr.end(f.secret + '\0'.repeat(10000)); child.stdout.end(Buffer.alloc(128 * 1024 + 1, 0)); }); return child;
+  }; syncBuiltinESMExports();
+  let error; try { await assert.rejects(f.run('probe'), e => { error = e; return e.phase === 'privilege-probe'; }); }
+  finally { childProcess.spawn = original; syncBuiltinESMExports(); }
+  assert(closed); assert.equal(kills, 1); const { receipt, metadata, raw } = openedPrivilegeFailure(error);
+  assert(raw.length <= 32 * 1024); assert.equal(metadata.transport.exitCode, null); assert.equal(metadata.transport.signal, 'SIGTERM');
+  assert.equal(metadata.transport.reason, 'stdout-limit'); assert.equal(metadata.transport.stdoutBytes, 128 * 1024 + 1);
+  assert(metadata.transport.stdoutTruncated); assert(!JSON.stringify(receipt).includes(f.secret)); assert.equal(f.urls.length, 0);
+});
+
+test('the real generated root catch keeps its bounded cause in the local pipe and emits only a static stderr message', () => {
+  const result = childProcess.spawnSync(process.execPath, ['--input-type=module', '-'], {
+    input: subject.driverAuditSupabaseCanaryRootInput({ operation: 'fixture-invalid-operation', recipientPublicKey }),
+    env: { PATH: '/usr/bin:/bin' }, encoding: 'utf8', timeout: 10000, maxBuffer: 32 * 1024,
+  });
+  assert.equal(result.status, 1); assert.equal(result.stderr, 'Canary privileged command stopped\n');
+  const local = JSON.parse(result.stdout); assert.equal(local.kind, 'supabase-canary-root-local-failure-v1');
+  assert.equal(typeof local.cause.message, 'string'); assert(local.cause.stack.length > 0); assert(Buffer.byteLength(result.stdout) <= 4096);
 });
 
 test('the exact generated privileged program parses as ESM without running any root operation', () => {

@@ -334,7 +334,7 @@ export function driverAuditSupabaseCanaryRootInput(input) {
   const payload = Buffer.from(JSON.stringify(input)); need(payload.length <= 32 * 1024);
   const source = driverAuditSupabaseCanarySource();
   const driver = `\nimport { createPublicKey, createCipheriv, publicEncrypt } from 'node:crypto';\nimport { gzipSync } from 'node:zlib';\n`
-    + sealRoot.toString() + '\n'
+    + sealRoot.toString() + '\n' + boundedDiagnosticText.toString() + '\n' + diagnosticCause.toString() + '\n'
     + createDriverAuditSupabasePromotionPlan.toString() + '\n' + validateDriverAuditSupabaseCanaryAcceptance.toString() + '\n'
     + executeDriverAuditSupabasePromotion.toString() + '\n'
     + 'const finishCanary=()=>{};for(const event of ["SIGTERM","SIGINT","SIGHUP"])process.on(event,finishCanary);\n'
@@ -345,7 +345,12 @@ export function driverAuditSupabaseCanaryRootInput(input) {
     + 'diff:driverAuditSupabaseCanaryDiff,execute:executeDriverAuditSupabaseCanary,seal:sealRoot,'
     + 'createPromotion:value=>createDriverAuditSupabasePromotionPlan(value,{verifyCanaryPlan:createDriverAuditSupabaseCanaryPlan}),'
     + 'executePromotion:executeDriverAuditSupabasePromotion});process.stdout.write(JSON.stringify(result)); }'
-    + 'catch { process.stderr.write("Canary privileged command stopped\\n"); process.exitCode=1; }'
+    + 'catch(cause){try{const local={version:1,kind:"supabase-canary-root-local-failure-v1",'
+    + 'cause:diagnosticCause(cause),uid:process.getuid(),platform:process.platform,nodeVersion:process.version,nodeExecutable:process.execPath};'
+    + 'let raw=JSON.stringify(local);while(Buffer.byteLength(raw)>4096){'
+    + 'local.cause.stack=local.cause.stack.slice(0,Math.floor(local.cause.stack.length/2));local.cause.stackTruncated=true;'
+    + 'local.cause.message=local.cause.message.slice(0,Math.floor(local.cause.message.length/2));local.cause.messageTruncated=true;raw=JSON.stringify(local);}'
+    + 'process.stdout.write(raw);}catch{}process.stderr.write("Canary privileged command stopped\\n");process.exitCode=1;}'
     + 'finally{for(const event of ["SIGTERM","SIGINT","SIGHUP"])process.off(event,finishCanary);}\n';
   const output = Buffer.concat([source, Buffer.from(driver)]); need(output.length <= 128 * 1024); return output;
 }
@@ -535,17 +540,49 @@ async function acceptanceArtifact({ folder, rawSha256, objectSha256, server, rel
   return { proof, recipe, environmentFile };
 }
 
-// No shell or caller-selected executable, arguments, cwd or environment.
+function boundedDiagnosticText(value, maximum = 4096) {
+  const size = Buffer.isBuffer(value) ? value.length : typeof value === 'string' ? Buffer.byteLength(value) : 0;
+  const raw = Buffer.isBuffer(value) ? value.subarray(0, maximum) : Buffer.from(typeof value === 'string' ? value.slice(0, maximum) : '');
+  let text = raw.subarray(0, maximum).toString('utf8');
+  while (Buffer.byteLength(text) > maximum) text = text.slice(0, -1);
+  return { text, bytes: size, truncated: size > Buffer.byteLength(text) };
+}
+
+function diagnosticCause(cause) {
+  let name = '', code = '', message = '', stack = '';
+  try { name = typeof cause?.name === 'string' ? cause.name : ''; code = typeof cause?.code === 'string' || Number.isSafeInteger(cause?.code) ? String(cause.code) : '';
+    message = typeof cause?.message === 'string' ? cause.message : ''; stack = typeof cause?.stack === 'string' ? cause.stack : ''; } catch { /* Unreadable error details cannot replace the original stopped result. */ }
+  const m = boundedDiagnosticText(message, 2048), s = boundedDiagnosticText(stack, 4096);
+  return { name: boundedDiagnosticText(name, 128).text, code: boundedDiagnosticText(code, 128).text,
+    message: m.text, messageBytes: m.bytes, messageTruncated: m.truncated, stack: s.text, stackBytes: s.bytes, stackTruncated: s.truncated };
+}
+
+// No shell or caller-selected executable, arguments, cwd or environment. Raw
+// child details remain on the local pipe/nonenumerable error until RSA sealing.
 async function rootCommand(input) {
   return new Promise((resolve, reject) => {
     const child = spawn('/usr/bin/sudo', ['-n', '--', '/usr/bin/node', '--input-type=module', '-'],
       { cwd: '/', env: { PATH: '/usr/sbin:/usr/bin:/sbin:/bin', LANG: 'C' }, stdio: ['pipe', 'pipe', 'pipe'] });
-    const parts = []; let size = 0, failed = false;
-    const fail = () => { failed = true; child.kill('SIGTERM'); };
-    const timer = setTimeout(fail, 60000);
-    child.stdout.on('data', bytes => { if ((size += bytes.length) > 128 * 1024) fail(); else parts.push(bytes); });
-    child.stderr.resume(); child.stdin.on('error', fail); child.once('error', fail);
-    child.once('close', code => { clearTimeout(timer); if (failed || code !== 0) reject(Error('Privileged canary command stopped')); else resolve(Buffer.concat(parts).toString()); });
+    const parts = [], stdout = [], stderr = []; let size = 0, errorBytes = 0, stdoutSaved = 0, stderrSaved = 0, failed = false, reason, cause;
+    const prefix = (items, bytes, saved) => { const take = Math.min(4096 - saved, bytes.length); if (take > 0) items.push(Buffer.from(bytes.subarray(0, take))); return saved + take; };
+    const fail = (why, error) => { if (!failed) { reason = why; cause = error; failed = true; child.kill('SIGTERM'); } };
+    const timer = setTimeout(() => fail('timeout'), 60000);
+    child.stdout.on('data', bytes => { stdoutSaved = prefix(stdout, bytes, stdoutSaved); if ((size += bytes.length) > 128 * 1024) fail('stdout-limit'); else parts.push(bytes); });
+    child.stderr.on('data', bytes => { errorBytes += bytes.length; stderrSaved = prefix(stderr, bytes, stderrSaved); });
+    child.stdin.on('error', error => fail('stdin', error)); child.once('error', error => fail('spawn', error));
+    child.once('close', (code, signal) => {
+      clearTimeout(timer);
+      if (failed || code !== 0) {
+        const out = boundedDiagnosticText(Buffer.concat(stdout)), err = boundedDiagnosticText(Buffer.concat(stderr));
+        const stopped = Error('Privileged canary command stopped');
+        Object.defineProperty(stopped, 'driverAuditCanaryPrivilegeTransport', { value: {
+          exitCode: Number.isSafeInteger(code) && code >= 0 && code <= 255 ? code : null,
+          signal: typeof signal === 'string' && /^SIG[A-Z0-9]{1,12}$/.test(signal) ? signal : null, reason: reason ?? 'exit',
+          stdout: out.text, stdoutBytes: size, stdoutTruncated: size > Buffer.byteLength(out.text),
+          stderr: err.text, stderrBytes: errorBytes, stderrTruncated: errorBytes > Buffer.byteLength(err.text), cause: diagnosticCause(cause) } });
+        reject(stopped);
+      } else resolve(Buffer.concat(parts).toString());
+    });
     child.stdin.end(input);
   });
 }
@@ -593,6 +630,8 @@ export async function runDriverAuditSupabaseCanaryControl(args, adapters = {}) {
   const command = adapters.rootCommand ?? rootCommand;
   const shell = Object.fromEntries(Object.entries(process.env).filter(([name]) => ['HOME', 'PATH', 'USER', 'LOGNAME', 'LANG'].includes(name)));
   let checkout, verify, operatorFolder, checkedPrivilege, promotionInputs, checkoutAttempt, checkoutDiagnostic, preservedBaseFiles;
+  let privilegeStep = 'fixed-executables', privilegeRootInput, privilegeRootResponse;
+  const executableChecks = [];
   const controller = new AbortController(), interrupt = () => controller.abort(Error('Canary operation cancelled'));
   for (const event of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(event, interrupt);
   adapters.signal?.addEventListener('abort', interrupt);
@@ -687,19 +726,28 @@ export async function runDriverAuditSupabaseCanaryControl(args, adapters = {}) {
     });
     const executables = [];
     for (const file of ['/usr/bin/sudo', '/usr/bin/node']) {
-      const value = await executable(file); need(value.path === file && value.uid === 0 && !(value.mode & 0o022)
-        && (value.mode & 0o111) && typeof value.signature === 'string' && value.signature.length <= 512); executables.push(value);
+      privilegeStep = 'check-' + path.basename(file);
+      const value = await executable(file), row = { path: file, observed: { path: typeof value?.path === 'string' ? value.path.slice(0, 1024) : null,
+        uid: Number.isSafeInteger(value?.uid) ? value.uid : null, mode: Number.isSafeInteger(value?.mode) ? value.mode : null,
+        signature: typeof value?.signature === 'string' ? value.signature.slice(0, 512) : null }, guardAccepted: false };
+      executableChecks.push(row); need(value.path === file && value.uid === 0 && !(value.mode & 0o022)
+        && (value.mode & 0o111) && typeof value.signature === 'string' && value.signature.length <= 512);
+      row.guardAccepted = true; executables.push(value);
     }
     checkedPrivilege = async () => { for (const value of executables) need(JSON.stringify(await executable(value.path)) === JSON.stringify(value)); };
     const invoke = async input => {
       controller.signal.throwIfAborted();
       await checkedPrivilege();
       if (['enable', 'seal-entry', 'promote'].includes(input.operation)) attempted = true;
-      const result = rootResult(await command(driverAuditSupabaseCanaryRootInput(input)), input.operation, input.planSha256, args.recipientPublicKey, input.canaryAcceptanceSha256);
+      const script = driverAuditSupabaseCanaryRootInput(input);
+      if (phase === 'privilege-probe') { privilegeStep = 'root-child'; privilegeRootInput = { sha256: sha(script), bytes: script.length }; }
+      const raw = await command(script);
+      if (phase === 'privilege-probe') { privilegeStep = 'root-response'; privilegeRootResponse = boundedDiagnosticText(raw); }
+      const result = rootResult(raw, input.operation, input.planSha256, args.recipientPublicKey, input.canaryAcceptanceSha256);
       await checkedPrivilege(); controller.signal.throwIfAborted(); return result;
     };
     const probe = await invoke({ operation: 'probe', recipientPublicKey: args.recipientPublicKey });
-    await checkout(); if (operation === 'probe') return { ...probe, applicationCommit: p.base, directDatabaseConnections: 0, networkRequests: 0 };
+    privilegeStep = 'base-checkout-readback'; await checkout(); if (operation === 'probe') return { ...probe, applicationCommit: p.base, directDatabaseConnections: 0, networkRequests: 0 };
     operatorFolder = path.join(args.appRoot, 'server/.private/driver-report-supabase-handoff'); await directory(operatorFolder);
     const load = (name, root = args.appRoot) => adapters.load ? adapters.load(name, root) : import(pathToFileURL(path.join(root, 'server', name)).href);
     const { acquireWorkerLock } = await load('vendor/driver-audits/integration/hosted/worker-lock.mjs');
@@ -838,12 +886,40 @@ export async function runDriverAuditSupabaseCanaryControl(args, adapters = {}) {
     return { ...completed, applicationCommit: p.base, handshakeSha256, directDatabaseConnections: 0,
       ...(operation === 'promote' ? { canaryAcceptanceObjectSha256: args.canaryAcceptanceObjectSha256 } : {}),
       sourceStarted: false, syncStarted: false, staffAuthorizationGranted: false, liveBrowserVerified: false };
-  } catch {
+  } catch (cause) {
     await recover(); if (controller.signal.aborted) phase = 'cancelled';
     outward = Object.assign(Error('Supabase canary control stopped at ' + phase), { phase, rollbackRestored });
     if (phase === 'checkout' && checkoutAttempt && checkoutDiagnostic) try {
       Object.defineProperty(outward, 'supabaseControlStopped', { value: await checkoutDiagnostic() });
     } catch { /* Diagnostics cannot replace or open the original closed guard. */ }
+    if (phase === 'privilege-probe') try {
+      const filesystemExecutables = [];
+      for (const file of ['/usr/bin/sudo', '/usr/bin/node']) {
+        try { const stat = await fs.lstat(file, { bigint: true }); filesystemExecutables.push({ path: file, available: true,
+          regular: stat.isFile(), symlink: stat.isSymbolicLink(), realpath: await fs.realpath(file), uid: Number(stat.uid), gid: Number(stat.gid),
+          mode: Number(stat.mode), bytes: Number(stat.size), signature: signature(stat) }); }
+        catch (error) { filesystemExecutables.push({ path: file, available: false, error: diagnosticCause(error) }); }
+      }
+      const transport = cause?.driverAuditCanaryPrivilegeTransport;
+      const response = privilegeRootResponse && { stdout: privilegeRootResponse.text, stdoutBytes: privilegeRootResponse.bytes, stdoutTruncated: privilegeRootResponse.truncated };
+      const details = { version: 1, kind: 'supabase-canary-privilege-first-failure-v1', operation: args.operation,
+        applicationCommit: args.expectedSha, operatorPhase: phase, failedStep: privilegeStep, executableChecks, filesystemExecutables,
+        rootInput: privilegeRootInput ?? null, transport: transport ?? null, rootResponse: response ?? null, cause: diagnosticCause(cause),
+        readOnly: true, guardChanged: false, acceptedAsVerified: false, sourceStarted: false, syncStarted: false, routingChanged: false };
+      let metadata = Buffer.from(JSON.stringify(details));
+      for (let shrink = 0; metadata.length > 32 * 1024 && shrink < 8; shrink++) {
+        const shorten = item => { if (!item || typeof item !== 'object') return; for (const [field, value] of Object.entries(item)) {
+          if (['stdout', 'stderr', 'message', 'stack'].includes(field) && typeof value === 'string') { item[field] = value.slice(0, Math.floor(value.length / 2)); item[field + 'Truncated'] = true; }
+          else if (value && typeof value === 'object') shorten(value);
+        } }; shorten(details);
+        metadata = Buffer.from(JSON.stringify(details));
+      }
+      need(metadata.length <= 32 * 1024); const packed = gzipSync(metadata);
+      Object.defineProperty(outward, 'supabaseControlStopped', { value: { status: 'supabase-control-stopped', applicationCommit: args.expectedSha,
+        operatorPhase: phase, metadataSha256: sha(metadata), capsule: sealRoot(args.recipientPublicKey, { version: 1,
+          kind: 'supabase-canary-privilege-failure-capsule-v1', applicationCommit: args.expectedSha, metadataSha256: sha(metadata),
+          metadataGzipSha256: sha(packed), metadataGzipBase64: packed.toString('base64') }) } });
+    } catch { /* Local diagnostics may fail; no plaintext detail can escape. */ }
     throw outward;
   } finally {
     await cancelled();
