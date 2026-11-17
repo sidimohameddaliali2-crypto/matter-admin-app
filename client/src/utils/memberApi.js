@@ -1,3 +1,4 @@
+import { attachActivityContext } from './activityCapture';
 import { attachRequestReference } from './requestReference';
 import axios from 'axios';
 
@@ -48,5 +49,6 @@ memberApi.interceptors.response.use(
 );
 
 attachRequestReference(memberApi);
+attachActivityContext(memberApi);
 
 export default memberApi;

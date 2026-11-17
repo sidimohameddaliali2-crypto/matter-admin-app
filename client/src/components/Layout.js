@@ -64,7 +64,7 @@ const NAV_ITEMS = [
 
   { name: 'Partners', href: '/admin/partners', icon: Building2, permission: 'partners', group: 'Partners' },
 
-  { name: 'Traceability', href: '/traceability', icon: Radar, roles: ['super_admin'], group: 'Admin' },
+  { name: 'Activity history', href: '/traceability', icon: Radar, roles: ['super_admin'], group: 'Admin' },
   { name: 'Users', href: '/users', icon: Users, permission: 'users', group: 'Admin' },
   { name: 'Employees', href: '/employees', icon: Briefcase, permission: 'employees', group: 'Admin' },
 

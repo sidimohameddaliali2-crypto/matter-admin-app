@@ -1,3 +1,4 @@
+import { activityActor } from '../observability/activityPolicy.js';
 import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 
@@ -38,6 +39,7 @@ export const protect = async (req, res, next) => {
         return res.status(401).json({ message: 'User account is deactivated' });
       }
       
+      req.activityActor = Object.freeze(activityActor(req));
       next();
     } catch (error) {
       return res.status(401).json({ message: 'Not authorized, token failed' });

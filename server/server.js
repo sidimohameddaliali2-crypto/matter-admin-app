@@ -5,6 +5,8 @@
 // module imported below sees process.env already populated. See
 // loadEnv.js for the full explanation.
 import './loadEnv.js';
+import './observability/installActivity.js';
+import { startActivityHistory } from './observability/activityStore.js';
 import { createRequestTrace } from './observability/requestTrace.js';
 import { resolveTraceRoute } from './observability/routeCatalog.js';
 import traceabilityRoutes from './routes/traceability.js';
@@ -48,6 +50,8 @@ initializeSpaces();
 
 // Create Express app
 const app = express();
+app.set('activityHistoryEnabled', true);
+startActivityHistory();
 const server = http.createServer(app);
 
 // Origins allowed to call the API with credentials. The SPA is served by this

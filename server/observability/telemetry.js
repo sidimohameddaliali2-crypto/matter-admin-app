@@ -56,7 +56,7 @@ export function emitTelemetry(event, fields = {}, sink = (line) => console.info(
 // Call around each execution, never around timer registration. A completed run
 // records the returned outcome; a caught failure inside work must be marked there.
 export async function traceJob(job, work) {
-  const value = { trace_id: newTraceId(), span_id: newSpanId(), run_id: randomUUID() };
+  const value = { trace_id: newTraceId(), span_id: newSpanId(), run_id: randomUUID(), job };
   const began = performance.now();
   return inTraceContext(value, async () => {
     emitTelemetry('job.started', { job });
