@@ -264,7 +264,7 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
         {initial?.source === 'menu-selection' && (
           <div className="bg-[#eafbd0] border border-[#cdeb9e] text-[#2a3f13] rounded-2xl px-4 py-2.5 text-[12.5px] leading-snug">
             {initial.mealType === 'breakfast'
-              ? 'Breakfast of the day starts at AED 12. Edit the selling price below; your price and availability toggle are preserved when menus synchronize. Serving dates follow Menu Selection.'
+              ? 'Breakfast of the day starts at AED 20. Edit the selling price below; your price and availability toggle are preserved when menus synchronize. Serving dates follow Menu Selection.'
               : "Auto-synced from the Menu Selection weekly menu. Its price and availability window are kept in sync automatically each time next week's menu is published — edits here will be overwritten the next time that dish appears."}
           </div>
         )}

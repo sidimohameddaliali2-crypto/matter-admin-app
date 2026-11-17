@@ -33,7 +33,7 @@ test('breakfast sync retains one ID, editable prices and exact serving dates acr
   const first = week();
   assert.deepEqual(await syncMenuSelectionBreakfastsToPartnerMenu(first), {created: 1, updated: 0});
   const item = records[0];
-  assert.equal(partnerUnitPrice(item), 12);
+  assert.equal(partnerUnitPrice(item), 20);
   assert.equal(item.category, 'Breakfast of the day');
   assert.equal(isPartnerItemAvailable(item, '2026-11-17'), true);
   assert.equal(isPartnerItemAvailable(item, '2026-11-18'), false);

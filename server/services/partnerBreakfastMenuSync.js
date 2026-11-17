@@ -3,9 +3,9 @@ import MenuItem from '../models/MenuItem.js';
 import { assignItemToAllActivePartners } from './partnerMenuAssignment.js';
 import { partnerMenuNameKey, partnerMenuNamePattern } from './partnerMenuCatalog.js';
 
-// Owner (2026-11-17): default AED 12, editable in Master Menu. Existing prices
+// Owner (2026-11-17): default AED 20, editable in Master Menu. Existing prices
 // are never overwritten by a later menu publish or rotation edit.
-export const PARTNER_BREAKFAST_DEFAULT_PRICE = 12;
+export const PARTNER_BREAKFAST_DEFAULT_PRICE = 20;
 const entries = value => value instanceof Map ? [...value.entries()] : Object.entries(value || {});
 const dateKey = value => {
   const date = value ? new Date(value) : new Date(NaN);
