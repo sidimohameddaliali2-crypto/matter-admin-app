@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { dateClosed } from '../utils/partnerDailyPlan';
+import { recordActivityChange } from '../utils/activityCapture';
 
 // Keep the original partner calendar's month navigation, lime selections and
 // existing-order dots. Use UTC dates so travelling never shifts a delivery day.
@@ -38,7 +39,7 @@ export default function PartnerOrderCalendar({ earliestDate, selectedDates, orde
         const disabled = !selected && (new Date(date + 'T00:00:00Z').getUTCDay() === 0 || date < earliestDate || dateClosed(date));
         const hasOrder = orders.some(order => String(order.deliveryDate).slice(0, 10) === date && order.status !== 'cancelled');
         return <button key={date} type="button" aria-label={'Delivery ' + date} aria-pressed={selected} disabled={disabled}
-          onClick={() => onChange(selected ? selectedDates.filter(d => d !== date) : [...selectedDates, date].sort())}
+          onClick={event => { const next = selected ? selectedDates.filter(d => d !== date) : [...selectedDates, date].sort(); recordActivityChange({ field: 'Delivery dates', form: 'Daily order plan', before: selectedDates, after: next, element: event.currentTarget }); onChange(next); }}
           className="relative border-[1.5px] font-bold transition-colors disabled:cursor-default h-11 sm:h-[46px]"
           style={{ borderRadius: 14, borderColor: selected ? '#bcf679' : date === today ? '#a8ccf5' : '#12275e',
             background: selected ? '#bcf679' : '#051747', color: selected ? '#051747' : '#ede5de', opacity: disabled ? 0.35 : 1 }}>

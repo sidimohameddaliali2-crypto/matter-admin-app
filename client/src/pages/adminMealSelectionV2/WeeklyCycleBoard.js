@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Save, Check, Upload, Copy, History, Eye, X, GripVertical } from 'lucide-react';
 import { Action, Badge, Tabs, SearchBox, Modal, Notice } from './components';
 import { componentName, mealType, mealFormat, cycleSlots } from './workbookMeals';
+import { activityReference, recordActivityChange } from '../../utils/activityCapture';
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 const GROUPS = ['Breakfast', 'Main', 'Sub', 'Snack'];
@@ -57,7 +58,18 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
   const key = `${menu}:${week}`;
   const board = boards[key] || (menu === 'Main menu' && week === 'Week 1' ? seedBoard(meals) : emptyBoard());
   const byId = new Map(meals.map(meal => [meal.id, meal]));
-  const persistBoards = async updates => {
+  const latestBoards = useRef(boards);
+  latestBoards.current = boards;
+  const persistBoards = async (updates, observe = true) => {
+    if (observe) Object.entries(updates).forEach(([boardKey, next]) => {
+      const before = latestBoards.current[boardKey] || (boardKey === 'Main menu:Week 1' ? seedBoard(meals) : emptyBoard());
+      next.forEach((day, di) => day.forEach((group, gi) => {
+        const describe = entries => entries.map(entry => `${activityReference(byId.get(entry.mealId)?.name || 'Meal', entry.mealId)}${entry.isMatterCore ? ' · Matter Core' : ''}`);
+        const oldLabels = describe(before[di][gi]), newLabels = describe(group);
+        if (JSON.stringify(oldLabels) !== JSON.stringify(newLabels)) recordActivityChange({ field: `${boardKey.replace(':', ' · ')} · ${DAYS[di]} · ${GROUPS[gi]}`, form: 'Cycle menu draft', before: oldLabels, after: newLabels });
+      }));
+    });
+    latestBoards.current = { ...latestBoards.current, ...updates };
     pending.current++;
     setBoards(current => ({ ...current, ...updates }));
     try {
@@ -71,7 +83,7 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
     catch (error) { setMessage(error.response?.data?.message || error.message || 'Cycle could not be saved.'); return false; }
     finally { pending.current--; }
   };
-  const changeBoard = update => persistBoards({ [key]: update(board) });
+  const changeBoard = (update, observe = true) => persistBoards({ [key]: update(latestBoards.current[key] || board) }, observe);
   const entryCount = board.reduce((total, day) => total + day.flat().filter(entry => byId.has(entry.mealId)).length, 0);
   const library = meals.filter(meal => meal.name.toLowerCase().includes(query.toLowerCase()) && (!protein || mealType(meal) === protein) && (!slot || cycleSlots(meal).includes(Number(slot))));
   const addMeal = (meal, dayIndex, groupIndex) => {
@@ -126,7 +138,7 @@ export default function WeeklyCycleBoard({ meals, source, onImport, importDialog
               <small>{mealType(meal) || GROUPS[gi]} · {componentName(meal, 'Carb') === '—' ? meal.temperature : componentName(meal, 'Carb')}</small>
               {entry.isMatterCore && <Badge tone="lime">Matter Core</Badge>}
               <button className="av2-card-remove" aria-label={`Remove ${meal.id} from ${DAYS[di]}`} onClick={() => changeBoard(current => current.map((value, d) => d !== di ? value : value.map((list, g) => g !== gi ? list : list.filter((_, i) => i !== index))))}><X size={11}/></button>
-              <label className="av2-core-label"><input type="checkbox" aria-label={`Mark ${meal.id} as Matter Core on ${DAYS[di]}`} checked={Boolean(entry.isMatterCore)} onChange={event => changeBoard(current => current.map((value, d) => d !== di ? value : value.map((list, g) => g !== gi ? list : list.map((item, i) => i !== index ? item : { ...item, isMatterCore: event.target.checked }))))}/>Matter Core</label>
+              <label className="av2-core-label"><input type="checkbox" aria-label={`Mark ${meal.name} as Matter Core on ${DAYS[di]}`} data-activity-label={`Matter Core for ${activityReference(meal.name, entry.mealId)} on ${DAYS[di]} ${GROUPS[gi]} ${week}`} checked={Boolean(entry.isMatterCore)} onChange={event => changeBoard(current => current.map((value, d) => d !== di ? value : value.map((list, g) => g !== gi ? list : list.map((item, i) => i !== index ? item : { ...item, isMatterCore: event.target.checked }))), false)}/>Matter Core</label>
             </div>;
           })}
           {!group.length && <small className="av2-board-empty">Drag a meal here</small>}

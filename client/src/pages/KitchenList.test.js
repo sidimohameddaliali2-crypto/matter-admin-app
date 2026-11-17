@@ -2,6 +2,7 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import api from '../utils/api';
 import KitchenList from './KitchenList';
+import { installActivityCapture } from '../utils/activityCapture';
 
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn(), patch: jest.fn(), put: jest.fn() } }));
 jest.mock('../lib/kitchenDayScope', () => ({ ...jest.requireActual('../lib/kitchenDayScope'), kitchenToday: () => '2026-10-22' }));
@@ -363,6 +364,25 @@ test('a failed snack edit keeps its editor open and does not report a completed 
   await act(async () => save.click());
   expect([...container.querySelectorAll('button')].some(button => button.textContent.trim() === 'Save')).toBe(true);
   expect([...container.querySelectorAll('input[type="number"]')].some(input => input.value === '15')).toBe(true);
+});
+
+test('custom kitchen filter choices are traced without a save', async () => {
+  localStorage.setItem('token', 'fixture-session'); window.history.replaceState({}, '', '/kitchen-list');
+  const previousFetch = window.fetch, warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  const capture = jest.fn().mockResolvedValue({ ok: true, status: 202, headers: { get: () => null }, json: async () => ({ success: true }) }); window.fetch = capture;
+  const cleanup = installActivityCapture();
+  try {
+    const filters = container.querySelector('[aria-label="Customer status filter"]');
+    await act(async () => [...filters.querySelectorAll('button')].find(button => button.textContent === 'Missing').click());
+    await act(async () => [...filters.querySelectorAll('button')].find(button => button.textContent === 'Needs attention').click());
+    await act(async () => window.dispatchEvent(new Event('pagehide')));
+    const events = capture.mock.calls.flatMap(([, options]) => JSON.parse(options.body).events);
+    expect(events.map(event => event.changes[0])).toEqual([
+      { field: 'Customer status filter', before: 'All', after: 'Missing', redacted: false },
+      { field: 'Customer status filter', before: 'Missing', after: 'Needs attention', redacted: false },
+    ]);
+    expect(events.every(event => event.stage === 'form_edited' && !event.actor)).toBe(true);
+  } finally { cleanup(); window.fetch = previousFetch; warn.mockRestore(); }
 });
 
 

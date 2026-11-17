@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { fetchDeliveryChanges } from '../store/slices/deliveryChangeSlice';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 
 const DeliveryChanges = () => {
   const dispatch = useDispatch();
@@ -27,6 +28,17 @@ const DeliveryChanges = () => {
   useEffect(() => {
     loadChanges();
   }, []);
+
+  const clearFilters = () => {
+    for (const [key, field] of [['status', 'Status filter'], ['startDate', 'Start date filter'], ['endDate', 'End date filter'], ['customerId', 'Customer filter']]) {
+      if (filters[key]) recordActivityChange({ field, before: filters[key], after: '', private: key === 'customerId', form: 'Delivery change filters' });
+    }
+    setFilters({ status: '', startDate: '', endDate: '', customerId: '' });
+  };
+  const changeDateState = next => {
+    const label = value => ({ '': 'All', active: 'Active', upcoming: 'Upcoming', completed: 'Completed' }[value] || value);
+    recordActivityChange({ field: 'Delivery change date state', before: label(dateStatusFilter), after: label(next), form: 'Delivery change filters' }); setDateStatusFilter(next);
+  };
 
   const loadChanges = () => {
     // customerId is matched client-side (visibleGroups) since the backend only
@@ -277,7 +289,7 @@ const DeliveryChanges = () => {
               </span>
             </button>
             <button
-              onClick={() => setFilters({ status: '', startDate: '', endDate: '', customerId: '' })}
+              onClick={clearFilters}
               className="flex items-center justify-center p-2 bg-white border border-gray-200 rounded-lg hover:bg-gray-50 transition-colors text-gray-500"
               title="Clear filters"
             >
@@ -317,7 +329,7 @@ const DeliveryChanges = () => {
             ].map((opt) => (
               <button
                 key={opt.key || 'all'}
-                onClick={() => setDateStatusFilter(opt.key)}
+                onClick={() => changeDateState(opt.key)}
                 className={`flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
                   dateStatusFilter === opt.key
                     ? 'bg-blue-600 border-blue-600 text-white'
@@ -502,7 +514,7 @@ const DeliveryChanges = () => {
             ].map((opt) => (
               <button
                 key={opt.key || 'all'}
-                onClick={() => setDateStatusFilter(opt.key)}
+                onClick={() => changeDateState(opt.key)}
                 className={`px-3 py-1 rounded-md text-sm font-medium transition-colors ${
                   dateStatusFilter === opt.key ? 'bg-white shadow-sm text-gray-900 border border-gray-200' : 'text-gray-500 hover:text-gray-800'
                 }`}

@@ -29,7 +29,11 @@ const outcome = (event) => {
 const summary = (event) =>
   event.summary || `${person(event)} ${event.action || 'performed an action'}`;
 const rowSummary = (event) => {
-  const description = summary(event);
+  // Keep opaque record references in the retained event and Details, while
+  // the first sentence describes the person's change in ordinary language.
+  const description = isDraft(event)
+    ? summary(event).replace(/\s*\((?:[a-f\d]{24}|[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12})\)/gi, '')
+    : summary(event);
   if (!event.issue) return description;
   const failed = ['failed', 'rejected'].includes(event.outcome);
   if (description.toLowerCase().includes(event.issue.toLowerCase()) ||
@@ -109,18 +113,18 @@ function ActivityDetail({ event, id }) {
         </div>
       </dl>
       {changes.length > 0 && <div className="trace-changes">
-        <h3>{saved ? 'Changes' : 'Entered values'}</h3>
+        <h3>{saved || draft ? 'Changes' : 'Entered values'}</h3>
           <div className="trace-change-list">
             {changes.map((change, index) => (
               <div className="trace-change" key={`${change.field}-${index}`}>
-                <h4>{readable(change.field || event.form?.field || 'Field')}</h4>
-                <dl className={saved ? '' : 'trace-entered-values'}>
-                  {saved && <div>
-                    <dt>Before</dt>
+                <h4>{change.field || event.form?.field || 'Field'}</h4>
+                <dl className={saved || draft ? '' : 'trace-entered-values'}>
+                  {(saved || draft) && <div>
+                    <dt>{draft ? 'Before edit' : 'Before'}</dt>
                     <dd>{change.redacted ? 'Hidden for privacy' : displayValue(change.before)}</dd>
                   </div>}
                   <div>
-                    <dt>{saved ? 'After' : 'Entered'}</dt>
+                    <dt>{draft ? 'After edit' : saved ? 'After' : 'Entered'}</dt>
                     <dd>{change.redacted ? 'Hidden for privacy' : displayValue(change.after)}</dd>
                   </div>
                 </dl>

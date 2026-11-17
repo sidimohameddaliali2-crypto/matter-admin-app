@@ -1,4 +1,5 @@
 import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady } from '../utils/kitchenIntegrity';
+import { recordActivityChange } from '../utils/activityCapture';
 import useKitchenSelectionWindow from '../lib/useKitchenSelectionWindow';
 import { assertKitchenRosterCovered, verifiedKitchenRoster, hasKitchenDeliveryOnDate } from '../lib/kitchenSnapshot';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
@@ -396,7 +397,7 @@ const KitchenCounting = () => {
 
         {!productionDate && <KitchenEmptyState counting hasMenu={!!selectedMenuId} />}
         {selectedMenu && selectedDate && !selectionWindow.canAutoAssign && <p role="status" className="rounded-xl bg-amber-50 p-4 text-sm text-amber-900">{selectionWindow.message} Counts can only be confirmed once every active customer has meals.</p>}
-        <div className="kitchen-date-chips" aria-label="Delivery dates">{menuDateKeys.map(date => <button type="button" key={date} aria-pressed={selectedDate === date} onClick={() => changeKitchenDate(date)}>{formatDateLabel(date)}</button>)}</div>
+        <div className="kitchen-date-chips" aria-label="Delivery dates">{menuDateKeys.map(date => <button type="button" key={date} aria-pressed={selectedDate === date} onClick={() => { recordActivityChange({ field: 'Delivery date', form: 'Kitchen counting', before: selectedDate, after: date }); recordActivityChange({ field: 'Partner-only delivery date', form: 'Kitchen counting', before: partnerOnlyDate, after: '' }); changeKitchenDate(date); }}>{formatDateLabel(date)}</button>)}</div>
 
         {error && <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}
 

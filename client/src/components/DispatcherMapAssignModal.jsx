@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { GoogleMap, Marker, Circle, Polygon, DrawingManager, useLoadScript, StandaloneSearchBox, InfoWindow } from '@react-google-maps/api';
 import api from '../utils/api';
+import { recordActivityChange } from '../utils/activityCapture';
 
 // Google Maps API Key - stored server-side to avoid exposure
 // Component will request key from backend if needed
@@ -173,6 +174,30 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
   const [savingEdit, setSavingEdit] = useState(false);
   const mapRef = useRef(null);
   const searchBoxRef = useRef(null);
+  const drawingGestureRef = useRef(0);
+  const selectionRef = useRef(selectedDeliveryIds);
+  selectionRef.current = selectedDeliveryIds;
+  const deliveryRef = id => {
+    const delivery = deliveries.find(item => (item._id || item.id) === id);
+    const name = String(delivery?.customerName || 'Delivery').slice(0, 45);
+    const customer = delivery?.customerId ? ` · ${String(delivery.customerId).slice(0, 20)}` : '';
+    return `${name}${customer} (${id})`;
+  };
+  const selectionRefs = ids => ids.map(deliveryRef);
+  const changeSelection = next => {
+    recordActivityChange({ field: 'Selected deliveries', before: selectionRefs(selectionRef.current), after: selectionRefs(next), form: 'Map assignment' });
+    selectionRef.current = next;
+    setSelectedDeliveryIds(next);
+  };
+  const shapeValue = shape => !shape ? 'None' : shape.type === 'circle'
+    ? `Circle: ${shape.center.lat.toFixed(6)}, ${shape.center.lng.toFixed(6)}; radius ${shape.radius} metres`
+    : shape.path.map(point => `${point.lat.toFixed(6)}, ${point.lng.toFixed(6)}`);
+  const pointValue = point => point ? `${Number(point[0]).toFixed(6)}, ${Number(point[1]).toFixed(6)}` : 'Not set';
+  const observePin = (id, coords) => {
+    const existing = manualPins[id];
+    const before = existing ? [existing.lat, existing.lng] : getDeliveryLatLng(deliveries.find(delivery => (delivery._id || delivery.id) === id));
+    recordActivityChange({ field: `Location for ${deliveryRef(id)}`, before: pointValue(before), after: pointValue([coords.lat, coords.lng]), form: 'Map assignment' });
+  };
 
   const { isLoaded, loadError } = useLoadScript(
     GOOGLE_API_KEY
@@ -221,21 +246,21 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
     return Array.from(groups.values());
   }, [deliveriesWithCoords]);
 
-  const computeSelected = useCallback(() => {
-    if (!drawnShape) return [];
+  const computeSelected = useCallback((shape = drawnShape) => {
+    if (!shape) return [];
 
-    if (drawnShape.type === 'circle' && drawnShape.center && drawnShape.radius) {
-      const centerLatLng = drawnShape.center;
-      const radiusMeters = Number(drawnShape.radius);
+    if (shape.type === 'circle' && shape.center && shape.radius) {
+      const centerLatLng = shape.center;
+      const radiusMeters = Number(shape.radius);
       return deliveriesWithCoords
         .filter(({ latlng }) => distanceMeters({ lat: latlng[0], lng: latlng[1] }, centerLatLng) <= radiusMeters)
         .map(({ d }) => d._id || d.id)
         .filter(Boolean);
     }
 
-    if (drawnShape.type === 'polygon' && Array.isArray(drawnShape.path)) {
+    if (shape.type === 'polygon' && Array.isArray(shape.path)) {
       return deliveriesWithCoords
-        .filter(({ latlng }) => isPointInPolygon(latlng, drawnShape.path))
+        .filter(({ latlng }) => isPointInPolygon(latlng, shape.path))
         .map(({ d }) => d._id || d.id)
         .filter(Boolean);
     }
@@ -246,6 +271,14 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
   useEffect(() => {
     setSelectedDeliveryIds(computeSelected());
   }, [drawnShape, deliveriesWithCoords, computeSelected]);
+
+  // Observe geometry only at its manual boundary. Recalculation after a delivery
+  // load is kept out of capture so hydration cannot impersonate a user edit.
+  const changeShape = next => {
+    recordActivityChange({ field: 'Map selection shape', before: shapeValue(drawnShape), after: shapeValue(next), form: 'Map assignment' });
+    changeSelection(computeSelected(next));
+    setDrawnShape(next);
+  };
 
   const deliverySearchResults = useMemo(() => {
     const term = deliverySearchTerm.trim().toLowerCase();
@@ -260,11 +293,10 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
       .slice(0, 20);
   }, [deliverySearchTerm, deliveries]);
 
-  const toggleDeliverySelection = useCallback((id) => {
-    setSelectedDeliveryIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
-    );
-  }, []);
+  const toggleDeliverySelection = id => {
+    const previous = selectionRef.current;
+    changeSelection(previous.includes(id) ? previous.filter(value => value !== id) : [...previous, id]);
+  };
 
   const focusDeliveryOnMap = useCallback((delivery) => {
     if (!delivery) return;
@@ -373,6 +405,8 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
   const retryGeocode = async (delivery) => {
     if (!delivery?.address) return alert('No address available');
     const id = delivery._id || delivery.id;
+    const initiatingToken = window.localStorage.getItem('token');
+    const initiatingPage = window.location.pathname;
     setGeocodingIds((prev) => [...prev, id]);
     try {
       const coords = await geocodeAddress(delivery.address);
@@ -380,6 +414,7 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
         alert('Geocode failed');
         return;
       }
+      if (window.localStorage.getItem('token') === initiatingToken && window.location.pathname === initiatingPage) observePin(id, coords);
       await api.patch(`/deliveries/${id}`, { gpsLocation: { lat: coords.lat, lng: coords.lng }, lat: coords.lat, lng: coords.lng });
       setFailedGeocodes((prev) => prev.filter((d) => (d._id || d.id) !== id));
     } catch (err) {
@@ -405,11 +440,11 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
       <div className="flex items-center justify-between p-3 border-b">
         <div className="flex items-center gap-3">
           <h3 className="font-semibold">Map Assign - {city}</h3>
-          <select value={city} onChange={(e) => setCity(e.target.value)} className="px-2 py-1 border rounded">
+          <select value={city} onChange={(e) => { changeShape(null); setCity(e.target.value); }} className="px-2 py-1 border rounded">
             <option>Dubai</option>
             <option>Abu Dhabi</option>
           </select>
-          <button onClick={() => { setDrawnShape(null); setSelectedDeliveryIds([]); }} className="px-2 py-1 bg-gray-100 rounded">Reset</button>
+          <button type="button" onClick={() => changeShape(null)} className="px-2 py-1 bg-gray-100 rounded">Reset</button>
         </div>
         <div className="flex items-center gap-2">
           <button onClick={onClose} className="px-3 py-1 rounded bg-white border">Close</button>
@@ -417,7 +452,9 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
       </div>
 
       <div className="flex flex-1 overflow-hidden">
-        <div className="flex-1 h-full relative">
+        <div className="flex-1 h-full relative"
+          onPointerDownCapture={event => { if (event.target.closest('button,[role="button"]')) drawingGestureRef.current = Date.now(); }}
+          onKeyDownCapture={event => { if (['Enter', ' '].includes(event.key) && event.target.closest('button,[role="button"]')) drawingGestureRef.current = Date.now(); }}>
           {isLoaded && !loadError && (
             <div className="absolute z-10 top-3 left-1/2 -translate-x-1/2 shadow-lg">
               <StandaloneSearchBox
@@ -430,6 +467,7 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
                   const lat = loc.lat();
                   const lng = loc.lng();
                   const nextCenter = { lat, lng };
+                  recordActivityChange({ field: 'Map centre', before: pointValue([center.lat, center.lng]), after: pointValue([lat, lng]), form: 'Map assignment' });
                   setCenter(nextCenter);
                   setZoom((z) => (z < 14 ? 14 : z));
                   if (mapRef.current) {
@@ -460,6 +498,7 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
                 if (editingDeliveryId && e.latLng) {
                   const lat = e.latLng.lat();
                   const lng = e.latLng.lng();
+                  observePin(editingDeliveryId, { lat, lng });
                   setManualPins((prev) => ({ ...prev, [editingDeliveryId]: { lat, lng } }));
                   api.patch(`/deliveries/${editingDeliveryId}`, { gpsLocation: { lat, lng } })
                     .then(() => {
@@ -499,21 +538,26 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
                   }
                 }}
                 onOverlayComplete={(e) => {
+                  drawingGestureRef.current = 0;
                   const overlay = e.overlay;
                   const type = e.type;
                   if (type === 'circle') {
                     const center = overlay.getCenter();
                     const radius = overlay.getRadius();
-                    setDrawnShape({ type: 'circle', center: { lat: center.lat(), lng: center.lng() }, radius });
+                    changeShape({ type: 'circle', center: { lat: center.lat(), lng: center.lng() }, radius });
                   } else if (type === 'polygon') {
                     const path = overlay.getPath().getArray().map((p) => ({ lat: p.lat(), lng: p.lng() }));
-                    setDrawnShape({ type: 'polygon', path });
+                    changeShape({ type: 'polygon', path });
                   }
                   overlay.setMap(null);
                 }}
                 onDrawingModeChanged={() => {
-                  setDrawnShape(null);
-                  setSelectedDeliveryIds([]);
+                  // Maps also invokes this while mounting/updating. Only an
+                  // immediately preceding toolbar gesture is a browser edit.
+                  const manual = drawingGestureRef.current && Date.now() - drawingGestureRef.current < 1000;
+                  drawingGestureRef.current = 0;
+                  if (manual) changeShape(null);
+                  else { setDrawnShape(null); setSelectedDeliveryIds([]); }
                 }}
               />
 
@@ -536,12 +580,10 @@ function DispatcherMapAssignModal({ open, onClose, deliveries = [], drivers = []
 
                 const toggleGroupSelection = () => {
                   if (!deliveryIds.length) return;
-                  setSelectedDeliveryIds((prev) => {
-                    const areAllSelected = deliveryIds.every((id) => prev.includes(id));
-                    if (areAllSelected) return prev.filter((id) => !deliveryIds.includes(id));
-                    const nextIds = deliveryIds.filter((id) => !prev.includes(id));
-                    return [...prev, ...nextIds];
-                  });
+                  const previous = selectionRef.current;
+                  const areAllSelected = deliveryIds.every(id => previous.includes(id));
+                  const next = areAllSelected ? previous.filter(id => !deliveryIds.includes(id)) : [...previous, ...deliveryIds.filter(id => !previous.includes(id))];
+                  changeSelection(next);
                 };
 
                 return (

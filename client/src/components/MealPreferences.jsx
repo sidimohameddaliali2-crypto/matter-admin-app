@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { recordActivityChange } from '../utils/activityCapture';
 import {
   Coffee,
   Apple,
@@ -186,6 +187,9 @@ const MealPreferences = ({ customerId, customerEmail }) => {
           <button
             onClick={() => {
               if (isEditing) {
+                const labels = { mealPerDay: 'Meals per day', breakfastInclude: 'Breakfast included', mealSnack: 'Snacks included', snackCount: 'Snack count', mealPlan: 'Meal plan', mealExclusion: 'Meal exclusions', allergies: 'Allergies', dietaryRestrictions: 'Dietary restrictions', preferences: 'Dietary preferences', weekend: 'Weekend meals', partner: 'Partner', unlimitedMeals: 'Unlimited meals' };
+                const display = (key, value) => key === 'partner' ? (value?.businessName || partners.find(partner => partner._id === (value?._id || value))?.businessName || (value ? `Partner ${value?._id || value}` : 'None')) : value;
+                Object.entries(labels).forEach(([key, field]) => recordActivityChange({ field, form: 'Meal preferences', before: display(key, formData[key]), after: display(key, mealProfile[key]), private: ['mealExclusion', 'allergies', 'dietaryRestrictions', 'preferences'].includes(key) }));
                 setFormData(mealProfile);
               }
               setIsEditing(!isEditing);
@@ -257,6 +261,8 @@ const MealPreferences = ({ customerId, customerEmail }) => {
                     onChange={(e) => {
                       const id = e.target.value;
                       const picked = partners.find((p) => p._id === id);
+                      const unlimited = id && picked?.menuSelectionEnabled ? true : (id ? formData.unlimitedMeals : false);
+                      recordActivityChange({ field: 'Unlimited meals', form: 'Meal preferences', before: !!formData.unlimitedMeals, after: !!unlimited });
                       setFormData((prev) => ({
                         ...prev,
                         partner: id || null,
@@ -489,6 +495,7 @@ const MealPreferences = ({ customerId, customerEmail }) => {
                   <input
                     type="text"
                     value={formData.dietaryRestrictions?.join(', ') || ''}
+                    data-activity-private
                     onChange={(e) =>
                       setFormData({
                         ...formData,
@@ -506,6 +513,7 @@ const MealPreferences = ({ customerId, customerEmail }) => {
                   </label>
                   <textarea
                     value={formData.preferences || ''}
+                    data-activity-private
                     onChange={(e) =>
                       setFormData({
                         ...formData,
@@ -555,6 +563,8 @@ const MealPreferences = ({ customerId, customerEmail }) => {
                               <input
                                 type="checkbox"
                                 checked={selected.has(phrase.toLowerCase())}
+                                data-activity-label="Dietary exclusions"
+                                data-activity-private
                                 onChange={() => toggle(phrase)}
                                 className="h-4 w-4 rounded accent-indigo-600"
                               />

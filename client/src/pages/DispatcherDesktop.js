@@ -25,6 +25,7 @@ import { setSelectedEvent } from '../store/slices/eventSlice';
 import EventCalendarView from '../components/events/EventCalendarView';
 import EventDetailModal from '../components/events/EventDetailModal';
 import api from '../utils/api';
+import { activityReference, recordActivityChange } from '../utils/activityCapture';
 import DispatcherMapAssignModal from '../components/DispatcherMapAssignModal';
 import RouteOptimizationModal from '../components/RouteOptimizationModal';
 import ManualOrderModal from '../components/ManualOrderModal';
@@ -128,6 +129,35 @@ const DispatcherDesktop = () => {
   const emirateButtonRef = useRef(null);
   const driverFilterButtonRef = useRef(null);
   const timingButtonRef = useRef(null);
+
+  // Loads and assignment responses update state without becoming browser edits.
+  const observedValues = useRef({});
+  observedValues.current = {
+    'Delivery areas': areaFilters, 'Delivery emirates': emirateFilters,
+    'Delivery drivers': driverFilters, 'Delivery hours': timingFilters,
+    'Unassigned deliveries only': showUnassignedOnly, 'Collection deliveries only': showCollectionsOnly,
+    'Selected deliveries': selectedDeliveryIds, 'Delivery date': selectedDate
+  };
+  const deliveryRefs = ids => ids.map(id => {
+    const delivery = deliveries.find(item => item._id === id);
+    const name = String(delivery?.customerName || 'Delivery').slice(0, 45);
+    const customer = delivery?.customerId ? ` · ${String(delivery.customerId).slice(0, 20)}` : '';
+    return `${name}${customer} (${id})`;
+  });
+  const driverRefs = ids => ids.map(id => {
+    if (id === 'unassigned') return 'Unassigned';
+    const driver = drivers.find(item => item._id === id);
+    return activityReference([driver?.profile?.firstName, driver?.profile?.lastName].filter(Boolean).join(' ') || driver?.name || 'Driver', id);
+  });
+  const changeObserved = (field, next, setter, format = value => value) => {
+    const before = observedValues.current[field];
+    const after = typeof next === 'function' ? next(before) : next;
+    recordActivityChange({ field, before: format(before), after: format(after), form: 'Dispatcher filters and selection' });
+    observedValues.current[field] = after;
+    setter(after);
+  };
+  const toggleValue = (field, value, setter, format) => changeObserved(field,
+    previous => previous.includes(value) ? previous.filter(item => item !== value) : [...previous, value], setter, format);
 
   const handleLogout = () => {
     dispatch(logout());
@@ -532,53 +562,13 @@ const DispatcherDesktop = () => {
     }
   };
 
-  const toggleAreaSelection = (area) => {
-    setAreaFilters((prev) => {
-      if (prev.includes(area)) {
-        return prev.filter((item) => item !== area);
-      }
-      return [...prev, area];
-    });
-  };
-
-  const toggleEmirateSelection = (emirate) => {
-    setEmirateFilters((prev) => {
-      if (prev.includes(emirate)) {
-        return prev.filter((item) => item !== emirate);
-      }
-      return [...prev, emirate];
-    });
-  };
-
-  const toggleDriverSelection = (driverId) => {
-    setDriverFilters((prev) => {
-      if (prev.includes(driverId)) {
-        return prev.filter((id) => id !== driverId);
-      }
-      return [...prev, driverId];
-    });
-  };
-
-  const toggleDeliverySelection = (deliveryId) => {
-    setSelectedDeliveryIds((prev) => {
-      if (prev.includes(deliveryId)) {
-        return prev.filter((id) => id !== deliveryId);
-      }
-      return [...prev, deliveryId];
-    });
-  };
-
-  const clearAreaFilters = () => {
-    setAreaFilters([]);
-  };
-
-  const clearEmirateFilters = () => {
-    setEmirateFilters([]);
-  };
-
-  const clearDriverFilters = () => {
-    setDriverFilters([]);
-  };
+  const toggleAreaSelection = area => toggleValue('Delivery areas', area, setAreaFilters);
+  const toggleEmirateSelection = emirate => toggleValue('Delivery emirates', emirate, setEmirateFilters);
+  const toggleDriverSelection = id => toggleValue('Delivery drivers', id, setDriverFilters, driverRefs);
+  const toggleDeliverySelection = id => toggleValue('Selected deliveries', id, setSelectedDeliveryIds, deliveryRefs);
+  const clearAreaFilters = () => changeObserved('Delivery areas', [], setAreaFilters);
+  const clearEmirateFilters = () => changeObserved('Delivery emirates', [], setEmirateFilters);
+  const clearDriverFilters = () => changeObserved('Delivery drivers', [], setDriverFilters, driverRefs);
 
   const areaLabel = areaFilters.length === 0 ? 'All Areas' : areaFilters.join(', ');
   const emirateLabel = emirateFilters.length === 0 ? 'All Emirates' : emirateFilters.join(', ');
@@ -937,11 +927,7 @@ const DispatcherDesktop = () => {
                   {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].map((hour) => (
                     <button
                       key={hour}
-                      onClick={() => setTimingFilters(prev =>
-                        prev.includes(hour)
-                          ? prev.filter(h => h !== hour)
-                          : [...prev, hour]
-                      )}
+                      onClick={() => toggleValue('Delivery hours', hour, setTimingFilters, hours => hours.map(value => value + 'am'))}
                       className={`px-3 py-2 rounded text-xs font-semibold ${
                         timingFilters.includes(hour)
                           ? 'bg-blue-600 text-white'
@@ -954,7 +940,7 @@ const DispatcherDesktop = () => {
                 </div>
                 <div className="border-t border-gray-200 p-2">
                   <button
-                    onClick={() => setTimingFilters([])}
+                    onClick={() => changeObserved('Delivery hours', [], setTimingFilters, hours => hours.map(hour => hour + 'am'))}
                     className="w-full text-sm text-blue-600 font-semibold hover:bg-blue-50 px-4 py-2 rounded"
                   >
                     Clear
@@ -969,7 +955,7 @@ const DispatcherDesktop = () => {
         {/* Action Bar */}
         <div className="flex flex-wrap items-center justify-end gap-2 mb-2 sm:justify-end justify-center">
           <button
-            onClick={() => setShowUnassignedOnly(!showUnassignedOnly)}
+            onClick={() => changeObserved('Unassigned deliveries only', value => !value, setShowUnassignedOnly)}
             className={`px-4 py-2 rounded-lg font-semibold text-sm transition w-full sm:w-auto ${
               showUnassignedOnly
                 ? 'bg-orange-500 text-white'
@@ -979,7 +965,7 @@ const DispatcherDesktop = () => {
             📦 Unassigned
           </button>
           <button
-            onClick={() => setShowCollectionsOnly(!showCollectionsOnly)}
+            onClick={() => changeObserved('Collection deliveries only', value => !value, setShowCollectionsOnly)}
             className={`px-4 py-2 rounded-lg font-semibold text-sm transition w-full sm:w-auto ${
               showCollectionsOnly
                 ? 'bg-teal-500 text-white'
@@ -1045,7 +1031,7 @@ const DispatcherDesktop = () => {
                 Optimize Routes
               </button>
               <button
-                onClick={() => setSelectedDeliveryIds([])}
+                onClick={() => changeObserved('Selected deliveries', [], setSelectedDeliveryIds, deliveryRefs)}
                 className="px-4 py-2 bg-white border border-blue-300 text-blue-600 rounded-lg font-semibold hover:bg-blue-50"
               >
                 Clear
@@ -1066,9 +1052,9 @@ const DispatcherDesktop = () => {
                   checked={selectedDeliveryIds.length > 0 && filteredDeliveries.every(d => selectedDeliveryIds.includes(d._id))}
                   onChange={() => {
                     if (selectedDeliveryIds.length > 0 && filteredDeliveries.every(d => selectedDeliveryIds.includes(d._id))) {
-                      setSelectedDeliveryIds([]);
+                      changeObserved('Selected deliveries', [], setSelectedDeliveryIds, deliveryRefs);
                     } else {
-                      setSelectedDeliveryIds(filteredDeliveries.map(d => d._id));
+                      changeObserved('Selected deliveries', filteredDeliveries.map(d => d._id), setSelectedDeliveryIds, deliveryRefs);
                     }
                   }}
                   className="w-4 h-4 text-blue-600 rounded border-gray-300"
