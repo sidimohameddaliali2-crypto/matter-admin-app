@@ -23,12 +23,13 @@ export function decodeDriverAuditOperator(encoded, compression) {
 }
 
 export function driverAuditSupabaseStoppedReceipt(value, applicationCommit, operatorPhase) {
-  const releaseCommand = /^prepare-release-(?:commit|fetch|fetched-commit|clone|checkout)$/.test(operatorPhase);
+  const preparationFailure = /^(?:prepare-[a-z-]+|staging-final-readback)$/.test(operatorPhase);
+  const packageFailure = /^prepare-(?:baseline|candidate|serving-current|serving-previous)-[a-z-]+$/.test(operatorPhase);
   const exact = (item, fields) => item && typeof item === 'object' && !Array.isArray(item)
     && Object.keys(item).length === fields.length && fields.every(field => Object.hasOwn(item, field));
   if (!exact(value, ['status', 'applicationCommit', 'operatorPhase', 'metadataSha256', 'capsule'])
     || value.status !== 'supabase-host-stopped' || value.applicationCommit !== applicationCommit
-    || value.operatorPhase !== operatorPhase || !(releaseCommand || /^prepare-(?:baseline|candidate|serving-current|serving-previous)-[a-z-]+$/.test(operatorPhase))
+    || value.operatorPhase !== operatorPhase || !preparationFailure
     || operatorPhase.length > 79 || !/^[a-f0-9]{64}$/.test(value.metadataSha256 || '')
     || !exact(value.capsule, ['version', 'key', 'iv', 'tag', 'data']) || value.capsule.version !== 1) return null;
   const encoded = (text, maximum, size) => typeof text === 'string' && text.length > 0 && text.length <= maximum
@@ -36,7 +37,7 @@ export function driverAuditSupabaseStoppedReceipt(value, applicationCommit, oper
     && (size === undefined || Buffer.from(text, 'base64').length === size);
   const capsule = value.capsule;
   if (!encoded(capsule.key, 2048) || Buffer.from(capsule.key, 'base64').length < 384
-    || !encoded(capsule.iv, 16, 12) || !encoded(capsule.tag, 24, 16) || !encoded(capsule.data, releaseCommand ? 128 * 1024 : 32768)) return null;
+    || !encoded(capsule.iv, 16, 12) || !encoded(capsule.tag, 24, 16) || !encoded(capsule.data, packageFailure ? 32768 : 128 * 1024)) return null;
   return { status: value.status, applicationCommit, operatorPhase, metadataSha256: value.metadataSha256,
     capsule: { version: 1, key: capsule.key, iv: capsule.iv, tag: capsule.tag, data: capsule.data } };
 }
