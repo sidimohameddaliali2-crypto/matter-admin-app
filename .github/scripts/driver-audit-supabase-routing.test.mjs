@@ -439,3 +439,157 @@ test('foreign ownership and writable cache leaves remain explicit protected revi
     assert.equal(await fs.readFile(f.homeFile, 'utf8'), f.secret);
   }
 });
+
+async function diskUsageFixture(t) {
+  const f = await storageFixture(t), exec = f.adapters.exec;
+  const roots = [path.join(f.homeRoot, '.pm2/logs'), path.join(f.appRoot, 'client/node_modules/.cache'),
+    path.join(f.appRoot, 'client/build'), path.join(f.server, '.private'), path.join(f.server, 'uploads'), path.join(f.homeRoot, '.cache'),
+    path.join(f.server, '.private/driver-audits/a9d21452a101850150b84fa4b5a15ea165490e2fc7bcb9a56482269c00897d61/work/attempts')];
+  for (const folder of roots) await fs.mkdir(folder, { recursive: true, mode: 0o700 });
+  const duCalls = [];
+  f.adapters.exec = async (file, args, options) => {
+    if (file !== '/usr/bin/du') return exec(file, args, options);
+    const folder = args.at(-1); assert(roots.includes(folder));
+    assert.deepEqual(args, ['--one-file-system', '--block-size=1', '--max-depth=3', '--null', '--', folder]);
+    assert.equal(options.timeout, 60000); assert.equal(options.maxBuffer, folder === roots[6] ? 2 * 1024 ** 2 : 512 * 1024);
+    assert.equal(options.encoding, 'buffer');
+    assert.deepEqual(options.env, { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8' });
+    duCalls.push({ file, args, options });
+    return { stdout: Buffer.from('4096\t' + folder + '/cache\0' + '8192\t' + folder + '\0'), stderr: Buffer.alloc(0) };
+  };
+  const run = changes => {
+    assert.equal(typeof operator.runDriverAuditSupabaseDiskUsage, 'function');
+    return operator.runDriverAuditSupabaseDiskUsage({ operation: 'inspect-supabase-disk-usage', appRoot: f.appRoot,
+      expectedSha: appSha, recipientPublicKey, ...changes }, f.adapters);
+  };
+  return { ...f, roots, duCalls, run };
+}
+
+test('disk usage invokes only the seven exact bounded metadata commands and seals protected classifications', async t => {
+  const f = await diskUsageFixture(t), original = await fs.stat(f.genuine, { bigint: true });
+  const result = await f.run(), value = unseal(result);
+  assert.equal(result.status, 'supabase-disk-usage-inspected'); assert.equal(result.deletedFiles, 0);
+  assert.equal(f.duCalls.length, 7); assert.equal(value.observations.length, 7); assert.equal(value.fileContentsRead, 0);
+  assert.equal(value.usageSnapshotAtomic, false); assert.equal(value.reclaimableBytesProven, false); assert.equal(value.deletionAuthorized, false);
+  assert(value.observations.every(row => row.status === 'measured' && row.rootBytes === '8192' && row.recordsObserved === 2));
+  assert.equal(value.observations.find(row => row.id === 'reporting-private').classification, 'original-report-source-review-history-controls-protected');
+  assert.equal(value.observations.find(row => row.id === 'client-build').classification, 'current-client-build-protected');
+  assert.equal(value.observations.find(row => row.id === 'original-report-attempts').classification, 'original-derived-workspaces-protected');
+  assert(!JSON.stringify(result).includes(f.homeRoot)); assert(!JSON.stringify(result).includes('/cache'));
+  assert.deepEqual(await fs.stat(f.genuine, { bigint: true }), original);
+  assert(f.loads.every(name => !/Mongo|DataBackend|loadEnv|supabase/i.test(name)));
+});
+
+test('missing and unsafe usage roots remain explicit unknown usage and never run du on their targets', async t => {
+  const f = await diskUsageFixture(t); await fs.rm(f.roots[5], { recursive: true });
+  await fs.rm(f.roots[1], { recursive: true }); await fs.symlink(f.roots[4], f.roots[1]);
+  const value = unseal(await f.run());
+  assert.equal(value.observations[5].status, 'missing'); assert.equal(value.observations[5].rootBytes, null);
+  assert.equal(value.observations[1].status, 'unsafe-root'); assert.equal(value.observations[1].rootBytes, null);
+  assert.equal(f.duCalls.length, 5); assert(!f.duCalls.some(row => [f.roots[1], f.roots[5]].includes(row.args.at(-1))));
+});
+
+test('partial du failures retain bounded private diagnostics without inventing complete or zero usage', async t => {
+  const f = await diskUsageFixture(t), exec = f.adapters.exec;
+  f.adapters.exec = async (file, args, options) => {
+    if (file === '/usr/bin/du' && args.at(-1) === f.roots[0]) throw Object.assign(Error(f.secret), { code: 1,
+      stdout: Buffer.from('4096\t' + f.roots[0] + '/still-present\0'), stderr: Buffer.from((f.secret + '\n').repeat(5000)) });
+    return exec(file, args, options);
+  };
+  const result = await f.run(), value = unseal(result), row = value.observations[0];
+  assert.equal(row.status, 'partial'); assert.equal(row.complete, false); assert.equal(row.rootBytes, null);
+  assert(row.diagnostic.text.includes(f.secret)); assert(row.diagnostic.truncated); assert(row.diagnostic.bytes > 2048);
+  assert(!JSON.stringify(result).includes(f.secret)); assert.equal(row.entries.length, 1);
+});
+
+test('malformed, out-of-scope, duplicated, excessive and truncated du rows cannot become usage claims', async t => {
+  for (const body of [root => '1\t/etc/outside\0', root => '1\t' + root + '/../../outside\0',
+    root => '1\t' + root + '\0' + '2\t' + root + '\0', root => 'x\t' + root + '\0',
+    root => '1\t' + root, root => Array.from({ length: 4097 }, (_, n) => '1\t' + root + '/d' + n + '\0').join('')]) {
+    const f = await diskUsageFixture(t), exec = f.adapters.exec;
+    f.adapters.exec = async (file, args, options) => file === '/usr/bin/du' && args.at(-1) === f.roots[0]
+      ? { stdout: Buffer.from(body(f.roots[0])), stderr: Buffer.alloc(0) } : exec(file, args, options);
+    const row = unseal(await f.run()).observations[0]; assert.equal(row.status, 'invalid-output');
+    assert.equal(row.rootBytes, null); assert.equal(row.complete, false); assert.equal(row.entries.length, 0);
+  }
+});
+
+test('ordinary active log growth is observed without pretending a stable atomic byte inventory', async t => {
+  const f = await diskUsageFixture(t), exec = f.adapters.exec, log = path.join(f.roots[0], 'app.log');
+  await fs.writeFile(log, 'original logs'); let grew = false;
+  f.adapters.exec = async (file, args, options) => {
+    if (file === '/usr/bin/du' && args.at(-1) === f.roots[0]) { grew = true; await fs.appendFile(log, ' new business log'); }
+    return exec(file, args, options);
+  };
+  const value = unseal(await f.run()); assert(grew); assert.equal(value.usageSnapshotAtomic, false);
+  assert.equal(value.observations[0].status, 'measured'); assert.equal(value.observations[0].complete, true);
+  assert.equal(await fs.readFile(log, 'utf8'), 'original logs new business log');
+});
+
+test('directory substitution during du rejects the result while retaining original and independent replacement', async t => {
+  const f = await diskUsageFixture(t), exec = f.adapters.exec; let reached = false;
+  f.adapters.exec = async (file, args, options) => {
+    const result = await exec(file, args, options);
+    if (file === '/usr/bin/du' && args.at(-1) === f.roots[0]) {
+      reached = true; await fs.rename(f.roots[0], f.roots[0] + '-old'); await fs.mkdir(f.roots[0], { mode: 0o700 });
+      await fs.writeFile(path.join(f.roots[0], 'new'), 'preserve new logs');
+    }
+    return result;
+  };
+  await assert.rejects(f.run(), /Supabase disk usage inspection stopped at du/); assert(reached);
+  assert.equal(await fs.readFile(path.join(f.roots[0], 'new'), 'utf8'), 'preserve new logs');
+  assert((await fs.stat(f.roots[0] + '-old')).isDirectory());
+});
+
+test('a non-root-owned du, extra public paths or active workers cannot reach usage commands', async t => {
+  const f = await diskUsageFixture(t), original = fs.lstat;
+  for (const extra of [{ roots: ['/etc'] }, { operation: 'clear-cache' }, { expectedSha: 'a'.repeat(40) }])
+    await assert.rejects(f.run(extra), /Supabase disk usage inspection stopped at inputs/);
+  fs.lstat = async (file, ...args) => { const s = await original(file, ...args); if (file === '/usr/bin/du') s.uid = 12345n; return s; };
+  try { await assert.rejects(f.run(), /Supabase disk usage inspection stopped at executable/); }
+  finally { fs.lstat = original; }
+  assert.equal(f.duCalls.length, 0);
+  f.rows[1].pid = 999; f.rows[1].pm2_env.status = 'online';
+  await assert.rejects(f.run(), /Supabase disk usage inspection stopped at workers/); assert.equal(f.duCalls.length, 0);
+});
+
+test('NUL records preserve tabs and newlines in private usage paths without exposing them outside the capsule', async t => {
+  const f = await diskUsageFixture(t), exec = f.adapters.exec, name = 'cache\tprivate\nfolder';
+  f.adapters.exec = async (file, args, options) => file === '/usr/bin/du' && args.at(-1) === f.roots[0]
+    ? { stdout: Buffer.from('4096\t' + f.roots[0] + '/' + name + '\0' + '8192\t' + f.roots[0] + '\0'), stderr: Buffer.alloc(0) }
+    : exec(file, args, options);
+  const result = await f.run(), row = unseal(result).observations[0];
+  assert.equal(row.status, 'measured'); assert(row.entries.some(r => r.path.endsWith('/' + name)));
+  assert(!JSON.stringify(result).includes('private')); assert.equal(row.recordsObserved, 2);
+});
+
+test('large valid usage observations trim only returned rows to preserve existing encrypted transport limits', async t => {
+  const f = await diskUsageFixture(t), exec = f.adapters.exec;
+  f.adapters.exec = async (file, args, options) => {
+    if (file !== '/usr/bin/du') return exec(file, args, options);
+    const folder = args.at(-1), rows = [];
+    for (let n = 0; n < 100; n++) rows.push('4096\t' + folder + '/' + Array.from({ length: 3 }, () => randomBytes(120).toString('hex')).join('/') + '\0');
+    rows.push('409600\t' + folder + '\0'); return { stdout: Buffer.from(rows.join('')), stderr: Buffer.alloc(0) };
+  };
+  const result = await f.run(), envelope = openTransferSecrets(privateKey, result.capsule);
+  const packed = Buffer.from(envelope.metadataGzipBase64, 'base64'), raw = gunzipSync(packed), value = JSON.parse(raw);
+  assert(packed.length <= 40 * 1024); assert(raw.length <= 384 * 1024);
+  assert(value.observations.every(row => row.complete && row.recordsObserved === 101 && row.entriesOmitted && row.rootBytes === '409600'));
+  assert(value.observations.some(row => row.entries.length < 32)); assert.equal(value.reclaimableBytesProven, false);
+});
+
+test('only the fixed original attempts root accepts the larger bounded depth-three census without reclaim claims', async t => {
+  const f = await diskUsageFixture(t), exec = f.adapters.exec; let reached = false;
+  f.adapters.exec = async (file, args, options) => {
+    if (file !== '/usr/bin/du' || args.at(-1) !== f.roots[6]) return exec(file, args, options);
+    reached = true; assert.equal(options.maxBuffer, 2 * 1024 ** 2);
+    const rows = Array.from({ length: 4500 }, (_, n) => '4096\t' + f.roots[6] + '/00000000-0000-4000-8000-' + String(n).padStart(12, '0') + '\0');
+    rows.push('18432000\t' + f.roots[6] + '\0'); const stdout = Buffer.from(rows.join('')); assert(stdout.length > 512 * 1024);
+    return { stdout, stderr: Buffer.alloc(0) };
+  };
+  const value = unseal(await f.run()), row = value.observations[6]; assert(reached);
+  assert.equal(row.status, 'measured'); assert.equal(row.recordsObserved, 4501); assert.equal(row.maximumRows, 16384);
+  assert.equal(row.entriesOmitted, true); assert.equal(row.deletionAuthorized, false); assert.equal(row.reclaimableBytesProven, false);
+  assert.equal(value.hardlinkAndOverlappingRootAttributionMayDiffer, true);
+  assert(value.observations.slice(0, 6).every(r => r.stdoutMaximumBytes === 512 * 1024 && r.maximumRows === 4096));
+});
