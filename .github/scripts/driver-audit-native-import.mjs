@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { gunzipSync } from 'node:zlib';
+import { gunzipSync, gzipSync } from 'node:zlib';
 
 export const NATIVE_IMPORT_CAPACITY_BYTES = 16 * 1024 ** 3;
 export const NATIVE_IMPORT_SOURCE_MANIFEST = 'e1650c0a521271976629fafc1ad6d6eb0abf39074b5eeaf909f2d93f929f9d9d';
@@ -105,16 +105,159 @@ async function stageBuilder({ folder, received, bundleSha256, syncRoot, read, pr
   return { ...result, status: 'builder-staged' };
 }
 
+async function diagnoseRoots({ db, syncRoot, read, privateDirectory, load, recipientPublicKey, diagnosticPage }) {
+  const signatures = new Map(), controls = [], inventories = [], records = new Map(), references = [], candidates = new Set();
+  const attemptPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
+  let metadataBytes = 0;
+  async function bytes(relative, maximum, optional = true) {
+    const file = path.join(syncRoot, relative);
+    try {
+      const value = await read(file, maximum);
+      signatures.set(relative, { sha256: hash(value), maximum });
+      return value;
+    } catch (error) {
+      if (optional && error.code === 'ENOENT') { signatures.set(relative, { sha256: null, maximum }); return null; }
+      throw error;
+    }
+  }
+  async function control(relative, kind, optional = true) {
+    const raw = await bytes(relative, 1024 * 1024, optional);
+    if (!raw) return null;
+    metadataBytes += raw.length;
+    requireImport(metadataBytes <= 8 * 1024 * 1024, 'Diagnostic control metadata exceeds its bound');
+    const value = JSON.parse(raw);
+    requireImport(object(value), 'Diagnostic control metadata must be an object');
+    controls.push({ relative, kind, sha256: hash(raw), value });
+    return value;
+  }
+  async function inventory(relative) {
+    const raw = await bytes(relative, 16 * 1024 * 1024);
+    const value = raw && JSON.parse(raw);
+    const result = { relative, present: !!raw, bytes: raw?.length ?? 0, sha256: raw ? hash(raw) : null,
+      entries: value && object(value) ? Object.keys(value).length : null };
+    inventories.push(result); return result;
+  }
+  const config = await control('sync.json', 'sync-config', false), baseline = path.join(syncRoot, 'baseline');
+  requireImport(config.root === syncRoot && config.baselineRoot === baseline, 'Diagnostic managed baseline differs');
+  const workspace = value => {
+    if (value === baseline) return value;
+    if (typeof value !== 'string') return null;
+    const relative = path.relative(syncRoot, value), parts = relative.split(path.sep);
+    return parts.length === 4 && parts[0] === 'work' && parts[1] === 'attempts' && attemptPattern.test(parts[2])
+      && parts[3] === 'server-data' && value === path.join(syncRoot, ...parts) ? value : null;
+  };
+  const identity = (value, revision = value?.collectorRevision) => ({
+    revision: Number.isSafeInteger(revision) && revision > 0 ? revision : null,
+    sourceBasis: digest(value?.sourceBasis) ? value.sourceBasis : null,
+    manifestSha256: digest(value?.manifestSha256) ? value.manifestSha256 : null,
+  });
+  const retain = value => { if (value.revision) candidates.add(value.revision); return value; };
+  const seed = await control('seed.json', 'bootstrap-seed', false);
+  const baselineInventory = await inventory('baseline/files.private.json');
+  const baselineRecipe = await control('baseline/build-recipe.private.json', 'bootstrap-recipe');
+  records.set(baseline, { kind: 'bootstrap', identity: retain(identity(seed)), accepted: null, recipe: baselineRecipe?.recipe ?? config.legacyBuildRecipe });
+  const pointer = await control('work/current.private.json', 'current-pointer');
+  const attemptsRoot = path.join(syncRoot, 'work/attempts');
+  const names = async () => {
+    let entries;
+    try { await privateDirectory(attemptsRoot); entries = await fs.readdir(attemptsRoot, { withFileTypes: true }); }
+    catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+    requireImport(entries.length <= 16384, 'Diagnostic workspace count exceeds its bound');
+    const result = [];
+    for (const entry of entries) if (attemptPattern.test(entry.name)) {
+      requireImport(entry.isDirectory(), 'Diagnostic workspace must be a real directory');
+      await privateDirectory(path.join(attemptsRoot, entry.name)); result.push(entry.name);
+    }
+    return result.sort();
+  };
+  const directories = await names();
+  for (const name of directories) {
+    const prefix = 'work/attempts/' + name + '/', root = path.join(syncRoot, prefix, 'server-data');
+    const accepted = await control(prefix + 'accepted.private.json', 'accepted');
+    const direct = await control(prefix + 'direct-seed.private.json', 'direct-seed');
+    const retired = await control(prefix + 'retired-workspace.private.json', 'retired');
+    const recipe = await control(prefix + 'build-recipe.private.json', 'build-recipe');
+    if (!accepted && !direct && !retired) continue;
+    const identities = [accepted && identity(accepted), direct && identity(direct), retired && identity(retired, retired.source?.revision)].filter(Boolean);
+    identities.forEach(retain);
+    const value = identities[0];
+    await inventory(prefix + 'server-data/files.private.json');
+    records.set(root, { kind: accepted ? 'accepted' : direct ? 'seed-only' : 'retired-only', identity: value,
+      accepted, recipe: recipe?.recipe ?? retired?.recipe, identityAgreement: identities.every(item => JSON.stringify(item) === JSON.stringify(value)) });
+    if (accepted?.previous) references.push({ kind: 'accepted-previous', ownerRevision: value.revision, reference: accepted.previous });
+  }
+  if (pointer) {
+    retain(identity(pointer));
+    if (pointer.previous) references.push({ kind: 'current-previous', ownerRevision: pointer.collectorRevision, reference: pointer.previous });
+  }
+  const head = await db.collection('driverAuditControl').findOne({ _id: 'head' }), headHash = hash(JSON.stringify(head));
+  for (const [kind, value] of [['mongo-current', head?.head], ['mongo-previous', head?.head?.previous]]) if (value) {
+    const item = identity(value.directImport, value.sourceRevision); retain(item);
+    controls.push({ kind, sha256: hash(JSON.stringify(value)), value });
+  }
+  const cleanReference = value => ({ basis: digest(value?.basis) ? value.basis : null,
+    manifestSha256: digest(value?.manifestSha256) ? value.manifestSha256 : null,
+    collectorRevision: Number.isSafeInteger(value?.collectorRevision) ? value.collectorRevision : null,
+    sourceBasis: digest(value?.sourceBasis) ? value.sourceBasis : null });
+  const mismatches = [], allMatches = [];
+  for (const [index, item] of references.entries()) {
+    const targetPath = workspace(item.reference.privateRoot), target = targetPath && records.get(targetPath), value = target?.identity;
+    const matches = { resolved: !!target, manifest: !!target && item.reference.manifestSha256 === value.manifestSha256,
+      basis: !!target && item.reference.basis === (target.accepted?.basis || value.sourceBasis),
+      revision: !!target && (item.reference.collectorRevision === undefined || item.reference.collectorRevision === value.revision),
+      sourceBasis: !!target && (item.reference.sourceBasis === undefined || item.reference.sourceBasis === value.sourceBasis) };
+    const recipe = target?.recipe, recipeFields = ['builderSha256', 'rendererSha256', 'journalsSha256', 'baselineManifestSha256'];
+    const recipeId = recipeFields.every(key => digest(recipe?.[key])) ? hash(JSON.stringify(Object.fromEntries(recipeFields.map(key => [key, recipe[key]])))) : null;
+    const recipeDerivedBasis = recipeId && value?.sourceBasis ? hash(JSON.stringify({ source: value.sourceBasis, recipeId })) : null;
+    const result = { index, referenceKind: item.kind, ownerRevision: Number.isSafeInteger(item.ownerRevision) ? item.ownerRevision : null,
+      targetKind: target?.kind || 'unresolved', reference: cleanReference(item.reference), target: target ? {
+        ...value, acceptedBasis: digest(target.accepted?.basis) ? target.accepted.basis : null, recipeId, recipeDerivedBasis,
+      } : null, matches, basisMatchesRecipeDerivation: !!recipeDerivedBasis && item.reference.basis === recipeDerivedBasis };
+    allMatches.push(result); if (!Object.values(matches).every(Boolean)) mismatches.push(result);
+  }
+  requireImport(JSON.stringify(directories) === JSON.stringify(await names()), 'Diagnostic workspace inventory changed');
+  requireImport(hash(JSON.stringify(await db.collection('driverAuditControl').findOne({ _id: 'head' }))) === headHash, 'Diagnostic serving roots changed');
+  for (const [relative, expected] of signatures) {
+    let actual = null;
+    try { actual = hash(await read(path.join(syncRoot, relative), expected.maximum)); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    requireImport(actual === expected.sha256, 'Diagnostic control metadata changed');
+  }
+  const metadata = { version: 1, syncRoot, controls, inventories, matches: allMatches }, raw = Buffer.from(JSON.stringify(metadata));
+  requireImport(raw.length <= 8 * 1024 * 1024, 'Diagnostic metadata exceeds its bound');
+  const candidateRevisions = [...candidates].sort((a, b) => a - b);
+  const output = { status: 'roots-diagnosed', censusVerified: false, authorityChanged: false, activationPending: true,
+    controls: controls.length, workspaces: directories.length, referenceCount: references.length, mismatchCount: mismatches.length,
+    mismatches: mismatches.slice(0, 8), candidateCount: candidateRevisions.length, candidateRevisions: candidateRevisions.slice(0, 256),
+    candidateRevisionsSha256: hash(JSON.stringify(candidateRevisions)), rootMetadataSha256: hash(raw),
+    bootstrap: { ...identity(seed), inventorySha256: baselineInventory.sha256,
+      inventoryBytes: baselineInventory.bytes, inventoryMatches: seed.manifestSha256 === baselineInventory.sha256 } };
+  if (recipientPublicKey) {
+    const compressed = gzipSync(raw), chunkBytes = 32 * 1024, pages = Math.ceil(compressed.length / chunkBytes);
+    requireImport(diagnosticPage < pages, 'Diagnostic metadata page is outside its bound');
+    const { sealTransferSecrets } = await load('services/driverAuditTransferCodec.js');
+    output.capsule = sealTransferSecrets(recipientPublicKey, { version: 1, page: diagnosticPage, pages,
+      metadataSha256: hash(raw), gzipSha256: hash(compressed), metadataBytes: raw.length, gzipBytes: compressed.length,
+      gzipChunkBase64: compressed.subarray(diagnosticPage * chunkBytes, (diagnosticPage + 1) * chunkBytes).toString('base64') });
+    output.recipientSha256 = hash(recipientPublicKey);
+  }
+  return output;
+}
+
 // The optional adapters are for isolated fixture tests. Dispatch supplies only
 // reviewed public identities; all private paths/modules come from the host.
 export async function runDriverAuditNativeImport({ operation, sessionId, templateSha256, profileSha256,
-  expectedSha, appRoot }, adapters = {}) {
+  expectedSha, appRoot, recipientPublicKey, diagnosticPage = 0 }, adapters = {}) {
   let phase = 'checkout', lock, connection;
   const execute = adapters.exec || exec, env = adapters.env || process.env;
   try {
-    requireImport(['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder'].includes(operation)
+    requireImport(['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'diagnose-roots'].includes(operation)
       && typeof sessionId === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(sessionId)
-      && digest(templateSha256), 'A reviewed import operation and public input identities are required');
+      && (operation === 'diagnose-roots' ? templateSha256 === undefined || digest(templateSha256) : digest(templateSha256)),
+    'A reviewed import operation and public input identities are required');
+    requireImport(integer(diagnosticPage) && diagnosticPage <= 256 && (recipientPublicKey === undefined
+      || typeof recipientPublicKey === 'string' && recipientPublicKey.length <= 8192 && !recipientPublicKey.includes('PRIVATE KEY')
+        && /-----BEGIN (?:RSA )?PUBLIC KEY-----/.test(recipientPublicKey)), 'A bounded public diagnostic recipient is required');
     requireImport(profileSha256 === undefined || digest(profileSha256), 'The import profile pin is invalid');
     requireImport(!['stage-import', 'verify-import'].includes(operation) || digest(profileSha256), 'The exact import profile pin is required');
     requireImport(typeof appRoot === 'string' && path.isAbsolute(appRoot) && path.resolve(appRoot) === appRoot
@@ -191,6 +334,12 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
       return authority;
     };
     phase = 'writers'; await stopped();
+    if (operation === 'diagnose-roots') {
+      phase = 'root-diagnostics';
+      const result = await diagnoseRoots({ db, syncRoot, read, privateDirectory, load, recipientPublicKey, diagnosticPage });
+      await stopped(); await checkout();
+      return { version: 1, sessionId, applicationCommit: expectedSha, ...result };
+    }
     if (operation === 'stage-builder') {
       phase = 'builder-staging';
       const result = await stageBuilder({ folder, received, bundleSha256: templateSha256, syncRoot, read, privateDirectory, load,
