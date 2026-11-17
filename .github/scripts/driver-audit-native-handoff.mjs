@@ -204,7 +204,8 @@ async function main() {
   }
   if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'stage-lineage', 'qualify-source',
     'diagnose-roots', 'disable-pruning', 'prepare-native-settings', 'swap-builder-held', 'verify-native-parity',
-    'activate-native', 'start-native', 'stage-native-proofs', 'export-native-controls'].includes(operation)) {
+    'activate-native', 'start-native', 'stage-native-proofs', 'export-native-controls',
+    'plan-native-cleanup', 'apply-native-cleanup'].includes(operation)) {
     phase = 'native-' + operation;
     const encoded = process.env.NATIVE_IMPORT_CODE;
     if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
@@ -230,6 +231,9 @@ async function main() {
     const common = { operation, appRoot, expectedSha: expected, sessionId: process.env.NATIVE_TRANSFER_SESSION_ID,
       profileSha256: process.env.NATIVE_IMPORT_PROFILE_SHA256 || undefined,
       templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256 || undefined };
+    if (['plan-native-cleanup', 'apply-native-cleanup'].includes(operation)) {
+      console.log(JSON.stringify(await operator.runDriverAuditNativeCleanup(common))); return;
+    }
     if (['disable-pruning', 'prepare-native-settings'].includes(operation)) {
       console.log(JSON.stringify(await operator.runDriverAuditNativeSettings(common))); return;
     }
