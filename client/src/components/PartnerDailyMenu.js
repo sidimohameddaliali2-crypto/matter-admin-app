@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 
 const heading = { fontFamily: "'Archivo Black', sans-serif" };
-const labels = { breakfast: 'Breakfast of the day', oats: 'Oats', 'wraps-buns': 'Wraps/Buns', snack: 'Snack', bowl: 'Bowl', main: 'Main' };
+const labels = { oats: 'Oats', 'wraps-buns': 'Wraps/Buns', snack: 'Snack', breakfast: 'Breakfast of the day', bowl: 'Bowl', main: 'Main' };
 const proteins = ['Chicken', 'Beef', 'Fish'];
 const titleCase = name => String(name || '').trim().toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
 const initials = name => String(name || '').trim().split(/\s+/).filter(Boolean).slice(0, 2).map(word => word[0]).join('').toUpperCase();
