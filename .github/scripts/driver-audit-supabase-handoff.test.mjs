@@ -14,6 +14,7 @@ import { sealTransferSecrets, openTransferSecrets } from '../../server/services/
 import { acquireWorkerLock } from '../../server/vendor/driver-audits/integration/hosted/worker-lock.mjs';
 import { stageDriverAuditSource } from '../../server/scripts/driverAuditSourceStage.js';
 import { archiveBytes } from '../../server/vendor/driver-audits/integration/cloud/repository.mjs';
+import { createVerifiedAuditArchive } from '../../server/vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
 import { verifyDriverAuditSupabaseServingPackage } from '../../server/services/driverAuditSupabaseReplica.js';
 import { driverAuditSupabaseStoppedReceipt } from './driver-audit-native-handoff.mjs';
 
@@ -341,6 +342,7 @@ test('legitimate leading-dot paths still reject symlinked files and parent direc
 async function preparationFixture(t) {
   const f = await fixture(t), node = { executable: '/usr/bin/node', version: 'v22.23.4', sha256: hash('fictional-node') };
   f.adapters.node = node;
+  f.rows.find(row=>row.name==='matter-driver-audit-sync').pm2_env.exec_interpreter=node.executable;
   const original = Object.fromEntries(['CRON_SECRET', 'MATTER_SUPABASE_SECRET', 'MATTER_DELIVERY_API_KEY', 'AI_GATEWAY_API_KEY',
     'MATTER_DELIVERY_ENABLED', 'MATTER_PHOTO_READ_ENABLED', 'MATTER_PHOTO_GRADE_ENABLED', 'MATTER_GPS_ENABLED',
     'MATTER_GPS_PUBLICATION_ENABLED'].map(name => [name, name.endsWith('_ENABLED') ? 'true' : f.secret]));
@@ -367,6 +369,10 @@ async function preparationFixture(t) {
   await f.write(path.join(f.root, 'work/current.private.json'), JSON.stringify(current));
   await f.write(path.join(f.server, 'package.json'), '{"type":"module","scripts":{"start":"node server.js"}}');
   const lock = await f.write(path.join(f.server, 'package-lock.json'), '{"lockfileVersion":3}');
+  const receiptCode = ['scripts/driverAuditSync.js','services/driverAuditDataBackend.js',
+    'vendor/driver-audits/integration/hosted/supabase-archive.mjs','vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs',
+    'services/driverAuditSupabaseAppBackend.js','services/driverAuditSupabaseArchive.js'];
+  for(const name of receiptCode)await f.write(path.join(f.server,name),await fs.readFile(new URL('../../server/'+name,import.meta.url)));
   await fs.mkdir(path.join(f.server, 'node_modules'), { mode: 0o700 });
   const oldBuilder = JSON.parse(await fs.readFile(path.join(f.root, 'builder/runtime-manifest.json')));
   const builderRows = [];
@@ -415,7 +421,9 @@ async function preparationFixture(t) {
     if (file === 'git' && args[0] === 'clone') {
       const target = args.at(-1); await fs.mkdir(path.join(target, 'server'), { recursive: true, mode: 0o700 });
       await f.write(path.join(target, 'server/package-lock.json'), await fs.readFile(path.join(f.server, 'package-lock.json')));
-      await f.write(path.join(target, 'server/package.json'), '{"type":"module"}'); return { stdout: '' };
+      await f.write(path.join(target, 'server/package.json'), '{"type":"module"}');
+      for(const name of receiptCode)await f.write(path.join(target,'server',name),await fs.readFile(path.join(f.server,name)));
+      return { stdout: '' };
     }
     if (file === 'git' && args[0] === '-C') return { stdout: args[2] === 'rev-parse' ? (args[3] === '--show-toplevel' ? args[1] : releaseSha) + '\n' : '' };
     if (file === '/usr/bin/npm') {
@@ -465,6 +473,96 @@ test('preparing Supabase stages an isolated release and all four original packag
   assert(f.commands.every(call => call.file === 'git' || call.file === '/usr/bin/npm' || call.file === 'pm2' && call.args.join() === 'jlist'));
   assert(!f.commands.some(call => call.args.some(arg => ['reset', 'restart', 'start', 'save'].includes(arg))));
   assert(!JSON.stringify(result).includes(f.secret));
+});
+
+async function originalArchiveReceipt(f, bytes = Buffer.from('fictional retained photo bytes')) {
+  const key=hash(bytes)+'.gz',value={target:'matter-report-archive',key,sha256:hash(bytes),bytes:bytes.length,verified:true};
+  const file=path.join(f.root,'archive-receipts',key+'.json');await f.write(file,JSON.stringify(value));return{key,value,file,bytes};
+}
+
+test('exact original Supabase verification receipts are retained separately and avoid redundant verification GETs without pretending to cache bytes',async t=>{
+  const f=await preparationFixture(t),original=await originalArchiveReceipt(f),result=await f.runPrepare();
+  const capsule=openTransferSecrets(privateKey,result.capsule),metadata=JSON.parse(gunzipSync(Buffer.from(capsule.metadataGzipBase64,'base64')));
+  const prefix=metadata.archiveReceiptPrefix;assert.equal(prefix.receipts,1);assert.equal(prefix.freshRemoteObjectBytesVerified,false);
+  const staging=path.join(metadata.preparation.syncRoot,'staging.private.json'),before=await fs.readFile(staging);
+  const proof=JSON.parse(await fs.readFile(prefix.path));assert.equal(proof.stagingReceiptSha256,hash(before));
+  assert.equal(proof.source.dataStore,'supabase');assert.equal(proof.source.archiveIdentitySha256,proof.destination.archiveIdentitySha256);
+  assert.equal(proof.receipts[0].name,original.key+'.json');assert.equal(proof.receipts[0].objectBytes,original.bytes.length);
+  const copied=path.join(metadata.preparation.syncRoot,'archive-receipts',original.key+'.json');
+  assert.deepEqual(await fs.readFile(copied),await fs.readFile(original.file));
+  assert.equal((await fs.stat(copied)).mode&0o077,0);
+  let gets=0;const archive=createVerifiedAuditArchive({receiptRoot:path.dirname(copied),remote:{async readObject(){gets++;throw Error('No fresh remote byte proof in this fixture');}}});
+  await archive.verify(original.key,original.bytes.length);assert.equal(gets,0);
+  await assert.rejects(archive.readObject(original.key,{maxBytes:original.bytes.length}));assert.equal(gets,1);
+  await f.runPrepare();assert.deepEqual(await fs.readFile(staging),before);assert.deepEqual(await fs.readFile(original.file),Buffer.from(JSON.stringify(original.value)));
+});
+
+test('receipt copying rejects duplicate serialized fields rather than retaining hidden non-receipt payloads',async t=>{
+  const f=await preparationFixture(t),saved=await originalArchiveReceipt(f);
+  await f.write(saved.file,JSON.stringify(saved.value).replace('{"target":','{"target":"fictional-not-receipt","target":'));
+  await assert.rejects(f.runPrepare(),/Supabase handoff stopped at prepare-archive-receipts-source/);
+});
+
+test('wrong archive, identity, size, fields or unsafe receipt files cannot enter the retained prefix',async t=>{
+  for(const mutate of [value=>({...value,target:'fictional-other-bucket'}),value=>({...value,key:'f'.repeat(64)+'.gz'}),
+    value=>({...value,sha256:'f'.repeat(64)}),value=>({...value,bytes:0}),value=>({...value,bytes:8*1024**2+1}),
+    value=>({...value,bytes:1.5}),value=>({...value,verified:false}),value=>({...value,unknown:'fictional-hidden'})]){
+    const f=await preparationFixture(t),saved=await originalArchiveReceipt(f);await f.write(saved.file,JSON.stringify(mutate(saved.value)));
+    await assert.rejects(f.runPrepare(),/Supabase handoff stopped at prepare-archive-receipts-source/);
+    assert(!f.commands.some(row=>row.file==='git'&&row.args[0]==='clone'));
+  }
+  for(const kind of ['name','symlink','mode','directory','boundary']){
+    const f=await preparationFixture(t),saved=await originalArchiveReceipt(f);
+    if(kind==='name')await fs.rename(saved.file,path.join(path.dirname(saved.file),'not-a-receipt.private.json'));
+    if(kind==='symlink'){await fs.rename(saved.file,saved.file+'.original');await fs.symlink(saved.file+'.original',saved.file);}
+    if(kind==='mode')await fs.chmod(saved.file,0o644);
+    if(kind==='directory'){await fs.unlink(saved.file);await fs.mkdir(saved.file,{mode:0o700});}
+    if(kind==='boundary')await fs.chmod(path.dirname(saved.file),0o755);
+    await assert.rejects(f.runPrepare(),/Supabase handoff stopped at prepare-archive-receipts-source/);
+  }
+});
+
+test('receipt reuse binds the real stopped Sync backend selection and fixed reviewed namespace',async t=>{
+  const mongo=await preparationFixture(t);await originalArchiveReceipt(mongo);
+  mongo.rows.find(row=>row.name==='matter-driver-audit-sync').pm2_env.DRIVER_AUDIT_DATA_STORE='mongo';
+  await assert.rejects(mongo.runPrepare(),/Supabase handoff stopped at prepare-archive-receipts-source/);
+  const other=await preparationFixture(t);await originalArchiveReceipt(other);
+  const file=path.join(other.server,'vendor/driver-audits/integration/hosted/supabase-archive.mjs');
+  await other.write(file,(await fs.readFile(file,'utf8')).replace('https://trhhjfgfmxofxhnzocks.supabase.co/storage/v1','https://fictional.invalid/storage/v1'));
+  await assert.rejects(other.runPrepare(),/Supabase handoff stopped at prepare-archive-receipts-source/);
+});
+
+test('new prefix proof can adopt an existing immutable staging receipt and rejects conflicting targets or original drift',async t=>{
+  const f=await preparationFixture(t),original=await originalArchiveReceipt(f),result=await f.runPrepare();
+  const metadata=JSON.parse(gunzipSync(Buffer.from(openTransferSecrets(privateKey,result.capsule).metadataGzipBase64,'base64'))),root=metadata.preparation.syncRoot;
+  const staging=path.join(root,'staging.private.json'),before=await fs.readFile(staging),prefix=metadata.archiveReceiptPrefix.path;
+  await fs.unlink(prefix);await fs.unlink(path.join(root,'archive-receipts',original.key+'.json'));
+  await f.runPrepare();assert.deepEqual(await fs.readFile(staging),before);
+  await f.write(path.join(root,'archive-receipts',original.key+'.json'),JSON.stringify({...original.value,bytes:original.value.bytes+1}));
+  await assert.rejects(f.runPrepare(),/Supabase handoff stopped at prepare-stage-archive-receipts/);assert.deepEqual(await fs.readFile(staging),before);
+  const drift=await preparationFixture(t),saved=await originalArchiveReceipt(drift),open=fs.open;let injected=false;
+  fs.open=async(file,...args)=>{const handle=await open(file,...args);
+    if(!injected&&typeof file==='string'&&path.basename(file)===saved.key+'.json'&&file.includes('/driver-report-app-releases/')){
+      injected=true;await drift.write(saved.file,JSON.stringify({...saved.value,bytes:saved.value.bytes+1}));
+    }return handle;
+  };
+  try{await assert.rejects(drift.runPrepare(),/Supabase handoff stopped at prepare-stage-archive-receipts/);assert(injected);}
+  finally{fs.open=open;}
+});
+
+test('receipt reuse bounds metadata before opening objects and preserves later genuine target verification receipts',async t=>{
+  const bounded=await preparationFixture(t),saved=await originalArchiveReceipt(bounded),readdir=fs.readdir;
+  fs.readdir=async(folder,...args)=>folder===path.dirname(saved.file)?Array.from({length:100001},()=>({name:path.basename(saved.file),isFile:()=>true})):readdir(folder,...args);
+  try{await assert.rejects(bounded.runPrepare(),/Supabase handoff stopped at prepare-archive-receipts-source/);}
+  finally{fs.readdir=readdir;}
+  const tooLarge=await preparationFixture(t),large=await originalArchiveReceipt(tooLarge);await tooLarge.write(large.file,Buffer.alloc(2049,32));
+  await assert.rejects(tooLarge.runPrepare(),/Supabase handoff stopped at prepare-archive-receipts-source/);
+  const f=await preparationFixture(t);await originalArchiveReceipt(f);const result=await f.runPrepare();
+  const metadata=JSON.parse(gunzipSync(Buffer.from(openTransferSecrets(privateKey,result.capsule).metadataGzipBase64,'base64'))),target=path.join(metadata.preparation.syncRoot,'archive-receipts');
+  const bytes=Buffer.from('fictional later genuine verified object'),key=hash(bytes)+'.gz';let reads=0;
+  const archive=createVerifiedAuditArchive({receiptRoot:target,remote:{async readObject(request){assert.equal(request,key);reads++;return[bytes];}}});
+  await archive.verify(key,bytes.length);assert.equal(reads,1);const file=path.join(target,key+'.json'),before=await fs.readFile(file);
+  await f.runPrepare();assert.deepEqual(await fs.readFile(file),before);
 });
 
 test('prepared release retries are exact and preserve hardlink inode, permissions and original modification times', async t => {
@@ -547,7 +645,7 @@ test('independent source or worker drift cannot become a successful staged recei
       else f.rows[1].pid = 9876;
       return result;
     };
-    await assert.rejects(f.runPrepare(), error => /^readback/.test(error.phase));
+    await assert.rejects(f.runPrepare(), error => /^(?:readback|prepare-staging-readback$)/.test(error.phase));
     assert.equal(kind === 'source' ? JSON.parse(await fs.readFile(f.configFile)).independentEdit : f.rows[1].pid, kind === 'source' ? true : 9876);
   }
 });
@@ -675,7 +773,7 @@ test('real local Git staging checks out the reviewed release while the original 
   for (const name of ['scripts/driverAuditHttp.js', 'scripts/driverAuditSourceStage.js', 'services/driverAuditSource.js',
     'services/driverAuditSupabaseReplica.js', 'services/driverAuditSupabaseSync.js',
     'services/driverAuditTransferCodec.js', 'vendor/driver-audits/integration/hosted/worker-lock.mjs',
-    'vendor/driver-audits/integration/hosted/supabase-archive.mjs', 'loadEnv.js']) await f.write(path.join(f.server, name), 'export {};\n');
+    'loadEnv.js']) await f.write(path.join(f.server, name), 'export {};\n');
   await git(['init', '--quiet']); await git(['add', '.']);
   const commitArgs = ['-c', 'user.name=Fictional Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m'];
   await git([...commitArgs, 'Original fixture']);
@@ -1048,4 +1146,24 @@ test('release transport failures seal the bounded private cause and retain exact
   });
   assert.deepEqual(await fs.readFile(path.join(f.root, 'work/current.private.json')), pointer);
   assert(!f.commands.some(row => row.args[0] === 'clone'));
+});
+
+test('a release readback guard seals its private stack and fixed metadata without accepting or changing the release', async t => {
+  const f = await preparationFixture(t), execute = f.adapters.exec;
+  f.adapters.exec = async (file, args, options) => {
+    if (file === 'git' && args[0] === '-C' && args[2] === 'rev-parse' && args[3] === 'HEAD') return { stdout: 'f'.repeat(40) + '\n' };
+    return execute(file, args, options);
+  };
+  await assert.rejects(f.runPrepare(), error => {
+    assert.equal(error.phase, 'prepare-release-readback');
+    const receipt = error.supabaseHostStopped;
+    assert.deepEqual(driverAuditSupabaseStoppedReceipt(receipt, commit, error.phase), receipt);
+    const capsule = openTransferSecrets(privateKey, receipt.capsule);
+    assert.equal(capsule.kind, 'supabase-preparation-failure-capsule-v1');
+    const raw = gunzipSync(Buffer.from(capsule.metadataGzipBase64, 'base64'));
+    assert.equal(hash(raw), receipt.metadataSha256); const detail = JSON.parse(raw);
+    assert.equal(detail.kind, 'supabase-preparation-failure-v1'); assert(detail.cause.stack.includes('releaseCheck'));
+    assert.equal(detail.releaseMetadata.length, 4); assert(detail.releaseMetadata.some(row => row.name === 'server/package-lock.json'));
+    assert(!JSON.stringify(receipt).includes(f.secret)); return true;
+  });
 });

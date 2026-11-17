@@ -567,6 +567,122 @@ async function prepareDependencies({ targetServer, packageLockSha256, npmIdentit
       && (await read(receiptFile)).data.equals(bytes)); } };
 }
 
+const receiptCodePaths = ['scripts/driverAuditSync.js', 'services/driverAuditDataBackend.js',
+  'vendor/driver-audits/integration/hosted/supabase-archive.mjs', 'vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs'];
+const receiptArchive = { project: 'https://trhhjfgfmxofxhnzocks.supabase.co', bucket: 'matter-report-archive' };
+
+async function archiveReceiptNamespace(server, exec, appRoot, target = false) {
+  const names = [...receiptCodePaths, ...(target ? ['services/driverAuditSupabaseAppBackend.js', 'services/driverAuditSupabaseArchive.js'] : [])];
+  await exec('git', ['-C', appRoot, 'ls-files', '--error-unmatch', ...names.map(name => 'server/' + name)]);
+  const files = [];
+  for (const name of names) {
+    const value = await read(path.join(server, name), { maximum: 512 * 1024, privateMode: false });
+    files.push({ name, sha256: value.sha256, bytes: value.bytes });
+    if (name.endsWith('/supabase-archive.mjs')) {
+      const text = value.data.toString('utf8');
+      need(/\bconst\s+base\s*=\s*(['"])https:\/\/trhhjfgfmxofxhnzocks\.supabase\.co\/storage\/v1\1\s*;/.test(text)
+        && /\bconst\s+bucket\s*=\s*(['"])matter-report-archive\1\s*[,;]/.test(text));
+    }
+    if (name.endsWith('/driver-audit-handoff.mjs')) need(/\bconst\s+archiveName\s*=\s*(['"])matter-report-archive\1\s*;/.test(value.data.toString('utf8')));
+  }
+  return { archiveIdentitySha256: sha(JSON.stringify(receiptArchive)), files };
+}
+
+async function archiveReceiptInventory(folder, boundary) {
+  try { await directory(folder); } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    return { present: false, root: folder, files: [], bytes: 0, objectBytes: 0, inventorySha256: sha('[]'), physicalInventorySha256: sha('[]') };
+  }
+  return withPrivatePackageDirectory(folder, boundary, async () => {
+    const before = await fs.lstat(folder, { bigint: true }), entries = (await fs.readdir(folder, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+    need(entries.length <= 100000); const files = []; let bytes = 0, objectBytes = 0;
+    for (const entry of entries) {
+      need(entry.isFile() && /^[a-f0-9]{64}\.gz\.json$/.test(entry.name));
+      const saved = await read(path.join(folder, entry.name), { maximum: 2048 }), value = JSON.parse(saved.data), key = entry.name.slice(0, -5);
+      need(Buffer.from(JSON.stringify(value)).equals(saved.data)
+        && exactKeys(value, ['target', 'key', 'sha256', 'bytes', 'verified']) && value.target === receiptArchive.bucket
+        && value.key === key && value.sha256 === key.slice(0, 64) && value.verified === true
+        && Number.isSafeInteger(value.bytes) && value.bytes > 0 && value.bytes <= 8 * 1024 ** 2
+        && (bytes += saved.bytes) <= 64 * 1024 ** 2);
+      objectBytes += value.bytes;
+      files.push({ name: entry.name, sha256: saved.sha256, bytes: saved.bytes, objectBytes: value.bytes,
+        physicalSignature: signature(await fs.lstat(saved.path, { bigint: true })), data: saved.data });
+    }
+    need(signature(await fs.lstat(folder, { bigint: true })) === signature(before));
+    const inventory = files.map(({ name, sha256, bytes, objectBytes }) => ({ name, sha256, bytes, objectBytes }));
+    return { present: true, root: folder, files, bytes, objectBytes, inventorySha256: sha(JSON.stringify(inventory)),
+      physicalInventorySha256: sha(JSON.stringify(files.map(({ name, physicalSignature }) => ({ name, physicalSignature })))) };
+  });
+}
+
+async function originalArchiveReceiptSource({ server, before, exec, load }) {
+  const expected = before.metadata.workers.rows.find(row => row.name === 'matter-driver-audit-sync');
+  const rows = JSON.parse((await exec('pm2', ['jlist'])).stdout); need(Array.isArray(rows) && rows.length <= 512);
+  const matches = rows.filter(row => row.name === 'matter-driver-audit-sync'); need(matches.length === 1);
+  const row = matches[0], settings = row.pm2_env;
+  need(row.pm_id === expected.id && row.pid === 0 && settings.status === 'stopped' && settings.pm_cwd === server
+    && settings.pm_exec_path === path.join(server, 'scripts/driverAuditSync.js') && settings.exec_interpreter === before.metadata.node.executable
+    && JSON.stringify(settings.args) === JSON.stringify(['--config', before.metadata.sync.configFile.path]));
+  const inherited = {}, keys = ['DRIVER_AUDIT_DATA_STORE', 'DRIVER_AUDIT_EXECUTION_HOST', 'DRIVER_AUDIT_SUPABASE_SECRET', 'MATTER_SUPABASE_SECRET', 'NODE_OPTIONS'];
+  for (const name of keys) {
+    const flat = settings[name], nested = settings.env?.[name];
+    need(flat === undefined || typeof flat === 'string'); need(nested === undefined || typeof nested === 'string');
+    need(flat === undefined || nested === undefined || flat === nested);
+    if (flat !== undefined || nested !== undefined) inherited[name] = flat ?? nested;
+  }
+  const dotenv = await load('node_modules/dotenv/lib/main.js');
+  const environmentFiles = await Promise.all(['.env', '.env.local'].map(name => read(path.join(server, name), { maximum: 256 * 1024, privateMode: false, optional: true })));
+  need(JSON.stringify(environmentFiles.map(value => value?.sha256 ?? null)) === JSON.stringify(before.configurationPin));
+  const effective = { ...(environmentFiles[0] ? dotenv.parse(environmentFiles[0].data) : {}), ...inherited,
+    ...(environmentFiles[1] ? dotenv.parse(environmentFiles[1].data) : {}) };
+  const secret = effective.DRIVER_AUDIT_SUPABASE_SECRET || effective.MATTER_SUPABASE_SECRET;
+  need((effective.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase'
+    && [undefined, '', 'sidi'].includes(effective.DRIVER_AUDIT_EXECUTION_HOST)
+    && typeof secret === 'string' && secret.length > 0 && secret.length <= 8192 && !/[\r\n]/.test(secret)
+    && (effective.NODE_OPTIONS === undefined || /^--max-old-space-size=\d{3,5}$/.test(effective.NODE_OPTIONS))
+    && (settings.node_args === undefined || JSON.stringify(settings.node_args) === '[]'));
+  const namespace = await archiveReceiptNamespace(server, exec, path.dirname(server));
+  const source = { applicationCommit: before.metadata.applicationCommit, syncRoot: before.metadata.sync.config.root,
+    syncConfigSha256: before.metadata.sync.configFile.sha256, dataStore: 'supabase', environmentPin: before.configurationPin,
+    runtimeSelectionSha256: sha(JSON.stringify([row.pm_id, effective.DRIVER_AUDIT_DATA_STORE || 'supabase', effective.DRIVER_AUDIT_EXECUTION_HOST || null,
+      effective.NODE_OPTIONS ?? null, sha(secret)])), ...namespace };
+  return { source, inventory: await archiveReceiptInventory(path.join(source.syncRoot, 'archive-receipts'), source.syncRoot) };
+}
+
+async function stageArchiveReceiptPrefix({ saved, syncRoot, targetServer, releaseRoot, releaseSha, stagingReceiptSha256, exec }) {
+  const namespace = await archiveReceiptNamespace(targetServer, exec, releaseRoot, true);
+  need(saved.source.archiveIdentitySha256 === namespace.archiveIdentitySha256);
+  const target = path.join(syncRoot, 'archive-receipts'); await mkdirPrivate(target);
+  for (const row of saved.inventory.files) {
+    const original = await read(path.join(saved.inventory.root, row.name), { maximum: 2048 });
+    need(original.sha256 === row.sha256 && original.bytes === row.bytes);
+    await writeOnce(path.join(target, row.name), original.data);
+  }
+  const proof = { version: 1, kind: 'retained-supabase-archive-receipts-v1', stagingReceiptSha256,
+    source: { ...saved.source, directoryPresent: saved.inventory.present, inventorySha256: saved.inventory.inventorySha256,
+      physicalInventorySha256: saved.inventory.physicalInventorySha256 },
+    destination: { releaseSha, root: target, ...namespace },
+    receipts: saved.inventory.files.map(({ name, sha256, bytes, objectBytes }) => ({ name, sha256, bytes, objectBytes })),
+    retainedVerificationMetadataBytes: saved.inventory.bytes, originalVerifiedObjectBytes: saved.inventory.objectBytes,
+    freshRemoteObjectBytesVerified: false, remoteAvailabilityAsserted: false, originalReceiptsChanged: false };
+  const bytes = Buffer.from(JSON.stringify(proof)), proofFile = path.join(syncRoot, 'retained/archive-verification-receipts.private.json');
+  need(bytes.length <= 32 * 1024 ** 2); await writeOnce(proofFile, bytes);
+  const recheck = async () => {
+    const current = await archiveReceiptInventory(saved.inventory.root, saved.source.syncRoot);
+    need(current.present === saved.inventory.present && current.inventorySha256 === saved.inventory.inventorySha256
+      && current.physicalInventorySha256 === saved.inventory.physicalInventorySha256);
+    const actual = await archiveReceiptInventory(target, syncRoot), byName = new Map(actual.files.map(row => [row.name, row]));
+    for (const row of saved.inventory.files) need(byName.get(row.name)?.sha256 === row.sha256 && byName.get(row.name)?.bytes === row.bytes);
+    need((await read(proofFile, { maximum: 32 * 1024 ** 2 })).sha256 === sha(bytes)
+      && JSON.stringify(await archiveReceiptNamespace(targetServer, exec, releaseRoot, true)) === JSON.stringify(namespace));
+  };
+  await recheck();
+  const result = { path: proofFile, sha256: sha(bytes), bytes: bytes.length, receipts: proof.receipts.length,
+    retainedVerificationMetadataBytes: saved.inventory.bytes, originalVerifiedObjectBytes: saved.inventory.objectBytes,
+    stagingReceiptSha256, freshRemoteObjectBytesVerified: false, remoteAvailabilityAsserted: false };
+  Object.defineProperty(result, 'recheck', { value: recheck }); return result;
+}
+
 async function prepareHost({ appRoot, server, before, environment, bootstrapSha256, exec, load, adapters, setPhase, observeFailure }) {
   const pins = adapters.pins ?? preparationPins;
   setPhase('source-credentials');
@@ -610,6 +726,8 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
     && sourceConfig.nodeVersion === node.version);
   const nodeProof = adapters.node ?? await fileHash(node.executable, { maximum: 256 * 1024 ** 2, privateMode: false });
   if (!adapters.node) need(nodeProof.stat.uid === 0n && !(Number(nodeProof.stat.mode) & 0o022) && await fs.realpath('/proc/self/exe') === node.executable);
+  setPhase('archive-receipts-source');
+  const receiptSource = await originalArchiveReceiptSource({ server, before, exec, load });
   const packagePhase = prefix => name => setPhase(prefix + '-' + name);
   const observeRole = role => value => observeFailure({ role, ...value });
   const baseline = await packageFiles(sync.config.baselineRoot, pins.baseline,
@@ -765,6 +883,7 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
   const envBytes = Buffer.from(Object.entries(selected).map(([name, value]) => name + '=' + JSON.stringify(value)).join('\n') + '\n');
   const dotenv = await load('node_modules/dotenv/lib/main.js'); need(JSON.stringify(dotenv.parse(envBytes)) === JSON.stringify(selected));
   await writeOnce(path.join(targetServer, '.env.local'), envBytes);
+  let receiptPrefix;
   const recheck = async () => {
     for (const row of [baseline, ...retained.flatMap(item => [item.files, ...(item.objects ? [item.objects] : [])])]) {
       const current = await packageFiles(row.root, row.manifestSha256,
@@ -799,6 +918,11 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
     await dependencies.recheck();
     need((await read(path.join(targetServer, '.env.local'))).data.equals(envBytes));
     if (!adapters.node) need((await fileHash(node.executable, { maximum: 256 * 1024 ** 2, privateMode: false })).sha256 === nodeProof.sha256);
+    const currentReceipts = await originalArchiveReceiptSource({ server, before, exec, load });
+    need(JSON.stringify(currentReceipts.source) === JSON.stringify(receiptSource.source)
+      && currentReceipts.inventory.inventorySha256 === receiptSource.inventory.inventorySha256
+      && currentReceipts.inventory.physicalInventorySha256 === receiptSource.inventory.physicalInventorySha256);
+    if (receiptPrefix) await receiptPrefix.recheck();
     for (const name of ['seed.json', 'work/current.private.json']) {
       try { await fs.lstat(path.join(syncRoot, name)); need(false); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     }
@@ -812,6 +936,16 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
     sourceEnvironmentSha256: sha(environmentBytes), appEnvironmentSha256: sha(envBytes), offHostRebasedEnvironmentBackupPending: true,
     seedSelected: false, registrationsChanged: false, workersStarted: false, routingChanged: false,
     bootstrapTransport: 'private-supabase-https-sha256', sourceEnvironmentValuesExported: false };
+  // Keep staging.private.json byte-compatible with prior preparation. The
+  // separately pinned prefix can be adopted without rewriting that receipt.
+  const stagingBytes = Buffer.from(JSON.stringify({ version: 1, kind: 'supabase-sidi-host-staging-receipt-v1',
+    inspectionMetadataSha256: sha(JSON.stringify(before.metadata)), ...prepared }));
+  const existingStaging = await read(path.join(syncRoot, 'staging.private.json'), { maximum: 2 * 1024 ** 2, optional: true });
+  need(!existingStaging || existingStaging.data.equals(stagingBytes));
+  setPhase('stage-archive-receipts');
+  receiptPrefix = await stageArchiveReceiptPrefix({ saved: receiptSource, syncRoot, targetServer, releaseRoot,
+    releaseSha: bootstrap.releaseSha, stagingReceiptSha256: sha(stagingBytes), exec });
+  await recheck(); Object.defineProperty(prepared, 'archiveReceiptPrefix', { value: receiptPrefix });
   Object.defineProperty(prepared, 'recheck', { value: recheck });
   return prepared;
 }
@@ -858,6 +992,35 @@ async function sealedPackageFailure({ target, phase, operation, expectedSha, rec
   const packed = gzipSync(raw), { sealTransferSecrets } = await load('services/driverAuditTransferCodec.js');
   const metadataSha256 = sha(raw);
   const capsule = sealTransferSecrets(recipientKey, { version: 1, kind: 'supabase-package-first-failure-capsule-v1',
+    applicationCommit: expectedSha, metadataSha256, metadataGzipSha256: sha(packed), metadataGzipBase64: packed.toString('base64') });
+  return { status: 'supabase-host-stopped', applicationCommit: expectedSha, operatorPhase: phase, metadataSha256, capsule };
+}
+
+async function sealedPreparationFailure({ phase, operation, expectedSha, recipientKey, exec, load, error, appRoot, releaseSha }) {
+  if (!recipientKey || !/^(?:prepare-[a-z-]+|staging-final-readback)$/.test(phase) || phase.length > 79) return null;
+  const bounded = (value, limit) => Buffer.from(String(value ?? '')).subarray(0, limit).toString('utf8');
+  const releaseMetadata = [];
+  if (phase.startsWith('prepare-release') && commit(releaseSha)) {
+    const root = path.join(appRoot, 'server/.private/driver-report-app-releases', releaseSha);
+    for (const name of ['', '.git', 'server', 'server/package-lock.json']) {
+      try {
+        const info = await fs.lstat(path.join(root, name));
+        releaseMetadata.push({ name, kind: info.isSymbolicLink() ? 'symbolic-link' : info.isDirectory() ? 'directory' : info.isFile() ? 'regular-file' : 'other',
+          uid: info.uid, mode: info.mode & 0o7777, bytes: info.size });
+      } catch (error) { releaseMetadata.push({ name, unavailable: bounded(error.code, 32) }); }
+    }
+  }
+  const raw = Buffer.from(JSON.stringify({ version: 1, kind: 'supabase-preparation-failure-v1',
+    applicationCommit: expectedSha, operation, operatorPhase: phase, releaseMetadata,
+    cause: { name: bounded(error?.name, 128), message: bounded(error?.message, 4096), stack: bounded(error?.stack, 8192),
+      code: bounded(error?.code, 128), signal: bounded(error?.signal, 32), killed: error?.killed === true,
+      stdout: bounded(error?.stdout, 4096), stderr: bounded(error?.stderr, 8192) } }));
+  need(raw.length <= 32 * 1024);
+  if ((await exec('git', ['rev-parse', 'HEAD'])).stdout.trim() !== expectedSha) return null;
+  await exec('git', ['diff', '--quiet', 'HEAD', '--', 'server/services/driverAuditTransferCodec.js']);
+  const packed = gzipSync(raw), { sealTransferSecrets } = await load('services/driverAuditTransferCodec.js');
+  const metadataSha256 = sha(raw);
+  const capsule = sealTransferSecrets(recipientKey, { version: 1, kind: 'supabase-preparation-failure-capsule-v1',
     applicationCommit: expectedSha, metadataSha256, metadataGzipSha256: sha(packed), metadataGzipBase64: packed.toString('base64') });
   return { status: 'supabase-host-stopped', applicationCommit: expectedSha, operatorPhase: phase, metadataSha256, capsule };
 }
@@ -927,7 +1090,8 @@ export async function runDriverAuditSupabaseHandoff({ operation, appRoot, expect
       await writeOnce(path.join(preparation.syncRoot, 'staging.private.json'), Buffer.from(JSON.stringify({ version: 1,
         kind: 'supabase-sidi-host-staging-receipt-v1', inspectionMetadataSha256: sha(JSON.stringify(before.metadata)), ...preparation })));
     }
-    const raw = Buffer.from(JSON.stringify(preparation ? { ...before.metadata, preparation } : before.metadata)); need(raw.length <= 2 * 1024 ** 2);
+    const raw = Buffer.from(JSON.stringify(preparation ? { ...before.metadata, preparation,
+      archiveReceiptPrefix: preparation.archiveReceiptPrefix } : before.metadata)); need(raw.length <= 2 * 1024 ** 2);
     const packed = gzipSync(raw); need(packed.length <= 96 * 1024);
     phase = 'seal'; const { sealTransferSecrets } = await load('services/driverAuditTransferCodec.js');
     const capsule = sealTransferSecrets(key, { version: 1, kind: 'supabase-host-inspection-capsule-v1',
@@ -937,10 +1101,12 @@ export async function runDriverAuditSupabaseHandoff({ operation, appRoot, expect
         builderSha256: preparation.builderSha256, seedSelected: false } : {}),
       recipientSha256: sha(recipientPublicKey), capsule, readOnly: !preparation,
       ...(preparation ? { stagingOnly: true, databaseWrites: false } : {}), workersStarted: false, routingChanged: false };
-  } catch {
+  } catch (cause) {
     const failure = Object.assign(Error('Supabase handoff stopped at ' + phase), { phase });
     try {
-      const receipt = await sealedPackageFailure({ target: failureTarget, phase, operation, expectedSha, recipientKey, exec, load });
+      const receipt = await sealedPackageFailure({ target: failureTarget, phase, operation, expectedSha, recipientKey, exec, load })
+        ?? await sealedPreparationFailure({ phase, operation, expectedSha, recipientKey, exec, load, error: cause,
+          appRoot, releaseSha: (adapters.pins ?? preparationPins).release });
       if (receipt) Object.defineProperty(failure, 'supabaseHostStopped', { value: receipt });
     } catch { /* Preserve the original closed guard if private sealing fails. */ }
     throw failure;
