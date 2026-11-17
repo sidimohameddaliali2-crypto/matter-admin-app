@@ -17,6 +17,15 @@ on:
           - start-supabase-report
           - qualify-supabase-source-held
           - run-supabase-report-once
+          - probe-supabase-canary
+          - plan-supabase-canary
+          - enable-supabase-canary
+          - seal-supabase-canary-entry
+          - restore-supabase-canary
+          - promote-supabase-report
+          - export-supabase-release-inputs
+          - stage-supabase-source-release
+          - start-supabase-source-sync
           - pause-builder
           - resume-builder
           - prepare-transfer
@@ -42,7 +51,7 @@ on:
           - apply-native-cleanup
           - prepare-object-store
           - externalize-native-archive
-        default: inspect
+        default: inspect-supabase-host
       expected_deployed_sha:
         description: Exact current application commit on the host
         type: string
@@ -96,6 +105,8 @@ jobs:
             inspect-supabase-host|prepare-supabase-host) operator=supabase-handoff ;;
             inspect-supabase-routing) operator=supabase-routing ;;
             prepare-supabase-serving|start-supabase-report|qualify-supabase-source-held|run-supabase-report-once) operator=supabase-control ;;
+            probe-supabase-canary|plan-supabase-canary|enable-supabase-canary|seal-supabase-canary-entry|restore-supabase-canary|promote-supabase-report) operator=supabase-canary-control ;;
+            export-supabase-release-inputs|stage-supabase-source-release|start-supabase-source-sync) operator=supabase-release-control ;;
             inspect-database-config) operator=database-check ;;
             prepare-object-store|externalize-native-archive) operator=object-store ;;
             plan-native-cleanup|apply-native-cleanup) operator=cleanup ;;
@@ -106,7 +117,7 @@ jobs:
             stage-native-proofs|export-native-controls) operator=proofs ;;
             *) operator=import ;;
           esac
-          if [[ "$operator" == supabase-handoff || "$operator" == supabase-routing || "$operator" == supabase-control ]]; then
+          if [[ "$operator" == supabase-* ]]; then
             operator_file=".github/scripts/driver-audit-$operator.mjs"
           else
             operator_file=".github/scripts/driver-audit-native-$operator.mjs"

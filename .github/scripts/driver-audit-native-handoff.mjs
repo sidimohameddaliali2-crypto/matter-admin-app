@@ -28,6 +28,79 @@ const supabaseControlOperations = Object.freeze({
   'qualify-supabase-source-held': 'held-qualify-source',
   'run-supabase-report-once': 'run-report-once',
 });
+const supabaseCanaryOperations = Object.freeze({
+  'probe-supabase-canary': 'probe', 'plan-supabase-canary': 'plan', 'enable-supabase-canary': 'enable',
+  'seal-supabase-canary-entry': 'seal-entry', 'restore-supabase-canary': 'restore', 'promote-supabase-report': 'promote',
+});
+const supabaseReleaseOperations = Object.freeze({
+  'export-supabase-release-inputs': 'export-release-inputs', 'stage-supabase-source-release': 'stage-source-release',
+  'start-supabase-source-sync': 'start-source-sync',
+});
+
+function boundedSupabasePublicPlan(operation, encoded, choices, hashes) {
+  if (typeof operation !== 'string' || !Object.hasOwn(choices, operation) || typeof encoded !== 'string' || !encoded.length
+    || encoded.length > 24576 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Bounded public Supabase operation required');
+  const bytes = Buffer.from(encoded, 'base64');
+  if (bytes.toString('base64') !== encoded) throw Error('Public Supabase operation encoding differs');
+  const value = JSON.parse(bytes), keys = ['version', 'recipientPublicKey', ...hashes];
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.version !== 1 || Object.keys(value).length !== keys.length
+    || !keys.every(key => Object.hasOwn(value, key)) || typeof value.recipientPublicKey !== 'string'
+    || !value.recipientPublicKey.length || value.recipientPublicKey.length > 8192
+    || !hashes.every(key => typeof value[key] === 'string' && /^[a-f0-9]{64}$/.test(value[key])))
+    throw Error('An exact public Supabase operation is required');
+  return { operation: choices[operation], recipientPublicKey: value.recipientPublicKey,
+    ...Object.fromEntries(hashes.map(key => [key, value[key]])) };
+}
+
+export function driverAuditSupabaseCanaryRequest(operation, encoded) {
+  const selected = supabaseCanaryOperations[operation];
+  return boundedSupabasePublicPlan(operation, encoded, supabaseCanaryOperations, [
+    ...(selected === 'probe' ? [] : ['preparedReceiptSha256']),
+    ...(['enable', 'seal-entry', 'restore', 'promote'].includes(selected) ? ['planSha256'] : []),
+    ...(selected === 'promote' ? ['canaryAcceptanceSha256', 'canaryAcceptanceObjectSha256'] : []),
+  ]);
+}
+
+export function driverAuditSupabaseReleaseRequest(operation, encoded) {
+  return boundedSupabasePublicPlan(operation, encoded, supabaseReleaseOperations,
+    ['preparedReceiptSha256', 'qualificationReceiptSha256',
+      ...(supabaseReleaseOperations[operation] === 'export-release-inputs' ? ['reportCompletionIdentitySha256'] : ['releasePackSha256'])]);
+}
+
+export function driverAuditSupabaseReleaseReceipts(value, args, applicationCommit) {
+  const hex = text => typeof text === 'string' && /^[a-f0-9]{64}$/.test(text);
+  const exact = (item, keys) => item && typeof item === 'object' && !Array.isArray(item)
+    && Object.keys(item).length === keys.length && keys.every(key => Object.hasOwn(item, key));
+  const exporting = args.operation === 'export-release-inputs', starting = args.operation === 'start-source-sync';
+  const specific = exporting ? 'reportCompletionIdentitySha256' : 'releasePackSha256';
+  const fields = ['status', 'operation', 'applicationCommit', 'releaseCommit', 'preparedReceiptSha256', 'qualificationReceiptSha256', specific,
+    'dataStore', 'sourceStarted', 'syncSteadyStarted', 'routingChanged', 'recipientSha256', 'metadataSha256', 'diagnosticPages', 'sealedPages'];
+  if (!exact(value, fields) || value.status !== (exporting ? 'supabase-release-inputs-exported'
+    : starting ? 'supabase-source-sync-started' : 'supabase-source-release-staged') || value.operation !== args.operation
+    || value.applicationCommit !== applicationCommit || value.releaseCommit !== '4a00becfe4954b8139df6ac3c6058c2a592484d2'
+    || value.preparedReceiptSha256 !== args.preparedReceiptSha256 || value.qualificationReceiptSha256 !== args.qualificationReceiptSha256
+    || value[specific] !== args[specific] || value.dataStore !== 'supabase' || value.sourceStarted !== starting
+    || value.syncSteadyStarted !== starting || value.routingChanged !== false || value.recipientSha256 !== hash(args.recipientPublicKey)
+    || !hex(value.metadataSha256) || !Number.isSafeInteger(value.diagnosticPages) || value.diagnosticPages < 1 || value.diagnosticPages > 64
+    || !Array.isArray(value.sealedPages) || value.sealedPages.length !== value.diagnosticPages)
+    throw Error('The exact encrypted Supabase release result is required');
+  const base64 = (text, max, bytes) => typeof text === 'string' && text.length > 0 && text.length <= max
+    && /^[A-Za-z0-9+/]+=*$/.test(text) && Buffer.from(text, 'base64').toString('base64') === text
+    && (bytes === undefined || Buffer.from(text, 'base64').length === bytes);
+  const { sealedPages, ...summary } = value;
+  const pages = sealedPages.map((capsule, pageIndex) => {
+    if (!exact(capsule, ['version', 'key', 'iv', 'tag', 'data']) || capsule.version !== 1 || !base64(capsule.key, 2048)
+      || Buffer.from(capsule.key, 'base64').length < 384 || !base64(capsule.iv, 16, 12) || !base64(capsule.tag, 24, 16)
+      || !base64(capsule.data, 96 * 1024)) throw Error('Bounded encrypted Supabase release pages are required');
+    const row = { status: 'supabase-release-output-page', operation: value.operation, applicationCommit,
+      releaseCommit: value.releaseCommit, preparedReceiptSha256: value.preparedReceiptSha256,
+      qualificationReceiptSha256: value.qualificationReceiptSha256, [specific]: value[specific],
+      metadataSha256: value.metadataSha256, pageIndex, diagnosticPages: value.diagnosticPages, capsule };
+    if (Buffer.byteLength(JSON.stringify(row)) > 64 * 1024 - 512) throw Error('Supabase release page exceeds the transport line bound');
+    return row;
+  });
+  return [...pages, summary];
+}
 
 export function driverAuditSupabaseControlRequest(operation, encoded) {
   const selected = supabaseControlOperations[operation];
@@ -274,10 +347,14 @@ async function main() {
     'activate-native', 'start-native', 'stage-native-proofs', 'export-native-controls',
     'plan-native-cleanup', 'apply-native-cleanup', 'inspect-database-config',
     'prepare-object-store', 'externalize-native-archive', 'inspect-supabase-host', 'prepare-supabase-host', 'inspect-supabase-routing',
-    ...Object.keys(supabaseControlOperations)].includes(operation)) {
+    ...Object.keys(supabaseControlOperations), ...Object.keys(supabaseCanaryOperations), ...Object.keys(supabaseReleaseOperations)].includes(operation)) {
     phase = 'native-' + operation;
     const supabaseControl = Object.hasOwn(supabaseControlOperations, operation)
       ? driverAuditSupabaseControlRequest(operation, process.env.NATIVE_TRANSFER_PLAN_B64) : null;
+    const supabaseCanary = Object.hasOwn(supabaseCanaryOperations, operation)
+      ? driverAuditSupabaseCanaryRequest(operation, process.env.NATIVE_TRANSFER_PLAN_B64) : null;
+    const supabaseRelease = Object.hasOwn(supabaseReleaseOperations, operation)
+      ? driverAuditSupabaseReleaseRequest(operation, process.env.NATIVE_TRANSFER_PLAN_B64) : null;
     const code = decodeDriverAuditOperator(process.env.NATIVE_IMPORT_CODE, process.env.NATIVE_IMPORT_COMPRESSION);
     const load = name => import(pathToFileURL(path.join(appRoot, 'server', name)).href);
     const { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory } = await load('services/driverAuditSource.js');
@@ -289,6 +366,20 @@ async function main() {
     catch (error) { if (error.code !== 'EEXIST') throw error; }
     if (hash(await readPrivateDriverAuditSource(filename, 256 * 1024)) !== hash(code)) throw Error('Reviewed import operator hash differs');
     const operator = await import(pathToFileURL(filename).href);
+    if (supabaseCanary || supabaseRelease) {
+      try {
+        if (supabaseCanary) console.log(JSON.stringify(await operator.runDriverAuditSupabaseCanaryControl({ ...supabaseCanary, appRoot, expectedSha: expected })));
+        else {
+          const result = await operator.runDriverAuditSupabaseReleaseControl({ ...supabaseRelease, appRoot, expectedSha: expected });
+          for (const receipt of driverAuditSupabaseReleaseReceipts(result, supabaseRelease, expected)) console.log(JSON.stringify(receipt));
+        }
+      } catch (error) {
+        const stopped = driverAuditSupabaseControlStoppedReceipt(error.supabaseControlStopped, expected, error.phase);
+        if (stopped) console.log(JSON.stringify(stopped));
+        throw error;
+      }
+      return;
+    }
     if (supabaseControl) {
       try {
         console.log(JSON.stringify(await operator.runDriverAuditSupabaseControl({ ...supabaseControl, appRoot, expectedSha: expected })));
