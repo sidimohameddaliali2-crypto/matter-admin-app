@@ -544,7 +544,9 @@ async function prepareDependencies({ targetServer, packageLockSha256, npmIdentit
   const options = { cwd: targetServer, timeout: 300000, env: { PATH: '/usr/bin:/bin', LANG: 'C.UTF-8', CI: 'true',
     NODE_OPTIONS: '--max-old-space-size=1024', npm_config_jobs: '2', npm_config_maxsockets: '4',
     npm_config_fetch_retries: '1', npm_config_fetch_timeout: '30000', npm_config_cache: path.join(controls, 'cache'),
-    npm_config_userconfig: '/dev/null', npm_config_globalconfig: '/dev/null', npm_config_update_notifier: 'false' } };
+    npm_config_userconfig: path.join(controls, 'user.npmrc'), npm_config_globalconfig: path.join(controls, 'global.npmrc'),
+    npm_config_update_notifier: 'false' } };
+  for (const file of [options.env.npm_config_userconfig, options.env.npm_config_globalconfig]) await writeOnce(file, Buffer.alloc(0));
   const existingReceipt = await read(receiptFile, { optional: true });
   if (!existingReceipt) {
     need(!await read(path.join(targetServer, '.env.local'), { optional: true }));
