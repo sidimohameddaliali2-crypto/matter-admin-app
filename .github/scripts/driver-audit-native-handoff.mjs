@@ -310,6 +310,8 @@ if (process.argv.includes('--run')) main().catch(error => {
     .map(match => Number(match[1])).filter(line => line > 0 && line < 10000).slice(0, 8) : [];
   const location = censusLines.length ? '; censusLines=' + censusLines.join(',') : '';
   const fileCode = ['ENOENT', 'EACCES', 'EPERM', 'ELOOP'].includes(error.code) ? '; fileCode=' + error.code : '';
-  console.error('Native handoff operation stopped at ' + phase + reason + status + location + fileCode + '; check its private recovery receipt before retrying.');
+  const operatorPhase = typeof error.phase === 'string' && /^[a-z][a-z0-9-]{0,79}$/.test(error.phase)
+    ? '; operatorPhase=' + error.phase : '';
+  console.error('Native handoff operation stopped at ' + phase + operatorPhase + reason + status + location + fileCode + '; check its private recovery receipt before retrying.');
   process.exitCode = 1;
 });
