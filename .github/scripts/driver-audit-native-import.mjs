@@ -22,9 +22,9 @@ const integer = value => Number.isSafeInteger(value) && value >= 0;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const requireImport = (condition, message) => { if (!condition) throw Object.assign(Error(message), { importGuard: true }); };
 
-async function saveProfile(file, bytes, read) {
+async function saveProfile(file, bytes, read, maxBytes = 1024 * 1024) {
   try {
-    const existing = await read(file, 1024 * 1024);
+    const existing = await read(file, maxBytes);
     requireImport(hash(existing) === hash(bytes), 'The immutable import profile differs');
     return;
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -36,6 +36,41 @@ async function saveProfile(file, bytes, read) {
     const directory = await fs.open(path.dirname(file), 'r');
     try { await directory.sync(); } finally { await directory.close(); }
   } finally { await fs.unlink(temporary); }
+}
+
+async function stageHistoricalSource({ folder, received, proofSha256, syncRoot, db, read, load, env }) {
+  const { DRIVER_AUDIT_HISTORICAL_SOURCE_FILE: name, validateDriverAuditHistoricalSourceProof } =
+    await load('services/driverAuditOriginalSourceLineage.js');
+  requireImport(name === 'historical-source-lineage.private.json' && received.inputFiles?.length === 1
+    && received.inputFiles[0].name === name && received.inputFiles[0].sha256 === proofSha256
+    && integer(received.inputFiles[0].bytes) && received.inputFiles[0].bytes > 0 && received.inputFiles[0].bytes <= 16 * 1024 * 1024,
+  'The exact original historical source proof is required');
+  const bytes = await read(path.join(folder, name), 16 * 1024 * 1024);
+  requireImport(bytes.length === received.inputFiles[0].bytes && hash(bytes) === proofSha256,
+    'The original historical source proof hash differs');
+  const proof = JSON.parse(bytes), config = JSON.parse(await read(path.join(syncRoot, 'sync.json'), 1024 * 1024));
+  await validateDriverAuditHistoricalSourceProof({ proof, config });
+  const { createHostedRpc } = await load('vendor/driver-audits/integration/cloud/rpc.mjs');
+  const { createCloudState } = await load('vendor/driver-audits/integration/cloud/cloud-state.mjs');
+  const secret = env.DRIVER_AUDIT_SUPABASE_SECRET || env.MATTER_SUPABASE_SECRET;
+  requireImport(typeof secret === 'string' && secret.length > 0, 'The original source is required for the collector census');
+  const source = createCloudState({ rpc: createHostedRpc({ secret }) }), before = await source.read('collector-state');
+  requireImport(Number.isSafeInteger(before.revision) && before.revision > 0 && typeof before.body === 'string',
+    'The original collector source is unavailable');
+  const target = path.join(syncRoot, name), existed = await fs.lstat(target).then(() => true, error => {
+    if (error.code !== 'ENOENT') throw error; return false;
+  });
+  await saveProfile(target, bytes, read, 16 * 1024 * 1024);
+  const { collectDriverAuditReceiptRoots } = await load('services/driverAuditLiveImport.js');
+  const census = await collectDriverAuditReceiptRoots({ db, syncRoot,
+    documents: [{ key: 'collector-state', revision: before.revision, body_text: before.body }] });
+  const after = await source.read('collector-state');
+  requireImport(after.revision === before.revision && after.body === before.body, 'The original collector source changed during the census');
+  requireImport(census.receiptBindings?.length === proof.entries.length, 'The original historical source proof was not consumed');
+  return { status: existed ? 'historical-source-already-retained' : 'historical-source-retained', proofSha256,
+    collectorRootsSha256: census.sha256, collectorRevisions: census.collectorRevisions,
+    historicalSourceReceipts: census.receiptBindings, renderedWorkspaceRecovered: false, sourceRecordsChanged: false,
+    authorityChanged: false, activationPending: true };
 }
 
 async function stageBuilder({ folder, received, bundleSha256, syncRoot, read, privateDirectory, load, pins }) {
@@ -406,7 +441,7 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
   let phase = 'checkout', lock, connection;
   const execute = adapters.exec || exec, env = adapters.env || process.env;
   try {
-    requireImport(['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'diagnose-roots'].includes(operation)
+    requireImport(['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'stage-lineage', 'diagnose-roots'].includes(operation)
       && typeof sessionId === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(sessionId)
       && (operation === 'diagnose-roots' ? templateSha256 === undefined || digest(templateSha256) : digest(templateSha256)),
     'A reviewed import operation and public input identities are required');
@@ -500,6 +535,12 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
       const result = await stageSource({ folder, received, bundleSha256: templateSha256, syncRoot, server,
         db, client: connection.getClient(), read, privateDirectory, load, execute,
         pins: adapters.sourcePins || { manifest: NATIVE_IMPORT_SOURCE_MANIFEST, files: 134 } });
+      await stopped(); await checkout();
+      return { version: 1, sessionId, applicationCommit: expectedSha, ...result };
+    }
+    if (operation === 'stage-lineage') {
+      phase = 'historical-source-retention';
+      const result = await stageHistoricalSource({ folder, received, proofSha256: templateSha256, syncRoot, db, read, load, env });
       await stopped(); await checkout();
       return { version: 1, sessionId, applicationCommit: expectedSha, ...result };
     }

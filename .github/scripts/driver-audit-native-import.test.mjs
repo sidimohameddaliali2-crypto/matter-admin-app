@@ -505,6 +505,70 @@ test('source staging accepts only the two verified fixed-name inputs', async t =
   });
 });
 
+async function lineageStageFixture(t) {
+  const f = await fixture(t), name = 'historical-source-lineage.private.json';
+  const proof = { version: 1, entries: [{ fixture: 'fictional-private-source-receipt' }] };
+  const raw = Buffer.from(JSON.stringify(proof)), originalLoad = f.adapters.load;
+  await fs.writeFile(path.join(f.folder, name), raw, { mode: 0o600 });
+  f.receipt.inputFiles = [{ name, sha256: hash(raw), bytes: raw.length }];
+  f.receipt.objects = 1; f.receipt.bytes = raw.length; f.state.plan.objectCount = 1; f.state.plan.objectBytes = raw.length;
+  await f.save('received.private.json', f.receipt); await f.save('session.private.json', f.state);
+  f.adapters.env.DRIVER_AUDIT_SUPABASE_SECRET = 'fictional-private-source-key';
+  const source = { revision: 7, body: '{"fictional":"source body"}' };
+  let reads = 0, advance = false, invalid = false;
+  f.adapters.load = async module => {
+    if (module === 'services/driverAuditOriginalSourceLineage.js') return { DRIVER_AUDIT_HISTORICAL_SOURCE_FILE: name,
+      async validateDriverAuditHistoricalSourceProof({ proof: value, config }) {
+        assert.deepEqual(value, proof); assert.equal(config.root, f.syncRoot);
+        if (invalid) throw Error('fictional-private-source-receipt');
+      } };
+    if (module === 'vendor/driver-audits/integration/cloud/rpc.mjs') return { createHostedRpc({ secret }) {
+      assert.equal(secret, f.adapters.env.DRIVER_AUDIT_SUPABASE_SECRET); return { fixture: true };
+    } };
+    if (module === 'vendor/driver-audits/integration/cloud/cloud-state.mjs') return { createCloudState() {
+      return { async read(key) { assert.equal(key, 'collector-state'); reads++;
+        return advance && reads > 1 ? { ...source, revision: 8 } : source; } };
+    } };
+    if (module === 'services/driverAuditLiveImport.js') return { async collectDriverAuditReceiptRoots({ db, syncRoot, documents }) {
+      assert.equal(syncRoot, f.syncRoot); assert(db); assert.deepEqual(documents, [{ key: 'collector-state', revision: 7, body_text: source.body }]);
+      assert.deepEqual(await fs.readFile(path.join(syncRoot, name)), raw);
+      return { sha256: censusSha, collectorRevisions: [2, 3, 7], receiptBindings: [{ key: 'collector-state', revision: 3, receiptSha256: hash('original') }] };
+    } };
+    return originalLoad(module);
+  };
+  return { ...f, name, raw, runLineage: () => f.run('stage-lineage', { templateSha256: hash(raw) }),
+    advance: () => { advance = true; }, invalidate: () => { invalid = true; } };
+}
+
+test('historical source retention stages only immutable proof metadata and checks the actual unchanged source census', async t => {
+  const f = await lineageStageFixture(t), config = await fs.readFile(path.join(f.syncRoot, 'sync.json'));
+  const result = await f.runLineage();
+  assert.equal(result.status, 'historical-source-retained'); assert.equal(result.collectorRootsSha256, censusSha);
+  assert.equal(result.renderedWorkspaceRecovered, false); assert.equal(result.sourceRecordsChanged, false);
+  assert.equal(result.authorityChanged, false); assert.equal(result.activationPending, true);
+  assert.deepEqual(await fs.readFile(path.join(f.syncRoot, 'sync.json')), config);
+  assert.equal((await f.runLineage()).status, 'historical-source-already-retained');
+  assert(!JSON.stringify(result).includes('fictional-private')); assert.equal(f.cli.length, 0);
+  assert(f.calls.every(call => call.file === 'git' || call.file === 'pm2' && call.args.join() === 'jlist'));
+});
+
+test('historical source retention rejects input, source, proof or existing-target drift without changing source records', async t => {
+  for (const reason of ['name', 'extra', 'hash', 'conflict', 'advanced', 'secret', 'proof']) await t.test(reason, async sub => {
+    const f = await lineageStageFixture(sub);
+    if (reason === 'name') f.receipt.inputFiles[0].name = 'other.private.json';
+    if (reason === 'extra') f.receipt.inputFiles.push(f.receipt.inputFiles[0]);
+    if (reason === 'hash') await fs.appendFile(path.join(f.folder, f.name), 'changed');
+    if (reason === 'conflict') await fs.writeFile(path.join(f.syncRoot, f.name), 'preserve-existing', { mode: 0o600 });
+    if (reason === 'advanced') f.advance();
+    if (reason === 'secret') delete f.adapters.env.DRIVER_AUDIT_SUPABASE_SECRET;
+    if (reason === 'proof') f.invalidate();
+    await f.save('received.private.json', f.receipt);
+    await assert.rejects(f.runLineage(), error => !String(error).includes('fictional-private'));
+    if (reason === 'conflict') assert.equal(await fs.readFile(path.join(f.syncRoot, f.name), 'utf8'), 'preserve-existing');
+    assert.equal(f.cli.length, 0); assert.equal(f.locked(), false);
+  });
+});
+
 async function builderFixture(t) {
   const f = await fixture(t), originalLoad = f.adapters.load;
   f.adapters.load = name => name === 'vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs'

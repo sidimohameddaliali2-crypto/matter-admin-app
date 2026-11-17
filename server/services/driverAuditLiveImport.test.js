@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { isDriverAuditTechnicalKey, createDriverAuditReceiptSelection, collectDriverAuditReceiptRoots } from './driverAuditLiveImport.js';
+import { DRIVER_AUDIT_HISTORICAL_SOURCE_FILE, DRIVER_AUDIT_ORIGINAL_BASIS_MODULE_SHA256,
+  originalDriverAuditReceiptSha256, originalDriverAuditSourceBasis } from './driverAuditOriginalSourceLineage.js';
 
 test('technical history selection requires a pinned complete backup and preserves evidence namespaces', () => {
   const originalReceiptSha256 = 'a'.repeat(64);
@@ -262,4 +264,110 @@ test('serving or workspace drift during the census requires a new snapshot', asy
     f.state.onHeadRead = async count => { if (count === 2) await change(f); };
     await assert.rejects(f.collect(), /changed during|drift/);
   });
+});
+
+async function historicalSourceFixture(t) {
+  const f = await censusFixture(t), root = f.root;
+  const module = await fs.readFile(new URL('./fixtures/driverAuditOriginalAutomaticRelease.mjs', import.meta.url));
+  assert.equal(digest(module), DRIVER_AUDIT_ORIGINAL_BASIS_MODULE_SHA256);
+  const runner = Buffer.from('export const fictional = true;\n');
+  for (const [name, body] of [['integration/cloud/automatic-release.mjs', module], ['scripts/run-automatic-report.mjs', runner]]) {
+    await fs.mkdir(path.dirname(path.join(root, 'builder', name)), { recursive: true, mode: 0o700 });
+    await fs.writeFile(path.join(root, 'builder', name), body, { mode: 0o600 });
+  }
+  const manifest = { version: 1, files: { 'integration/cloud/automatic-release.mjs': digest(module),
+    'scripts/run-automatic-report.mjs': digest(runner) } };
+  await f.write('builder/runtime-manifest.json', manifest);
+  const config = JSON.parse(await fs.readFile(path.join(root, 'sync.json')));
+  await f.write('sync.json', { ...config, builderSha256: digest(JSON.stringify(manifest)) });
+  const publication = { head: { reportHash: digest('fictional original result'), manifest: { sha256: digest('fictional original browser') } },
+    gpsState: { fixture: { stateManifest: { sha256: digest('fictional original GPS') } } }, cloudPhotoResults: {} };
+  const receipt = { key: 'collector-state', revision: 3, event_id: 'original-fixture-event', request_sha256: digest('original request'),
+    body_sha256: digest(JSON.stringify(publication)), body_text: JSON.stringify(publication), event_text: '{"fixture":true}',
+    created_at: '2026-01-01T00:00:00.123456+04:00' };
+  const owner = await f.attempt(4, 7, null, false), reference = { basis: originalDriverAuditSourceBasis(publication),
+    privateRoot: path.join(root, 'work/attempts/00000000-0000-4000-8000-000000000099/server-data'),
+    manifestSha256: digest('unavailable original rendered manifest') };
+  const accepted = { ...owner.accepted, baselineRoot: reference.privateRoot, previous: reference };
+  await f.write(owner.relative + '/accepted.private.json', accepted);
+  const proof = { version: 1, kind: 'historical-source-receipt-retention-v1',
+    sourceBasisModuleSha256: DRIVER_AUDIT_ORIGINAL_BASIS_MODULE_SHA256,
+    origin: { sourceDumpSha256: digest('original dump'), sourceSnapshotSha256: digest('original snapshot'),
+      restoreVerificationSha256: digest('independent restored comparison'), originalReceiptSha256: digest('complete original receipt backup') },
+    entries: [{ owner: { relative: owner.relative + '/accepted.private.json', sha256: digest(JSON.stringify(accepted)), collectorRevision: 7 },
+      reference, receipt, receiptSha256: originalDriverAuditReceiptSha256(receipt),
+      gap: { kind: 'preexisting-missing-temporary-report-workspace', workspacePresent: false, renderedManifestAvailable: false } }] };
+  await f.write(DRIVER_AUDIT_HISTORICAL_SOURCE_FILE, proof);
+  return { ...f, owner, accepted, reference, receipt, proof };
+}
+
+test('missing historical working copy retains its exact original source receipt while recording the rendered gap', async t => {
+  const f = await historicalSourceFixture(t), before = await fs.readFile(path.join(f.root, f.owner.relative, 'accepted.private.json'));
+  const result = await f.collect();
+  assert.deepEqual(result.collectorRevisions, [2, 3, 4, 7, 8, 10, 11]);
+  assert.deepEqual(result.receiptBindings, [{ key: 'collector-state', revision: 3, receiptSha256: f.proof.entries[0].receiptSha256 }]);
+  assert.ok(result.roots.some(row => row.kind === 'preexisting-missing-temporary-report-workspace'
+    && row.sourceRevision === 3 && row.workspacePresent === false && row.renderedManifestAvailable === false));
+  assert.equal(result.roots.some(row => row.kind === 'historical-original-rendered-workspace'), false);
+  assert.deepEqual(await fs.readFile(path.join(f.root, f.owner.relative, 'accepted.private.json')), before);
+  await assert.rejects(fs.lstat(path.dirname(f.reference.privateRoot)), { code: 'ENOENT' });
+  const originalReceiptSha256 = digest('complete original receipt backup');
+  const selection = createDriverAuditReceiptSelection({ collectorRevisions: result.collectorRevisions, receiptBindings: result.receiptBindings,
+    originalReceiptSha256, backup: { verified: true, originalsPreserved: true, originalReceiptSha256, receiptCount: 100,
+      sourceDumpSha256: digest('dump') } });
+  assert.equal(selection.include(f.receipt), true);
+  assert.throws(() => selection.include({ ...f.receipt, created_at: '2026-01-01T00:00:00.123Z' }), /differs/);
+});
+
+test('historical source proof rejects tampering, active roots, fabricated recovery and unused entries', async t => {
+  const changes = [
+    ['changed owner', async f => { f.proof.entries[0].owner.sha256 = digest('changed'); }],
+    ['changed reference', async f => { f.proof.entries[0].reference.manifestSha256 = digest('changed'); }],
+    ['changed original event', async f => { f.proof.entries[0].receipt.event_text = '{"changed":true}'; }],
+    ['changed original clock', async f => { f.proof.entries[0].receipt.created_at = '2026-01-01T00:00:00Z'; }],
+    ['missing backup origin', async f => { delete f.proof.origin.restoreVerificationSha256; }],
+    ['fabricated rendered recovery', async f => { f.proof.entries[0].gap.renderedManifestAvailable = true; }],
+    ['changed basis implementation', async f => {
+      await fs.writeFile(path.join(f.root, 'builder/integration/cloud/automatic-release.mjs'), 'export const changed=true;');
+    }],
+    ['workspace parent present', async f => { await fs.mkdir(path.dirname(f.reference.privateRoot), { mode: 0o700 }); }],
+    ['workspace parent symlink', async f => { await fs.symlink(path.join(f.root, f.owner.relative), path.dirname(f.reference.privateRoot)); }],
+    ['duplicate original proof', async f => { f.proof.entries.push(f.proof.entries[0]); }],
+    ['unused proof', async f => { await fs.rm(path.join(f.root, f.owner.relative), { recursive: true }); }],
+    ['operational source identity', async f => { f.state.head.sourceRevision = 3; f.state.head.directImport.collectorRevision = 3;
+      f.state.head.directImport.sourceBasis = f.reference.basis; }],
+    ['operational rendered manifest', async f => { f.state.head.directImport.manifestSha256 = f.reference.manifestSha256; }],
+    ['current pointer previous', async f => {
+      const value = { ...f.pending.accepted, baselineRoot: f.reference.privateRoot, previous: f.reference };
+      await f.write(f.pending.relative + '/accepted.private.json', value); await f.write('work/current.private.json', value);
+    }],
+  ];
+  for (const [name, change] of changes) await t.test(name, async sub => {
+    const f = await historicalSourceFixture(sub); await change(f); await f.write(DRIVER_AUDIT_HISTORICAL_SOURCE_FILE, f.proof);
+    await assert.rejects(f.collect());
+  });
+});
+
+test('historical source proof and workspace absence are rechecked after the census', async t => {
+  for (const kind of ['proof', 'workspace']) await t.test(kind, async sub => {
+    const f = await historicalSourceFixture(sub);
+    f.state.onHeadRead = async count => {
+      if (count !== 2) return;
+      if (kind === 'proof') await f.write(DRIVER_AUDIT_HISTORICAL_SOURCE_FILE, { ...f.proof, version: 2 });
+      else await fs.mkdir(path.dirname(f.reference.privateRoot), { mode: 0o700 });
+    };
+    await assert.rejects(f.collect(), /changed|reappeared/);
+  });
+});
+
+test('historical source identity survives only the exact retained builder during an interrupted managed swap', async t => {
+  const f = await historicalSourceFixture(t), before = await f.collect();
+  const config = JSON.parse(await fs.readFile(path.join(f.root, 'sync.json'))), retained = path.join(f.root, 'builder-retained-' + config.builderSha256);
+  await fs.rename(path.join(f.root, 'builder'), retained);
+  assert.equal((await f.collect()).sha256, before.sha256);
+  await fs.mkdir(path.join(f.root, 'builder'), { mode: 0o700 });
+  await assert.rejects(f.collect());
+  await fs.rmdir(path.join(f.root, 'builder'));
+  await fs.writeFile(path.join(retained, 'integration/cloud/automatic-release.mjs'), 'corrupt');
+  await assert.rejects(f.collect());
 });

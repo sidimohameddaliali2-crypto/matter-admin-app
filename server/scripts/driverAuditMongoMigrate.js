@@ -58,7 +58,7 @@ async function main() {
     const preselected = profile.receiptInput === 'selected';
     const selection = createDriverAuditReceiptSelection({ backup,
       originalReceiptSha256: preselected ? backup.originalReceiptSha256 : profile.receipts.sha256,
-      collectorRevisions: census.collectorRevisions });
+      collectorRevisions: census.collectorRevisions, receiptBindings: census.receiptBindings });
     if (preselected && (backup.liveReceiptSha256 !== profile.receipts.sha256
         || !Number.isSafeInteger(backup.liveReceiptCount) || backup.liveReceiptCount < 1
         || backup.collectorRootsSha256 !== census.sha256)) throw Error('Selected receipt proof differs');

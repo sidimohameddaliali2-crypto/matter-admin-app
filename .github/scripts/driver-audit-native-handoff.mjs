@@ -164,7 +164,7 @@ async function main() {
       recipientSha256: hash(request.recipientPublicKey), capsule }));
     return;
   }
-  if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'diagnose-roots'].includes(operation)) {
+  if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'stage-lineage', 'diagnose-roots'].includes(operation)) {
     phase = 'native-import-' + operation;
     const encoded = process.env.NATIVE_IMPORT_CODE;
     if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');

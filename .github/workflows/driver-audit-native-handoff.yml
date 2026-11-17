@@ -19,6 +19,7 @@ on:
           - verify-import
           - stage-builder
           - stage-source
+          - stage-lineage
           - diagnose-roots
         default: inspect
       expected_deployed_sha:
