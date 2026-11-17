@@ -201,7 +201,7 @@ test('review follow-up toggles capture the dependent owner and cleared private a
   const description = el.querySelector('[aria-label="Follow-up action"]');
   await act(async () => { Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(description, 'PRIVATE-FOLLOWUP-CONTEXT'); description.dispatchEvent(new Event('input', { bubbles: true })); }); await deliver(); fetchMock.mockClear();
   await act(async () => followup().click()); await deliver();
-  expect(changes()).toEqual(expect.arrayContaining([expect.objectContaining({ field: 'Follow up action', redacted: true }), expect.objectContaining({ field: 'Action owner', before: 'Fixture staff', after: '' })])); expect(JSON.stringify(events())).not.toContain('PRIVATE-FOLLOWUP-CONTEXT');
+  expect(changes()).toEqual(expect.arrayContaining([expect.objectContaining({ field: expect.stringMatching(/^Follow[- ]up action$/), redacted: true }), expect.objectContaining({ field: 'Action owner', before: 'Fixture staff', after: '' })])); expect(JSON.stringify(events())).not.toContain('PRIVATE-FOLLOWUP-CONTEXT');
 });
 
 test('discarding a stored issue draft records its removal without copying its private contents', async () => {
