@@ -77,11 +77,12 @@ test('the real bridge dispatches all four compressed controls without any databa
 });
 
 test('storage inspection dispatches only its fixed public recipient to the read-only module', async t => {
-  for (const [operation, entry] of [['inspect-supabase-storage', 'runDriverAuditSupabaseStorageInspection'],
-    ['inspect-supabase-disk-usage', 'runDriverAuditSupabaseDiskUsage']]) {
+  for (const [operation, entry, internal = operation] of [['inspect-supabase-storage', 'runDriverAuditSupabaseStorageInspection'],
+    ['inspect-supabase-disk-usage', 'runDriverAuditSupabaseDiskUsage'],
+    ['plan-supabase-log-archive', 'runDriverAuditSupabaseLogArchive', 'plan-log-archive']]) {
     const input = { version: 1, recipientPublicKey: 'fixture public recipient' };
     const code = 'export async function ' + entry + '(a){'
-      + 'if(a.operation!==' + JSON.stringify(operation) + '||a.recipientPublicKey!=="fixture public recipient"'
+      + 'if(a.operation!==' + JSON.stringify(internal) + '||a.recipientPublicKey!=="fixture public recipient"'
       + '||a.expectedSha!==' + JSON.stringify(commit) + ')throw Error("Wrong inspection dispatch");'
       + 'return{status:"storage-fixture",readOnly:true,applicationDatabaseConnections:0,networkRequests:0};}';
     const f = await bridgeFixture(t, code, { operation, input });
