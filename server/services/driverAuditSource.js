@@ -217,6 +217,7 @@ export async function readDriverAuditSourceConfig(file) {
 }
 
 const capabilityFenceMode = 'reporting-database-capability-v1';
+const twoPhaseFenceMode = 'reporting-database-capability-v2';
 const originalReportingProject = 'trhhjfgfmxofxhnzocks';
 const proofId = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
 const fingerprintNames = ['documents', 'receipts', 'archive', 'reservations', 'roadCache', 'capabilities'];
@@ -247,6 +248,24 @@ const catalogFunctions = new Set([...fencedFunctions,
     .map(name => 'public.matter_hosted_' + name),
 ]);
 
+// Canonical function-only catalogs bind both real transitions independently of
+// observation clocks, JSON key order and unrelated source metadata.
+export function driverAuditReportingFunctionCatalogSha256(rows) {
+  requireSource(Array.isArray(rows) && rows.length === catalogFunctions.size, 'An exact reporting function catalog is required.');
+  const seen = new Set();
+  const projected = rows.map(row => {
+    requireSource(catalogFunctions.has(row?.identity) && !seen.has(row.identity) && row.owner === 'postgres'
+      && hashPattern.test(row.definitionSha256 ?? '') && hashPattern.test(row.aclSha256 ?? '')
+      && Array.isArray(row.apiExecutableRoles) && new Set(row.apiExecutableRoles).size === row.apiExecutableRoles.length
+      && row.apiExecutableRoles.every(role => ['PUBLIC', 'anon', 'authenticated', 'service_role'].includes(role)),
+    'Reporting function catalog identity or execution scope differs.');
+    seen.add(row.identity);
+    return { identity: row.identity, owner: row.owner, definitionSha256: row.definitionSha256,
+      aclSha256: row.aclSha256, apiExecutableRoles: [...row.apiExecutableRoles].sort() };
+  }).sort((left, right) => left.identity < right.identity ? -1 : left.identity > right.identity ? 1 : 0);
+  return driverAuditSourceHash(JSON.stringify(projected));
+}
+
 function sourceReceiptReference(saved, directory) {
   return typeof saved?.path === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,100}\.private\.json$/.test(saved.path)
     ? { ...saved, path: path.join(directory, saved.path) } : saved;
@@ -261,9 +280,111 @@ function retainedUncertainAttempts(value, baseline) {
     && value.beforeSha256 === baseline.sha256 && value.afterSha256 === baseline.sha256;
 }
 
+function embeddedPhaseReceipt(reference, expectedSha256) {
+  requireSource(hashPattern.test(reference?.sha256 ?? '') && reference.sha256 === expectedSha256
+    && typeof reference.dataBase64 === 'string' && reference.dataBase64.length <= 1400000,
+  'The exact embedded phase receipt is required.');
+  const bytes = Buffer.from(reference.dataBase64, 'base64');
+  requireSource(bytes.length > 0 && bytes.length <= 1024 * 1024 && bytes.toString('base64') === reference.dataBase64
+    && driverAuditSourceHash(bytes) === reference.sha256, 'Embedded phase receipt integrity differs.');
+  const value = JSON.parse(bytes);
+  requireSource(value && typeof value === 'object' && !Array.isArray(value), 'An embedded phase receipt object is required.');
+  return value;
+}
+
+function verifyTwoPhaseOrigins(capabilities, fence, baseline, finalDrain) {
+  const phase1 = embeddedPhaseReceipt(capabilities.phase1Receipt, fence.phase1ReceiptSha256);
+  const phase2 = embeddedPhaseReceipt(capabilities.phase2Receipt, fence.phase2ReceiptSha256);
+  const kinds = ['provider-admission-fence-phase1', 'reporting-data-write-fence-phase2'];
+  for (const [index, phase] of [phase1, phase2].entries()) {
+    const before = Date.parse(phase.commitBeforeAt), after = Date.parse(phase.commitAfterAt);
+    const observedBefore = Date.parse(phase.beforeObservationAt), observedAfter = Date.parse(phase.afterObservationAt);
+    requireSource(phase.version === 1 && phase.verified === true && phase.kind === kinds[index]
+      && phase.sourceProjectRef === fence.sourceProjectRef && proofId(phase.executionId)
+      && phase.legacyRuntimeSha256 === fence.legacyRuntimeSha256 && phase.legacyEntrypointsSha256 === fence.legacyEntrypointsSha256
+      && hashPattern.test(phase.sqlSha256 ?? '') && /^[1-9][0-9]{0,30}$/.test(phase.transactionId ?? '')
+      && Number.isSafeInteger(phase.backendPid) && phase.backendPid > 0
+      && phase.applied === true && phase.alreadyClosed === false && phase.reapplied === false
+      && [before, after, observedBefore, observedAfter].every(Number.isFinite)
+      && observedBefore <= before && before <= after && after - before <= 3 * minuteMs
+      && after <= observedAfter && observedAfter <= Date.parse(capabilities.checkedAt)
+      && hashPattern.test(phase.beforeObservationSha256 ?? '') && hashPattern.test(phase.afterObservationSha256 ?? '')
+      && phase.beforeObservationSha256 !== phase.afterObservationSha256
+      && hashPattern.test(phase.beforeCatalogSha256 ?? '') && hashPattern.test(phase.afterCatalogSha256 ?? '')
+      && phase.beforeCatalogSha256 !== phase.afterCatalogSha256,
+    'The real one-time phase transition or commit interval differs.');
+  }
+  const original = capabilities.functions.map(row => ({ identity: row.identity, owner: row.owner,
+    definitionSha256: row.beforeDefinitionSha256, aclSha256: row.beforeAclSha256, apiExecutableRoles: row.beforeApiExecutableRoles }));
+  const internal = original.find(row => row.identity.startsWith('matter_reporting_hosted.state_cas_internal('));
+  requireSource(phase1.executionId !== phase2.executionId && phase1.transactionId !== phase2.transactionId
+    && fence.phase1ReceiptSha256 !== fence.phase2ReceiptSha256
+    && phase1.admissionBlockedAt === fence.admissionBlockedAt && phase1.commitAfterAt === fence.admissionBlockedAt
+    && phase1.baselineCatalogSha256 === capabilities.baselineCatalogSha256
+    && phase1.beforeCatalogSha256 === driverAuditReportingFunctionCatalogSha256(original)
+    && hashPattern.test(phase1.internalDefinitionSha256 ?? '') && phase1.internalDefinitionSha256 !== internal.definitionSha256
+    && phase1.afterCatalogSha256 === driverAuditReportingFunctionCatalogSha256(phase1.functions)
+    && phase1.providerAdmissionsBlocked === true && phase1.downstreamSettlementsPreserved === true
+    && phase1.all11ProviderBudgetPoliciesGuarded === true && phase1.originalRoleSchemaRoadAndGallaboxControlsPreserved === true
+    && Array.isArray(phase1.cronJobsDisabled)
+    && phase1.cronJobsDisabled.length === 2 && [4, 5].every(id => phase1.cronJobsDisabled.includes(id)),
+  'The original phase1 admission identity or guarded catalog differs.');
+  for (const row of phase1.functions) {
+    const old = original.find(item => item.identity === row.identity);
+    requireSource(row.definitionSha256 === (row.identity === internal.identity ? phase1.internalDefinitionSha256 : old.definitionSha256)
+      && row.aclSha256 === old.aclSha256 && JSON.stringify([...row.apiExecutableRoles].sort()) === JSON.stringify([...old.apiExecutableRoles].sort()),
+    'The phase1 catalog changes more than the reviewed admission guard.');
+  }
+  const drain = phase2.prePhase2Drain, beforeClosure = Date.parse(phase2.commitBeforeAt);
+  requireSource(phase2.phase1ReceiptSha256 === fence.phase1ReceiptSha256 && phase2.phase1ExecutionId === phase1.executionId
+    && phase2.phase1SQLSha256 === phase1.sqlSha256 && phase2.admissionBlockedAt === fence.admissionBlockedAt
+    && phase2.dataWritesBlockedAt === fence.dataWritesBlockedAt && phase2.commitBeforeAt === fence.dataWritesBlockedAt
+    && phase2.beforeCatalogSha256 === phase1.afterCatalogSha256
+    && phase2.afterCatalogSha256 === driverAuditReportingFunctionCatalogSha256(capabilities.functions)
+    && phase2.originalInternalDefinitionSha256 === internal.definitionSha256 && phase2.originalDefinitionRestored === true
+    && phase2.reportingFunctions === catalogFunctions.size && phase2.revokedMutators === fencedFunctions.size
+    && proofId(drain?.id) && hashPattern.test(drain.sha256 ?? '')
+    && drain.sha256 === phase2.beforeObservationSha256 && drain.checkedAt === phase2.beforeObservationAt
+    && Date.parse(drain.checkedAt) >= Date.parse(fence.admissionBlockedAt) + 6 * minuteMs
+    && Date.parse(drain.checkedAt) <= beforeClosure
+    && ['activeLeases', 'activeReportingTransactions', 'activeSqlCronRuns', 'activeProviderWork',
+      'privilegedReportingWriters', 'possibleReportingHttpQueue'].every(name => drain[name] === 0)
+    && hashPattern.test(drain.admissionGraphSha256 ?? '') && drain.admissionGraphSha256 === finalDrain.admissionGraphSha256
+    && hashPattern.test(drain.ownerAuditSha256 ?? '')
+    && retainedUncertainAttempts(drain.uncertainAttempts, baseline),
+  'The phase2 closure requires the original admission, real pre-commit drain and whole uncertain ledger.');
+  return { phase1, phase2 };
+}
+
+const projectionFields = ['version', 'mode', 'sourceProjectRef', 'sourceReleaseSha256', 'sourceFenceSha256', 'capabilityAuditSha256',
+  'legacyRuntimeSha256', 'legacyEntrypointsSha256',
+  'phase1ExecutionId', 'phase1ReceiptSha256', 'phase1SQLSha256', 'phase2ExecutionId', 'phase2ReceiptSha256', 'phase2SQLSha256',
+  'transactionId', 'admissionBlockedAt', 'dataWritesBlockedAt', 'commitObservedAt', 'prePhase2DrainAt', 'beforeCatalogSha256',
+  'afterCatalogSha256', 'initialCursor', 'checkpointSha256', 'backupReceiptSha256', 'parityReceiptSha256', 'backupAt', 'validUntil'];
+export function validateDriverAuditSourceFenceProjection(value, nowMs = Date.now()) {
+  const lower = Date.parse(value?.dataWritesBlockedAt), upper = Date.parse(value?.commitObservedAt);
+  const admission = Date.parse(value?.admissionBlockedAt), drain = Date.parse(value?.prePhase2DrainAt);
+  const backup = Date.parse(value?.backupAt), expires = Date.parse(value?.validUntil);
+  requireSource(value?.version === 2 && value.mode === twoPhaseFenceMode && value.sourceProjectRef === originalReportingProject
+    && Object.keys(value).length === projectionFields.length && projectionFields.every(name => Object.hasOwn(value, name))
+    && projectionFields.filter(name => name.endsWith('Sha256')).every(name => hashPattern.test(value[name] ?? ''))
+    && proofId(value.phase1ExecutionId) && proofId(value.phase2ExecutionId) && value.phase1ExecutionId !== value.phase2ExecutionId
+    && value.phase1ReceiptSha256 !== value.phase2ReceiptSha256 && value.beforeCatalogSha256 !== value.afterCatalogSha256
+    && /^[1-9][0-9]{0,30}$/.test(value.transactionId ?? '') && Number.isFinite(nowMs)
+    && [lower, upper, admission, drain, backup, expires].every(Number.isFinite)
+    && admission + 6 * minuteMs <= drain && drain <= lower && lower <= upper && upper - lower <= 3 * minuteMs
+    && backup >= upper + 5 * minuteMs && backup <= nowMs && nowMs - backup <= 30 * minuteMs
+    && nowMs >= upper && expires > nowMs && expires <= lower + 30 * minuteMs
+    && Number.isFinite(Date.parse(value.initialCursor)) && Date.parse(value.initialCursor) % minuteMs === 0
+    && Date.parse(value.initialCursor) <= admission,
+  'A fresh validated two-phase source fence projection is required.');
+  return driverAuditSourceHash(JSON.stringify(value));
+}
+
 // This mode proves closure of the audited legacy reporting admissions. It does
 // not claim cron processes stopped or revoke shared raw Storage/Gateway keys.
-async function verifyCapabilityFence(config, fence, release, backup, directory, verifiedAt, expires, nowMs) {
+async function verifyCapabilityFence(config, fence, release, backup, directory, verifiedAt, expires, nowMs, sourceFenceSha256) {
+  const twoPhase = fence.mode === twoPhaseFenceMode;
   const blockedAt = Date.parse(fence.admissionBlockedAt), checkedAt = Date.parse(fence.checkedAt);
   const baseline = backup?.uncertainAttemptsBaseline;
   requireSource(Number.isSafeInteger(baseline?.count) && baseline.count >= 0 && hashPattern.test(baseline.sha256 ?? '')
@@ -290,6 +411,7 @@ async function verifyCapabilityFence(config, fence, release, backup, directory, 
     requireSource(value.version === 1 && value.verified === true && value.id === reference.id && value.kind === kind
       && value.sourceProjectRef === fence.sourceProjectRef && value.legacyRuntimeSha256 === fence.legacyRuntimeSha256
       && value.legacyEntrypointsSha256 === fence.legacyEntrypointsSha256 && value.admissionBlockedAt === fence.admissionBlockedAt
+      && (!twoPhase || value.dataWritesBlockedAt === fence.dataWritesBlockedAt)
       && Number.isFinite(at) && at >= blockedAt && at <= checkedAt, 'Capability fence proof identity or clock differs.');
     proofs[name] = value;
   }
@@ -332,12 +454,16 @@ async function verifyCapabilityFence(config, fence, release, backup, directory, 
     .every(name => drain[name] === 0) && hashPattern.test(drain.admissionGraphSha256 ?? '')
     && hashPattern.test(drain.ownerAuditSha256 ?? '') && retainedUncertainAttempts(drain.uncertainAttempts, baseline),
   'The capability fence needs drained work and preserved uncertain attempts.');
+  const origins = twoPhase ? verifyTwoPhaseOrigins(capabilities, fence, baseline, drain) : undefined;
+  const quietAfter = origins ? Date.parse(origins.phase2.commitAfterAt) : blockedAt;
+  if (twoPhase) requireSource(Date.parse(fence.validUntil) <= Date.parse(fence.dataWritesBlockedAt) + 30 * minuteMs
+    && expires <= Date.parse(fence.dataWritesBlockedAt) + 30 * minuteMs, 'The phase2 full-closure window cannot be refreshed.');
   requireSource(Array.isArray(quiet.samples) && quiet.samples.length === 2, 'Independent quiet source samples are required.');
   requireSource(quiet.samples.every(value => value && typeof value === 'object'), 'Independent quiet source samples are required.');
   const [start, end] = quiet.samples, from = Date.parse(start.at), to = Date.parse(end.at);
   requireSource(proofId(start.id) && proofId(end.id) && start.id !== end.id
     && hashPattern.test(start.sha256 ?? '') && hashPattern.test(end.sha256 ?? '') && start.sha256 !== end.sha256
-    && Number.isFinite(from) && Number.isFinite(to) && from >= blockedAt && to - from >= 5 * minuteMs
+    && Number.isFinite(from) && Number.isFinite(to) && from >= quietAfter && to - from >= 5 * minuteMs
     && to - from <= 30 * minuteMs && nowMs - to <= 30 * minuteMs
     && sameFingerprints(start.fingerprints, end.fingerprints)
     && capabilities.capabilitySha256 === end.fingerprints.capabilities
@@ -347,12 +473,24 @@ async function verifyCapabilityFence(config, fence, release, backup, directory, 
   requireSource(checkpoint.snapshotId === baseline.snapshotId && checkpoint.sourceSnapshotSha256 === baseline.sourceSnapshotSha256
     && checkpoint.restoreVerificationSha256 === baseline.restoreVerificationSha256
     && Number.isFinite(capturedAt) && capturedAt >= Date.parse(drain.checkedAt) && nowMs - capturedAt <= 30 * minuteMs
+    && (!twoPhase || capturedAt >= to && capturedAt >= quietAfter)
     && capturedAt <= Date.parse(checkpoint.checkedAt) && checkpoint.initialCursor === release.initialCursor
     && Number.isSafeInteger(checkpoint.collectorRevision) && checkpoint.collectorRevision > 0
     && Number.isSafeInteger(checkpoint.reviewRevision) && checkpoint.reviewRevision >= 0
     && checkpoint.backupReceiptSha256 === release.backup.sha256 && checkpoint.parityReceiptSha256 === release.parity.sha256
     && sameFingerprints(checkpoint.fingerprints, end.fingerprints) && retainedUncertainAttempts(checkpoint.uncertainAttempts, baseline),
   'The final capability fence checkpoint or retained uncertain attempts differ.');
+  if (origins) return { version: 2, mode: twoPhaseFenceMode, sourceProjectRef: fence.sourceProjectRef, sourceFenceSha256,
+    legacyRuntimeSha256: fence.legacyRuntimeSha256, legacyEntrypointsSha256: fence.legacyEntrypointsSha256,
+    capabilityAuditSha256: fence.capabilityAudit.sha256, phase1ExecutionId: origins.phase1.executionId,
+    phase1ReceiptSha256: fence.phase1ReceiptSha256, phase1SQLSha256: origins.phase1.sqlSha256,
+    phase2ExecutionId: origins.phase2.executionId, phase2ReceiptSha256: fence.phase2ReceiptSha256,
+    phase2SQLSha256: origins.phase2.sqlSha256, transactionId: origins.phase2.transactionId,
+    admissionBlockedAt: fence.admissionBlockedAt, dataWritesBlockedAt: fence.dataWritesBlockedAt,
+    commitObservedAt: origins.phase2.commitAfterAt, prePhase2DrainAt: origins.phase2.prePhase2Drain.checkedAt,
+    beforeCatalogSha256: origins.phase2.beforeCatalogSha256, afterCatalogSha256: origins.phase2.afterCatalogSha256,
+    initialCursor: release.initialCursor, checkpointSha256: fence.checkpoint.sha256, backupReceiptSha256: release.backup.sha256,
+    parityReceiptSha256: release.parity.sha256, backupAt: checkpoint.capturedAt, validUntil: release.validUntil };
 }
 
 export async function verifyDriverAuditSourceRelease(config, reference, now = new Date()) {
@@ -368,6 +506,7 @@ export async function verifyDriverAuditSourceRelease(config, reference, now = ne
   requireSource(Number.isFinite(verifiedAt) && Number.isFinite(expires) && expires > verifiedAt && expires - verifiedAt <= 30 * minuteMs
     && now.getTime() >= verifiedAt && now.getTime() < expires, 'Source release fence is expired or not fresh.');
   const receipts = {};
+  let validatedFence;
   for (const kind of ['backup', 'parity', 'credentials', 'sourceFence']) {
     const saved = release[kind];
     const receiptReference = sourceReceiptReference(saved, path.dirname(reference.path));
@@ -375,15 +514,20 @@ export async function verifyDriverAuditSourceRelease(config, reference, now = ne
     requireSource(receipt.version === 1 && receipt.verified === true, `The ${kind} receipt is not verified.`);
     receipts[kind] = receipt;
     if (kind === 'sourceFence') {
-      if (receipt.mode === capabilityFenceMode) {
-        await verifyCapabilityFence(config, receipt, release, receipts.backup,
-          path.dirname(receiptReference.path), verifiedAt, expires, now.getTime());
+      if ([capabilityFenceMode, twoPhaseFenceMode].includes(receipt.mode)) {
+        validatedFence = await verifyCapabilityFence(config, receipt, release, receipts.backup,
+          path.dirname(receiptReference.path), verifiedAt, expires, now.getTime(), receiptReference.sha256);
       } else {
         requireSource(receipt.writersStopped === true && receipt.leasesDrained === true
           && receipt.initialCursor === release.initialCursor && Date.parse(receipt.validUntil) >= expires,
         'The source fence does not match the stopped and drained writers.');
       }
     }
+  }
+  if (validatedFence) {
+    validatedFence = { ...validatedFence, sourceReleaseSha256: reference.sha256 };
+    validateDriverAuditSourceFenceProjection(validatedFence, now.getTime());
+    return { release, sha256: reference.sha256, validatedFence: Object.freeze(validatedFence) };
   }
   return { release, sha256: reference.sha256 };
 }

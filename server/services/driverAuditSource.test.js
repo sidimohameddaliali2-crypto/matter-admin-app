@@ -14,6 +14,7 @@ import {
   writeDriverAuditSourceState,
   readDriverAuditSourceConfig,
   verifyDriverAuditSourceRelease,
+  driverAuditReportingFunctionCatalogSha256,
   runDriverAuditSourceChild,
 } from './driverAuditSource.js';
 
@@ -408,6 +409,109 @@ test('native cutover accepts identified database capability evidence without cla
   assert.equal(checked.release.initialCursor, f.release.initialCursor);
   assert.equal(f.fence.writersStopped, false);
   assert.equal(f.proofs.drainAudit.uncertainAttempts.afterCount, 5);
+});
+
+async function twoPhaseCapabilityFixture(t) {
+  const f = await capabilityFenceFixture(t), cap = f.proofs.capabilityAudit;
+  const admissionBlockedAt = '2026-11-16T03:35:00.000Z', dataWritesBlockedAt = '2026-11-16T04:00:00.000Z';
+  for (const proof of Object.values(f.proofs)) Object.assign(proof, { admissionBlockedAt, dataWritesBlockedAt });
+  Object.assign(f.fence, { mode: 'reporting-database-capability-v2', admissionBlockedAt, dataWritesBlockedAt,
+    initialCursor: '2026-11-16T03:34:00.000Z' });
+  f.release.initialCursor = f.proofs.checkpoint.initialCursor = f.fence.initialCursor;
+  const original = cap.functions.map(row => ({ identity: row.identity, owner: row.owner,
+    definitionSha256: row.beforeDefinitionSha256, aclSha256: row.beforeAclSha256, apiExecutableRoles: row.beforeApiExecutableRoles }));
+  const internal = original.find(row => row.identity.startsWith('matter_reporting_hosted.state_cas_internal('));
+  const functions = structuredClone(original);
+  functions.find(row => row.identity === internal.identity).definitionSha256 = hash('fictional-admission-guard');
+  const phase1 = { version: 1, kind: 'provider-admission-fence-phase1', verified: true, sourceProjectRef: f.fence.sourceProjectRef,
+    executionId: 'actual-phase1-execution', sqlSha256: hash('phase1-sql'), legacyRuntimeSha256: f.fence.legacyRuntimeSha256,
+    legacyEntrypointsSha256: f.fence.legacyEntrypointsSha256, transactionId: '123456', backendPid: 123,
+    commitBeforeAt: '2026-11-16T03:34:59.000Z', commitAfterAt: admissionBlockedAt, admissionBlockedAt,
+    beforeObservationAt: '2026-11-16T03:34:58.000Z', afterObservationAt: '2026-11-16T03:35:02.000Z',
+    beforeObservationSha256: hash('phase1-before'), afterObservationSha256: hash('phase1-after'),
+    beforeCatalogSha256: driverAuditReportingFunctionCatalogSha256(original),
+    afterCatalogSha256: driverAuditReportingFunctionCatalogSha256(functions), baselineCatalogSha256: cap.baselineCatalogSha256,
+    internalDefinitionSha256: hash('fictional-admission-guard'), functions, applied: true, alreadyClosed: false, reapplied: false,
+    providerAdmissionsBlocked: true, downstreamSettlementsPreserved: true, all11ProviderBudgetPoliciesGuarded: true,
+    originalRoleSchemaRoadAndGallaboxControlsPreserved: true, cronJobsDisabled: [4, 5] };
+  const prePhase2Drain = { ...structuredClone(f.proofs.drainAudit), id: 'pre-phase2-drain', sha256: hash('phase2-before'),
+    checkedAt: '2026-11-16T03:59:00.000Z', possibleReportingHttpQueue: 0 };
+  const phase2 = { version: 1, kind: 'reporting-data-write-fence-phase2', verified: true, sourceProjectRef: phase1.sourceProjectRef,
+    executionId: 'actual-phase2-execution', sqlSha256: hash('phase2-sql'), legacyRuntimeSha256: phase1.legacyRuntimeSha256,
+    legacyEntrypointsSha256: phase1.legacyEntrypointsSha256, transactionId: '123457', backendPid: 124,
+    commitBeforeAt: dataWritesBlockedAt, commitAfterAt: '2026-11-16T04:00:01.000Z', admissionBlockedAt, dataWritesBlockedAt,
+    beforeObservationAt: prePhase2Drain.checkedAt, afterObservationAt: '2026-11-16T04:00:02.000Z',
+    beforeObservationSha256: prePhase2Drain.sha256, afterObservationSha256: hash('phase2-after'),
+    beforeCatalogSha256: phase1.afterCatalogSha256, afterCatalogSha256: driverAuditReportingFunctionCatalogSha256(cap.functions),
+    phase1ExecutionId: phase1.executionId, phase1SQLSha256: phase1.sqlSha256, originalInternalDefinitionSha256: internal.definitionSha256,
+    originalDefinitionRestored: true, reportingFunctions: 47, revokedMutators: 26,
+    applied: true, alreadyClosed: false, reapplied: false, prePhase2Drain };
+  const refreshOrigins = () => {
+    phase1.afterCatalogSha256 = driverAuditReportingFunctionCatalogSha256(phase1.functions);
+    const raw1 = Buffer.from(JSON.stringify(phase1)); phase2.phase1ReceiptSha256 = hash(raw1);
+    cap.phase1Receipt = { sha256: hash(raw1), dataBase64: raw1.toString('base64') };
+    const raw2 = Buffer.from(JSON.stringify(phase2)); cap.phase2Receipt = { sha256: hash(raw2), dataBase64: raw2.toString('base64') };
+    f.fence.phase1ReceiptSha256 = hash(raw1); f.fence.phase2ReceiptSha256 = hash(raw2);
+  };
+  refreshOrigins();
+  return { ...f, phase1, phase2, refreshOrigins };
+}
+
+test('native two-phase v2 retains the old admission clock and uses the real full-closure bound for its window', async t => {
+  const f = await twoPhaseCapabilityFixture(t), result = await f.verify();
+  assert.equal(result.validatedFence.mode, 'reporting-database-capability-v2');
+  assert.equal(result.validatedFence.admissionBlockedAt, f.phase1.commitAfterAt);
+  assert.equal(result.validatedFence.dataWritesBlockedAt, f.phase2.commitBeforeAt);
+  assert.equal(result.validatedFence.commitObservedAt, f.phase2.commitAfterAt);
+  assert(Date.parse(f.release.validUntil) - Date.parse(f.fence.admissionBlockedAt) > 30 * 60000);
+  assert.deepEqual((await f.verify()).validatedFence, result.validatedFence);
+});
+
+test('v2 rejects clock relabeling, replayed closure, mismatched catalogs, missing drain and changed paid evidence', async t => {
+  for (const change of [
+    f => { f.phase2.reapplied = true; }, f => { f.phase2.alreadyClosed = true; },
+    f => { f.phase2.executionId = f.phase1.executionId; }, f => { f.phase2.transactionId = f.phase1.transactionId; },
+    f => { f.phase2.commitAfterAt = '2026-11-16T04:01:00.000Z'; },
+    f => { f.phase2.beforeObservationAt = f.phase2.commitAfterAt; },
+    f => { f.phase2.beforeCatalogSha256 = f.phase2.afterCatalogSha256; },
+    f => { f.phase2.originalDefinitionRestored = false; },
+    f => { f.phase2.prePhase2Drain.activeProviderWork = 1; },
+    f => { f.phase2.prePhase2Drain.uncertainAttempts.afterSha256 = hash('changed-paid-ledger'); },
+    f => { f.phase2.prePhase2Drain.checkedAt = '2026-11-16T03:40:59.000Z'; f.phase2.beforeObservationAt = f.phase2.prePhase2Drain.checkedAt; },
+    f => { f.phase1.functions[0].apiExecutableRoles = []; },
+    f => { f.fence.validUntil = f.release.validUntil = '2026-11-16T04:30:00.001Z'; },
+    f => { f.phase2.commitBeforeAt = f.fence.dataWritesBlockedAt = '2026-11-16T03:35:01.000Z'; },
+    f => { f.phase1.commitAfterAt = '2026-11-16T03:36:00.000Z'; },
+  ]) {
+    const f = await twoPhaseCapabilityFixture(t); change(f); f.refreshOrigins();
+    await assert.rejects(f.verify(), /phase|capability|closure|drain|catalog|fence|window/i);
+  }
+});
+
+test('fresh v2 audits cannot renew an expired full-closure clock even when all receipt identities and clocks agree', async t => {
+  const f = await twoPhaseCapabilityFixture(t);
+  const admission = '2026-11-16T03:00:00.000Z', closure = '2026-11-16T03:35:00.000Z';
+  Object.assign(f.phase1, { admissionBlockedAt: admission, commitBeforeAt: '2026-11-16T02:59:59.000Z', commitAfterAt: admission,
+    beforeObservationAt: '2026-11-16T02:59:58.000Z', afterObservationAt: '2026-11-16T03:00:02.000Z' });
+  Object.assign(f.phase2, { admissionBlockedAt: admission, dataWritesBlockedAt: closure, commitBeforeAt: closure,
+    commitAfterAt: '2026-11-16T03:35:01.000Z', beforeObservationAt: '2026-11-16T03:34:00.000Z', afterObservationAt: '2026-11-16T03:35:02.000Z' });
+  f.phase2.prePhase2Drain.checkedAt = f.phase2.beforeObservationAt;
+  for (const proof of Object.values(f.proofs)) Object.assign(proof, { admissionBlockedAt: admission, dataWritesBlockedAt: closure });
+  Object.assign(f.fence, { admissionBlockedAt: admission, dataWritesBlockedAt: closure, initialCursor: '2026-11-16T02:59:00.000Z' });
+  f.release.initialCursor = f.proofs.checkpoint.initialCursor = f.fence.initialCursor;
+  f.refreshOrigins();
+  await assert.rejects(f.verify(), /phase2 full-closure window|fresh validated/i);
+});
+
+test('v2 origin bytes are independently pinned and capability mode remains native only', async t => {
+  for (const reason of ['missing', 'tampered', 'legacy', 'scope']) {
+    const f = await twoPhaseCapabilityFixture(t);
+    if (reason === 'missing') delete f.proofs.capabilityAudit.phase1Receipt;
+    if (reason === 'tampered') f.proofs.capabilityAudit.phase2Receipt.dataBase64 = Buffer.from('{}').toString('base64');
+    if (reason === 'legacy') f.config.dataStore = 'supabase';
+    if (reason === 'scope') { f.phase1.originalRoleSchemaRoadAndGallaboxControlsPreserved = false; f.refreshOrigins(); }
+    await assert.rejects(f.verify(), /phase|capability|native|embedded|catalog/i);
+  }
 });
 
 test('database capability mode cannot replace the legacy stopped-process proof', async t => {
