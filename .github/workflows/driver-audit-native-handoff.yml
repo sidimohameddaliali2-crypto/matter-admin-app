@@ -18,6 +18,7 @@ on:
           - stage-import
           - verify-import
           - stage-builder
+          - diagnose-roots
         default: inspect
       expected_deployed_sha:
         description: Exact current application commit on the host
@@ -34,6 +35,9 @@ on:
         type: string
       import_profile_sha256:
         description: SHA-256 of the host-created native import profile
+        type: string
+      diagnostic_page:
+        description: Page of RSA-sealed private control metadata, starting at zero
         type: string
 
 concurrency:
@@ -71,13 +75,14 @@ jobs:
           NATIVE_IMPORT_CODE: ${{ steps.prepare.outputs.import_code }}
           NATIVE_IMPORT_TEMPLATE_SHA256: ${{ inputs.import_template_sha256 }}
           NATIVE_IMPORT_PROFILE_SHA256: ${{ inputs.import_profile_sha256 }}
+          NATIVE_DIAGNOSTIC_PAGE: ${{ inputs.diagnostic_page }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 60m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,NATIVE_HANDOFF_OPERATION,NATIVE_HANDOFF_CODE,NATIVE_TRANSFER_PLAN_B64,NATIVE_TRANSFER_SESSION_ID,NATIVE_IMPORT_CODE,NATIVE_IMPORT_TEMPLATE_SHA256,NATIVE_IMPORT_PROFILE_SHA256
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,NATIVE_HANDOFF_OPERATION,NATIVE_HANDOFF_CODE,NATIVE_TRANSFER_PLAN_B64,NATIVE_TRANSFER_SESSION_ID,NATIVE_IMPORT_CODE,NATIVE_IMPORT_TEMPLATE_SHA256,NATIVE_IMPORT_PROFILE_SHA256,NATIVE_DIAGNOSTIC_PAGE
           script: |
             set -e
             cd -- "$DO_APP_PATH"

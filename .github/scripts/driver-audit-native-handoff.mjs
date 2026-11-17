@@ -164,7 +164,7 @@ async function main() {
       recipientSha256: hash(request.recipientPublicKey), capsule }));
     return;
   }
-  if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder'].includes(operation)) {
+  if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'diagnose-roots'].includes(operation)) {
     phase = 'native-import-' + operation;
     const encoded = process.env.NATIVE_IMPORT_CODE;
     if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
@@ -180,9 +180,18 @@ async function main() {
     catch (error) { if (error.code !== 'EEXIST') throw error; }
     if (hash(await readPrivateDriverAuditSource(filename, 256 * 1024)) !== hash(code)) throw Error('Reviewed import operator hash differs');
     const { runDriverAuditNativeImport } = await import(pathToFileURL(filename).href);
+    let recipientPublicKey;
+    if (operation === 'diagnose-roots' && process.env.NATIVE_TRANSFER_PLAN_B64) {
+      const encodedPlan = process.env.NATIVE_TRANSFER_PLAN_B64;
+      if (encodedPlan.length > 24576 || !/^[A-Za-z0-9+/]+=*$/.test(encodedPlan)) throw Error('Bounded public diagnostic recipient required');
+      const { validateDriverAuditTransferPlan } = await load('services/driverAuditTransferSession.js');
+      recipientPublicKey = validateDriverAuditTransferPlan(JSON.parse(Buffer.from(encodedPlan, 'base64').toString('utf8'))).recipientPublicKey;
+    }
     console.log(JSON.stringify(await runDriverAuditNativeImport({ operation, appRoot, expectedSha: expected,
-      sessionId: process.env.NATIVE_TRANSFER_SESSION_ID, templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256,
-      profileSha256: process.env.NATIVE_IMPORT_PROFILE_SHA256 || undefined })));
+      sessionId: process.env.NATIVE_TRANSFER_SESSION_ID, templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256 || undefined,
+      profileSha256: process.env.NATIVE_IMPORT_PROFILE_SHA256 || undefined,
+      recipientPublicKey, diagnosticPage: process.env.NATIVE_DIAGNOSTIC_PAGE === '' || process.env.NATIVE_DIAGNOSTIC_PAGE === undefined
+        ? 0 : Number(process.env.NATIVE_DIAGNOSTIC_PAGE) })));
     return;
   }
   if (['prepare-transfer', 'receive-transfer'].includes(operation)) {

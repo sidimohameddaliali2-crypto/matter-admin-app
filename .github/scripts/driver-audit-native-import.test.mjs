@@ -5,6 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
+import { gunzipSync } from 'node:zlib';
+import { generateKeyPairSync } from 'node:crypto';
+import { sealTransferSecrets, openTransferSecrets } from '../../server/services/driverAuditTransferCodec.js';
 import { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory } from '../../server/services/driverAuditSource.js';
 import { readDriverAuditImportRows } from '../../server/services/driverAuditLiveImport.js';
 import { verifyAuditBuilder } from '../../server/vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
@@ -77,6 +80,7 @@ async function fixture(t) {
     },
     async load(name) {
       if (name === 'loadEnv.js') return {};
+      if (name === 'services/driverAuditTransferCodec.js') return { sealTransferSecrets };
       if (name === 'node_modules/mongoose/index.js') return { default: { createConnection(uri) {
         assert.equal(uri, adapters.env.MONGODB_URI); return connection;
       } } };
@@ -222,6 +226,57 @@ test('the host operator lock excludes concurrent imports from the encrypted-tran
   assert.equal(f.locked(), true);
   release(); await first;
   assert.equal(f.locked(), false);
+});
+
+async function diagnosticFixture(t) {
+  const f = await fixture(t), baseline = path.join(f.syncRoot, 'baseline');
+  await fs.mkdir(baseline, { mode: 0o700 });
+  const manifest = Buffer.from(JSON.stringify({ 'fictional.private.json': hash('fictional') }));
+  await fs.writeFile(path.join(baseline, 'files.private.json'), manifest, { mode: 0o600 });
+  await fs.writeFile(path.join(f.syncRoot, 'seed.json'), JSON.stringify({ version: 1, collectorRevision: 2118,
+    sourceBasis: 'd'.repeat(64), manifestSha256: hash(manifest), fixtureSecret: 'fictional-diagnostic-secret' }), { mode: 0o600 });
+  const attempt = path.join(f.syncRoot, 'work/attempts/11111111-1111-4111-8111-111111111111');
+  await fs.mkdir(path.join(attempt, 'server-data'), { recursive: true, mode: 0o700 });
+  const accepted = { version: 1, collectorRevision: 5771, basis: 'b'.repeat(64), sourceBasis: 'b'.repeat(64),
+    privateRoot: path.join(attempt, 'server-data'), baselineRoot: baseline, manifestSha256: hash(manifest),
+    previous: { privateRoot: baseline, manifestSha256: hash(manifest), basis: 'e'.repeat(64) } };
+  await fs.writeFile(path.join(attempt, 'accepted.private.json'), JSON.stringify(accepted), { mode: 0o600 });
+  await fs.writeFile(path.join(attempt, 'server-data/files.private.json'), manifest, { mode: 0o600 });
+  await fs.writeFile(path.join(f.syncRoot, 'work/current.private.json'), JSON.stringify(accepted), { mode: 0o600 });
+  const diagnose = extra => runDriverAuditNativeImport({ operation: 'diagnose-roots', appRoot: f.appRoot,
+    sessionId, expectedSha: commit, ...extra }, f.adapters);
+  return { ...f, diagnose, accepted, attempt };
+}
+
+test('read-only root diagnostics report the actual previous-reference mismatch without relaxing census or loading source/profile inputs', async t => {
+  const f = await diagnosticFixture(t);
+  await fs.rm(f.sourceRoot, { recursive: true });
+  await fs.unlink(path.join(f.folder, 'profile-template.private.json'));
+  const result = await f.diagnose();
+  assert.equal(result.status, 'roots-diagnosed');
+  assert.equal(result.censusVerified, false); assert.equal(result.authorityChanged, false);
+  assert.ok(result.candidateRevisions.includes(2118));
+  assert.ok(result.mismatches.length > 0 && result.mismatches.length <= 8);
+  const mismatch = result.mismatches.find(row => row.targetKind === 'bootstrap');
+  assert.equal(mismatch.matches.manifest, true); assert.equal(mismatch.matches.basis, false);
+  assert.equal(mismatch.reference.basis, 'e'.repeat(64)); assert.equal(mismatch.target.sourceBasis, 'd'.repeat(64));
+  const output = JSON.stringify(result);
+  assert(!output.includes(f.appRoot)); assert(!output.includes('fictional-diagnostic-secret'));
+  assert.equal(f.cli.length, 0); assert.equal(f.locked(), false);
+  await assert.rejects(fs.stat(path.join(f.folder, 'profile.private.json')), { code: 'ENOENT' });
+});
+
+test('diagnostic control metadata is paged and RSA-sealed while public mismatch records stay bounded', async t => {
+  const f = await diagnosticFixture(t), recipient = generateKeyPairSync('rsa', { modulusLength: 3072 });
+  const result = await f.diagnose({ recipientPublicKey: recipient.publicKey.export({ type: 'spki', format: 'pem' }) });
+  assert.ok(result.capsule); assert(!JSON.stringify(result).includes('fictional-diagnostic-secret'));
+  const payload = openTransferSecrets(recipient.privateKey, result.capsule);
+  assert.equal(payload.page, 0); assert.equal(payload.pages, 1);
+  const metadata = JSON.parse(gunzipSync(Buffer.from(payload.gzipChunkBase64, 'base64')));
+  assert.ok(metadata.controls.some(row => row.value?.fixtureSecret === 'fictional-diagnostic-secret'));
+  assert.equal(hash(JSON.stringify(metadata)), payload.metadataSha256);
+  await assert.rejects(f.diagnose({ recipientPublicKey: 'invalid recipient' }));
+  await assert.rejects(f.diagnose({ diagnosticPage: 999999 }));
 });
 
 async function builderFixture(t) {
