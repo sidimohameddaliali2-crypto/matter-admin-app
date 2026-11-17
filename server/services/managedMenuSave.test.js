@@ -95,7 +95,8 @@ const fixture = t => {
   let active, operations;
   const writes = [], deleted = [], tags = [];
   const query = value => ({ session() { return this; }, select() { return this; }, lean: async () => value });
-  t.mock.method(mongoose.connection, 'transaction', async callback => {
+  t.mock.method(mongoose.connection, 'transaction', async (callback, options) => {
+    if (options?.readPreference === 'primary') return callback({breakfastSync: true});
     active = { transaction: true }; operations = []; store.committed = false;
     const result = await callback(active);
     for (const operation of operations) operation();
@@ -238,6 +239,7 @@ test('the API synchronizes partner dishes only after a published menu commits, a
   const { store } = fixture(t);
   const events = [];
   t.mock.method(PartnerItem, 'findOne', () => ({ sort: async () => { assert.equal(store.committed, true); events.push('partner-read-after-commit'); return null; } }));
+  t.mock.method(PartnerItem, 'find', () => ({lean: async () => {assert.equal(store.committed, true); events.push('breakfast-read-after-commit'); return [];}}));
   t.mock.method(PartnerItem, 'create', async () => ({ _id: new mongoose.Types.ObjectId() }));
   t.mock.method(Partner, 'find', () => ({ select() { return this; }, lean: async () => [] }));
   t.mock.method(console, 'error', () => {});
@@ -245,12 +247,12 @@ test('the API synchronizes partner dishes only after a published menu commits, a
   const res = response();
   await handler('/:id', 'put')(request, res);
   assert.equal(res.statusCode, 200); assert.deepEqual(res.body.warnings, []);
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
   t.mock.method(Menu.prototype, 'save', async () => { throw new Error('Database save failed'); });
   const failed = response();
   await handler('/:id', 'put')(request, failed);
   assert.equal(failed.statusCode, 503); assert.equal(failed.body.success, false);
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
 });
 
 test('partner-sync failure after commit reports a saved-menu warning instead of implying the menu rolled back', async (t) => {
@@ -365,4 +367,29 @@ test('publish-only updates preserve an existing title, and explicit titles are t
   assert.equal(store.menu.title,'Original');assert.equal(store.menu.isPublished,true);
   await saveManagedMenu({menuId,body:{title:'  Revised menu  '},buildMealName,mergeUploadedSnackPools:()=>{}});
   assert.equal(store.menu.title,'Revised menu');
+});
+
+test('the unpublish API removes breakfast dates only after commit and preserves other menus', async t => {
+  const {store} = fixture(t);
+  store.menu.isPublished = true;
+  t.mock.method(Menu, 'findOneAndUpdate', () => ({lean: async () => structuredClone(store.menu)}));
+  const item = {_id: 'breakfast', name: 'Egg Toast', breakfastScheduleRevision: 0,
+    menuSelectionDatesByMenu: {[menuId]: [new Date('2026-10-30')], other: [new Date('2026-11-10')]}};
+  t.mock.method(PartnerItem, 'findOne', () => assert.fail('Unpublish must not create dishes'));
+  t.mock.method(PartnerItem, 'find', () => ({lean: async () => {
+    assert.equal(store.committed, true); return [structuredClone(item)];
+  }}));
+  t.mock.method(PartnerItem, 'findById', () => ({session() {return this;}, lean: async () => structuredClone(item)}));
+  t.mock.method(PartnerItem, 'updateOne', async (filter, update) => {
+    assert.equal(store.committed, true);
+    assert.equal(filter.breakfastScheduleRevision, item.breakfastScheduleRevision);
+    Object.assign(item, update.$set); item.breakfastScheduleRevision++;
+    return {matchedCount: 1};
+  });
+  const res = response();
+  await handler('/:id', 'put')({params: {id: menuId}, user: {_id: new mongoose.Types.ObjectId()}, body: {isPublished: false}}, res);
+  assert.equal(res.statusCode, 200); assert.deepEqual(res.body.warnings, []);
+  assert.equal(store.menu.isPublished, false);
+  assert.deepEqual(Object.keys(item.menuSelectionDatesByMenu), ['other']);
+  assert.deepEqual(item.availableDates.map(date => date.toISOString().slice(0, 10)), ['2026-11-10']);
 });

@@ -415,3 +415,14 @@ test('an edit menu validates order ownership and matching delivery date', async 
   assert.equal((await call(partnerRouter, 'get', '/menu', {query: {date: '2099-01-06', orderId: ORDER}})).code, 400);
   assert.equal((await call(partnerRouter, 'get', '/menu', {query: {date: DAY, orderId: 'bad'}})).code, 400);
 });
+
+
+test('master-menu breakfast selling prices can be edited without losing their serving schedule', async t => {
+  const current = {source: 'menu-selection', mealType: 'breakfast', price: 12, sellingPrice: 12,
+    availableDates: [new Date(DAY)], menuSelectionDatesByMenu: {week: [new Date(DAY)]}};
+  t.mock.method(PartnerMenuItem, 'findById', async () => current);
+  t.mock.method(PartnerMenuItem, 'findByIdAndUpdate', async (id, update) => {Object.assign(current, update.$set); return current;});
+  const res = await call(adminRouter, 'patch', '/menu/:itemId', {params: {itemId: ITEM}, body: {sellingPrice: 18}});
+  assert.equal(res.code, 200); assert.equal(current.sellingPrice, 18);
+  assert.equal(current.availableDates[0].toISOString().slice(0, 10), DAY);
+});

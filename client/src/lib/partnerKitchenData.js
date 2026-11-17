@@ -1,4 +1,4 @@
-export const PARTNER_MEAL_LABELS = { main: 'Main', snack: 'Snack', bowl: 'Bowl', 'wraps-buns': 'Wraps/Buns', oats: 'Oats' };
+export const PARTNER_MEAL_LABELS = { breakfast: 'Breakfast of the day', main: 'Main', snack: 'Snack', bowl: 'Bowl', 'wraps-buns': 'Wraps/Buns', oats: 'Oats' };
 
 export async function loadPartnerKitchenOrders(api, date, current = () => true) {
   const response = await api.get('/menus/kitchen-partner-orders', { params: { date } });

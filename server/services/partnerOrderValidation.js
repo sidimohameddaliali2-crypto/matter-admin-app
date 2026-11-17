@@ -27,6 +27,7 @@ export const isPartnerItemAvailable = (item, deliveryDate) => {
   if (!item || item.isAvailable === false) return false;
   if (item.source !== 'menu-selection') return true;
   const day = new Date(deliveryDate).setUTCHours(0, 0, 0, 0);
+  if (Array.isArray(item.availableDates)) return item.availableDates.some(date => new Date(date).setUTCHours(0, 0, 0, 0) === day);
   if (item.availableFrom && day < new Date(item.availableFrom).setUTCHours(0, 0, 0, 0)) return false;
   if (item.availableTo && day > new Date(item.availableTo).setUTCHours(0, 0, 0, 0)) return false;
   return true;

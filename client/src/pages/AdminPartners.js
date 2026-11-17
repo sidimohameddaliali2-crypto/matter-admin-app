@@ -34,8 +34,8 @@ const marginColor = (m) => (m >= 50 ? '#3f8500' : m >= 35 ? '#0b1a3f' : '#ff3b00
 
 // Category display order: Oats, Wraps/Buns, Snack, Bowl, Main (Bowl wasn't
 // in the list given — placed just before Main since it's not mentioned).
-const MEAL_TYPES = ['oats', 'wraps-buns', 'snack', 'bowl', 'main'];
-const MEAL_TYPE_LABEL = { oats: 'Oats', 'wraps-buns': 'Wraps/Buns', snack: 'Snack', bowl: 'Bowl', main: 'Main' };
+const MEAL_TYPES = ['breakfast', 'oats', 'wraps-buns', 'snack', 'bowl', 'main'];
+const MEAL_TYPE_LABEL = { breakfast: 'Breakfast of the day', oats: 'Oats', 'wraps-buns': 'Wraps/Buns', snack: 'Snack', bowl: 'Bowl', main: 'Main' };
 const TYPE_BADGE = { cafe: '#fff2d9', gym: '#e3edff', restaurant: '#e3f3d9', other: '#f1ebe2' };
 const WASTE_REASONS = ['over-order', 'spoilage', 'returns', 'prep-error'];
 
@@ -263,7 +263,9 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
         {error && <div className="bg-[#fff2eb] border border-[#ffd9c2] text-[#ff3b00] rounded-2xl px-4 py-2 text-sm">{error}</div>}
         {initial?.source === 'menu-selection' && (
           <div className="bg-[#eafbd0] border border-[#cdeb9e] text-[#2a3f13] rounded-2xl px-4 py-2.5 text-[12.5px] leading-snug">
-            Auto-synced from the Menu Selection weekly menu. Its price and availability window are kept in sync automatically each time next week's menu is published — edits here will be overwritten the next time that dish appears.
+            {initial.mealType === 'breakfast'
+              ? 'Breakfast of the day starts at AED 20. Edit the selling price below; your price and availability toggle are preserved when menus synchronize. Serving dates follow Menu Selection.'
+              : "Auto-synced from the Menu Selection weekly menu. Its price and availability window are kept in sync automatically each time next week's menu is published — edits here will be overwritten the next time that dish appears."}
           </div>
         )}
         <div><label className="block text-sm font-medium text-[#0b1a3f] mb-1">Item Name *</label>
@@ -285,7 +287,7 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
           <textarea name="description" rows={2} value={form.description} onChange={set} className="w-full border-[1.5px] border-[#e3d9ca] rounded-2xl px-3.5 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#bcf679]" /></div>
         <div><label className="block text-sm font-medium text-[#0b1a3f] mb-1">Ingredients <span className="text-[#c9bfae] font-normal">(comma-separated)</span></label>
           <textarea name="ingredients" rows={2} value={form.ingredients} onChange={set} className="w-full border-[1.5px] border-[#e3d9ca] rounded-2xl px-3.5 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#bcf679]" placeholder="Chicken, Rice, Olive Oil, Garlic…" /></div>
-        {initial?.source === 'menu-selection' ? <div>
+        {initial?.source === 'menu-selection' && initial.mealType === 'breakfast' ? <p className="text-sm text-[#6b7894]">Serving dates: {(initial.availableDates || []).map(fmtDate).join(', ') || 'No scheduled dates'}</p> : initial?.source === 'menu-selection' ? <div>
           <label className="block text-sm font-medium text-[#0b1a3f] mb-1">Availability Window <span className="text-[#c9bfae] font-normal">(optional)</span></label>
           <div className="grid grid-cols-2 gap-3">
             <div><label className="block text-xs text-[#6b7894] mb-1">From</label>
