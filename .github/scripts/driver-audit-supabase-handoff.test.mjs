@@ -6,10 +6,14 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { gzipSync } from 'node:zlib';
 import test from 'node:test';
 import dotenv from '../../server/node_modules/dotenv/lib/main.js';
 import { sealTransferSecrets, openTransferSecrets } from '../../server/services/driverAuditTransferCodec.js';
 import { acquireWorkerLock } from '../../server/vendor/driver-audits/integration/hosted/worker-lock.mjs';
+import { stageDriverAuditSource } from '../../server/scripts/driverAuditSourceStage.js';
+import { archiveBytes } from '../../server/vendor/driver-audits/integration/cloud/repository.mjs';
+import { verifyDriverAuditSupabaseServingPackage } from '../../server/services/driverAuditSupabaseReplica.js';
 
 const operator = await import('./driver-audit-supabase-handoff.mjs').catch(error => {
   if (error.code !== 'ERR_MODULE_NOT_FOUND') throw error;
@@ -330,4 +334,450 @@ test('legitimate leading-dot paths still reject symlinked files and parent direc
     }
     await assert.rejects(f.run(), error => error.phase === 'inspect-source');
   }
+});
+
+async function preparationFixture(t) {
+  const f = await fixture(t), node = { executable: '/usr/bin/node', version: 'v22.23.4', sha256: hash('fictional-node') };
+  f.adapters.node = node;
+  const original = Object.fromEntries(['CRON_SECRET', 'MATTER_SUPABASE_SECRET', 'MATTER_DELIVERY_API_KEY', 'AI_GATEWAY_API_KEY',
+    'MATTER_DELIVERY_ENABLED', 'MATTER_PHOTO_READ_ENABLED', 'MATTER_PHOTO_GRADE_ENABLED', 'MATTER_GPS_ENABLED',
+    'MATTER_GPS_PUBLICATION_ENABLED'].map(name => [name, name.endsWith('_ENABLED') ? 'true' : f.secret]));
+  const oldSource = await stagedSource(f, ['source/.vercelignore'], { writeFiles: true });
+  const oldConfigFile = path.join(oldSource.root, 'source.json'), oldConfig = JSON.parse(await fs.readFile(oldConfigFile));
+  oldConfig.environment = await f.write(oldConfig.environment.path, JSON.stringify({ ...original, DRIVER_AUDIT_DATA_STORE: 'mongo' }));
+  Object.assign(oldConfig, { nodeExecutable: node.executable, nodeVersion: node.version });
+  await f.write(oldConfigFile, JSON.stringify(oldConfig));
+  const baselineFile = await f.write(path.join(f.root, 'baseline/input.private.json'), '{"original":true}');
+  const baseline = await f.write(path.join(f.root, 'baseline/files.private.json'), JSON.stringify({ 'input.private.json': baselineFile.sha256 }));
+  f.seed.manifestSha256 = baseline.sha256; await f.write(path.join(f.root, 'seed.json'), JSON.stringify(f.seed));
+  const makePackage = async (id, collectorRevision) => {
+    const parent = path.join(f.root, 'work/attempts', id), privateRoot = path.join(parent, 'server-data');
+    const data = await f.write(path.join(privateRoot, 'original-data.private.json'), '{"retained":' + collectorRevision + '}');
+    const manifest = await f.write(path.join(privateRoot, 'files.private.json'), JSON.stringify({ 'original-data.private.json': data.sha256 }));
+    const value = { version: 1, privateRoot, collectorRevision, sourceBasis: hash('basis-' + collectorRevision),
+      manifestSha256: manifest.sha256, generation: hash('generation-' + collectorRevision), reportHash: hash('report-' + collectorRevision) };
+    const accepted = await f.write(path.join(parent, 'accepted.private.json'), JSON.stringify(value));
+    return { ...value, attemptId: id, acceptedSha256: accepted.sha256, directSeedSha256: null };
+  };
+  const current = await makePackage('11111111-1111-4111-8111-111111111111', 11);
+  const serving = await makePackage('22222222-2222-4222-8222-222222222222', 10);
+  const previous = await makePackage('33333333-3333-4333-8333-333333333333', 9);
+  await f.write(path.join(f.root, 'work/current.private.json'), JSON.stringify(current));
+  await f.write(path.join(f.server, 'package.json'), '{"type":"module","scripts":{"start":"node server.js"}}');
+  const lock = await f.write(path.join(f.server, 'package-lock.json'), '{"lockfileVersion":3}');
+  await fs.mkdir(path.join(f.server, 'node_modules'), { mode: 0o700 });
+  const oldBuilder = JSON.parse(await fs.readFile(path.join(f.root, 'builder/runtime-manifest.json')));
+  const builderRows = [];
+  for (const name of Object.keys(oldBuilder.files)) {
+    const bytes = name === 'integration/cloud/module-1.mjs' ? Buffer.from('export const managed = true;\n') : await fs.readFile(path.join(f.root, 'builder', name));
+    oldBuilder.files[name] = hash(bytes); builderRows.push({ path: name, dataBase64: bytes.toString('base64') });
+  }
+  const builderManifest = Buffer.from(JSON.stringify(oldBuilder)), builderSha256 = hash(builderManifest);
+  builderRows.unshift({ path: 'runtime-manifest.json', dataBase64: builderManifest.toString('base64') });
+  const sourceBytes = Buffer.from('export {};\n'), sourceFiles = ['source/api/fixture.mjs', 'source/integration/hosted/native-backend.mjs',
+    'source/integration/hosted/archive-read-cache.mjs', 'source/integration/cloud/native-poll-progress.mjs'];
+  const sourceManifest = Buffer.from(JSON.stringify({ schemaVersion: 1,
+    managedSourceExecutionHost: 'sidi', managedSourceExecutionAdmission: 'fixed-host-v1',
+    files: sourceFiles.map(path => ({ path, sha256: hash(sourceBytes), bytes: sourceBytes.length })),
+    entrypoints: [{ id: 'delivery', module: 'source/api/fixture.mjs', exportName: 'default', method: 'GET',
+      path: '/api/collector?task=delivery', schedule: '* * * * *', timeZone: 'UTC', maxDurationSeconds: 300,
+      requiredEnvironment: ['CRON_SECRET', 'MATTER_DELIVERY_ENABLED'] }] }));
+  const sourceSha256 = hash(sourceManifest), sourceRows = [{ path: 'manifest.private.json', dataBase64: sourceManifest.toString('base64') },
+    ...sourceFiles.map(path => ({ path, dataBase64: sourceBytes.toString('base64') }))];
+  const archive = (manifestSha256, files) => {
+    const bytes = gzipSync(Buffer.from(JSON.stringify({ version: 1, manifestSha256, files })));
+    return { sha256: hash(bytes), bytes: bytes.length, dataBase64: bytes.toString('base64') };
+  };
+  const inspected = await f.run(), releaseSha = 'd'.repeat(40);
+  const bootstrap = { version: 1, kind: 'driver-reports-supabase-bootstrap-v1', releaseSha,
+    packageLockSha256: lock.sha256, inspectionMetadataSha256: inspected.metadataSha256,
+    expected: { syncConfigSha256: hash(await fs.readFile(f.configFile)), seedSha256: hash(await fs.readFile(path.join(f.root, 'seed.json'))),
+      currentPointerSha256: hash(await fs.readFile(path.join(f.root, 'work/current.private.json'))), sourceConfigSha256: hash(await fs.readFile(oldConfigFile)) },
+    retained: [{ ...serving, role: 'serving-current' }, { ...previous, role: 'serving-previous' }],
+    builder: archive(builderSha256, builderRows), source: archive(sourceSha256, sourceRows) };
+  const pins = { release: releaseSha, source: sourceSha256, sourceFiles: sourceFiles.length, oldSource: path.basename(oldSource.root), builder: builderSha256, builderFiles: 73,
+    oldBuilder: f.config.builderSha256, baseline: baseline.sha256, baselineRevision: 7, candidate: current.manifestSha256,
+    candidateRevision: 11, candidateBasis: current.sourceBasis,
+    servingCurrent: { collectorRevision: serving.collectorRevision, manifestSha256: serving.manifestSha256, generation: serving.generation },
+    servingPrevious: { collectorRevision: previous.collectorRevision, manifestSha256: previous.manifestSha256, generation: previous.generation } };
+  const expectedEnvironment = () => {
+    const id = hash(JSON.stringify(['driver-reports-supabase-sync-v1', bootstrap.releaseSha, pins.source, pins.builder, pins.baseline, pins.candidate]));
+    return { ...original, MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: path.join(f.server, '.private/driver-report-app-releases', bootstrap.releaseSha,
+      'server/.private/driver-audits', id, 'work/archive-cache'), DRIVER_AUDIT_EXECUTION_HOST: 'sidi' };
+  };
+  bootstrap.expected.sourceEnvironmentSha256 = hash(JSON.stringify(expectedEnvironment()));
+  f.adapters.pins = pins;
+  const commands = [], exec = f.adapters.exec;
+  f.adapters.exec = async (file, args, options) => {
+    commands.push({ file, args, options });
+    if (file === 'git' && args[0] === 'clone') {
+      const target = args.at(-1); await fs.mkdir(path.join(target, 'server'), { recursive: true, mode: 0o700 });
+      await f.write(path.join(target, 'server/package-lock.json'), await fs.readFile(path.join(f.server, 'package-lock.json')));
+      await f.write(path.join(target, 'server/package.json'), '{"type":"module"}'); return { stdout: '' };
+    }
+    if (file === 'git' && args[0] === '-C') return { stdout: args[2] === 'rev-parse' ? (args[3] === '--show-toplevel' ? args[1] : releaseSha) + '\n' : '' };
+    if (file === '/usr/bin/npm') {
+      if (args[0] === 'ci') {
+        await f.write(path.join(options.cwd, 'node_modules/fictional-package/index.js'), 'module.exports = "isolated";\n');
+        return { stdout: '' };
+      }
+      assert.deepEqual(args, ['ls', '--omit=dev', '--all', '--json']);
+      return { stdout: JSON.stringify({ name: 'fictional-release', dependencies: { 'fictional-package': { version: '1.0.0' } } }) };
+    }
+    return exec(file, args);
+  };
+  let reads = 0;
+  f.adapters.bootstrapArchive = { async assertPrivate() { return { public: false }; }, async readObject() { reads++; return [gzipSync(Buffer.from(JSON.stringify(bootstrap)))]; } };
+  f.adapters.stageSource = async ({ sourceRoot, compressed, environmentBytes, nodeExecutable }) => {
+    const { gunzipSync } = await import('node:zlib'), bundle = JSON.parse(gunzipSync(compressed));
+    const root = path.join(sourceRoot, bundle.manifestSha256), runtimeRoot = path.join(root, 'runtime');
+    for (const row of bundle.files) await f.write(path.join(runtimeRoot, row.path), Buffer.from(row.dataBase64, 'base64'));
+    const environment = await f.write(path.join(root, 'environment.private.json'), environmentBytes);
+    const configFile = path.join(root, 'source.json');
+    await f.write(configFile, JSON.stringify({ version: 1, root, runtimeRoot, manifestSha256: bundle.manifestSha256,
+      nodeExecutable, nodeVersion: bundle.nodeVersion, environment }));
+    return { configFile, manifestSha256: bundle.manifestSha256 };
+  };
+  const run = () => f.run({ operation: 'prepare-supabase-host', bootstrapSha256: hash(gzipSync(Buffer.from(JSON.stringify(bootstrap)))) });
+  return { ...f, bootstrap, pins, runPrepare: run, original, commands, expectedEnvironment, reads: () => reads };
+}
+
+test('preparing Supabase stages an isolated release and all four original package roles without selecting a serving seed', async t => {
+  const f = await preparationFixture(t), original = await fs.readFile(f.configFile), pointer = await fs.readFile(path.join(f.root, 'work/current.private.json'));
+  const result = await f.runPrepare();
+  assert.equal(result.status, 'supabase-host-prepared'); assert.equal(result.workersStarted, false);
+  assert.equal(result.readOnly, false); assert.equal(result.stagingOnly, true); assert.equal(result.databaseWrites, false);
+  assert.equal(result.routingChanged, false); assert.equal(result.seedSelected, false); assert.equal(f.reads(), 1);
+  const capsule = openTransferSecrets(privateKey, result.capsule), { gunzipSync } = await import('node:zlib');
+  const evidence = JSON.parse(gunzipSync(Buffer.from(capsule.metadataGzipBase64, 'base64')));
+  assert.equal(evidence.preparation.packages.length, 4);
+  const root = evidence.preparation.syncRoot;
+  await assert.rejects(fs.access(path.join(root, 'seed.json')), { code: 'ENOENT' });
+  await assert.rejects(fs.access(path.join(root, 'work/current.private.json')), { code: 'ENOENT' });
+  assert.deepEqual(await fs.readFile(f.configFile), original);
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'work/current.private.json')), pointer);
+  const env = dotenv.parse(await fs.readFile(path.join(evidence.preparation.releaseRoot, 'server/.env.local')));
+  assert.equal(env.DRIVER_AUDIT_EXECUTION_HOST, 'sidi'); assert.equal(env.DRIVER_AUDIT_DATA_STORE, 'supabase');
+  assert.equal(env.DRIVER_AUDIT_ENABLED, '0'); assert.equal(env.DRIVER_AUDIT_IMPORT_ENABLED, '0');
+  assert.equal(env.DRIVER_AUDIT_REPLICA_GC_ENABLED, '0'); assert.equal(env.MONGODB_URI, undefined);
+  assert(f.commands.every(call => call.file === 'git' || call.file === '/usr/bin/npm' || call.file === 'pm2' && call.args.join() === 'jlist'));
+  assert(!f.commands.some(call => call.args.some(arg => ['reset', 'restart', 'start', 'save'].includes(arg))));
+  assert(!JSON.stringify(result).includes(f.secret));
+});
+
+test('prepared release retries are exact and preserve hardlink inode, permissions and original modification times', async t => {
+  const f = await preparationFixture(t), first = await f.runPrepare(), { gunzipSync } = await import('node:zlib');
+  const one = JSON.parse(gunzipSync(Buffer.from(openTransferSecrets(privateKey, first.capsule).metadataGzipBase64, 'base64'))).preparation;
+  const old = path.join(f.root, 'baseline/input.private.json'), copied = path.join(one.syncRoot, 'baseline/input.private.json');
+  const original = await fs.lstat(old, { bigint: true }), linked = await fs.lstat(copied, { bigint: true });
+  assert.equal(original.ino, linked.ino); assert.equal(original.dev, linked.dev); assert.equal(original.mtimeNs, linked.mtimeNs);
+  assert.equal(Number(original.mode) & 0o777, 0o600);
+  const receipt = await fs.readFile(path.join(one.syncRoot, 'staging.private.json'));
+  await f.runPrepare(); assert.deepEqual(await fs.readFile(path.join(one.syncRoot, 'staging.private.json')), receipt);
+  assert.equal((await fs.lstat(old, { bigint: true })).mtimeNs, original.mtimeNs);
+  assert.equal((await fs.lstat(copied, { bigint: true })).ino, linked.ino);
+  assert.equal(f.commands.filter(row => row.args[0] === 'clone').length, 1);
+  assert.equal(f.commands.filter(row => row.file === '/usr/bin/npm' && row.args[0] === 'ci').length, 1);
+  const source = JSON.parse(await fs.readFile(path.join(path.dirname(one.sourceConfig), 'environment.private.json')));
+  for (const [key, value] of Object.entries(f.original)) assert.equal(source[key], value);
+  assert.equal(Object.keys(source).length, 11);
+  assert.equal(source.MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY, path.join(one.syncRoot, 'work/archive-cache'));
+  assert.equal(one.offHostRebasedEnvironmentBackupPending, true);
+});
+
+test('bootstrap integrity, intent, code, package and lock conflicts fail before any worker or serving change', async t => {
+  for (const change of [f => { f.bootstrap.inspectionMetadataSha256 = hash('stale inspection'); },
+    f => { f.bootstrap.expected.currentPointerSha256 = hash('different candidate pointer'); },
+    f => { f.bootstrap.expected.sourceConfigSha256 = hash('different source credentials'); },
+    f => { f.bootstrap.expected.sourceEnvironmentSha256 = hash('different offhost environment'); },
+    f => { f.bootstrap.builder.dataBase64 = Buffer.from('corrupt code').toString('base64'); },
+    f => { f.bootstrap.source.dataBase64 = Buffer.from('corrupt source').toString('base64'); },
+    f => { f.bootstrap.packageLockSha256 = hash('different dependency lock'); },
+    f => { f.bootstrap.retained[0].collectorRevision--; },
+    f => { f.bootstrap.retained[1].privateRoot = f.bootstrap.retained[0].privateRoot; },
+    f => { f.bootstrap.environment = { password: f.secret }; },
+    async f => { await f.write(path.join(f.root, 'baseline/input.private.json'), f.secret); }]) {
+    const f = await preparationFixture(t); await change(f);
+    const original = await fs.readFile(f.configFile), pointer = await fs.readFile(path.join(f.root, 'work/current.private.json'));
+    await assert.rejects(f.runPrepare(), error => /^Supabase handoff stopped at prepare-[a-z-]+$/.test(error.message)
+      && !error.message.includes(f.secret));
+    assert.deepEqual(await fs.readFile(f.configFile), original); assert.deepEqual(await fs.readFile(path.join(f.root, 'work/current.private.json')), pointer);
+    assert(f.commands.every(row => row.file === 'git' || row.file === '/usr/bin/npm' || row.file === 'pm2' && row.args.join() === 'jlist'));
+  }
+});
+
+test('a wrong bootstrap hash, public bucket or oversized response cannot reach release cloning', async t => {
+  for (const fail of ['hash', 'public', 'large']) {
+    const f = await preparationFixture(t);
+    if (fail === 'public') f.adapters.bootstrapArchive.assertPrivate = async () => ({ public: true });
+    else f.adapters.bootstrapArchive.readObject = async () => [Buffer.alloc(fail === 'large' ? 2 * 1024 ** 2 + 1 : 10)];
+    await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-bootstrap');
+    assert(!f.commands.some(row => row.args[0] === 'clone'));
+  }
+});
+
+test('a retained package path or hardlink conflict stays untouched and never creates an effective seed', async t => {
+  const f = await preparationFixture(t), original = f.adapters.exec;
+  f.adapters.exec = async (file, args, options) => {
+    const result = await original(file, args, options);
+    if (file === 'git' && args[0] === 'clone') {
+      const id = hash(JSON.stringify(['driver-reports-supabase-sync-v1', f.bootstrap.releaseSha, f.pins.source,
+        f.pins.builder, f.pins.baseline, f.pins.candidate]));
+      await f.write(path.join(args.at(-1), 'server/.private/driver-audits', id, 'baseline/input.private.json'), 'independent private file');
+    }
+    return result;
+  };
+  await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-stage-packages');
+  const release = path.join(f.server, '.private/driver-report-app-releases', f.bootstrap.releaseSha);
+  const files = await fs.readdir(path.join(release, 'server/.private/driver-audits'));
+  const root = path.join(release, 'server/.private/driver-audits', files[0]);
+  assert.equal(await fs.readFile(path.join(root, 'baseline/input.private.json'), 'utf8'), 'independent private file');
+  await assert.rejects(fs.access(path.join(root, 'seed.json')), { code: 'ENOENT' });
+  await assert.rejects(fs.access(path.join(root, 'staging.private.json')), { code: 'ENOENT' });
+});
+
+test('independent source or worker drift cannot become a successful staged receipt', async t => {
+  for (const kind of ['source', 'worker']) {
+    const f = await preparationFixture(t), stage = f.adapters.stageSource;
+    f.adapters.stageSource = async args => {
+      const result = await stage(args);
+      if (kind === 'source') await f.write(f.configFile, JSON.stringify({ ...f.config, independentEdit: true }));
+      else f.rows[1].pid = 9876;
+      return result;
+    };
+    await assert.rejects(f.runPrepare(), error => /^readback/.test(error.phase));
+    assert.equal(kind === 'source' ? JSON.parse(await fs.readFile(f.configFile)).independentEdit : f.rows[1].pid, kind === 'source' ? true : 9876);
+  }
+});
+
+test('preparation calls the real source stager with the derived legal cache root and preserves the original nine values', async t => {
+  const f = await preparationFixture(t);
+  delete f.adapters.stageSource;
+  f.adapters.loadRelease = async name => {
+    assert.equal(name, 'scripts/driverAuditSourceStage.js'); return { stageDriverAuditSource };
+  };
+  const result = await f.runPrepare(), { gunzipSync } = await import('node:zlib');
+  const prepared = JSON.parse(gunzipSync(Buffer.from(openTransferSecrets(privateKey, result.capsule).metadataGzipBase64, 'base64'))).preparation;
+  const config = JSON.parse(await fs.readFile(prepared.sourceConfig)), environment = JSON.parse(await fs.readFile(config.environment.path));
+  assert.equal(config.nodeExecutable, '/usr/bin/node'); assert.equal(config.nodeVersion, 'v22.23.4');
+  assert.equal(environment.MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY, path.join(prepared.syncRoot, 'work/archive-cache'));
+  for (const [name, value] of Object.entries(f.original)) assert.equal(environment[name], value);
+  await assert.rejects(fs.access(path.join(path.dirname(prepared.sourceConfig), 'source-state.private.json')), { code: 'ENOENT' });
+});
+
+async function directSeed(f, row) {
+  const objects = new Map(), at = '2026-11-12T00:00:00.000Z', browser = Buffer.from(JSON.stringify({ fixture: row.collectorRevision }));
+  const generation = hash(browser), reportHash = hash('direct-report-' + row.collectorRevision), catalogHash = hash('fictional-catalog');
+  const snapshot = { sha256: generation, url: 'report-data/snapshot-' + generation + '.json' };
+  const values = {
+    'publication.private.json': Buffer.from(JSON.stringify({ head: { reportHash, manifest: snapshot, source: { observedAt: at } }, catalog: { sha256: catalogHash } })),
+    'identities.private.json': Buffer.from('{}'), 'maps.private.json': Buffer.from('{}'),
+    'gps-index.private.json.gz': gzipSync(Buffer.from('{"streamFiles":{"vehicle":"gps-stream.private.json.gz"}}')),
+    'preview-read-view.private.json.gz': gzipSync(Buffer.from(JSON.stringify({ reportHash, generation, catalogHash,
+      browser: snapshot, deferredQueryFiles: { rows: 'deferred.private.json.gz' } }))),
+    'renderer.private.html': Buffer.from('<html>Fictional</html>'), 'build.private.json': Buffer.from('{}'),
+    'browser-data.private.json.gz': gzipSync(browser), 'gps-stream.private.json.gz': gzipSync(Buffer.from('{"gps":[1,2,3]}')),
+    'deferred.private.json.gz': gzipSync(Buffer.from('{"rows":["fictional"]}')),
+  };
+  const storage = { async putVerifiedObject(key, bytes) { objects.set(key, bytes); return { key, bytes: bytes.length, sha256: hash(bytes), verified: true }; } };
+  const files = {};
+  for (const [name, bytes] of Object.entries(values)) files[name] = await archiveBytes(storage, bytes, { domain: 'previewRuntime', path: name });
+  const descriptor = await archiveBytes(storage, Buffer.from(JSON.stringify({ version: 1, files, generation, reportHash,
+    sourceManifestSha256: row.manifestSha256 })), { domain: 'previewPackage', path: 'descriptor.json' });
+  const parent = path.dirname(row.privateRoot), bundleRoot = path.join(parent, 'audit-objects');
+  for (const [name, bytes] of objects) await f.write(path.join(bundleRoot, name), bytes);
+  const identity = { generation, reportHash, manifestSha256: row.manifestSha256, descriptorSha256: descriptor.sha256 };
+  const seed = { version: 1, mode: 'sync', bundleRoot, pointer: { version: 1, generation, reportHash, descriptor },
+    collectorRevision: row.collectorRevision, sourceBasis: row.sourceBasis, manifestSha256: row.manifestSha256, visibleCutoffAt: at,
+    closureReceipt: { version: 1, status: 'verified', sourceBasis: row.sourceBasis, ...identity, checkedAt: at,
+      checks: { archive: true, photos: true, reviewHistory: true } }, restore: { version: 1, archive: 'matter-report-archive', verified: true, ...identity } };
+  Object.assign(row, { generation, reportHash });
+  row.acceptedSha256 = (await f.write(path.join(parent, 'accepted.private.json'), JSON.stringify({ ...row, version: 1 }))).sha256;
+  row.directSeedSha256 = (await f.write(path.join(parent, 'direct-seed.private.json'), JSON.stringify(seed))).sha256;
+  const pin = row.role === 'serving-current' ? f.pins.servingCurrent : f.pins.servingPrevious; pin.generation = generation;
+  return { seed, objects, files };
+}
+
+test('staging verifies every original serving current/previous descriptor byte without uploading or selecting either seed', async t => {
+  const f = await preparationFixture(t);
+  for (const row of f.bootstrap.retained) await directSeed(f, row);
+  f.adapters.loadRelease = async name => { assert.equal(name, 'services/driverAuditSupabaseReplica.js'); return { verifyDriverAuditSupabaseServingPackage }; };
+  const result = await f.runPrepare(), { gunzipSync } = await import('node:zlib');
+  const value = JSON.parse(gunzipSync(Buffer.from(openTransferSecrets(privateKey, result.capsule).metadataGzipBase64, 'base64'))).preparation;
+  const served = value.packages.filter(row => row.role.startsWith('serving-'));
+  assert.equal(served.length, 2); assert(served.every(row => row.descriptorVerified && row.servingSelectionPending));
+  assert.equal(value.seedSelected, false);
+  await assert.rejects(fs.access(path.join(value.syncRoot, 'seed.json')), { code: 'ENOENT' });
+});
+
+test('a missing original deferred or GPS object cannot receive a complete staging receipt', async t => {
+  for (const name of ['deferred.private.json.gz', 'gps-stream.private.json.gz']) {
+    const f = await preparationFixture(t), row = f.bootstrap.retained[0], pkg = await directSeed(f, row);
+    const chunk = pkg.files[name].chunks[0]; await fs.unlink(path.join(pkg.seed.bundleRoot, chunk.sha256 + '.gz'));
+    f.adapters.loadRelease = async () => ({ verifyDriverAuditSupabaseServingPackage });
+    await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-stage-packages');
+    const releaseRoot = path.join(f.server, '.private/driver-report-app-releases', f.bootstrap.releaseSha);
+    const roots = await fs.readdir(path.join(releaseRoot, 'server/.private/driver-audits'));
+    await assert.rejects(fs.access(path.join(releaseRoot, 'server/.private/driver-audits', roots[0], 'staging.private.json')), { code: 'ENOENT' });
+  }
+});
+
+test('late original acceptance or staged environment edits are preserved and cannot be admitted as completed staging', async t => {
+  for (const kind of ['original-accepted', 'staged-environment']) {
+    const f = await preparationFixture(t), stage = f.adapters.stageSource;
+    let edited;
+    if (kind === 'original-accepted') f.adapters.stageSource = async args => {
+      const value = await stage(args); edited = path.join(path.dirname(f.bootstrap.retained[0].privateRoot), 'accepted.private.json');
+      await f.write(edited, 'independent acceptance edit'); return value;
+    };
+    else {
+      const exec = f.adapters.exec;
+      f.adapters.exec = async (file, args, options) => {
+        if (file === 'git' && args[0] === '-C' && args[2] === 'rev-parse') {
+          const target = path.join(args[1], 'server/.env.local');
+          if (await fs.access(target).then(() => true, () => false)) { edited = target; await f.write(target, 'DRIVER_AUDIT_ENABLED=1\n'); }
+        }
+        return exec(file, args, options);
+      };
+    }
+    await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-staging-readback' || error.phase === 'staging-final-readback');
+    assert(edited); assert.equal(await fs.readFile(edited, 'utf8'), kind === 'original-accepted' ? 'independent acceptance edit' : 'DRIVER_AUDIT_ENABLED=1\n');
+  }
+});
+
+test('the host bridge forwards only the bootstrap hash and recipient before any native session or database module', async t => {
+  const f = await fixture(t), bin = path.join(f.appRoot, 'bin'), bootstrapSha256 = 'e'.repeat(64);
+  await fs.mkdir(bin);
+  await fs.writeFile(path.join(bin, 'git'), '#!/bin/sh\nprintf "%s\\n" ' + commit + '\n', { mode: 0o700 });
+  await fs.mkdir(path.join(f.server, 'services'), { recursive: true });
+  await fs.writeFile(path.join(f.server, 'package.json'), '{"type":"module"}');
+  await fs.copyFile(fileURLToPath(new URL('../../server/services/driverAuditSource.js', import.meta.url)), path.join(f.server, 'services/driverAuditSource.js'));
+  const code = 'export async function runDriverAuditSupabaseHandoff(args){' +
+    'if(args.operation!=="prepare-supabase-host"||args.bootstrapSha256!=="' + bootstrapSha256 + '"||!args.recipientPublicKey)throw Error("Wrong dispatch");' +
+    'if(Object.keys(args).sort().join()!=="appRoot,bootstrapSha256,expectedSha,operation,recipientPublicKey")throw Error("Unexpected native argument");' +
+    'return {status:"supabase-host-prepared",workersStarted:false,mongoConnections:0};}';
+  const script = fileURLToPath(new URL('./driver-audit-native-handoff.mjs', import.meta.url));
+  const source = 'Object.defineProperty(process,"platform",{value:"linux"});process.chdir(' + JSON.stringify(f.appRoot) +
+    ');process.argv.push("--run");await import(' + JSON.stringify(script) + ');';
+  const result = await promisify(execFile)(process.execPath, ['--input-type=module', '-e', source], { env: { PATH: bin,
+    EXPECTED_DEPLOYED_SHA: commit, NATIVE_HANDOFF_OPERATION: 'prepare-supabase-host', SUPABASE_BOOTSTRAP_SHA256: bootstrapSha256,
+    NATIVE_IMPORT_CODE: Buffer.from(code).toString('base64'),
+    NATIVE_TRANSFER_PLAN_B64: Buffer.from(JSON.stringify({ version: 1, recipientPublicKey })).toString('base64') } });
+  assert.deepEqual(JSON.parse(result.stdout), { status: 'supabase-host-prepared', workersStarted: false, mongoConnections: 0 });
+});
+
+test('real local Git staging checks out the reviewed release while the original checkout and private inputs remain exact', async t => {
+  const f = await preparationFixture(t), execute = promisify(execFile);
+  const git = async args => execute('git', args, { cwd: f.appRoot, timeout: 10000, maxBuffer: 1024 * 1024 });
+  await f.write(path.join(f.appRoot, '.gitignore'), '/server/.private/\n/server/.env*\n/server/node_modules/\n');
+  for (const name of ['scripts/driverAuditHttp.js', 'scripts/driverAuditSourceStage.js', 'services/driverAuditSource.js',
+    'services/driverAuditSupabaseReplica.js', 'services/driverAuditSupabaseSync.js',
+    'services/driverAuditTransferCodec.js', 'vendor/driver-audits/integration/hosted/worker-lock.mjs',
+    'vendor/driver-audits/integration/hosted/supabase-archive.mjs', 'loadEnv.js']) await f.write(path.join(f.server, name), 'export {};\n');
+  await git(['init', '--quiet']); await git(['add', '.']);
+  const commitArgs = ['-c', 'user.name=Fictional Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m'];
+  await git([...commitArgs, 'Original fixture']);
+  const base = (await git(['rev-parse', 'HEAD'])).stdout.trim();
+  await f.write(path.join(f.appRoot, 'reviewed-release.txt'), 'Separate reviewed fixture release\n');
+  await git(['add', 'reviewed-release.txt']); await git([...commitArgs, 'Reviewed fixture']);
+  const releaseSha = (await git(['rev-parse', 'HEAD'])).stdout.trim(); await git(['checkout', '--quiet', '--detach', base]);
+  const originalExec = f.adapters.exec, statuses = [];
+  f.adapters.exec = async (file, args, options) => {
+    const result = await (file === 'git' ? git(args) : originalExec(file, args, options));
+    if (file === 'git' && args.includes('status')) statuses.push(result.stdout);
+    return result;
+  };
+  const common = { appRoot: f.appRoot, expectedSha: base, recipientPublicKey };
+  f.bootstrap.releaseSha = releaseSha;
+  f.pins.release = releaseSha;
+  f.bootstrap.expected.sourceEnvironmentSha256 = hash(JSON.stringify(f.expectedEnvironment()));
+  f.bootstrap.inspectionMetadataSha256 = (await operator.runDriverAuditSupabaseHandoff({ ...common, operation: 'inspect-supabase-host' }, f.adapters)).metadataSha256;
+  const before = await fs.readFile(f.configFile), current = await fs.readFile(path.join(f.root, 'work/current.private.json'));
+  const result = await operator.runDriverAuditSupabaseHandoff({ ...common, operation: 'prepare-supabase-host',
+    bootstrapSha256: hash(gzipSync(Buffer.from(JSON.stringify(f.bootstrap)))) }, f.adapters).catch(error => {
+    assert.fail(error.phase + ': ' + JSON.stringify(statuses));
+  });
+  assert.equal(result.releaseCommit, releaseSha); assert.equal((await git(['rev-parse', 'HEAD'])).stdout.trim(), base);
+  await operator.runDriverAuditSupabaseHandoff({ ...common, operation: 'prepare-supabase-host',
+    bootstrapSha256: hash(gzipSync(Buffer.from(JSON.stringify(f.bootstrap)))) }, f.adapters);
+  assert.equal((await git(['status', '--porcelain'])).stdout, '');
+  assert.deepEqual(await fs.readFile(f.configFile), before); assert.deepEqual(await fs.readFile(path.join(f.root, 'work/current.private.json')), current);
+  const release = path.join(f.server, '.private/driver-report-app-releases', releaseSha);
+  assert.equal((await git(['-C', release, 'rev-parse', 'HEAD'])).stdout.trim(), releaseSha);
+  await assert.rejects(fs.access(path.join(release, '.git/objects/info/alternates')), { code: 'ENOENT' });
+  assert((await fs.lstat(path.join(release, 'server/node_modules'))).isDirectory());
+  await f.write(path.join(f.server, 'node_modules/business-app-only.js'), 'independent business dependency change');
+  await assert.rejects(fs.access(path.join(release, 'server/node_modules/business-app-only.js')), { code: 'ENOENT' });
+});
+
+test('preparation rejects a linked private parent before creating any directory outside the release', async t => {
+  const f = await preparationFixture(t), exec = f.adapters.exec, outside = path.join(f.appRoot, 'outside-private');
+  await fs.mkdir(outside, { mode: 0o700 });
+  f.adapters.exec = async (file, args, options) => {
+    const result = await exec(file, args, options);
+    if (file === 'git' && args[0] === 'clone') {
+      const parent = path.join(args.at(-1), 'server/.private');
+      await fs.mkdir(parent, { recursive: true, mode: 0o700 });
+      await fs.symlink(outside, path.join(parent, 'driver-audits'));
+    }
+    return result;
+  };
+  await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-stage-directories');
+  assert(f.commands.some(row => row.file === '/usr/bin/npm' && row.args[0] === 'ci'));
+  assert.deepEqual(await fs.readdir(outside), []);
+});
+
+test('isolated dependency installation has a bounded secret-free environment and never links to the business app', async t => {
+  const f = await preparationFixture(t), result = await f.runPrepare();
+  const prepared = JSON.parse((await import('node:zlib')).gunzipSync(Buffer.from(openTransferSecrets(privateKey, result.capsule).metadataGzipBase64, 'base64'))).preparation;
+  const install = f.commands.find(row => row.file === '/usr/bin/npm' && row.args[0] === 'ci');
+  assert(install); assert.deepEqual(install.args, ['ci', '--omit=dev', '--no-audit', '--no-fund']);
+  assert.equal(install.options.cwd, path.join(prepared.releaseRoot, 'server'));
+  assert.equal(install.options.timeout, 300000);
+  assert.equal(install.options.env.NODE_OPTIONS, '--max-old-space-size=1024');
+  assert(!JSON.stringify(install.options.env).includes(f.secret));
+  assert(!Object.keys(install.options.env).some(key => /MONGO|JWT|SUPABASE|SPACES|TOKEN|PASSWORD/.test(key)));
+  const dependencies = path.join(prepared.releaseRoot, 'server/node_modules');
+  assert((await fs.lstat(dependencies)).isDirectory());
+  assert.equal(prepared.dependencies.mode, 'isolated-npm-ci-v1');
+  assert.equal(prepared.dependencies.target, undefined);
+  assert(f.commands.find(row => row.args[0] === 'clone').args.includes('--dissociate'));
+});
+
+test('a dependency changed after installation is retained and rejects retry instead of reinstalling over it', async t => {
+  const f = await preparationFixture(t), result = await f.runPrepare();
+  const prepared = JSON.parse((await import('node:zlib')).gunzipSync(Buffer.from(openTransferSecrets(privateKey, result.capsule).metadataGzipBase64, 'base64'))).preparation;
+  const file = path.join(prepared.releaseRoot, 'server/node_modules/fictional-package/index.js');
+  await f.write(file, 'independent dependency edit');
+  await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-dependencies');
+  assert.equal(await fs.readFile(file, 'utf8'), 'independent dependency edit');
+  assert.equal(f.commands.filter(row => row.file === '/usr/bin/npm' && row.args[0] === 'ci').length, 1);
+});
+
+test('an interrupted isolated install retries only inside the staged release and never changes business dependencies', async t => {
+  const f = await preparationFixture(t), exec = f.adapters.exec;
+  const original = await f.write(path.join(f.server, 'node_modules/business-only.js'), 'original business dependency');
+  let fail = true;
+  f.adapters.exec = async (file, args, options) => {
+    const result = await exec(file, args, options);
+    if (file === '/usr/bin/npm' && args[0] === 'ci' && fail) { fail = false; throw Error(f.secret); }
+    return result;
+  };
+  await assert.rejects(f.runPrepare(), error => error.message === 'Supabase handoff stopped at prepare-dependencies');
+  const result = await f.runPrepare(); assert.equal(result.stagingOnly, true);
+  assert.equal(hash(await fs.readFile(original.path)), original.sha256);
+  assert.equal(f.commands.filter(row => row.file === '/usr/bin/npm' && row.args[0] === 'ci').length, 2);
+});
+
+test('a preexisting dependency symlink is rejected before any install or modification of its target', async t => {
+  const f = await preparationFixture(t), exec = f.adapters.exec;
+  const original = await f.write(path.join(f.server, 'node_modules/business-only.js'), 'untouched business dependency');
+  f.adapters.exec = async (file, args, options) => {
+    const result = await exec(file, args, options);
+    if (file === 'git' && args[0] === 'clone') await fs.symlink(path.join(f.server, 'node_modules'), path.join(args.at(-1), 'server/node_modules'));
+    return result;
+  };
+  await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-dependencies');
+  assert(!f.commands.some(row => row.file === '/usr/bin/npm'));
+  assert.equal(hash(await fs.readFile(original.path)), original.sha256);
 });
