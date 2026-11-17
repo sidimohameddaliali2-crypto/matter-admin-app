@@ -3,6 +3,7 @@ import { gzipSync, gunzipSync } from 'node:zlib';
 import { packDriverAuditMongoTexts } from './driverAuditMongoText.js';
 import { isDriverAuditTechnicalKey } from './driverAuditLiveImport.js';
 import { createDriverAuditTechnicalState } from './driverAuditTechnicalState.js';
+import { validateDriverAuditSourceFenceProjection } from './driverAuditSource.js';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const sha256 = /^[a-f0-9]{64}$/;
@@ -221,12 +222,14 @@ export async function importDriverAuditMongoHistorical({ db, client, objects, re
   return { verified: true, records: count, sha256: fingerprint.digest('hex') };
 }
 
-export async function verifyDriverAuditMongoAuthority({ db, rpc, original, importSha256, verifyResults }) {
+export async function verifyDriverAuditMongoAuthority({ db, rpc, original, importSha256, verifyResults, sourceFence }) {
   requireImport(typeof verifyResults === 'function', 'Saved result and GPS preservation verification is required');
   const control = db.collection('driverAuditNativeControl');
   const started = await control.findOne({ _id: 'authority' });
   requireImport(started?.status === 'staging' && started.importSha256 === importSha256,
     'The native import is unavailable');
+  const sourceFenceSha256 = sourceFence === undefined ? undefined : validateDriverAuditSourceFenceProjection(sourceFence);
+  requireImport(sourceFenceSha256 || !started.verifiedSourceFenceSha256, 'A verified two-phase source fence cannot be downgraded');
   const fields = ['collector-state', 'review-journal'];
   for (const row of original) {
     requireImport(keyPattern.test(row.key), 'Invalid original state key');
@@ -240,11 +243,15 @@ export async function verifyDriverAuditMongoAuthority({ db, rpc, original, impor
   requireImport(result?.verified === true && result.resultsEqual === true && result.gpsEqual === true
     && result.reviewHistoryEqual === true && result.photosEqual === true,
   'The saved results, GPS, original photos or review history differ');
-  const proof = { verified: true, importSha256, documents: original.length, result };
+  if (sourceFenceSha256) requireImport(validateDriverAuditSourceFenceProjection(sourceFence) === sourceFenceSha256,
+    'The two-phase source fence changed during native verification');
+  const proof = { verified: true, importSha256, documents: original.length, result,
+    ...(sourceFenceSha256 ? { sourceFenceSha256 } : {}) };
   const paritySha256 = hash(JSON.stringify(proof));
   const saved = await control.updateOne({
     _id: 'authority', status: 'staging', importSha256, writeFence: started.writeFence,
-  }, { $set: { paritySha256, verifiedWriteFence: started.writeFence, verifiedAt: new Date() } }, { writeConcern });
+  }, { $set: { paritySha256, verifiedWriteFence: started.writeFence, verifiedAt: new Date(),
+    ...(sourceFenceSha256 ? { verifiedSourceFenceSha256: sourceFenceSha256 } : {}) } }, { writeConcern });
   requireImport(saved.matchedCount === 1, 'The native import changed during verification');
   return { ...proof, paritySha256 };
 }
@@ -256,12 +263,16 @@ export async function activateDriverAuditMongoAuthority({ db, importSha256, pari
   const stoppedAt = Date.parse(fence?.stoppedAt);
   const backupAt = Date.parse(fence?.backupAt);
   const validUntil = Date.parse(fence?.validUntil);
-  requireImport(fence?.oldWritersFenced === true && fence?.oldReviewsFenced === true
-    && fence?.leasesDrained === true && Number.isFinite(stoppedAt)
-    && backupAt >= stoppedAt && backupAt <= now && validUntil > now && validUntil - stoppedAt <= 30 * 60_000,
+  const twoPhase = fence?.mode === 'reporting-database-capability-v2';
+  const sourceFenceSha256 = twoPhase ? validateDriverAuditSourceFenceProjection(fence.sourceFence, now) : undefined;
+  requireImport(fence?.oldWritersFenced === true && fence?.oldReviewsFenced === true && fence?.leasesDrained === true
+    && (twoPhase ? fence.stoppedAt === undefined && fence.backupAt === fence.sourceFence.backupAt
+      && fence.validUntil === fence.sourceFence.validUntil : Number.isFinite(stoppedAt)
+      && backupAt >= stoppedAt && backupAt <= now && validUntil > now && validUntil - stoppedAt <= 30 * 60_000),
   'The old collector and review writers need a fresh final backup and a verified fence');
   const result = await db.collection('driverAuditNativeControl').updateOne({
     _id: 'authority', status: 'staging', importSha256, paritySha256,
+    verifiedSourceFenceSha256: sourceFenceSha256 || { $exists: false },
     $expr: { $eq: ['$writeFence', '$verifiedWriteFence'] },
   }, { $set: { status: 'active', verified: true, paritySha256, oldWritersFenced: true,
     oldReviewsFenced: true, activatedAt: new Date(), fence } }, { writeConcern });

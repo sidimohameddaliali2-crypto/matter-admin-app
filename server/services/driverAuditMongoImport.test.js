@@ -17,6 +17,62 @@ const original = [
   { key: 'review-journal', revision: 1, body_text: '{"originalReview":true}' },
 ];
 
+function twoPhaseAuthorityFixture() {
+  const now = Date.now(), hash = value => createHash('sha256').update(value).digest('hex');
+  const sourceFence = { version: 2, mode: 'reporting-database-capability-v2', sourceProjectRef: 'trhhjfgfmxofxhnzocks',
+    phase1ExecutionId: 'phase1-real', phase2ExecutionId: 'phase2-real', transactionId: '123457',
+    admissionBlockedAt: new Date(now - 40 * 60000).toISOString(), dataWritesBlockedAt: new Date(now - 10 * 60000).toISOString(),
+    commitObservedAt: new Date(now - 10 * 60000 + 1000).toISOString(), prePhase2DrainAt: new Date(now - 11 * 60000).toISOString(),
+    initialCursor: new Date(Math.floor((now - 41 * 60000) / 60000) * 60000).toISOString(),
+    backupAt: new Date(now - 2 * 60000).toISOString(), validUntil: new Date(now + 20 * 60000).toISOString() };
+  for (const name of ['sourceReleaseSha256', 'sourceFenceSha256', 'capabilityAuditSha256', 'legacyRuntimeSha256', 'legacyEntrypointsSha256',
+    'phase1ReceiptSha256', 'phase1SQLSha256', 'phase2ReceiptSha256', 'phase2SQLSha256', 'beforeCatalogSha256', 'afterCatalogSha256',
+    'checkpointSha256', 'backupReceiptSha256', 'parityReceiptSha256']) sourceFence[name] = hash(name);
+  let authority = { _id: 'authority', status: 'staging', importSha256: firstHash, writeFence: 1 }, updates = 0;
+  const db = { collection(name) { assert.equal(name, 'driverAuditNativeControl'); return {
+    async findOne() { return structuredClone(authority); },
+    async updateOne(query, change) {
+      const match = Object.entries(query).every(([key, value]) => key === '$expr'
+        ? authority.writeFence === authority.verifiedWriteFence
+        : value && typeof value === 'object' && '$exists' in value ? Object.hasOwn(authority, key) === value.$exists : authority[key] === value);
+      if (!match) return { matchedCount: 0 };
+      updates++; Object.assign(authority, change.$set);
+      for (const key of Object.keys(change.$unset || {})) delete authority[key];
+      return { matchedCount: 1 };
+    },
+  }; } };
+  const verify = extra => verifyDriverAuditMongoAuthority({ db, original, importSha256: firstHash, sourceFence,
+    rpc: async (_, { p_key }) => { const value = original.find(row => row.key === p_key); return { revision: value.revision, body_text: value.body_text }; },
+    verifyResults: async () => ({ verified: true, resultsEqual: true, gpsEqual: true, photosEqual: true, reviewHistoryEqual: true }), ...extra });
+  const fence = () => ({ mode: sourceFence.mode, sourceFence, oldWritersFenced: true, oldReviewsFenced: true, leasesDrained: true,
+    backupAt: sourceFence.backupAt, validUntil: sourceFence.validUntil });
+  return { db, sourceFence, verify, fence, row: () => authority, updates: () => updates };
+}
+
+test('two-phase authority binds the exact source origins to native parity and preserves the original admission time', async () => {
+  const f = twoPhaseAuthorityFixture(), proof = await f.verify();
+  assert.match(proof.sourceFenceSha256, /^[a-f0-9]{64}$/);
+  assert.equal(f.row().verifiedSourceFenceSha256, proof.sourceFenceSha256);
+  await activateDriverAuditMongoAuthority({ db: f.db, importSha256: firstHash, paritySha256: proof.paritySha256, fence: f.fence() });
+  assert.equal(f.row().status, 'active');
+  assert.equal(f.row().fence.sourceFence.admissionBlockedAt, f.sourceFence.admissionBlockedAt);
+});
+
+test('two-phase activation rejects origin drift, stale closure, a changed write fence and legacy downgrade', async t => {
+  for (const reason of ['origins', 'expiry', 'write', 'legacy', 'backup', 'unbound']) await t.test(reason, async () => {
+    const f = twoPhaseAuthorityFixture(), proof = await f.verify(reason === 'unbound' ? { sourceFence: undefined } : {});
+    let fence = f.fence();
+    if (reason === 'origins') f.sourceFence.phase2ReceiptSha256 = 'f'.repeat(64);
+    if (reason === 'expiry') { f.sourceFence.validUntil = new Date(Date.parse(f.sourceFence.dataWritesBlockedAt) + 30 * 60000 + 1).toISOString(); fence = f.fence(); }
+    if (reason === 'write') f.row().writeFence++;
+    if (reason === 'legacy') fence = { oldWritersFenced: true, oldReviewsFenced: true, leasesDrained: true,
+      stoppedAt: f.sourceFence.dataWritesBlockedAt, backupAt: f.sourceFence.backupAt, validUntil: f.sourceFence.validUntil };
+    if (reason === 'backup') fence.backupAt = f.sourceFence.dataWritesBlockedAt;
+    await assert.rejects(activateDriverAuditMongoAuthority({ db: f.db, importSha256: firstHash, paritySha256: proof.paritySha256, fence }));
+    assert.equal(f.row().status, 'staging');
+  });
+});
+
 async function fixture(t) {
   const client = new MongoClient(uri);
   await client.connect();

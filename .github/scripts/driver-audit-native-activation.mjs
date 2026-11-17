@@ -14,6 +14,8 @@ const same = (a, b) => isDeepStrictEqual(a, b);
 const json = value => Buffer.from(JSON.stringify(value, null, 2) + '\n');
 const check = (value, message) => { if (!value) throw Object.assign(Error(message), { activationGuard: true }); };
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
+const twoPhaseAuthorityBinding = value => value?.fence?.mode === 'reporting-database-capability-v2'
+  || Object.hasOwn(value || {}, 'verifiedSourceFenceSha256') || Object.hasOwn(value?.fence || {}, 'sourceFence');
 
 async function templateProvenance({ read, privateDirectory, folder, transferRoot, sessionId, profileSha256, targetDatabase,
   received, templateBytes, templateSha256, inputPins, externalPins }) {
@@ -232,6 +234,13 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
         && active.importSha256 === profileSha256 && active.paritySha256 === paritySha256
         && active.oldWritersFenced === true && active.oldReviewsFenced === true && Number.isFinite(Date.parse(active.activatedAt)),
       'The exact verified native authority and preserved parity proof are required');
+      if (twoPhaseAuthorityBinding(active) || Object.hasOwn(content, 'sourceFenceSha256')) {
+        check(active.fence?.mode === 'reporting-database-capability-v2'
+          && active.fence.sourceFence?.mode === 'reporting-database-capability-v2'
+          && digest(content.sourceFenceSha256) && content.sourceFenceSha256 === active.verifiedSourceFenceSha256
+          && hash(JSON.stringify(active.fence.sourceFence)) === content.sourceFenceSha256,
+        'The active two-phase authority and preserved source fence differ');
+      }
       inputPins.set('native-authority-parity.private.json', { expected: hash(bytes), maximum: 4 * 1024 * 1024 });
       return proof;
     };
@@ -319,7 +328,7 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
       }
     }
     const verifyRelease = () => verifyDriverAuditSourceRelease(config, releaseReference, acceptedReleaseTime || new Date());
-    const { release } = await verifyRelease();
+    const { release, validatedFence } = await verifyRelease();
     const aliases = { backup: 'source-backup.private.json', parity: 'source-parity.private.json',
       credentials: 'source-credentials.private.json', sourceFence: 'source-fence.private.json' }, receipts = {};
     for (const [kind, name] of Object.entries(aliases)) {
@@ -331,9 +340,36 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
     check(digest(receipts.parity.hostQualification?.fixtureSha256) && digest(receipts.parity.hostQualification?.receiptSha256),
       'The exact Linux fixture and qualification receipt identities are required');
     const fenceProof = receipts.sourceFence;
-    check(fenceProof.mode === 'reporting-database-capability-v1' && fenceProof.checkpoint?.path === 'checkpoint.private.json',
+    const twoPhase = fenceProof.mode === 'reporting-database-capability-v2';
+    check((twoPhase || fenceProof.mode === 'reporting-database-capability-v1') && fenceProof.checkpoint?.path === 'checkpoint.private.json',
       'The reviewed native capability fence and fixed checkpoint are required');
     const checkpoint = JSON.parse(await pinned('checkpoint.private.json', fenceProof.checkpoint.sha256));
+    if (twoPhase) {
+      for (const [name, alias] of [['capabilityAudit', 'capability-audit.private.json'], ['drainAudit', 'drain-audit.private.json'],
+        ['quietAudit', 'quiet-audit.private.json']]) {
+        check(fenceProof[name]?.path === alias, 'The two-phase fence must use the fixed private audit aliases');
+        await pinned(alias, fenceProof[name].sha256);
+      }
+      check(validatedFence?.version === 2 && validatedFence.mode === fenceProof.mode && fenceProof.writersStopped === false
+        && validatedFence.sourceProjectRef === fenceProof.sourceProjectRef
+        && ['legacyRuntimeSha256', 'legacyEntrypointsSha256'].every(key => digest(validatedFence[key]) && validatedFence[key] === fenceProof[key])
+        && validatedFence.admissionBlockedAt === fenceProof.admissionBlockedAt
+        && validatedFence.dataWritesBlockedAt === fenceProof.dataWritesBlockedAt
+        && ['phase1ReceiptSha256', 'phase2ReceiptSha256'].every(key => digest(validatedFence[key]) && validatedFence[key] === fenceProof[key])
+        && validatedFence.sourceReleaseSha256 === template.sourceReleaseSha256
+        && validatedFence.sourceFenceSha256 === release.sourceFence.sha256
+        && validatedFence.capabilityAuditSha256 === fenceProof.capabilityAudit.sha256
+        && validatedFence.checkpointSha256 === fenceProof.checkpoint.sha256
+        && validatedFence.backupReceiptSha256 === release.backup.sha256 && validatedFence.parityReceiptSha256 === release.parity.sha256
+        && validatedFence.initialCursor === release.initialCursor && validatedFence.backupAt === checkpoint.capturedAt
+        && validatedFence.validUntil === release.validUntil,
+      'The actual verified two-phase source origin differs');
+    }
+    if (observedAuthority?.status === 'active' && (twoPhase || twoPhaseAuthorityBinding(observedAuthority))) {
+      check(twoPhase && observedAuthority.fence?.mode === fenceProof.mode
+        && observedAuthority.verifiedSourceFenceSha256 === hash(JSON.stringify(validatedFence))
+        && same(observedAuthority.fence.sourceFence, validatedFence), 'The active two-phase source fence changed');
+    }
     const baseline = receipts.backup.uncertainAttemptsBaseline;
     check(baseline?.sourceSnapshotSha256 === closure.origin?.sourceSnapshotSha256
       && baseline.restoreVerificationSha256 === closure.origin?.restoreVerificationSha256
@@ -400,7 +436,8 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
       const rpc = createDriverAuditMongoRpc({ db, client, objects: archive });
       const { verifyDriverAuditMongoAuthority } = await load('services/driverAuditMongoImport.js');
       phase = 'authority-parity';
-      const proof = await verifyDriverAuditMongoAuthority({ db, rpc, original, importSha256: profileSha256, verifyResults: async () => {
+      const proof = await verifyDriverAuditMongoAuthority({ db, rpc, original, importSha256: profileSha256,
+        ...(twoPhase ? { sourceFence: validatedFence } : {}), verifyResults: async () => {
         let fresh;
         if (adapters.verifyParity) fresh = await adapters.verifyParity();
         else {
@@ -439,12 +476,14 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
       } });
       await savePrivate(proofFile, json(proof), read);
       await pinned('native-authority-parity.private.json', hash(json(proof)));
-      await safety(); await verifyRelease();
+      await safety(); const checkedRelease = await verifyRelease();
+      check(!twoPhase || same(checkedRelease.validatedFence, validatedFence), 'The verified two-phase source origin changed during parity');
       const { activateDriverAuditMongoAuthority } = await load('services/driverAuditMongoImport.js');
       phase = 'authority-activation';
       await activateDriverAuditMongoAuthority({ db, importSha256: profileSha256, paritySha256: proof.paritySha256,
         fence: { oldWritersFenced: true, oldReviewsFenced: true, leasesDrained: true,
-          stoppedAt: fenceProof.admissionBlockedAt, backupAt: checkpoint.capturedAt, validUntil: release.validUntil } });
+          ...(twoPhase ? { mode: fenceProof.mode, sourceFence: checkedRelease.validatedFence } : { stoppedAt: fenceProof.admissionBlockedAt }),
+          backupAt: checkpoint.capturedAt, validUntil: release.validUntil } });
     }
     const active = await authority(); await activeProof(active);
     if (operation === 'activate-native') {

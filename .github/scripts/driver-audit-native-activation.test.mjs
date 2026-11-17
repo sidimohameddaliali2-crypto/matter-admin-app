@@ -67,7 +67,7 @@ async function fixture(t) {
     ['credentials', 'source-credentials.private.json', { version: 1, verified: true }], ['sourceFence', 'source-fence.private.json', fence]]) {
     release[kind] = { path: name, sha256: await save(name, value) };
   }
-  const sourceReleaseSha256 = await save('source-release.private.json', release);
+  let sourceReleaseSha256 = await save('source-release.private.json', release);
   const syncConfig = { version: 1, root: syncRoot, codeRoot: path.join(syncRoot, 'builder'), baselineRoot: path.join(syncRoot, 'baseline'),
     rendererBuild: { path: path.join(syncRoot, 'baseline/build.private.json') }, journals: { path: path.join(syncRoot, 'validation-journals.private.json') } };
   await fs.writeFile(path.join(syncRoot, 'sync.json'), json(syncConfig), { mode: 0o600 });
@@ -87,7 +87,7 @@ async function fixture(t) {
   await save('received.private.json', { version: 1, status: 'transfer-received', verified: true, authorityChanged: false,
     sessionId, targetDatabase: 'existing', inventorySha256: state.inventorySha256, objects: 1, bytes: 100,
     completedAt: new Date(now).toISOString(), inputFiles: [{ name: 'activation-template.private.json', sha256: templateSha256, bytes: json(template).length }] });
-  let authority = { status: 'staging', importSha256: profileSha256, writeFence: 7 }, locked = false, failAt, parityValid = true, head = null;
+  let authority = { status: 'staging', importSha256: profileSha256, writeFence: 7 }, locked = false, failAt, parityValid = true, head = null, validatedFence;
   const events = [], entries = [{ name: 'matter-delivery-api', pm_id: 1, pm2_env: { status: 'online', pm_cwd: appRoot,
     pm_exec_path: path.join(server, 'server.js') } }, { name: 'matter-driver-audit-sync', pm_id: 2,
     pm2_env: { status: 'stopped', pm_cwd: server, pm_exec_path: path.join(server, 'scripts/driverAuditSync.js'),
@@ -98,7 +98,9 @@ async function fixture(t) {
   }, async updateOne(query, update) {
     assert.equal(name, 'driverAuditNativeControl');
     const match = Object.entries(query).every(([key, value]) => key === '_id' || key === '$expr'
-      ? key !== '$expr' || authority.writeFence === authority.verifiedWriteFence : authority[key] === value);
+      ? key !== '$expr' || authority.writeFence === authority.verifiedWriteFence
+      : value && typeof value === 'object' && Object.hasOwn(value, '$exists')
+        ? Object.hasOwn(authority, key) === value.$exists : authority[key] === value);
     if (!match) return { matchedCount: 0 };
     events.push(update.$set?.status === 'active' ? 'authority-active' : 'authority-parity');
     Object.assign(authority, update.$set); return { matchedCount: 1 };
@@ -143,7 +145,8 @@ async function fixture(t) {
       if (name === 'node_modules/mongoose/index.js') return { default: { createConnection() { return { db, getClient: () => ({}), async asPromise() {}, async close() {} }; } } };
       if (name === 'services/driverAuditSource.js') return { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory,
         async readDriverAuditSourceConfig() { return config; }, async verifyDriverAuditSourceRelease(_config, _ref, at = new Date()) {
-          assert.equal(_config, config); assert(Date.parse(release.validUntil) > at.getTime()); events.push('source-fence-verified'); return { release }; } };
+          assert.equal(_config, config); assert(Date.parse(release.validUntil) > at.getTime()); events.push('source-fence-verified');
+          return { release, ...(validatedFence ? { validatedFence: structuredClone(validatedFence) } : {}) }; } };
       if (name === 'scripts/driverAuditSourceQualify.js') return { async requireDriverAuditSourceHostQualification({ supervisor }) {
         const rows = await supervisor(); assert.equal(rows.find(row => row.name === 'matter-driver-audit-sync').pm2_env.status, 'online');
         events.push('linux-qualified');
@@ -172,10 +175,95 @@ async function fixture(t) {
       await save('received.private.json', receipt);
     },
     authority: () => authority, setAuthority: value => { authority = value; }, head: value => { head = value; }, failure: value => { failAt = value; },
+    setValidatedFence: value => { validatedFence = value; },
+    async refreshSourceRelease() {
+      sourceReleaseSha256 = await save('source-release.private.json', release); template.sourceReleaseSha256 = sourceReleaseSha256;
+      templateSha256 = await save('activation-template.private.json', template);
+      const receipt = JSON.parse(await fs.readFile(path.join(folder, 'received.private.json')));
+      receipt.inputFiles[0] = { name: 'activation-template.private.json', sha256: templateSha256, bytes: json(template).length };
+      await save('received.private.json', receipt);
+    },
     parityValid: value => { parityValid = value; }, locked: () => locked,
     run: (operation, extra = {}) => runDriverAuditNativeActivation({ operation, appRoot, sessionId, profileSha256,
       templateSha256, expectedSha: commit, ...extra }, adapters) };
 }
+
+async function twoPhaseFixture(t) {
+  const f = await fixture(t), now = Date.now();
+  const admissionBlockedAt = new Date(now - 40 * 60_000).toISOString();
+  const dataWritesBlockedAt = new Date(now - 10 * 60_000).toISOString();
+  const fence = JSON.parse(await fs.readFile(path.join(f.folder, 'source-fence.private.json')));
+  for (const [key, name] of [['capabilityAudit', 'capability-audit.private.json'], ['drainAudit', 'drain-audit.private.json'],
+    ['quietAudit', 'quiet-audit.private.json']]) {
+    const bytes = json({ version: 1, verified: true, kind: 'fictional already verified ' + key });
+    await fs.writeFile(path.join(f.folder, name), bytes, { mode: 0o600 }); fence[key] = { path: name, sha256: hash(bytes) };
+  }
+  Object.assign(fence, { mode: 'reporting-database-capability-v2', admissionBlockedAt, dataWritesBlockedAt,
+    sourceProjectRef: 'trhhjfgfmxofxhnzocks', writersStopped: false,
+    legacyRuntimeSha256: 'b'.repeat(64), legacyEntrypointsSha256: 'c'.repeat(64),
+    phase1ReceiptSha256: '7'.repeat(64), phase2ReceiptSha256: '8'.repeat(64) });
+  const fenceBytes = json(fence); await fs.writeFile(path.join(f.folder, 'source-fence.private.json'), fenceBytes, { mode: 0o600 });
+  f.release.sourceFence.sha256 = hash(fenceBytes); await f.refreshSourceRelease();
+  const checkpoint = JSON.parse(await fs.readFile(path.join(f.folder, 'checkpoint.private.json')));
+  const projection = { version: 2, mode: fence.mode, sourceProjectRef: 'trhhjfgfmxofxhnzocks',
+    legacyRuntimeSha256: fence.legacyRuntimeSha256, legacyEntrypointsSha256: fence.legacyEntrypointsSha256,
+    sourceReleaseSha256: f.template.sourceReleaseSha256, sourceFenceSha256: f.release.sourceFence.sha256,
+    capabilityAuditSha256: fence.capabilityAudit.sha256, phase1ExecutionId: '00000000-0000-4000-8000-000000000101',
+    phase1ReceiptSha256: fence.phase1ReceiptSha256, phase1SQLSha256: '1'.repeat(64),
+    phase2ExecutionId: '00000000-0000-4000-8000-000000000102', phase2ReceiptSha256: fence.phase2ReceiptSha256,
+    phase2SQLSha256: '2'.repeat(64), transactionId: '424242', admissionBlockedAt, dataWritesBlockedAt,
+    commitObservedAt: new Date(Date.parse(dataWritesBlockedAt) + 1000).toISOString(),
+    prePhase2DrainAt: new Date(Date.parse(dataWritesBlockedAt) - 1000).toISOString(),
+    beforeCatalogSha256: '3'.repeat(64), afterCatalogSha256: '4'.repeat(64), initialCursor: f.release.initialCursor,
+    checkpointSha256: fence.checkpoint.sha256, backupReceiptSha256: f.release.backup.sha256,
+    parityReceiptSha256: f.release.parity.sha256, backupAt: checkpoint.capturedAt, validUntil: f.release.validUntil };
+  f.setValidatedFence(projection); return { ...f, projection, fence };
+}
+
+test('native two-phase activation records the original admission and independently verified full closure without a fake stopped time', async t => {
+  const f = await twoPhaseFixture(t), result = await f.run('activate-native');
+  assert.equal(result.status, 'native-activated');
+  const active = f.authority();
+  assert.equal(active.fence.mode, 'reporting-database-capability-v2'); assert.deepEqual(active.fence.sourceFence, f.projection);
+  assert.equal(active.fence.stoppedAt, undefined); assert.equal(active.fence.sourceFence.admissionBlockedAt, f.fence.admissionBlockedAt);
+  assert.equal(active.fence.sourceFence.dataWritesBlockedAt, f.fence.dataWritesBlockedAt);
+  assert.equal(f.entries[1].pm2_env.status, 'stopped');
+});
+
+test('two-phase activation fails before switching settings when its verified origin projection is absent or mismatched', async t => {
+  for (const reason of ['missing', 'admission', 'closure', 'phase1', 'phase2', 'release', 'checkpoint']) await t.test(reason, async t => {
+    const f = await twoPhaseFixture(t), projection = structuredClone(f.projection);
+    if (reason === 'missing') f.setValidatedFence(undefined);
+    else {
+      const field = { admission: 'admissionBlockedAt', closure: 'dataWritesBlockedAt', phase1: 'phase1ReceiptSha256',
+        phase2: 'phase2ReceiptSha256', release: 'sourceReleaseSha256', checkpoint: 'checkpointSha256' }[reason];
+      projection[field] = field.endsWith('At') ? new Date(Date.parse(projection[field]) + 1).toISOString() : 'f'.repeat(64);
+      f.setValidatedFence(projection);
+    }
+    await assert.rejects(f.run('activate-native'));
+    assert.equal(f.authority().status, 'staging'); assert.deepEqual(await fs.readFile(f.envFile), f.before);
+  });
+});
+
+test('two-phase source-fence origin drift during complete parity cannot activate authority', async t => {
+  const f = await twoPhaseFixture(t), verifyParity = f.adapters.verifyParity;
+  f.adapters.verifyParity = async () => { const result = await verifyParity();
+    f.setValidatedFence({ ...f.projection, phase2SQLSha256: 'f'.repeat(64) }); return result; };
+  await assert.rejects(f.run('activate-native'));
+  assert.equal(f.authority().status, 'staging'); assert.deepEqual(await fs.readFile(f.envFile), f.before);
+});
+
+test('two-phase activation requires the fixed received audit aliases even when an alternate private path has identical bytes', async t => {
+  const f = await twoPhaseFixture(t), original = path.join(f.folder, 'capability-audit.private.json');
+  await fs.copyFile(original, path.join(f.folder, 'other-private-audit.private.json'));
+  f.fence.capabilityAudit.path = 'other-private-audit.private.json';
+  const bytes = json(f.fence); await fs.writeFile(path.join(f.folder, 'source-fence.private.json'), bytes, { mode: 0o600 });
+  f.release.sourceFence.sha256 = hash(bytes); await f.refreshSourceRelease();
+  Object.assign(f.projection, { sourceFenceSha256: hash(bytes), sourceReleaseSha256: f.template.sourceReleaseSha256 });
+  f.setValidatedFence(f.projection);
+  await assert.rejects(f.run('activate-native'));
+  assert.equal(f.authority().status, 'staging'); assert.deepEqual(await fs.readFile(f.envFile), f.before);
+});
 
 test('real authority exports require fresh complete parity before settings/API and leave report workers stopped', async t => {
   const f = await fixture(t), result = await f.run('activate-native');
@@ -350,6 +438,58 @@ test('exact active API recovery uses accepted authority time while a first sourc
     const before = f.events.filter(value => value === 'driverAuditDeploy.js:deploy-worker-resume').length;
     await assert.rejects(f.run('start-native'));
     assert.equal(f.events.filter(value => value === 'driverAuditDeploy.js:deploy-worker-resume').length, before);
+    assert.equal(f.authority().status, 'active');
+  });
+});
+
+test('two-phase active API recovery retains its original closure projection while a first source start still needs fresh admission', async t => {
+  const f = await twoPhaseFixture(t); f.failure('api'); await assert.rejects(f.run('activate-native')); f.failure(null);
+  const projection = structuredClone(f.authority().fence.sourceFence), activatedAt = f.authority().activatedAt;
+  await inFuture(2 * 60 * 60_000, async () => {
+    assert.equal((await f.run('activate-native')).status, 'native-activated');
+    assert.deepEqual(f.authority().fence.sourceFence, projection); assert.equal(f.authority().activatedAt, activatedAt);
+    const before = f.events.filter(value => value === 'driverAuditDeploy.js:deploy-worker-resume').length;
+    await assert.rejects(f.run('start-native'));
+    assert.equal(f.events.filter(value => value === 'driverAuditDeploy.js:deploy-worker-resume').length, before);
+  });
+});
+
+test('two-phase active recovery rejects a changed authority origin or preserved parity binding', async t => {
+  for (const reason of ['authority-hash', 'stored-projection', 'fresh-projection', 'parity-proof']) await t.test(reason, async t => {
+    const f = await twoPhaseFixture(t); f.failure('api'); await assert.rejects(f.run('activate-native')); f.failure(null);
+    if (reason === 'authority-hash') f.authority().verifiedSourceFenceSha256 = 'f'.repeat(64);
+    if (reason === 'stored-projection') f.authority().fence.sourceFence.phase2ReceiptSha256 = 'f'.repeat(64);
+    if (reason === 'fresh-projection') f.setValidatedFence({ ...f.projection, phase2SQLSha256: 'f'.repeat(64) });
+    if (reason === 'parity-proof') {
+      const file = path.join(f.folder, 'native-authority-parity.private.json'), proof = JSON.parse(await fs.readFile(file));
+      proof.sourceFenceSha256 = 'f'.repeat(64); delete proof.paritySha256; proof.paritySha256 = hash(JSON.stringify(proof));
+      f.authority().paritySha256 = proof.paritySha256; await fs.writeFile(file, json(proof), { mode: 0o600 });
+    }
+    const restarts = f.events.filter(value => value === 'restart matter-delivery-api --update-env').length;
+    await assert.rejects(f.run('activate-native'));
+    assert.equal(f.events.filter(value => value === 'restart matter-delivery-api --update-env').length, restarts);
+    assert.equal(f.authority().status, 'active');
+  });
+});
+
+test('a stored two-phase binding cannot enter legacy recovery by changing only mode flags', async t => {
+  for (const signal of ['authority-hash', 'proof-hash', 'stored-projection']) await t.test(signal, async t => {
+    const f = await twoPhaseFixture(t); f.failure('api'); await assert.rejects(f.run('activate-native')); f.failure(null);
+    f.authority().fence.mode = 'reporting-database-capability-v1';
+    if (signal !== 'authority-hash') delete f.authority().verifiedSourceFenceSha256;
+    if (signal !== 'stored-projection') delete f.authority().fence.sourceFence;
+    if (signal !== 'proof-hash') {
+      const file = path.join(f.folder, 'native-authority-parity.private.json'), value = JSON.parse(await fs.readFile(file));
+      delete value.sourceFenceSha256; delete value.paritySha256; value.paritySha256 = hash(JSON.stringify(value));
+      f.authority().paritySha256 = value.paritySha256; await fs.writeFile(file, json(value), { mode: 0o600 });
+    }
+    f.fence.mode = 'reporting-database-capability-v1';
+    const raw = json(f.fence); await fs.writeFile(path.join(f.folder, 'source-fence.private.json'), raw, { mode: 0o600 });
+    f.release.sourceFence.sha256 = hash(raw); f.setValidatedFence(undefined); await f.refreshSourceRelease();
+    // The source-origin guard must stand on its own when an interrupted local
+    // recovery has lost its replayable intent file.
+    await fs.unlink(path.join(f.folder, 'native-activation-intent.private.json'));
+    await assert.rejects(f.run('activate-native'));
     assert.equal(f.authority().status, 'active');
   });
 });
