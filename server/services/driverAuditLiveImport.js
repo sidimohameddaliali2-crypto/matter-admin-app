@@ -118,7 +118,10 @@ export async function collectDriverAuditReceiptRoots({ db, documents, syncRoot }
     await requirePrivateDriverAuditSourceDirectory(syncRoot);
     const signatures = new Map();
     async function bytes(relative, optional) {
-      try { return await readPrivateDriverAuditSource(path.join(syncRoot, relative), 1024 * 1024); }
+      // Package inventories use the same bounded contract as qualification;
+      // small control receipts keep their separate one MiB limit.
+      const maxBytes = path.basename(relative) === 'files.private.json' ? 16 * 1024 * 1024 : 1024 * 1024;
+      try { return await readPrivateDriverAuditSource(path.join(syncRoot, relative), maxBytes); }
       catch (error) { if (optional && error.code === 'ENOENT') return null; throw error; }
     }
     async function metadata(relative, optional = false) {
@@ -149,7 +152,8 @@ export async function collectDriverAuditReceiptRoots({ db, documents, syncRoot }
     async function manifest(relative, expected, allowMissing = false) {
       const value = await metadata(relative, true);
       requireRoot(value ? signatures.get(relative) === expected && Object.keys(value).length > 0
-        && Object.entries(value).every(([name, digest]) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,239}$/.test(name)
+        && Object.entries(value).every(([name, digest]) => name.length <= 512
+          && name.split('/').every(component => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(component))
           && hashPattern.test(digest)) : allowMissing, 'Retained workspace manifest is missing or differs');
     }
     async function seedMetadata(relative, mode, bundleRoot) {
