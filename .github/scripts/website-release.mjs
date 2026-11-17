@@ -148,9 +148,11 @@ export async function publishWebsite(appRoot, source, releaseId, { checkPublic }
     const previous = await currentId(root);
     if (!previous) throw Error('Bootstrap the website before publishing.');
     const destination = await storeBuild(root, source, releaseId);
-    if (previous !== releaseId) await point(root, 'previous', previous);
     await point(root, 'current', releaseId);
-    try { if (checkPublic) await checkPublic(destination); }
+    try {
+      if (checkPublic) await checkPublic(destination);
+      if (previous !== releaseId) await point(root, 'previous', previous);
+    }
     catch (error) { await point(root, 'current', previous); throw error; }
     return { releaseId, previous };
   });

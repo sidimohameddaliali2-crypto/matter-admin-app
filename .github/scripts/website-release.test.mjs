@@ -104,3 +104,43 @@ test('Linux publishing preserves the old website until verification and supports
   await assert.rejects(publishWebsite(root, first, id));
   assert.equal(await fs.readlink(current), `releases/${id}`);
 });
+
+test('failed publication preserves the existing rollback target and a first failure creates none', { skip: process.platform !== 'linux' }, async t => {
+  const root = await temporary(t);
+  await fixture(path.join(root, 'client/build'), 'legacy', true);
+  const releaseA = (await bootstrapWebsite(root)).releaseId;
+  const current = path.join(root, '.website/current');
+  const previous = path.join(root, '.website/previous');
+  const releaseB = path.join(root, '.website/incoming/b');
+  const releaseC = path.join(root, '.website/incoming/c');
+  await fixture(releaseB, id);
+  await sealWebsite(releaseB, id);
+  await fixture(releaseC, second);
+  await sealWebsite(releaseC, second);
+
+  await assert.rejects(publishWebsite(root, releaseB, id, {
+    checkPublic: async () => { throw Error('first check failed'); },
+  }), /first check failed/);
+  assert.equal(await fs.readlink(current), `releases/${releaseA}`);
+  await assert.rejects(fs.lstat(previous), { code: 'ENOENT' });
+
+  await publishWebsite(root, releaseB, id);
+  assert.equal(await fs.readlink(previous), `releases/${releaseA}`);
+  await assert.rejects(publishWebsite(root, releaseC, second, {
+    checkPublic: async () => {
+      assert.equal(await fs.readlink(current), `releases/${second}`);
+      assert.equal(await fs.readlink(previous), `releases/${releaseA}`);
+      throw Error('candidate check failed');
+    },
+  }), /candidate check failed/);
+  assert.equal(await fs.readlink(current), `releases/${id}`);
+  assert.equal(await fs.readlink(previous), `releases/${releaseA}`);
+  assert.equal((await rollbackWebsite(root)).releaseId, releaseA);
+  assert.equal(await fs.readlink(current), `releases/${releaseA}`);
+
+  await publishWebsite(root, releaseB, id);
+  await publishWebsite(root, releaseC, second);
+  assert.equal(await fs.readlink(previous), `releases/${id}`);
+  await publishWebsite(root, releaseC, second);
+  assert.equal(await fs.readlink(previous), `releases/${id}`);
+});
