@@ -348,7 +348,7 @@ async function main() {
     'diagnose-roots', 'disable-pruning', 'prepare-native-settings', 'swap-builder-held', 'verify-native-parity',
     'activate-native', 'start-native', 'stage-native-proofs', 'export-native-controls',
     'plan-native-cleanup', 'apply-native-cleanup', 'inspect-database-config',
-    'prepare-object-store', 'externalize-native-archive', 'inspect-supabase-host', 'prepare-supabase-host', 'inspect-supabase-routing',
+    'prepare-object-store', 'externalize-native-archive', 'inspect-supabase-host', 'prepare-supabase-host', 'inspect-supabase-routing', 'inspect-supabase-storage',
     ...Object.keys(supabaseControlOperations), ...Object.keys(supabaseCanaryOperations), ...Object.keys(supabaseReleaseOperations)].includes(operation)) {
     phase = 'native-' + operation;
     const supabaseControl = Object.hasOwn(supabaseControlOperations, operation)
@@ -392,7 +392,7 @@ async function main() {
       }
       return;
     }
-    if (['inspect-supabase-host', 'prepare-supabase-host', 'inspect-supabase-routing'].includes(operation)) {
+    if (['inspect-supabase-host', 'prepare-supabase-host', 'inspect-supabase-routing', 'inspect-supabase-storage'].includes(operation)) {
       const encodedPlan = process.env.NATIVE_TRANSFER_PLAN_B64;
       if (!encodedPlan || encodedPlan.length > 24576 || !/^[A-Za-z0-9+/]+=*$/.test(encodedPlan)) throw Error('Bounded public Supabase recipient required');
       const bytes = Buffer.from(encodedPlan, 'base64');
@@ -400,8 +400,10 @@ async function main() {
       const request = JSON.parse(bytes);
       if (request?.version !== 1 || Object.keys(request).length !== 2 || typeof request.recipientPublicKey !== 'string')
         throw Error('An exact public Supabase recipient is required');
-      if (operation === 'inspect-supabase-routing') {
-        console.log(JSON.stringify(await operator.runDriverAuditSupabaseRouting({ operation, appRoot,
+      if (['inspect-supabase-routing', 'inspect-supabase-storage'].includes(operation)) {
+        const inspect = operation === 'inspect-supabase-storage'
+          ? operator.runDriverAuditSupabaseStorageInspection : operator.runDriverAuditSupabaseRouting;
+        console.log(JSON.stringify(await inspect({ operation, appRoot,
           expectedSha: expected, recipientPublicKey: request.recipientPublicKey })));
         return;
       }

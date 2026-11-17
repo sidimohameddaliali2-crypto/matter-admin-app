@@ -76,6 +76,21 @@ test('the real bridge dispatches all four compressed controls without any databa
   }
 });
 
+test('storage inspection dispatches only its fixed public recipient to the read-only module', async t => {
+  const operation = 'inspect-supabase-storage', input = { version: 1, recipientPublicKey: 'fixture public recipient' };
+  const code = 'export async function runDriverAuditSupabaseStorageInspection(a){'
+    + 'if(a.operation!=="inspect-supabase-storage"||a.recipientPublicKey!=="fixture public recipient"'
+    + '||a.expectedSha!==' + JSON.stringify(commit) + ')throw Error("Wrong inspection dispatch");'
+    + 'return{status:"storage-fixture",readOnly:true,applicationDatabaseConnections:0,networkRequests:0};}';
+  const f = await bridgeFixture(t, code, { operation, input });
+  assert.deepEqual(JSON.parse((await f.run()).stdout), {
+    status: 'storage-fixture', readOnly: true, applicationDatabaseConnections: 0, networkRequests: 0,
+  });
+  await assert.rejects(fs.access(path.join(f.root, 'server/node_modules')), { code: 'ENOENT' });
+  const invalid = await bridgeFixture(t, code, { operation, input: { ...input, path: '/arbitrary' } });
+  await assert.rejects(invalid.run(), error => error.code === 1 && !error.stdout.includes('storage-fixture'));
+});
+
 const canaryOperations = [
   ['probe-supabase-canary', 'probe'], ['plan-supabase-canary', 'plan'], ['enable-supabase-canary', 'enable'],
   ['seal-supabase-canary-entry', 'seal-entry'], ['restore-supabase-canary', 'restore'], ['promote-supabase-report', 'promote'],
