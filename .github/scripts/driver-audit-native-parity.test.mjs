@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createDriverAuditMongoArchive } from '../../server/services/driverAuditMongoArchive.js';
+import { validateDriverAuditSpacesArchiveReference } from '../../server/services/driverAuditSpacesArchive.js';
 import { createDriverAuditMongoTextReader } from '../../server/services/driverAuditMongoText.js';
 import { readDriverAuditImportRows, isDriverAuditTechnicalKey, createDriverAuditReceiptSelection } from '../../server/services/driverAuditLiveImport.js';
 import { originalDriverAuditReceiptSha256 } from '../../server/services/driverAuditOriginalSourceLineage.js';
@@ -31,8 +32,13 @@ async function fixture(t, options = {}) {
   for (const dir of [folder, syncRoot, path.join(server, 'services'), path.join(server, 'scripts')]) {
     await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   }
-  for (const name of ['services/driverAuditMongoArchive.js', 'scripts/driverAuditMongoMigrate.js']) {
-    await fs.writeFile(path.join(server, name), await fs.readFile(new URL('../../server/' + name, import.meta.url)), { mode: 0o600 });
+  for (const name of ['services/driverAuditMongoArchive.js', 'services/driverAuditSpacesArchive.js',
+    'services/driverAuditNativeObjectStore.js', 'scripts/driverAuditMongoMigrate.js']) {
+    const bytes = await fs.readFile(new URL('../../server/' + name, import.meta.url)).catch(error => {
+      if (name === 'services/driverAuditNativeObjectStore.js' && error.code === 'ENOENT') return Buffer.from('// fictional factory code identity\n');
+      throw error;
+    });
+    await fs.writeFile(path.join(server, name), bytes, { mode: 0o600 });
   }
   const tables = new Map(), table = name => { if (!tables.has(name)) tables.set(name, []); return tables.get(name); };
   const match = (row, query) => Object.entries(query).every(([key, value]) => value && typeof value === 'object'
@@ -146,10 +152,31 @@ async function fixture(t, options = {}) {
       pointer: '/payload', encoding: 'text', sha256: hash(largePayload), bytes: largePayload.length, kind: 'gps' }))
       : [{ objectKey: evidence[2].key, pointer: '/files/0/base64', encoding: 'base64',
         sha256: hash(inline), bytes: inline.length, kind: 'gps' }] };
-  const archive = createDriverAuditMongoArchive({ db, client, capacityBytes: profile.capacityBytes });
+  const externalContents = new Map(), objectStoreIdentitySha256 = options.external ? '7'.repeat(64) : undefined;
+  let externalReads = 0;
+  const objectStore = options.external ? { identitySha256: objectStoreIdentitySha256,
+    async assertPrivate() { return { public: false, identitySha256: objectStoreIdentitySha256 }; },
+    async putVerifiedObject() { throw Error('parity must not write external objects'); },
+    async readBytes(ref) { externalReads++; validateDriverAuditSpacesArchiveReference(ref, { identitySha256: objectStoreIdentitySha256 });
+      const value = externalContents.get(ref.key); if (!value) throw Error('fictional original external object absent'); return value; },
+  } : undefined;
+  function externalize(index, alias = false) {
+    const item = evidence[index], row = table('driverAuditNativeFiles').find(row => row._id === item.key);
+    delete row.reference;
+    row.externalReference = { version: 1, provider: 'spaces', identitySha256: objectStoreIdentitySha256,
+      key: alias ? 'photos/fictional/original.jpg' : 'driver-reports/archive/v1/' + item.key,
+      size: item.bytes.length, sha256: hash(item.bytes),
+      ...(alias ? { kind: 'existing-photo-v1', etag: '"original-etag"', versionId: 'original-version' } : {}) };
+    externalContents.set(row.externalReference.key, item.bytes); return row;
+  }
+  if (options.external) {
+    table('driverAuditNativeControl').push({ _id: 'archive-object-store', version: 1, provider: 'spaces', identitySha256: objectStoreIdentitySha256 });
+    externalize(0, true); externalize(1);
+  }
+  const archive = createDriverAuditMongoArchive({ db, client, capacityBytes: profile.capacityBytes, objectStore });
   const args = () => ({ db, archive, profileBytes, profileSha256, closureProofBytes: Buffer.from(JSON.stringify(closure)),
     closureProofSha256: hash(JSON.stringify(closure)), sessionId, implementationIdentities: identities,
-    targetIdentitySha256: '1'.repeat(64),
+    targetIdentitySha256: '1'.repeat(64), objectStoreIdentitySha256, validateExternalReference: validateDriverAuditSpacesArchiveReference,
     readRows: ref => readDriverAuditImportRows(folder, ref), readPinnedJson: async ref => {
       const bytes = await fs.readFile(path.join(folder, ref.file)); assert.equal(hash(bytes), ref.sha256); return JSON.parse(bytes);
     }, readText: createDriverAuditMongoTextReader(archive), readTechnical: async () => { throw Error('unused technical reference'); },
@@ -175,6 +202,8 @@ async function fixture(t, options = {}) {
       if (name === 'loadEnv.js') return {};
       if (name === 'services/driverAuditSource.js') return { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory };
       if (name === 'services/driverAuditMongoArchive.js') return { createDriverAuditMongoArchive };
+      if (name === 'services/driverAuditNativeObjectStore.js') return { createDriverAuditNativeObjectStore: async () => objectStore };
+      if (name === 'services/driverAuditSpacesArchive.js') return { validateDriverAuditSpacesArchiveReference };
       if (name === 'services/driverAuditMongoText.js') return { createDriverAuditMongoTextReader };
       if (name === 'services/driverAuditTechnicalState.js') return { createDriverAuditTechnicalState };
       if (name === 'services/driverAuditLiveImport.js') return { readDriverAuditImportRows, isDriverAuditTechnicalKey, createDriverAuditReceiptSelection,
@@ -196,7 +225,8 @@ async function fixture(t, options = {}) {
   }
   return { args, source, receipts, historical, objects, profile, closure, census, archive, table, reference, textReference,
     appRoot, hostAdapters, state, received, runHost, get closed() { return closed; }, get locked() { return locked; },
-    evidence, folder, setCensus(value) { census = value; }, async run(extra = {}) {
+    evidence, folder, externalContents, externalize, objectStoreIdentitySha256,
+    get externalReads() { return externalReads; }, setCensus(value) { census = value; }, async run(extra = {}) {
       return implementation.verifyDriverAuditNativeParity({ ...args(), ...extra });
     } };
 }
@@ -205,6 +235,91 @@ function dataFileRefs(profile) { return ['documents', 'receipts', 'historical', 
 
 const exportRecipient = generateKeyPairSync('rsa', { modulusLength: 3072 });
 const exportPublicKey = exportRecipient.publicKey.export({ type: 'spki', format: 'pem' });
+
+test('archive implementation identity binds all three ordered source files and rejects partial byte maps', () => {
+  const files = implementation.driverAuditArchiveImplementationFiles;
+  assert.deepEqual(files, ['services/driverAuditMongoArchive.js', 'services/driverAuditSpacesArchive.js', 'services/driverAuditNativeObjectStore.js']);
+  const bytes = Object.fromEntries(files.map((file, index) => [file, Buffer.from('fictional implementation ' + index)]));
+  const expected = hash(JSON.stringify(files.map(file => ({ file, sha256: hash(bytes[file]) }))));
+  assert.equal(implementation.driverAuditArchiveImplementationSha256(bytes), expected);
+  for (const file of files) {
+    assert.notEqual(implementation.driverAuditArchiveImplementationSha256({ ...bytes, [file]: Buffer.from('changed') }), expected);
+    assert.throws(() => implementation.driverAuditArchiveImplementationSha256({ ...bytes, [file]: undefined }));
+  }
+  assert.throws(() => implementation.driverAuditArchiveImplementationSha256({ ...bytes, extra: Buffer.from('unknown') }));
+});
+
+test('hybrid parity reads every legacy, private and original-photo byte while preserving exact original records', async t => {
+  const f = await fixture(t, { external: true }), result = await f.run();
+  assert.equal(result.verified, true); assert.equal(result.archive.objectBytesReadFresh, f.objects.reduce((sum, row) => sum + row.bytes, 0));
+  assert.equal(f.externalReads, 2); assert.equal(result.freshOriginalRecordComparisons, true);
+  const cached = await f.run({ priorArchiveAttestation: result.archiveAttestation });
+  assert.equal(cached.archive.objectBytesReadFresh, 0); assert.equal(f.externalReads, 2);
+});
+
+test('hybrid parity rejects corrupt actual external photo and GPS bytes', async t => {
+  for (const index of [0, 1]) await t.test('original-' + index, async t => {
+    const f = await fixture(t, { external: true }), row = f.table('driverAuditNativeFiles').find(row => row._id === f.evidence[index].key);
+    f.externalContents.set(row.externalReference.key, Buffer.alloc(f.evidence[index].bytes.length, 'x'));
+    await assert.rejects(f.run(), /archive-bytes|differ/);
+  });
+});
+
+test('hybrid metadata rejects mixed references, unknown fields and configured/store identity drift', async t => {
+  for (const reason of ['mixed', 'unknown-row', 'unknown-ref', 'binding-extra', 'binding-drift', 'binding-missing', 'config-drift', 'unconfigured']) await t.test(reason, async t => {
+    const f = await fixture(t, { external: true }), row = f.table('driverAuditNativeFiles').find(row => row.externalReference);
+    const binding = f.table('driverAuditNativeControl').find(row => row._id === 'archive-object-store');
+    if (reason === 'mixed') row.reference = f.reference(f.evidence[0].bytes);
+    if (reason === 'unknown-row') row.unexpected = true;
+    if (reason === 'unknown-ref') row.externalReference.unexpected = true;
+    if (reason === 'binding-extra') binding.extra = true;
+    if (reason === 'binding-drift') binding.identitySha256 = '0'.repeat(64);
+    if (reason === 'binding-missing') f.table('driverAuditNativeControl').splice(f.table('driverAuditNativeControl').indexOf(binding), 1);
+    await assert.rejects(f.run(reason === 'config-drift' ? { objectStoreIdentitySha256: '0'.repeat(64) }
+      : reason === 'unconfigured' ? { objectStoreIdentitySha256: undefined } : {}));
+    assert.equal(f.externalReads, 0);
+  });
+});
+
+test('legacy unknown nested reference metadata is retained as a failed verification', async t => {
+  const f = await fixture(t); f.table('driverAuditNativeFiles')[0].reference.chunks[0].externalReference = { unknown: true };
+  await assert.rejects(f.run(), /archive chunk reference/);
+});
+
+test('moving a Mongo object or an original-photo alias invalidates the previous full-byte attestation', async t => {
+  for (const index of [0, 2]) await t.test('layout-' + index, async t => {
+    const f = await fixture(t, { external: true }), before = await f.run();
+    f.externalize(index);
+    await assert.rejects(f.run({ priorArchiveAttestation: before.archiveAttestation }), /attestation/);
+    assert.equal((await f.run()).verified, true);
+  });
+});
+
+test('original-photo alias key, ETag and version identities each invalidate cached byte reuse', async t => {
+  for (const field of ['key', 'etag', 'versionId']) await t.test(field, async t => {
+    const f = await fixture(t, { external: true }), before = await f.run();
+    const row = f.table('driverAuditNativeFiles').find(row => row.externalReference?.kind === 'existing-photo-v1');
+    row.externalReference[field] = field === 'key' ? 'photos/fictional/other.jpg' : field === 'etag' ? '"changed-etag"' : 'changed-version';
+    await assert.rejects(f.run({ priorArchiveAttestation: before.archiveAttestation }), /attestation/);
+  });
+});
+
+test('changed actual archive implementation prevents cached full-byte reuse', async t => {
+  const f = await fixture(t, { external: true }), before = await f.run();
+  await assert.rejects(f.run({ priorArchiveAttestation: before.archiveAttestation,
+    implementationIdentities: { ...identities, archiveSha256: hash('changed factory bytes') } }), /attestation/);
+});
+
+test('hybrid host wiring uses configured store identity and the actual three-file implementation aggregate', async t => {
+  const f = await fixture(t, { external: true }), first = await f.runHost();
+  assert.equal(first.verified, true); assert.equal(f.externalReads, 2);
+  const sources = Object.fromEntries(await Promise.all(implementation.driverAuditArchiveImplementationFiles.map(async name =>
+    [name, await fs.readFile(path.join(f.appRoot, 'server', name))])));
+  assert.equal(first.archive.archiveImplementationSha256, implementation.driverAuditArchiveImplementationSha256(sources));
+  assert.equal((await f.runHost()).archive.mode, 'reused-full-byte-attestation'); assert.equal(f.externalReads, 2);
+  await fs.appendFile(path.join(f.appRoot, 'server/services/driverAuditNativeObjectStore.js'), '\n// fictional changed deployed factory\n');
+  await assert.rejects(f.runHost(), /complete-parity/); assert.equal(f.externalReads, 2);
+});
 
 test('optional RSA export seals the exact saved parity receipt without changing its bytes or identity', async t => {
   const f = await fixture(t), load = f.hostAdapters.load;
@@ -325,8 +440,9 @@ test('rejects a partial CLI receipt presented as a full byte attestation', async
 });
 
 test('a completed code-pinned CLI scan can attest bytes while records remain freshly compared', async t => {
-  const f = await fixture(t), args = f.args(), before = await implementation.captureNativeDriverAuditArchiveMetadata({
-    db: args.db, objects: f.objects, targetIdentitySha256: args.targetIdentitySha256 });
+  for (const external of [false, true]) await t.test(external ? 'hybrid' : 'legacy', async t => {
+  const f = await fixture(t, { external }), args = f.args(), before = await implementation.captureNativeDriverAuditArchiveMetadata({
+    ...args, objects: f.objects });
   const receipt = { status: 'staged-data-verified', importSha256: args.profileSha256, archiveObjects: 4,
     resultsEqual: true, reportIdentityEqual: true, assessmentHistoryEqual: true,
     collectorRootsSha256: f.census.sha256, activationPending: true, archiveClosurePending: true };
@@ -338,6 +454,7 @@ test('a completed code-pinned CLI scan can attest bytes while records remain fre
   assert.equal(result.freshOriginalRecordComparisons, true);
   f.table('driverAuditNativeReceipts')[0].event_ref = f.textReference('{"changed":true}');
   await assert.rejects(f.run({ priorArchiveAttestation: attestation }));
+  });
 });
 
 test('does not reuse a full scan from another target database identity', async t => {

@@ -10,7 +10,7 @@ import { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory 
 import { runDriverAuditNativeSettings } from './driver-audit-native-settings.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
-const commit = 'a'.repeat(40), sourceManifest = 'e1650c0a521271976629fafc1ad6d6eb0abf39074b5eeaf909f2d93f929f9d9d';
+const commit = 'a'.repeat(40), sourceManifest = '15301337474717828b88997faac92cbc23763b16ed1fc7881fa6bd553696a64b';
 const sessionId = '00000000-0000-4000-8000-000000000007', capacity = 16 * 1024 ** 3;
 
 async function fixture(t) {

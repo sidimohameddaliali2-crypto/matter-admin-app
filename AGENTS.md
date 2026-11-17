@@ -74,9 +74,11 @@ Before changing Driver Reports staff routes/UI, collection/grading/GPS, reviews/
 
 Use [private source maintenance](docs/driver-audits/private-source-maintenance.md) to recover complete code from Sidi's native archives and preserve the actual live fixes; an old local export or a delta is not the maintenance source. Use [complete native parity](docs/driver-audits/native-parity.md) for original results, GPS, photos and reviews, and [historical source retention](docs/driver-audits/historical-source-lineage.md) for an explicitly missing old temporary workspace. Preserve current safety limits and uncertain paid attempts, keep old technical history in backup, and verify the actual authority before choosing a migration-only control.
 
+For hybrid storage, keep transactional report records and reviews in MongoDB, and follow the native file reference into the app's existing Spaces bucket for archive bytes. Reuse an existing photo only after full-byte verification and retention checks; preserve its upload URL and bytes. A native archive allowance does not change the database plan. Keep identical polls in bounded typed progress, with original evidence/generation clocks unchanged. Read the storage and preingest controls in the guides before transferring files or pruning staging.
+
 ## Deployment
 
-Every push to `main` triggers the GitHub Action, which SSHes into the DigitalOcean droplet. There it runs `git reset --hard origin/main`, installs server deps with `npm ci --omit=dev`, runs `npm ci && npm run build` for the client, and restarts PM2 as `matter-delivery-api`. Merging to main means shipping to production, so make sure the client builds before you push.
+When enabled, a push to `main` triggers the GitHub deployment to DigitalOcean. It installs server dependencies, builds/verifies the client through the configured release path, and restarts `matter-delivery-api` using the declared npm invocation. Make sure the client builds before shipping. Check actual workflow state and deployment SHA: the owner can pause Actions, and a merge during that pause does not deploy. Preserve an owner-requested pause; run only a reviewed, needed manual operation and pause it again. Keep automatic deployments paused until their resumption is authorized.
 
 ## Conventions
 

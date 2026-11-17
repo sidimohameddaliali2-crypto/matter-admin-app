@@ -10,13 +10,15 @@ import { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory 
 import { acquireWorkerLock } from '../../server/vendor/driver-audits/integration/hosted/worker-lock.mjs';
 import { withDriverAuditHeavyWork } from '../../server/services/driverAuditHeavyWork.js';
 import { runDriverAuditNativeActivation } from './driver-audit-native-activation.mjs';
+import { driverAuditArchiveImplementationFiles, driverAuditArchiveImplementationSha256 } from './driver-audit-native-parity.mjs';
+import { validateDriverAuditSpacesArchiveReference } from '../../server/services/driverAuditSpacesArchive.js';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const json = value => Buffer.from(JSON.stringify(value, null, 2) + '\n');
-const sourceSha = 'e1650c0a521271976629fafc1ad6d6eb0abf39074b5eeaf909f2d93f929f9d9d';
+const sourceSha = '15301337474717828b88997faac92cbc23763b16ed1fc7881fa6bd553696a64b';
 const commit = 'a'.repeat(40), sessionId = '00000000-0000-4000-8000-000000000009', capacity = 16 * 1024 ** 3;
 
-async function fixture(t) {
+async function fixture(t, { hybrid = false } = {}) {
   const appRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'native-activation-')));
   t.after(() => fs.rm(appRoot, { recursive: true, force: true }));
   const server = path.join(appRoot, 'server'), transferRoot = path.join(server, '.private/driver-audit-native-transfer');
@@ -26,7 +28,8 @@ async function fixture(t) {
   for (const directory of [folder, sourceRoot, cache, operators]) await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   const save = async (name, value) => { const bytes = Buffer.isBuffer(value) ? value : json(value);
     await fs.writeFile(path.join(folder, name), bytes, { mode: 0o600 }); return hash(bytes); };
-  const before = Buffer.from('DRIVER_AUDIT_ENABLED=1\nDRIVER_AUDIT_IMPORT_ENABLED=0\nDRIVER_AUDIT_REPLICA_GC_ENABLED=0\nPRIVATE_SETTING="fictional secret unchanged"\n');
+  const before = Buffer.from('DRIVER_AUDIT_ENABLED=1\nDRIVER_AUDIT_IMPORT_ENABLED=0\nDRIVER_AUDIT_REPLICA_GC_ENABLED=0\nPRIVATE_SETTING="fictional secret unchanged"\n'
+    + (hybrid ? 'DRIVER_AUDIT_NATIVE_OBJECT_STORE=spaces\nDRIVER_AUDIT_NATIVE_PHOTO_CANDIDATES_SHA256=' + '8'.repeat(64) + '\n' : ''));
   const base = Buffer.from('MONGODB_URI=mongodb://fictional.invalid/existing\n');
   const after = Buffer.concat([before, Buffer.from('DRIVER_AUDIT_DATA_STORE=mongo\nDRIVER_AUDIT_NATIVE_CAPACITY_BYTES=' + capacity
     + '\nMATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY=' + cache + '\n')]);
@@ -88,12 +91,18 @@ async function fixture(t) {
     sessionId, targetDatabase: 'existing', inventorySha256: state.inventorySha256, objects: 1, bytes: 100,
     completedAt: new Date(now).toISOString(), inputFiles: [{ name: 'activation-template.private.json', sha256: templateSha256, bytes: json(template).length }] });
   let authority = { status: 'staging', importSha256: profileSha256, writeFence: 7 }, locked = false, failAt, parityValid = true, head = null, validatedFence;
-  const events = [], entries = [{ name: 'matter-delivery-api', pm_id: 1, pm2_env: { status: 'online', pm_cwd: appRoot,
-    pm_exec_path: path.join(server, 'server.js') } }, { name: 'matter-driver-audit-sync', pm_id: 2,
+  const events = [], gitCalls = [], archiveOptions = [];
+  const store = hybrid ? { identitySha256: '9'.repeat(64), async assertPrivate() {
+    events.push('external-private-verified'); return { public: false, identitySha256: this.identitySha256 }; } } : undefined;
+  let storeBinding = store ? { _id: 'archive-object-store', version: 1, provider: 'spaces', identitySha256: store.identitySha256 } : null;
+  const entries = [{ name: 'matter-delivery-api', pm_id: 1, pid: 101, pm2_env: { status: 'online', pm_cwd: appRoot,
+    pm_exec_path: '/usr/bin/npm', args: ['start', '--prefix', 'server'] } }, { name: 'matter-driver-audit-sync', pm_id: 2,
     pm2_env: { status: 'stopped', pm_cwd: server, pm_exec_path: path.join(server, 'scripts/driverAuditSync.js'),
       args: ['--config', path.join(syncRoot, 'sync.json')] } }];
   const db = { databaseName: 'existing', async command() { return { setName: 'fixture', logicalSessionTimeoutMinutes: 30 }; }, collection(name) { return { async findOne(query) {
-    if (name === 'driverAuditNativeControl') return query._id === 'authority' ? structuredClone(authority) : { limitBytes: capacity, usedBytes: 1 };
+    if (name === 'driverAuditNativeControl') return query._id === 'authority' ? structuredClone(authority)
+      : query._id === 'archive-object-store' ? structuredClone(storeBinding)
+        : query._id === 'capacity' ? { limitBytes: capacity, usedBytes: 1 } : null;
     return name === 'driverAuditControl' && query._id === 'head' ? head : null;
   }, async updateOne(query, update) {
     assert.equal(name, 'driverAuditNativeControl');
@@ -106,8 +115,11 @@ async function fixture(t) {
     Object.assign(authority, update.$set); return { matchedCount: 1 };
   } }; } };
   const adapters = { platform: 'linux', env: { MONGODB_URI: 'mongodb://fictional.invalid/existing' },
+    async systemFile(file) { assert.equal(file, '/usr/bin/npm'); return { realpath: '/usr/lib/node_modules/npm/bin/npm-cli.js',
+      isFile: true, uid: 0, mode: 0o100644, bytes: 100, sha256: 'f'.repeat(64) }; },
     async exec(file, args, options) {
-      if (file === 'git') return { stdout: args[0] === 'rev-parse' ? commit + '\n' : '' };
+      if (file === 'git') { gitCalls.push(args); return { stdout: args[0] === 'rev-parse' ? commit + '\n'
+        : args[0] === 'ls-files' ? args.slice(args.indexOf('--') + 1).join('\n') + '\n' : '' }; }
       if (file === 'pm2') {
         if (args[0] === 'jlist') return { stdout: JSON.stringify(entries) };
         events.push(args.join(' '));
@@ -157,17 +169,21 @@ async function fixture(t) {
       } };
       if (name === 'services/driverAuditMongoImport.js') return { verifyDriverAuditMongoAuthority, activateDriverAuditMongoAuthority };
       if (name === 'services/driverAuditLiveImport.js') return { async *readDriverAuditImportRows() { yield* documents; } };
-      if (name === 'services/driverAuditMongoArchive.js') return { createDriverAuditMongoArchive: () => ({}) };
+      if (name === 'services/driverAuditMongoArchive.js') return { createDriverAuditMongoArchive: options => { archiveOptions.push(options); return {}; } };
+      if (name === 'services/driverAuditNativeObjectStore.js') return { async createDriverAuditNativeObjectStore({ env }) {
+        assert.equal(env.DRIVER_AUDIT_NATIVE_OBJECT_STORE, hybrid ? 'spaces' : undefined); return store; } };
+      if (name === 'services/driverAuditSpacesArchive.js') return { validateDriverAuditSpacesArchiveReference };
       if (name === 'services/driverAuditMongoRpc.js') return { createDriverAuditMongoRpc: () => async (_name, args) => documents.find(row => row.key === args.p_key) };
       if (name === 'services/driverAuditDataBackend.js') return { async createDriverAuditDataBackend() { assert.equal(authority.status, 'active');
-        return { kind: 'mongo', archiveCacheDirectory: cache }; } };
+        return { kind: 'mongo', archiveCacheDirectory: cache, objectStoreIdentitySha256: store?.identitySha256 }; } };
       if (name === 'vendor/driver-audits/integration/hosted/worker-lock.mjs') return { async acquireWorkerLock(file) {
         if (file === path.join(transferRoot, 'operator.lock')) { assert(!locked); locked = true; return { async release() { locked = false; } }; }
         return { async release() {} };
       } };
       throw Error('Unexpected activation dependency');
     }, async verifyParity() { events.push('fresh-complete-parity'); return { ...nativeParity, verified: parityValid }; } };
-  return { folder, appRoot, syncRoot, envFile, before, after, events, entries, config, release, template, templateSha256, profileSha256, adapters,
+  return { folder, appRoot, syncRoot, envFile, before, after, events, gitCalls, archiveOptions, store, entries, config, release, template, templateSha256, profileSha256, adapters,
+    setStoreBinding: value => { storeBinding = value; },
     priorParity: nativeParity, async refreshTemplate() {
       templateSha256 = await save('activation-template.private.json', template);
       const receipt = JSON.parse(await fs.readFile(path.join(folder, 'received.private.json')));
@@ -273,6 +289,99 @@ test('real authority exports require fresh complete parity before settings/API a
   assert.deepEqual(await fs.readFile(f.envFile), f.after); assert.equal(f.entries[1].pm2_env.status, 'stopped');
   assert(!f.events.some(value => value.includes('audit-source-start'))); assert.equal(f.locked(), false);
   assert(!JSON.stringify(result).includes('fictional secret'));
+});
+
+test('actual deployment NPM launch and trusted executable are checked before and after activation', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.run('activate-native')).status, 'native-activated');
+  for (const file of ['server/services/driverAuditPollProgress.js', 'server/services/driverAuditSpacesArchive.js',
+    'server/services/driverAuditNativeObjectStore.js', 'server/scripts/driverAuditQualificationChild.js', 'server/package.json']) {
+    assert(f.gitCalls.some(args => args[0] === 'ls-files' && args.includes(file)), 'The actual loaded dependency must be tracked: ' + file);
+    assert(f.gitCalls.some(args => args[0] === 'diff' && args.includes(file)), 'The actual loaded dependency must be clean: ' + file);
+  }
+});
+
+test('unknown NPM arguments, executable drift and untracked new dependencies cannot admit authority', async t => {
+  for (const reason of ['args', 'direct-node', 'writable', 'non-system', 'changed-npm', 'untracked', 'dirty-spaces']) await t.test(reason, async t => {
+    const f = await fixture(t), systemFile = f.adapters.systemFile, exec = f.adapters.exec;
+    if (reason === 'args') f.entries[0].pm2_env.args = ['start'];
+    if (reason === 'direct-node') f.entries[0].pm2_env.pm_exec_path = path.join(f.appRoot, 'server/server.js');
+    if (['writable', 'non-system', 'changed-npm'].includes(reason)) {
+      let reads = 0;
+      f.adapters.systemFile = async file => ({ ...await systemFile(file),
+        ...(reason === 'writable' ? { mode: 0o100666 } : reason === 'non-system' ? { realpath: '/tmp/npm-cli.js' }
+          : ++reads > 1 ? { sha256: 'a'.repeat(64) } : {}) });
+    }
+    if (reason === 'untracked' || reason === 'dirty-spaces') f.adapters.exec = async (file, args, options) => {
+      if (file === 'git' && args[0] === (reason === 'untracked' ? 'ls-files' : 'diff')
+          && args.includes('server/services/driverAuditSpacesArchive.js')) throw Error('Fictional unreviewed dependency');
+      return exec(file, args, options);
+    };
+    await assert.rejects(f.run('activate-native'));
+    assert.equal(f.authority().status, 'staging'); assert.deepEqual(await fs.readFile(f.envFile), f.before);
+    assert(!f.events.includes('fresh-complete-parity'));
+  });
+});
+
+test('hybrid activation passes the exact factory destination and requires fresh private readiness before native selection', async t => {
+  const f = await fixture(t, { hybrid: true });
+  assert.equal((await f.run('activate-native')).status, 'native-activated');
+  assert.equal(f.archiveOptions.length, 1); assert.equal(f.archiveOptions[0].objectStore, f.store);
+  assert(f.events.indexOf('external-private-verified') < f.events.indexOf('authority-parity'));
+  for (const reason of ['missing-binding', 'binding', 'privacy', 'identity-drift']) await t.test(reason, async t => {
+    const g = await fixture(t, { hybrid: true });
+    if (reason === 'missing-binding') g.setStoreBinding(null);
+    if (reason === 'binding') g.setStoreBinding({ _id: 'archive-object-store', version: 1, provider: 'spaces', identitySha256: 'a'.repeat(64) });
+    if (reason === 'privacy') g.store.assertPrivate = async () => ({ public: true, identitySha256: g.store.identitySha256 });
+    if (reason === 'identity-drift') g.store.assertPrivate = async () => {
+      g.store.identitySha256 = 'a'.repeat(64); return { public: false, identitySha256: g.store.identitySha256 }; };
+    await assert.rejects(g.run('activate-native'));
+    assert.equal(g.authority().status, 'staging'); assert.deepEqual(await fs.readFile(g.envFile), g.before);
+  });
+});
+
+test('online API requires a live PID while an exact stopped launch may be deliberately restarted', async t => {
+  const invalid = await fixture(t); invalid.entries[0].pid = 0;
+  await assert.rejects(invalid.run('activate-native')); assert.equal(invalid.authority().status, 'staging');
+  const stopped = await fixture(t), exec = stopped.adapters.exec;
+  stopped.entries[0].pid = 0; stopped.entries[0].pm2_env.status = 'stopped';
+  stopped.adapters.exec = async (file, args, options) => {
+    const result = await exec(file, args, options);
+    if (file === 'pm2' && args[0] === 'restart') { stopped.entries[0].pid = 102; stopped.entries[0].pm2_env.status = 'online'; }
+    return result;
+  };
+  assert.equal((await stopped.run('activate-native')).status, 'native-activated');
+});
+
+test('hybrid binding or NPM code drift during fresh parity cannot switch authority', async t => {
+  for (const reason of ['binding', 'npm']) await t.test(reason, async t => {
+    const f = await fixture(t, { hybrid: true }), verify = f.adapters.verifyParity, systemFile = f.adapters.systemFile;
+    f.adapters.verifyParity = async () => {
+      const value = await verify();
+      if (reason === 'binding') f.setStoreBinding({ _id: 'archive-object-store', version: 1, provider: 'spaces', identitySha256: 'a'.repeat(64) });
+      else f.adapters.systemFile = async file => ({ ...await systemFile(file), sha256: 'a'.repeat(64) });
+      return value;
+    };
+    await assert.rejects(f.run('activate-native')); assert.equal(f.authority().status, 'staging');
+    assert.deepEqual(await fs.readFile(f.envFile), f.before);
+  });
+});
+
+test('a mismatched selected backend or a changed post-restart NPM retains active authority and held report workers', async t => {
+  for (const reason of ['backend', 'npm']) await t.test(reason, async t => {
+    const f = await fixture(t, { hybrid: true }), load = f.adapters.load, execute = f.adapters.exec, systemFile = f.adapters.systemFile;
+    if (reason === 'backend') f.adapters.load = async name => name === 'services/driverAuditDataBackend.js'
+      ? { async createDriverAuditDataBackend(args) { const value = await (await load(name)).createDriverAuditDataBackend(args);
+        return { ...value, objectStoreIdentitySha256: 'a'.repeat(64) }; } } : load(name);
+    else f.adapters.exec = async (file, args, options) => {
+      const value = await execute(file, args, options);
+      if (file === 'pm2' && args[0] === 'restart') f.adapters.systemFile = async file => ({ ...await systemFile(file), sha256: 'a'.repeat(64) });
+      return value;
+    };
+    await assert.rejects(f.run('activate-native')); assert.equal(f.authority().status, 'active');
+    assert.deepEqual(await fs.readFile(f.envFile), f.after); assert.equal(f.entries[1].pm2_env.status, 'stopped');
+    assert(!f.events.some(value => value.includes('audit-source-start')));
+  });
 });
 
 test('startup uses existing sync/source controls only after committed native authority and preserves it on failure', async t => {
@@ -388,8 +497,18 @@ test('staging head drift blocks activation, while a retry retains a newer report
   assert.equal(f.authority().status, 'active'); assert.deepEqual(await fs.readFile(f.envFile), f.after);
 });
 
-test('the default path loads the hash-pinned host verifier module and wires fresh native comparison dependencies', async t => {
-  const f = await fixture(t), module = Buffer.from(`
+async function defaultParityFixture(t, { hybrid = false, incompleteImplementation = false } = {}) {
+  const f = await fixture(t, { hybrid });
+  const byteMap = Object.fromEntries(driverAuditArchiveImplementationFiles.map(file => [file, Buffer.from('fictional implementation: ' + file)]));
+  const aggregate = driverAuditArchiveImplementationSha256(byteMap);
+  const module = Buffer.from(`
+    import { createHash } from 'node:crypto';
+    export const driverAuditArchiveImplementationFiles = ${JSON.stringify(incompleteImplementation
+      ? driverAuditArchiveImplementationFiles.slice(0, 1) : driverAuditArchiveImplementationFiles)};
+    export function driverAuditArchiveImplementationSha256(bytes) {
+      return createHash('sha256').update(JSON.stringify(driverAuditArchiveImplementationFiles.map(file => ({file,
+        sha256:createHash('sha256').update(bytes[file]).digest('hex')})))).digest('hex');
+    }
     export function nativeDriverAuditTargetIdentity(uri, database) {
       if (!uri.startsWith('mongodb://') || database !== 'existing') throw Error('wrong target');
       return '${'7'.repeat(64)}';
@@ -397,17 +516,18 @@ test('the default path loads the hash-pinned host verifier module and wires fres
     export async function verifyDriverAuditNativeParity(args) {
       const rows = await Array.fromAsync(args.readRows(JSON.parse(args.profileBytes).documents));
       if (rows.length !== 2 || typeof args.readText !== 'function' || typeof args.collectCensus !== 'function'
-        || typeof args.readArchiveAttestation !== 'function' || !/^[a-f0-9]{64}$/.test(args.implementationIdentities.archiveSha256)
-        || args.targetIdentitySha256 !== '${'7'.repeat(64)}') throw Error('missing fresh native dependency');
+        || typeof args.readArchiveAttestation !== 'function' || args.implementationIdentities.archiveSha256 !== '${aggregate}'
+        || args.targetIdentitySha256 !== '${'7'.repeat(64)}' || typeof args.validateExternalReference !== 'function'
+        || args.objectStoreIdentitySha256 !== ${JSON.stringify(f.store?.identitySha256) || 'undefined'}) throw Error('missing fresh native dependency');
       return ${JSON.stringify(f.priorParity)};
     }
   `);
   delete f.adapters.verifyParity;
   f.template.parityVerifierSha256 = hash(module);
   await fs.writeFile(path.join(f.appRoot, 'server/.private/driver-audit-native-operators', hash(module) + '.mjs'), module, { mode: 0o600 });
-  for (const file of ['services/driverAuditMongoArchive.js', 'scripts/driverAuditMongoMigrate.js']) {
+  for (const file of [...driverAuditArchiveImplementationFiles, 'scripts/driverAuditMongoMigrate.js']) {
     await fs.mkdir(path.dirname(path.join(f.appRoot, 'server', file)), { recursive: true, mode: 0o700 });
-    await fs.writeFile(path.join(f.appRoot, 'server', file), 'fictional app implementation identity', { mode: 0o600 });
+    await fs.writeFile(path.join(f.appRoot, 'server', file), byteMap[file] || 'fictional migration CLI identity', { mode: 0o600 });
   }
   await f.refreshTemplate();
   const load = f.adapters.load;
@@ -418,8 +538,24 @@ test('the default path loads the hash-pinned host verifier module and wires fres
       collectDriverAuditReceiptRoots: async () => { throw Error('the public parity fixture only checks the callback contract'); } };
     return load(name);
   };
-  assert.equal((await f.run('activate-native')).status, 'native-activated');
-  assert.equal(f.authority().status, 'active');
+  return f;
+}
+
+test('the default verifier binds all three actual archive implementations, official external validator and selected object store', async t => {
+  for (const hybrid of [false, true]) await t.test(hybrid ? 'hybrid' : 'legacy Mongo', async t => {
+    const f = await defaultParityFixture(t, { hybrid });
+    assert.equal((await f.run('activate-native')).status, 'native-activated');
+    assert.equal(f.authority().status, 'active');
+  });
+});
+
+test('an omitted archive reader or changed Spaces implementation cannot reuse complete parity', async t => {
+  for (const reason of ['omitted-reader', 'changed-spaces']) await t.test(reason, async t => {
+    const f = await defaultParityFixture(t, { hybrid: true, incompleteImplementation: reason === 'omitted-reader' });
+    if (reason === 'changed-spaces') await fs.appendFile(path.join(f.appRoot, 'server/services/driverAuditSpacesArchive.js'), '\nchanged');
+    await assert.rejects(f.run('activate-native'));
+    assert.equal(f.authority().status, 'staging'); assert.deepEqual(await fs.readFile(f.envFile), f.before);
+  });
 });
 
 async function inFuture(milliseconds, operation) {

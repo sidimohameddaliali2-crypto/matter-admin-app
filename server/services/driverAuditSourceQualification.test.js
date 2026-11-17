@@ -303,6 +303,17 @@ test('start accepts only a complete exact Linux host qualification receipt', asy
     sourceAfterBuilder: { ...complete.sourceAfterBuilder, executionAdmission: 'fixed-host-v1', executionLedgersPreserved: true,
       nativeManagedArchiveCache: true } };
   assert.deepEqual(await verifyNative(await save(native)), native);
+  const verifyProgress = reference => verifyDriverAuditSourceHostQualification({
+    config: { ...nativeConfig, runtime: { files: [{ path: 'source/integration/cloud/native-poll-progress.mjs' }] } },
+    commit, reference, builder, nodeExecutable, nodeVersion, nodeArgs });
+  await assert.rejects(verifyProgress(await save(native)), /polling progress/i);
+  const progress = { ...native,
+    source: { ...native.source, nativeNoChangeDuplicateFree: true, outputObjects: 0, failureKind: 'progress' },
+    sourceAfterBuilder: { ...native.sourceAfterBuilder, nativeNoChangeDuplicateFree: true, outputObjects: 0, failureKind: null } };
+  assert.deepEqual(await verifyProgress(await save(progress)), progress);
+  for (const changes of [{ nativeNoChangeDuplicateFree: false }, { outputObjects: 1 }, { failureKind: 'publication' }]) {
+    await assert.rejects(verifyProgress(await save({ ...progress, source: { ...progress.source, ...changes } })), /polling progress/i);
+  }
   await save(complete);
 
   const cacheRoot = path.join(root, 'archive-cache');
@@ -337,7 +348,7 @@ test('start accepts only a complete exact Linux host qualification receipt', asy
     builder: { ...nativeShared.builder, nativeManagedArchiveCache: false } })), /incomplete|changed/i);
 });
 
-async function replayFixture(t, { network = false, nativeReplay = false } = {}) {
+async function replayFixture(t, { network = false, nativeReplay = false, nativePollProgress = false } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'audit-child-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const work = path.join(root, 'work');
@@ -354,8 +365,8 @@ async function replayFixture(t, { network = false, nativeReplay = false } = {}) 
   const head = { source: { day: '2026-11-15', observedAt: '2026-11-15T17:55:33Z' }, reportHash: 'a'.repeat(64), manifest: { sha256: 'b'.repeat(64) } };
   const stateFile = path.join(work, 'state.json');
   const state = Object.entries({
-    'collector-state': { head, lastCapture: { runId: 'example' } },
-    'capture:example': { runId: 'example', ref: { key } },
+    'collector-state': { head, lastCapture: { runId: 'stream-123' } },
+    'capture:stream-123': { runId: 'stream-123', ref: { key } },
     'worker-budget': {},
   }).map(([key, body]) => ({ key, revision: 1, body: JSON.stringify(body) }));
   await fs.writeFile(stateFile, JSON.stringify({ rows: state }));
@@ -368,6 +379,7 @@ async function replayFixture(t, { network = false, nativeReplay = false } = {}) 
   await fs.writeFile(path.join(app, 'collector.mjs'), [
     'import assert from "node:assert/strict";',
     'import fs from "node:fs/promises";',
+    'import {createHash,randomUUID} from "node:crypto";',
     'let called = false;',
     'export default async function (request, response) {',
     '  assert.equal(process.env.QUALIFICATION_PROTECTED_VALUE, undefined);',
@@ -389,13 +401,34 @@ async function replayFixture(t, { network = false, nativeReplay = false } = {}) 
     ].join('\n') : '  assert.equal(process.env.DRIVER_AUDIT_DATA_STORE, undefined);',
     '  await assert.rejects(fs.readFile(' + JSON.stringify(outside) + '), { code:"ERR_ACCESS_DENIED" });',
     network ? '  try { await fetch("https://source.invalid/"); } catch {}' : '',
+    nativePollProgress ? [
+      '  if(!called){',
+      '    const backend=globalThis[Symbol.for("matter.driver-audit.native-backend")],key="native-progress:delivery";',
+      '    assert.equal((await backend.rpc("matter_hosted_state_read",{p_key:"collector-state"})).body_text,' +
+        JSON.stringify(state.find(row => row.key === 'collector-state').body) + ');',
+      '    const hash=x=>createHash("sha256").update(x).digest("hex"),ownerId=randomUUID();',
+      '    const lease={ownerId,...await backend.rpc("matter_hosted_lease_acquire",{p_owner:ownerId,p_ttl:240})};',
+      '    const value=await backend.pollProgress.read({key});',
+      '    const body=JSON.stringify({version:1,kind:"native-delivery-poll-progress",schedule:{pending:[]},photoCursor:0,',
+      '      photoSourceHalt:null,lastPoll:null,lastSuccessfulPollAt:null,lastDataChangeAt:null});',
+      '    const bodySha256=hash(body),expectedRevision=value.revision;',
+      '    try{await backend.pollProgress.compareAndSwap({key,lease,expectedRevision,body,',
+      '      eventId:"progress-"+hash(JSON.stringify([key,expectedRevision,bodySha256])),',
+      '      event:JSON.stringify({kind:"native-poll-progress",key,phase:"settled",bodySha256}),',
+      '      request:JSON.stringify({key,expectedRevision,bodySha256})});}',
+      '    catch(error){await backend.rpc("matter_hosted_lease_release",{p_owner:ownerId,p_token:lease.token});',
+      '      response.end(JSON.stringify({status:"needs-inspection",failed:1}));return;}',
+      '    await backend.rpc("matter_hosted_lease_release",{p_owner:ownerId,p_token:lease.token});',
+      '  }',
+    ].join('\n') : '',
     '  response.end(JSON.stringify(called ? {status:"not-due"} : {status:"complete",collected:1,failed:0}));',
     '  called = true;',
     '}',
   ].join('\n'));
   const entrypoint = { module: 'source/collector.mjs', method: 'GET', path: '/api/collector?task=delivery', schedule: '* * * * *' };
   const inputFile = path.join(work, 'input.private.json');
-  await fs.writeFile(inputFile, JSON.stringify({ root: work, runtimeRoot, entrypoint, stateFile, objectsRoot, expected, nativeReplay }));
+  await fs.writeFile(inputFile, JSON.stringify({ root: work, runtimeRoot, entrypoint, stateFile, objectsRoot, expected, nativeReplay,
+    nativePollProgress, failPublication: nativePollProgress }));
   return { mode: 'source', root: work, inputFile, executable: process.execPath, args: ['--max-old-space-size=3072'],
     readRoots: [runtimeRoot], timeoutMs: 5000 };
 }
@@ -427,6 +460,18 @@ test('native qualification uses fixed host admission and preserved saved ledgers
     assert.equal(receipt.status, 'verified');
     assert.equal(receipt.executionAdmission, 'fixed-host-v1');
     assert.equal(receipt.executionLedgersPreserved, true);
+    assert.equal(receipt.networkAttempts, 0);
+  } finally { await child.stop(); }
+});
+
+test('native qualification tests failed progress retry while unchanged evidence emits no new objects', async t => {
+  const child = runDriverAuditQualificationChild(await replayFixture(t, { nativeReplay: true, nativePollProgress: true }));
+  try {
+    const receipt = await child.result;
+    assert.equal(receipt.status, 'verified');
+    assert.equal(receipt.outputObjects, 0);
+    assert.equal(receipt.nativeNoChangeDuplicateFree, true);
+    assert.equal(receipt.failureKind, 'progress');
     assert.equal(receipt.networkAttempts, 0);
   } finally { await child.stop(); }
 });

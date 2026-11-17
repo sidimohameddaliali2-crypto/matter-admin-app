@@ -13,8 +13,10 @@ import { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory,
 import { stageDriverAuditSource } from '../../server/scripts/driverAuditSourceStage.js';
 import { readDriverAuditImportRows } from '../../server/services/driverAuditLiveImport.js';
 import { verifyAuditBuilder } from '../../server/vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
+import { createDriverAuditNativeObjectStore } from '../../server/services/driverAuditNativeObjectStore.js';
+import { validateDriverAuditSpacesArchiveReference } from '../../server/services/driverAuditSpacesArchive.js';
 import { captureNativeDriverAuditArchiveMetadata, createDriverAuditNativeCliByteAttestation,
-  nativeDriverAuditTargetIdentity } from './driver-audit-native-parity.mjs';
+  nativeDriverAuditTargetIdentity, driverAuditArchiveImplementationSha256 } from './driver-audit-native-parity.mjs';
 import { runDriverAuditNativeImport, NATIVE_IMPORT_FILES, NATIVE_IMPORT_SOURCE_MANIFEST,
   NATIVE_IMPORT_CAPACITY_BYTES, NATIVE_BUILDER_TO } from './driver-audit-native-import.mjs';
 
@@ -32,6 +34,8 @@ async function fixture(t) {
   for (const [original, target] of [
     ['./driver-audit-native-parity.mjs', path.join(appRoot, '.github/scripts/driver-audit-native-parity.mjs')],
     ['../../server/services/driverAuditMongoArchive.js', path.join(server, 'services/driverAuditMongoArchive.js')],
+    ['../../server/services/driverAuditSpacesArchive.js', path.join(server, 'services/driverAuditSpacesArchive.js')],
+    ['../../server/services/driverAuditNativeObjectStore.js', path.join(server, 'services/driverAuditNativeObjectStore.js')],
     ['../../server/scripts/driverAuditMongoMigrate.js', path.join(server, 'scripts/driverAuditMongoMigrate.js')],
   ]) {
     await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
@@ -79,10 +83,10 @@ async function fixture(t) {
   const nativeChunks = [{ _id: hash(nativeObject), size: nativeObject.length }];
   const db = { databaseName: targetDatabase, collection: name => ({
     findOne: async query => name === 'driverAuditNativeControl'
-      ? query._id === 'authority' ? authority : { limitBytes: NATIVE_IMPORT_CAPACITY_BYTES, usedBytes: 0 } : stage,
+      ? query._id === 'authority' ? authority : query._id === 'capacity' ? { limitBytes: NATIVE_IMPORT_CAPACITY_BYTES, usedBytes: 0 } : null : stage,
     find(query, options) {
       assert(['driverAuditNativeFiles', 'driverAuditNativeChunks'].includes(name));
-      assert.equal(options.projection.bytes, undefined);
+      assert.equal(options?.projection?.bytes, undefined);
       return { toArray: async () => (name === 'driverAuditNativeFiles' ? nativeFiles : nativeChunks)
         .filter(row => query._id.$in.includes(row._id)) };
     },
@@ -110,6 +114,8 @@ async function fixture(t) {
     async load(name) {
       if (name === 'loadEnv.js') return {};
       if (name === 'services/driverAuditTransferCodec.js') return { sealTransferSecrets };
+      if (name === 'services/driverAuditNativeObjectStore.js') return { createDriverAuditNativeObjectStore };
+      if (name === 'services/driverAuditSpacesArchive.js') return { validateDriverAuditSpacesArchiveReference };
       if (name === 'scripts/driverAuditSourceStage.js') return { stageDriverAuditSource };
       if (name === 'services/driverAuditMongoArchive.js') return { createDriverAuditMongoArchive({ capacityBytes }) {
         assert.equal(capacityBytes, NATIVE_IMPORT_CAPACITY_BYTES);
@@ -274,7 +280,9 @@ test('a current CLI verification preserves an independently valid earlier-profil
     const root = path.dirname(f.folder), filename = (await fs.readdir(root)).find(name => name.startsWith('archive-bytes-'));
     const file = path.join(root, filename), initial = JSON.parse(await fs.readFile(file));
     const implementationIdentities = { verifierSha256: hash(await fs.readFile(path.join(f.appRoot, '.github/scripts/driver-audit-native-parity.mjs'))),
-      archiveSha256: hash(await fs.readFile(path.join(f.appRoot, 'server/services/driverAuditMongoArchive.js'))),
+      archiveSha256: driverAuditArchiveImplementationSha256(Object.fromEntries(await Promise.all([
+        'services/driverAuditMongoArchive.js', 'services/driverAuditSpacesArchive.js', 'services/driverAuditNativeObjectStore.js',
+      ].map(async file => [file, await fs.readFile(path.join(f.appRoot, 'server', file))])))),
       migrationCliSha256: hash(await fs.readFile(path.join(f.appRoot, 'server/scripts/driverAuditMongoMigrate.js'))) };
     let prior;
     if (method === 'earlier-profile') {
@@ -530,7 +538,7 @@ test('orphan probes are capped at eight and never follow an invalid reference pa
 async function sourceStageFixture(t) {
   const f = await fixture(t), files = [];
   const paths = ['source/api/collector.mjs', 'source/integration/hosted/native-backend.mjs',
-    'source/integration/hosted/archive-read-cache.mjs', ...Array.from({ length: 131 }, (_, i) => 'source/fixture-' + i + '.mjs')];
+    'source/integration/hosted/archive-read-cache.mjs', ...Array.from({ length: 133 }, (_, i) => 'source/fixture-' + i + '.mjs')];
   const manifest = { schemaVersion: 1, files: paths.map(file => {
     const bytes = Buffer.from('export const fictional = true;\n'); files.push({ path: file, dataBase64: bytes.toString('base64') });
     return { path: file, bytes: bytes.length, sha256: hash(bytes) };
@@ -554,7 +562,7 @@ async function sourceStageFixture(t) {
     await f.save('received.private.json', f.receipt); await f.save('session.private.json', f.state);
     return { compressed, environmentBytes, sha256: hash(compressed) };
   };
-  f.adapters.sourcePins = { manifest: manifestSha256, files: 134 };
+  f.adapters.sourcePins = { manifest: manifestSha256, files: 136 };
   const runSource = async () => f.run('stage-source', { templateSha256: (await refresh()).sha256 });
   return { ...f, bundle, environment, refresh, runSource, target: path.join(f.appRoot, 'server/.private/driver-audit-source', manifestSha256) };
 }
@@ -563,7 +571,7 @@ test('source staging verifies exact code/runtime, retains credentials privately 
   const f = await sourceStageFixture(t);
   await fs.unlink(path.join(f.folder, 'profile-template.private.json'));
   const result = await f.runSource();
-  assert.equal(result.status, 'source-staged'); assert.equal(result.files, 134);
+  assert.equal(result.status, 'source-staged'); assert.equal(result.files, 136);
   assert.equal(result.authorityChanged, false); assert.equal(result.activationPending, true);
   const record = JSON.parse(await fs.readFile(path.join(f.target, 'stage.private.json')));
   assert.equal(record.bundleSha256, result.bundleSha256);

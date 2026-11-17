@@ -6,7 +6,7 @@ import { promisify, isDeepStrictEqual } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const execute = promisify(execFile), hash = value => createHash('sha256').update(value).digest('hex');
-const sourceManifest = 'e1650c0a521271976629fafc1ad6d6eb0abf39074b5eeaf909f2d93f929f9d9d';
+const sourceManifest = '15301337474717828b88997faac92cbc23763b16ed1fc7881fa6bd553696a64b';
 const capacityBytes = 16 * 1024 ** 3;
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const integer = value => Number.isSafeInteger(value) && value >= 0;
@@ -16,6 +16,46 @@ const check = (value, message) => { if (!value) throw Object.assign(Error(messag
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
 const twoPhaseAuthorityBinding = value => value?.fence?.mode === 'reporting-database-capability-v2'
   || Object.hasOwn(value || {}, 'verifiedSourceFenceSha256') || Object.hasOwn(value?.fence || {}, 'sourceFence');
+const archiveImplementationFiles = ['services/driverAuditMongoArchive.js', 'services/driverAuditSpacesArchive.js',
+  'services/driverAuditNativeObjectStore.js'];
+const trackedDependencies = ['loadEnv.js', 'server.js', 'package.json', 'package-lock.json',
+  'services/driverAuditMongoImport.js', 'services/driverAuditMongoRpc.js', 'services/driverAuditSource.js',
+  'services/driverAuditLiveImport.js', 'services/driverAuditOriginalSourceLineage.js', 'services/driverAuditMongoText.js',
+  'services/driverAuditTechnicalState.js', 'services/driverAuditDataBackend.js', 'services/driverAuditPollProgress.js',
+  'services/driverAuditFixedHostBudget.js', 'services/driverAuditReadCache.js', 'services/driverAuditReviewContexts.js',
+  'services/driverAuditHeavyWork.js', ...archiveImplementationFiles, 'scripts/driverAuditSourceDeploy.js',
+  'scripts/driverAuditSourceQualify.js', 'scripts/driverAuditQualificationChild.js', 'scripts/driverAuditSourceStage.js',
+  'scripts/driverAuditSource.js', 'scripts/driverAuditSync.js', 'scripts/driverAuditDeploy.js', 'scripts/driverAuditMongoMigrate.js']
+  .map(file => 'server/' + file);
+
+async function systemFileIdentity(file) {
+  const realpath = await fs.realpath(file), before = await fs.lstat(realpath);
+  check(before.isFile() && before.uid === 0 && !(before.mode & 0o022) && before.size > 0 && before.size <= 64 * 1024,
+    'The managed system executable differs');
+  const handle = await fs.open(realpath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const opened = await handle.stat();
+    check(opened.isFile() && opened.dev === before.dev && opened.ino === before.ino && opened.size === before.size
+      && opened.uid === before.uid && opened.mode === before.mode, 'The system executable changed while opening');
+    const bytes = await handle.readFile(), final = await handle.stat();
+    check(bytes.length === opened.size && final.isFile() && final.dev === opened.dev && final.ino === opened.ino
+      && final.size === opened.size && final.uid === opened.uid && final.mode === opened.mode
+      && await fs.realpath(file) === realpath, 'The system executable changed while reading');
+    return { realpath, isFile: true, uid: opened.uid, mode: opened.mode, bytes: opened.size, sha256: hash(bytes) };
+  } finally { await handle.close(); }
+}
+
+async function apiLaunchIdentity(api, appRoot, systemFile) {
+  const settings = api?.pm2_env, npm = await systemFile('/usr/bin/npm');
+  check(integer(api?.pm_id) && settings?.pm_cwd === appRoot && same(settings.args, ['start', '--prefix', 'server'])
+    && ['online', 'stopped', 'errored'].includes(settings.status) && integer(api.pid)
+    && (settings.status === 'online' ? api.pid > 0 : api.pid === 0)
+    && npm?.isFile === true && npm.uid === 0 && !(npm.mode & 0o022) && integer(npm.bytes) && npm.bytes > 0
+    && npm.bytes <= 64 * 1024 && digest(npm.sha256)
+    && /^\/usr\/(?:share\/nodejs|(?:local\/)?lib\/node_modules)\/npm\/bin\/npm-cli\.js$/.test(npm.realpath || '')
+    && ['/usr/bin/npm', npm.realpath].includes(settings.pm_exec_path), 'The exact trusted NPM application launch is required');
+  return hash(JSON.stringify([api.pm_id, settings.pm_cwd, settings.pm_exec_path, settings.args, npm.realpath, npm.sha256]));
+}
 
 async function templateProvenance({ read, privateDirectory, folder, transferRoot, sessionId, profileSha256, targetDatabase,
   received, templateBytes, templateSha256, inputPins, externalPins }) {
@@ -128,13 +168,8 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
       check((adapters.platform || process.platform) === 'linux' && /^[a-f0-9]{40}$/.test(expectedSha || '')
         && (await exec('git', ['rev-parse', 'HEAD'], { cwd: appRoot, timeout: 5000, maxBuffer: 4096 })).stdout.trim() === expectedSha,
       'The exact reviewed Linux checkout is required');
-      await exec('git', ['diff', '--quiet', expectedSha, '--', 'server/services/driverAuditMongoImport.js',
-        'server/services/driverAuditMongoRpc.js', 'server/services/driverAuditSource.js', 'server/services/driverAuditLiveImport.js',
-        'server/services/driverAuditOriginalSourceLineage.js', 'server/services/driverAuditMongoText.js',
-        'server/services/driverAuditTechnicalState.js',
-        'server/services/driverAuditMongoArchive.js', 'server/services/driverAuditDataBackend.js',
-        'server/scripts/driverAuditSourceDeploy.js', 'server/scripts/driverAuditSourceQualify.js',
-        'server/scripts/driverAuditDeploy.js'], { cwd: appRoot, timeout: 5000, maxBuffer: 4096 });
+      await exec('git', ['ls-files', '--error-unmatch', '--', ...trackedDependencies], { cwd: appRoot, timeout: 5000, maxBuffer: 16 * 1024 });
+      await exec('git', ['diff', '--quiet', expectedSha, '--', 'server', ...trackedDependencies], { cwd: appRoot, timeout: 5000, maxBuffer: 4096 });
     };
     await checkout(); const server = path.join(appRoot, 'server');
     const load = adapters.load || (name => import(pathToFileURL(path.join(server, name)).href));
@@ -224,6 +259,12 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
     const hello = await db.command({ hello: 1 });
     check((hello.setName || hello.msg === 'isdbgrid') && Number.isFinite(hello.logicalSessionTimeoutMinutes),
       'The existing target must support MongoDB transactions');
+    const { createDriverAuditNativeObjectStore } = await load('services/driverAuditNativeObjectStore.js');
+    const objectStore = await createDriverAuditNativeObjectStore({ env: nativeEnv });
+    const objectStoreIdentitySha256 = objectStore?.identitySha256;
+    check((nativeEnv.DRIVER_AUDIT_NATIVE_OBJECT_STORE || 'mongo') === 'spaces'
+      ? digest(objectStoreIdentitySha256) && typeof objectStore.assertPrivate === 'function'
+      : objectStore === undefined, 'The configured native archive object store differs');
     const authority = () => db.collection('driverAuditNativeControl').findOne({ _id: 'authority' });
     const proofFile = path.join(folder, 'native-authority-parity.private.json');
     const activeProof = async active => {
@@ -245,7 +286,7 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
       return proof;
     };
     const readProcesses = async () => JSON.parse((await exec('pm2', ['jlist'], { timeout: 5000, maxBuffer: 8 * 1024 * 1024 })).stdout);
-    let admittedHeadSha256, admittedPointerSha256;
+    let admittedHeadSha256, admittedPointerSha256, admittedApiLaunchSha256, admittedStoreBindingSha256;
     const safety = async ({ stopped = true, apiOnline = operation === 'start-native' } = {}) => {
       await checkout();
       for (const [name, pin] of inputPins) check(hash(await read(path.join(folder, name), pin.maximum)) === pin.expected, 'An activation input changed');
@@ -256,7 +297,7 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
       const entries = await readProcesses(); check(Array.isArray(entries), 'The process inventory differs');
       const api = entries.filter(row => row.name === 'matter-delivery-api'), sync = entries.filter(row => row.name === 'matter-driver-audit-sync');
       const source = entries.filter(row => row.name === 'matter-driver-audit-source');
-      check(api.length === 1 && api[0].pm2_env?.pm_cwd === appRoot && api[0].pm2_env?.pm_exec_path === path.join(server, 'server.js')
+      check(api.length === 1
         && sync.length === 1 && sync[0].pm2_env?.pm_cwd === server
         && sync[0].pm2_env?.pm_exec_path === path.join(server, 'scripts/driverAuditSync.js')
         && same(sync[0].pm2_env?.args, ['--config', path.join(syncRoot, 'sync.json')])
@@ -267,12 +308,23 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
           : sync[0].pm2_env.status === 'online' && source.length === 1 && source[0].pm2_env.status === 'online')
         && (!apiOnline || api[0].pm2_env.status === 'online'),
       'The exact managed report workers must remain stopped');
-      const [head, directStage, allowance] = await Promise.all([
+      const apiIdentity = await apiLaunchIdentity(api[0], appRoot, adapters.systemFile || systemFileIdentity);
+      check(!admittedApiLaunchSha256 || apiIdentity === admittedApiLaunchSha256, 'The managed application launch changed');
+      admittedApiLaunchSha256 = apiIdentity;
+      const [head, directStage, allowance, storeBinding] = await Promise.all([
         db.collection('driverAuditControl').findOne({ _id: 'head' }), db.collection('driverAuditControl').findOne({ _id: 'direct-stage' }),
         db.collection('driverAuditNativeControl').findOne({ _id: 'capacity' }),
+        db.collection('driverAuditNativeControl').findOne({ _id: 'archive-object-store' }),
       ]);
       check(!directStage && allowance?.limitBytes === capacityBytes && integer(allowance.usedBytes) && allowance.usedBytes <= capacityBytes,
         'A direct stage or native allowance changed');
+      check(objectStore?.identitySha256 === objectStoreIdentitySha256
+        && (objectStore ? storeBinding && same(Object.keys(storeBinding).sort(), ['_id', 'identitySha256', 'provider', 'version'])
+          && storeBinding.version === 1 && storeBinding.provider === 'spaces'
+          && storeBinding.identitySha256 === objectStoreIdentitySha256 : !storeBinding), 'The bound native archive object store changed');
+      const storeBindingSha256 = hash(JSON.stringify(storeBinding));
+      check(!admittedStoreBindingSha256 || storeBindingSha256 === admittedStoreBindingSha256, 'The native archive destination binding changed');
+      admittedStoreBindingSha256 = storeBindingSha256;
       if (stopped) {
         let pointer = null;
         try { pointer = await read(path.join(syncRoot, 'work/current.private.json'), 1024 * 1024); }
@@ -423,15 +475,22 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
       heldLocks.push(await acquireWorkerLock(file));
     }
     await safety();
+    if (objectStore) {
+      const privacy = await objectStore.assertPrivate();
+      check(privacy?.public === false && privacy.identitySha256 === objectStoreIdentitySha256,
+        'Fresh private archive access is required');
+      await safety();
+    }
     const intent = { version: 1, sessionId, applicationCommit: expectedSha, profileSha256, templateSha256,
-      settingsPlanSha256: template.settingsPlanSha256, sourceConfigSha256: config.configSha256, afterSha256: settings.afterSha256 };
+      settingsPlanSha256: template.settingsPlanSha256, sourceConfigSha256: config.configSha256, afterSha256: settings.afterSha256,
+      apiLaunchIdentitySha256: admittedApiLaunchSha256, objectStoreIdentitySha256: objectStoreIdentitySha256 ?? null };
     await savePrivate(path.join(folder, 'native-activation-intent.private.json'), json(intent), read);
     const started = await authority();
     if (operation === 'activate-native' && started?.status === 'staging') {
       check(started.importSha256 === profileSha256 && started.writeFence === settings.authority?.writeFence,
         'The native staged authority changed after settings preparation');
       const { createDriverAuditMongoArchive } = await load('services/driverAuditMongoArchive.js');
-      const archive = createDriverAuditMongoArchive({ db, client, capacityBytes });
+      const archive = createDriverAuditMongoArchive({ db, client, capacityBytes, objectStore });
       const { createDriverAuditMongoRpc } = await load('services/driverAuditMongoRpc.js');
       const rpc = createDriverAuditMongoRpc({ db, client, objects: archive });
       const { verifyDriverAuditMongoAuthority } = await load('services/driverAuditMongoImport.js');
@@ -443,7 +502,11 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
         else {
           const verifierFile = path.join(server, '.private/driver-audit-native-operators', template.parityVerifierSha256 + '.mjs');
           check(hash(await read(verifierFile, 256 * 1024)) === template.parityVerifierSha256, 'The reviewed parity verifier code differs');
-          const { verifyDriverAuditNativeParity, nativeDriverAuditTargetIdentity } = await import(pathToFileURL(verifierFile).href);
+          const { verifyDriverAuditNativeParity, nativeDriverAuditTargetIdentity,
+            driverAuditArchiveImplementationFiles, driverAuditArchiveImplementationSha256 } = await import(pathToFileURL(verifierFile).href);
+          check(same(driverAuditArchiveImplementationFiles, archiveImplementationFiles)
+            && typeof driverAuditArchiveImplementationSha256 === 'function', 'The complete native archive implementation identity is required');
+          const { validateDriverAuditSpacesArchiveReference } = await load('services/driverAuditSpacesArchive.js');
           const { createDriverAuditMongoTextReader } = await load('services/driverAuditMongoText.js');
           const { createDriverAuditTechnicalState } = await load('services/driverAuditTechnicalState.js');
           const { collectDriverAuditReceiptRoots, isDriverAuditTechnicalKey } = await load('services/driverAuditLiveImport.js');
@@ -451,9 +514,11 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
           fresh = await verifyDriverAuditNativeParity({ db, archive, profileBytes, profileSha256, closureProofBytes: closureBytes,
             closureProofSha256: template.closureProofSha256, sessionId,
             implementationIdentities: { verifierSha256: template.parityVerifierSha256,
-              archiveSha256: hash(await fs.readFile(path.join(server, 'services/driverAuditMongoArchive.js'))),
+              archiveSha256: driverAuditArchiveImplementationSha256(Object.fromEntries(await Promise.all(
+                driverAuditArchiveImplementationFiles.map(async file => [file, await fs.readFile(path.join(server, file))])))),
               migrationCliSha256: hash(await fs.readFile(path.join(server, 'scripts/driverAuditMongoMigrate.js'))) },
             targetIdentitySha256: nativeDriverAuditTargetIdentity(nativeEnv.MONGODB_URI, db.databaseName),
+            objectStoreIdentitySha256, validateExternalReference: validateDriverAuditSpacesArchiveReference,
             readRows: ref => readDriverAuditImportRows(folder, ref),
             readPinnedJson: async ref => JSON.parse(await pinned(ref.file, ref.sha256)),
             readText: createDriverAuditMongoTextReader(archive), readTechnical: ref => technical.read(ref), isTechnicalKey: isDriverAuditTechnicalKey,
@@ -492,7 +557,8 @@ export async function runDriverAuditNativeActivation({ operation, sessionId, pro
       check((await read(localFile, 1024 * 1024)).equals(after), 'Native settings did not read back exactly');
       const { createDriverAuditDataBackend } = await load('services/driverAuditDataBackend.js');
       const backend = await createDriverAuditDataBackend({ db, env: nativeEnv });
-      check(backend.kind === 'mongo' && backend.archiveCacheDirectory === cache, 'The selected native backend differs');
+      check(backend.kind === 'mongo' && backend.archiveCacheDirectory === cache
+        && backend.objectStoreIdentitySha256 === objectStoreIdentitySha256, 'The selected native backend differs');
       phase = 'api-restart';
       await exec('pm2', ['restart', 'matter-delivery-api'], { timeout: 360_000, maxBuffer: 1024 * 1024 });
       await runScript('customerServiceDeploy.js', '--verify'); await safety({ apiOnline: true });

@@ -122,7 +122,7 @@ test('invalid capacities, policies, clocks and reservation sizes cannot open an 
 test('only the native data backend supplies fixed host execution admission', async () => {
   const legacy = await createDriverAuditDataBackend({ env: { MATTER_SUPABASE_SECRET: 'fictional-secret' } });
   assert.equal(legacy.createExecutionBudget, undefined);
-  const collection = { async createIndex() {}, async updateOne() {} };
+  const collection = { async createIndex() {}, async updateOne() {}, async findOne() { return null; } };
   const db = { collection: () => collection, admin: () => ({ command: async () => ({ setName: 'fixture', logicalSessionTimeoutMinutes: 30 }) }),
     client: { startSession: () => ({ withTransaction: operation => operation(), async endSession() {} }) } };
   const native = await createDriverAuditDataBackend({ db, staging: true,

@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const exec = promisify(execFile), sha = bytes => createHash('sha256').update(bytes).digest('hex');
-const sourceManifest = 'e1650c0a521271976629fafc1ad6d6eb0abf39074b5eeaf909f2d93f929f9d9d';
+const sourceManifest = '15301337474717828b88997faac92cbc23763b16ed1fc7881fa6bd553696a64b';
 const capacityBytes = 16 * 1024 ** 3;
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const integer = value => Number.isSafeInteger(value) && value >= 0;

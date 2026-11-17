@@ -15,11 +15,14 @@ const transactionOptions = {
 // This archive owns its evidence independently of the disposable serving replica.
 // Every reference names immutable bytes. A caller transaction can atomically
 // commit a new state pointer and its new chunks together.
-export function createDriverAuditMongoArchive({ db, client, capacityBytes }) {
+export function createDriverAuditMongoArchive({ db, client, capacityBytes, objectStore }) {
   if (!db?.collection || !client?.startSession || !Number.isSafeInteger(capacityBytes)
       || capacityBytes < 1 || capacityBytes > 60_000_000_000) {
     throw Error('An explicit native reporting storage allowance is required');
   }
+  if (objectStore && (!hashPattern.test(objectStore.identitySha256)
+      || typeof objectStore.putVerifiedObject !== 'function' || typeof objectStore.readBytes !== 'function'
+      || typeof objectStore.assertPrivate !== 'function')) throw Error('Native external archive configuration is invalid');
   const chunks = db.collection('driverAuditNativeChunks');
   const files = db.collection('driverAuditNativeFiles');
   const control = db.collection('driverAuditNativeControl');
@@ -116,21 +119,108 @@ export function createDriverAuditMongoArchive({ db, client, capacityBytes }) {
     return transaction(current => storeBytes(bytes, current), session);
   }
 
+  async function externalReference(reference, options = {}) {
+    if (!objectStore) throw Error('Native external archive object store is required');
+    const { validateDriverAuditSpacesArchiveReference } = await import('./driverAuditSpacesArchive.js');
+    return validateDriverAuditSpacesArchiveReference(reference, { identitySha256: objectStore.identitySha256, ...options });
+  }
+
+  async function objectStoreIdentity(session, create = false) {
+    if (!objectStore) throw Error('Native external archive object store is required');
+    const saved = await control.findOne({ _id: 'archive-object-store' }, { session });
+    if (!saved && create) {
+      await control.insertOne({ _id: 'archive-object-store', version: 1, provider: 'spaces',
+        identitySha256: objectStore.identitySha256 }, { session });
+      return;
+    }
+    if (!saved || Object.keys(saved).length !== 4 || saved.version !== 1 || saved.provider !== 'spaces'
+        || saved.identitySha256 !== objectStore.identitySha256) throw Error('Native archive object store identity differs');
+  }
+
+  async function readFile(saved, key, { maxBytes, signal, session } = {}) {
+    if (Object.hasOwn(saved, 'externalReference')) {
+      if (Object.hasOwn(saved, 'reference')) throw Error('Native archive object reference is ambiguous');
+      if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > maximumBytes) {
+        throw Error('Native archive reference exceeds its size limit');
+      }
+      const checked = await externalReference(saved.externalReference, { key });
+      if (checked.size > maxBytes) throw Error('Native archive reference exceeds its size limit');
+      await objectStoreIdentity(session);
+      // This path is only called outside canonical state transactions. Protected
+      // state/history still use the unchanged Mongo chunk readBytes protocol.
+      if (session) throw Error('External archive reads cannot enter a Mongo transaction');
+      const bytes = await objectStore.readBytes(checked, { maxBytes: Math.min(maxBytes, 16 * 1024 * 1024), signal });
+      if (!Buffer.isBuffer(bytes) || bytes.length !== checked.size || digest(bytes) !== checked.sha256) {
+        throw Error('Native external archive object integrity failure');
+      }
+      return bytes;
+    }
+    return readBytes(saved.reference, { maxBytes, session });
+  }
+
   async function readObject(key, { maxBytes = 16 * 1024 * 1024, signal } = {}) {
     if (!keyPattern.test(key)) throw Error('Invalid native archive object key');
     signal?.throwIfAborted();
     const saved = await files.findOne({ _id: key });
     if (!saved) throw Object.assign(Error('Native archive object unavailable'), { code: 'storage_not_found' });
-    const bytes = await readBytes(saved.reference, { maxBytes });
+    const bytes = await readFile(saved, key, { maxBytes, signal });
     if (digest(bytes) !== key.slice(0, 64)) throw Error('Native archive object integrity failure');
     signal?.throwIfAborted();
     return [bytes];
   }
 
-  async function putVerifiedObject(key, bytes) {
+  async function putVerifiedObject(key, bytes, { signal } = {}) {
     if (!keyPattern.test(key) || !Buffer.isBuffer(bytes) || !bytes.length
         || bytes.length > 16 * 1024 * 1024 || digest(bytes) !== key.slice(0, 64)) {
       throw Error('Native archive object binding is invalid');
+    }
+    signal?.throwIfAborted();
+    if (objectStore) {
+      const body = Buffer.from(bytes), existing = await files.findOne({ _id: key });
+      if (existing) {
+        const saved = await readFile(existing, key, { maxBytes: body.length, signal });
+        if (!saved.equals(body)) throw Error('Native archive object integrity failure');
+        signal?.throwIfAborted();
+        return { key, sha256: digest(body), bytes: body.length, verified: true };
+      }
+      // Pin the owned destination before any external I/O. Upload/readback is
+      // deliberately outside the metadata transaction and cannot publish state.
+      await transaction(async session => {
+        await objectStoreIdentity(session, true);
+        await allowance(session);
+      });
+      signal?.throwIfAborted();
+      const returned = await objectStore.putVerifiedObject(key, body, { signal });
+      if (!Object.isFrozen(returned)) throw Error('Native external archive reference must be frozen');
+      const reference = await externalReference(returned, { key, bytes: body.length });
+      signal?.throwIfAborted();
+      await transaction(async session => {
+        signal?.throwIfAborted();
+        await objectStoreIdentity(session);
+        await allowance(session);
+        const prior = await files.findOne({ _id: key }, { session });
+        if (prior) {
+          if (Object.hasOwn(prior, 'externalReference')) {
+            if (Object.hasOwn(prior, 'reference')) throw Error('Native archive object reference is ambiguous');
+            const checked = await externalReference(prior.externalReference, { key, bytes: body.length });
+            if (JSON.stringify(checked) !== JSON.stringify(reference)) throw Error('Native external archive reference differs');
+          } else {
+            const saved = await readBytes(prior.reference, { maxBytes: body.length, session });
+            if (!saved.equals(body)) throw Error('Native archive object integrity failure');
+          }
+          return;
+        }
+        const chargedBytes = body.length + 1024;
+        const allocation = await control.updateOne({ _id: 'capacity', limitBytes: capacityBytes,
+          usedBytes: { $lte: capacityBytes - chargedBytes },
+        }, { $inc: { usedBytes: chargedBytes } }, { session });
+        if (!allocation.matchedCount) {
+          throw Object.assign(Error('Native reporting storage allowance exhausted'), { code: 'AUDIT_CAPACITY' });
+        }
+        await files.insertOne({ _id: key, externalReference: reference }, { session });
+        signal?.throwIfAborted();
+      });
+      return { key, sha256: digest(body), bytes: body.length, verified: true };
     }
     await transaction(async session => {
       const existing = await files.findOne({ _id: key }, { session });
@@ -149,6 +239,9 @@ export function createDriverAuditMongoArchive({ db, client, capacityBytes }) {
 
   return {
     putBytes, readBytes, readObject, putVerifiedObject,
+    ...(typeof objectStore?.offerSourcePhotoCandidate === 'function' ? {
+      offerExistingPhotoCandidate: args => objectStore.offerSourcePhotoCandidate(args),
+    } : {}),
     async reserveTechnicalBytes(bytes, { session }) {
       if (!session?.inTransaction() || !Number.isSafeInteger(bytes) || bytes < 1) throw Error('Invalid native recovery allocation');
       await allowance(session);
@@ -166,7 +259,14 @@ export function createDriverAuditMongoArchive({ db, client, capacityBytes }) {
       }, { $inc: { usedBytes: -bytes, technicalBytes: -bytes } }, { session });
       if (!changed.matchedCount) throw Error('Native recovery allocation differs');
     },
-    async assertPrivate() { return { bucket: 'matter-report-archive', public: false }; },
+    async assertPrivate(options) {
+      if (!objectStore) return { bucket: 'matter-report-archive', public: false };
+      const proof = await objectStore.assertPrivate(options);
+      if (proof?.public !== false || proof.identitySha256 !== objectStore.identitySha256) {
+        throw Error('Native external archive privacy proof differs');
+      }
+      return proof;
+    },
     async status() {
       const saved = await control.findOne({ _id: 'capacity' });
       return { limitBytes: capacityBytes, usedBytes: saved?.usedBytes ?? 0 };

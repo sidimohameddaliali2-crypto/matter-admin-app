@@ -7,12 +7,46 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const NATIVE_BUILDER_FROM = '5780bdb95450558e4cc7dba91b3ed593fdd0b149648a6602b7c5ed441dec84c3';
 export const NATIVE_BUILDER_TO = '76790677571490ea75f63c8954ac0c798311b80458b45bf1ccbf54f00ae0701d';
-const sourceManifest = 'e1650c0a521271976629fafc1ad6d6eb0abf39074b5eeaf909f2d93f929f9d9d';
+const sourceManifest = '15301337474717828b88997faac92cbc23763b16ed1fc7881fa6bd553696a64b';
 const capacityBytes = 16 * 1024 ** 3, exec = promisify(execFile);
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const integer = value => Number.isSafeInteger(value) && value >= 0;
 const check = (condition, message) => { if (!condition) throw Object.assign(Error(message), { builderGuard: true }); };
+const trackedDependencies = ['loadEnv.js', 'server.js', 'package.json', 'package-lock.json',
+  'services/driverAuditSource.js', 'services/driverAuditLiveImport.js', 'services/driverAuditOriginalSourceLineage.js',
+  'services/driverAuditBuilderTransition.js', 'services/driverAuditDataBackend.js', 'services/driverAuditMongoArchive.js',
+  'services/driverAuditSpacesArchive.js', 'services/driverAuditNativeObjectStore.js', 'services/driverAuditMongoRpc.js',
+  'services/driverAuditPollProgress.js', 'scripts/checkDriverAuditBuilder.js',
+  'vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs', 'vendor/driver-audits/integration/hosted/worker-lock.mjs']
+  .map(file => 'server/' + file);
+
+async function systemFileIdentity(file) {
+  const realpath = await fs.realpath(file), before = await fs.lstat(realpath);
+  check(before.isFile() && before.uid === 0 && !(before.mode & 0o022) && before.size > 0 && before.size <= 64 * 1024,
+    'The managed system executable differs');
+  const handle = await fs.open(realpath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    const opened = await handle.stat();
+    check(opened.isFile() && opened.dev === before.dev && opened.ino === before.ino && opened.size === before.size
+      && opened.uid === before.uid && opened.mode === before.mode, 'The system executable changed while opening');
+    const bytes = await handle.readFile(), final = await handle.stat();
+    check(bytes.length === opened.size && final.isFile() && final.dev === opened.dev && final.ino === opened.ino
+      && final.size === opened.size && final.uid === opened.uid && final.mode === opened.mode
+      && await fs.realpath(file) === realpath, 'The system executable changed while reading');
+    return { realpath, isFile: true, uid: opened.uid, mode: opened.mode, bytes: opened.size, sha256: hash(bytes) };
+  } finally { await handle.close(); }
+}
+
+async function apiLaunchIdentity(api, appRoot, systemFile) {
+  const settings = api?.pm2_env, npm = await systemFile('/usr/bin/npm');
+  check(integer(api?.pm_id) && settings?.pm_cwd === appRoot && isDeepStrictEqual(settings.args, ['start', '--prefix', 'server'])
+    && npm?.isFile === true && npm.uid === 0 && !(npm.mode & 0o022) && integer(npm.bytes) && npm.bytes > 0
+    && npm.bytes <= 64 * 1024 && digest(npm.sha256)
+    && /^\/usr\/(?:share\/nodejs|(?:local\/)?lib\/node_modules)\/npm\/bin\/npm-cli\.js$/.test(npm.realpath || '')
+    && ['/usr/bin/npm', npm.realpath].includes(settings.pm_exec_path), 'The exact trusted NPM application launch is required');
+  return hash(JSON.stringify([api.pm_id, settings.pm_cwd, settings.pm_exec_path, settings.args, npm.realpath, npm.sha256]));
+}
 
 async function environmentBytes(file, optional = false) {
   const stat = await fs.lstat(file).catch(error => { if (optional && error.code === 'ENOENT') return null; throw error; });
@@ -78,11 +112,8 @@ export async function runDriverAuditNativeBuilder({ operation, sessionId, profil
       check((adapters.platform || process.platform) === 'linux' && /^[a-f0-9]{40}$/.test(expectedSha || '')
         && (await execute('git', ['rev-parse', 'HEAD'], { cwd: appRoot, timeout: 5000, maxBuffer: 4096 })).stdout.trim() === expectedSha,
       'The exact reviewed Linux checkout is required');
-      await execute('git', ['diff', '--quiet', expectedSha, '--', 'server/services/driverAuditSource.js',
-        'server/services/driverAuditLiveImport.js', 'server/services/driverAuditOriginalSourceLineage.js',
-        'server/services/driverAuditBuilderTransition.js', 'server/scripts/checkDriverAuditBuilder.js',
-        'server/vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs',
-        'server/vendor/driver-audits/integration/hosted/worker-lock.mjs'], { cwd: appRoot, timeout: 5000, maxBuffer: 4096 });
+      await execute('git', ['ls-files', '--error-unmatch', '--', ...trackedDependencies], { cwd: appRoot, timeout: 5000, maxBuffer: 16 * 1024 });
+      await execute('git', ['diff', '--quiet', expectedSha, '--', 'server', ...trackedDependencies], { cwd: appRoot, timeout: 5000, maxBuffer: 4096 });
     };
     await checkout();
     const server = path.join(appRoot, 'server');
@@ -147,6 +178,7 @@ export async function runDriverAuditNativeBuilder({ operation, sessionId, profil
     const optional = async (file, maximum = 1024 * 1024) => {
       try { return await read(file, maximum); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
     };
+    let admittedApiLaunchSha256;
     const capture = async () => {
       await checkout();
       check((await read(profileFile, 1024 * 1024)).equals(profileBytes)
@@ -159,13 +191,15 @@ export async function runDriverAuditNativeBuilder({ operation, sessionId, profil
       const api = entries.filter(row => row.name === 'matter-delivery-api'), sync = entries.filter(row => row.name === 'matter-driver-audit-sync');
       const source = entries.filter(row => row.name === 'matter-driver-audit-source');
       check(api.length === 1 && api[0].pm2_env?.status === 'online' && integer(api[0].pm_id)
-        && Number.isSafeInteger(api[0].pid) && api[0].pid > 0 && api[0].pm2_env.pm_cwd === appRoot
-        && api[0].pm2_env.pm_exec_path === path.join(server, 'server.js')
+        && Number.isSafeInteger(api[0].pid) && api[0].pid > 0
         && sync.length === 1 && integer(sync[0].pm_id) && sync[0].pid === 0 && sync[0].pm2_env?.status === 'stopped'
         && sync[0].pm2_env.pm_cwd === server && sync[0].pm2_env.pm_exec_path === path.join(server, 'scripts/driverAuditSync.js')
         && isDeepStrictEqual(sync[0].pm2_env.args, ['--config', configFile]) && source.length <= 1
         && source.every(row => integer(row.pm_id) && row.pid === 0 && row.pm2_env?.status === 'stopped'),
       'The existing app and stopped report registrations are required');
+      const apiIdentity = await apiLaunchIdentity(api[0], appRoot, adapters.systemFile || systemFileIdentity);
+      check(!admittedApiLaunchSha256 || apiIdentity === admittedApiLaunchSha256, 'The managed application launch changed');
+      admittedApiLaunchSha256 = apiIdentity;
       for (const row of source) {
         const value = row.pm2_env, args = value.args, file = args?.[1], parent = typeof file === 'string' ? path.dirname(file) : '';
         check(value.pm_cwd === server && value.pm_exec_path === path.join(server, 'scripts/driverAuditSource.js')
@@ -205,7 +239,8 @@ export async function runDriverAuditNativeBuilder({ operation, sessionId, profil
       check(census.collectorRevisions.includes(seed.collectorRevision)
         && census.roots.some(root => root.kind === 'seed.json' && root.sha256 === hash(seedBytes)), 'The actual bootstrap and census differ');
       const values = await readEnvironment();
-      const baseline = { processesSha256: hash(JSON.stringify(processes)), authoritySha256: hash(JSON.stringify(authority)),
+      const baseline = { processesSha256: hash(JSON.stringify(processes)), apiLaunchIdentitySha256: admittedApiLaunchSha256,
+        authoritySha256: hash(JSON.stringify(authority)),
         capacitySha256: hash(JSON.stringify(capacity)), servingHeadSha256: hash(JSON.stringify(head)),
         workspacePointerSha256: hash(pointer ?? 'null'), seedSha256: hash(seedBytes), baseSha256: values.baseSha256, localSha256: values.localSha256 };
       return { configBytes, config, census, baseline };

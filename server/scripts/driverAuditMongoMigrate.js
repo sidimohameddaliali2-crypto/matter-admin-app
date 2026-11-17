@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import mongoose from 'mongoose';
 import { createDriverAuditMongoArchive } from '../services/driverAuditMongoArchive.js';
+import { validateDriverAuditSpacesArchiveReference } from '../services/driverAuditSpacesArchive.js';
 import { createDriverAuditMongoTextReader } from '../services/driverAuditMongoText.js';
 import { importDriverAuditReviewContexts } from '../services/driverAuditReviewContexts.js';
 import { collectDriverAuditReceiptRoots, createDriverAuditReceiptSelection,
@@ -29,8 +30,7 @@ async function objectFileIndex(db, objectIndex) {
   }
   for (let start = 0; start < objectIndex.length; start += 500) {
     const batch = objectIndex.slice(start, start + 500), wanted = new Set(batch.map(row => row.key));
-    const found = await db.collection('driverAuditNativeFiles').find({ _id: { $in: [...wanted] } },
-      { projection: { _id: 1, reference: 1 } }).toArray();
+    const found = await db.collection('driverAuditNativeFiles').find({ _id: { $in: [...wanted] } }).toArray();
     for (const row of found) {
       if (!wanted.has(row._id) || records.has(row._id)) throw Error('Native archive metadata identities differ');
       records.set(row._id, row);
@@ -39,18 +39,47 @@ async function objectFileIndex(db, objectIndex) {
   return records;
 }
 
+async function objectStoreBinding(db, configuredIdentitySha256) {
+  if (configuredIdentitySha256 !== undefined && !hashPattern.test(configuredIdentitySha256)) throw Error('Invalid configured archive identity');
+  const row = await db.collection('driverAuditNativeControl').findOne({ _id: 'archive-object-store' });
+  if (row && (Object.keys(row).sort().join(',') !== '_id,identitySha256,provider,version'
+      || row.version !== 1 || row.provider !== 'spaces' || !hashPattern.test(row.identitySha256 || '')
+      || row.identitySha256 !== configuredIdentitySha256)) throw Error('Native archive object store identity differs');
+  return row;
+}
+
+function archiveFileReference(saved, row, store) {
+  const external = Object.hasOwn(saved, 'externalReference');
+  if (saved._id !== row.key || Object.keys(saved).sort().join(',') !== (external ? '_id,externalReference' : '_id,reference')) {
+    throw Error('Native archive file metadata is mixed or contains unknown fields');
+  }
+  if (external) {
+    if (!store) throw Error('Native external archive identity is absent');
+    return { external: true, reference: validateDriverAuditSpacesArchiveReference(saved.externalReference,
+      { identitySha256: store.identitySha256, key: row.key, bytes: row.bytes }) };
+  }
+  const ref = saved.reference;
+  if (!ref || Object.keys(ref).sort().join(',') !== 'chunks,sha256,size,version'
+    || ref.version !== 1 || ref.sha256 !== row.key.slice(0, 64) || ref.size !== row.bytes
+    || !Array.isArray(ref.chunks) || ref.chunks.length < 1 || ref.chunks.length > 16
+    || ref.chunks.some(part => !part || Object.keys(part).sort().join(',') !== 'sha256,size')) {
+    throw Error('Native archive object metadata differs');
+  }
+  return { external: false, reference: ref };
+}
+
 // Previously received objects were already hash-read back by the immutable
 // native writer. Staging checks references and chunk presence without another
 // complete payload scan. It cannot mint a byte-verification or activation proof.
-export async function stageDriverAuditMongoArchiveObjects({ db, archive, objectIndex, readOriginal, fileIndex }) {
+export async function stageDriverAuditMongoArchiveObjects({ db, archive, objectIndex, readOriginal, fileIndex, objectStoreIdentitySha256 }) {
   const existing = fileIndex ?? await objectFileIndex(db, objectIndex), parts = new Map(), missing = [];
+  const store = await objectStoreBinding(db, objectStoreIdentitySha256);
   let existingObjects = 0;
   for (const row of objectIndex) {
     const saved = existing.get(row.key);
     if (!saved) { missing.push(row); continue; }
-    const ref = saved.reference;
-    if (ref?.version !== 1 || ref.sha256 !== row.key.slice(0, 64) || ref.size !== row.bytes
-      || !Array.isArray(ref.chunks) || ref.chunks.length < 1 || ref.chunks.length > 16) throw Error('Native archive object metadata differs');
+    const checked = archiveFileReference(saved, row, store), ref = checked.reference;
+    if (checked.external) { existingObjects++; continue; }
     let covered = 0;
     for (const part of ref.chunks) {
       if (!hashPattern.test(part?.sha256 || '') || !Number.isSafeInteger(part.size) || part.size < 1
@@ -122,7 +151,9 @@ async function main() {
     await connection.asPromise();
     const db = connection.db, client = connection.getClient();
     if (db.databaseName !== profile.targetDatabase) throw Error('The native import targets another database');
-    const archive = createDriverAuditMongoArchive({ db, client, capacityBytes: profile.capacityBytes });
+    const { createDriverAuditNativeObjectStore } = await import('../services/driverAuditNativeObjectStore.js');
+    const objectStore = await createDriverAuditNativeObjectStore({ env: process.env });
+    const archive = createDriverAuditMongoArchive({ db, client, capacityBytes: profile.capacityBytes, objectStore });
     const state = createCloudState({ rpc: createDriverAuditMongoRpc({ db, client, objects: archive }) });
     const original = await Array.fromAsync(verifiedRows(root, profile.documents));
     const reference = profile.bookkeepingBackup;
@@ -176,9 +207,10 @@ async function main() {
     let missingBytes = 0;
     let missingObjects = 0;
     const fileIndex = await objectFileIndex(db, objectIndex);
+    const store = await objectStoreBinding(db, objectStore?.identitySha256);
     for (const row of objectIndex) {
       const prior = fileIndex.get(row.key);
-      if (prior && prior.reference?.size !== row.bytes) throw Error('A stored native object size differs');
+      if (prior) archiveFileReference(prior, row, store);
       if (!prior) { missingBytes += row.bytes; missingObjects++; }
     }
     const stored = await archive.status();
@@ -198,7 +230,7 @@ async function main() {
         documents: verifiedRows(root, profile.documents), previousImportSha256: profile.previousImportSha256 });
       const receipts = await importDriverAuditMongoReceipts({ ...args, receipts: selectedReceipts() });
       const historical = await importDriverAuditMongoHistorical({ ...args, records: verifiedRows(root, profile.historical) });
-      const archiveStage = await stageDriverAuditMongoArchiveObjects({ db, archive, objectIndex, fileIndex,
+      const archiveStage = await stageDriverAuditMongoArchiveObjects({ db, archive, objectIndex, fileIndex, objectStoreIdentitySha256: objectStore?.identitySha256,
         readOriginal: row => readPrivateDriverAuditSource(path.join(root, row.key), row.bytes) });
       const reviewContexts = await importDriverAuditReviewContexts({ db, archive, documents: original, importSha256: expected,
         contexts: verifiedRows(root, profile.reviewContexts), dependencies: verifiedRows(root, profile.reviewDependencies) });

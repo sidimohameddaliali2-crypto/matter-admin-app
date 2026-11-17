@@ -17,7 +17,7 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const exact = (value, fields) => object(value) && isDeepStrictEqual(Object.keys(value).sort(), [...fields].sort());
 const check = (condition, message) => { if (!condition) throw Object.assign(Error(message), { supplementGuard: true }); };
 const capacityBytes = 16 * 1024 ** 3, maximumFile = 16 * 1024 * 1024;
-const sourceManifest = 'e1650c0a521271976629fafc1ad6d6eb0abf39074b5eeaf909f2d93f929f9d9d';
+const sourceManifest = '15301337474717828b88997faac92cbc23763b16ed1fc7881fa6bd553696a64b';
 
 function publicRecipient(value) {
   check(typeof value === 'string' && value.length <= 8192 && !value.includes('PRIVATE KEY')
