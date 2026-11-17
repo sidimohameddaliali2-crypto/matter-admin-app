@@ -567,6 +567,62 @@ async function prepareDependencies({ targetServer, packageLockSha256, npmIdentit
       && (await read(receiptFile)).data.equals(bytes)); } };
 }
 
+async function requirePartialRelease({ releaseRoot, appRoot, baseSha, releaseSha, exec }) {
+  await directory(releaseRoot);
+  need(JSON.stringify(await fs.readdir(releaseRoot)) === '[".git"]');
+  const gitRoot = path.join(releaseRoot, '.git'), top = new Set(['HEAD', 'config', 'description', 'hooks', 'info', 'logs', 'objects', 'packed-refs', 'refs', 'branches']);
+  const inventory = async () => {
+    const rows = []; let entries = 0, bytes = 0;
+    const visit = async (folder, prefix = '', depth = 0) => {
+      need(depth <= 32);
+      const before = await fs.lstat(folder, { bigint: true });
+      need(before.isDirectory() && before.uid === BigInt(process.getuid()) && await fs.realpath(folder) === folder
+        && [0o700, 0o755, 0o775].includes(Number(before.mode) & 0o7777));
+      rows.push([prefix, signature(before)]);
+      for (const entry of (await fs.readdir(folder, { withFileTypes: true })).sort((a,b)=>a.name.localeCompare(b.name))) {
+        need(++entries <= 100000 && /^[A-Za-z0-9_.-]+$/.test(entry.name) && entry.name !== '.' && entry.name !== '..'
+          && (prefix || top.has(entry.name)) && (prefix !== 'hooks/' || entry.name.endsWith('.sample'))
+          && (prefix !== 'info/' || ['exclude', 'refs'].includes(entry.name)) && (prefix !== 'refs/' || entry.name !== 'replace'));
+        const name = prefix + entry.name, file = path.join(folder, entry.name), stat = await fs.lstat(file, { bigint: true });
+        need(stat.uid === BigInt(process.getuid()) && await fs.realpath(file) === file);
+        if (entry.isDirectory()) await visit(file, name + '/', depth + 1);
+        else {
+          need(entry.isFile() && stat.isFile() && stat.nlink === 1n && !(Number(stat.mode) & 0o7000)
+            && (bytes += Number(stat.size)) <= 4 * 1024 ** 3);
+          rows.push([name, signature(stat), String(stat.nlink)]);
+        }
+      }
+      need(signature(await fs.lstat(folder, { bigint: true })) === signature(before));
+    };
+    await visit(gitRoot); return rows;
+  };
+  const before = await inventory();
+  const command = args => exec('git', ['-C', releaseRoot, ...args], { maxBuffer: 64 * 1024 });
+  need((await command(['rev-parse', '--absolute-git-dir'])).stdout.trim() === gitRoot
+    && (await command(['rev-parse', '--show-toplevel'])).stdout.trim() === releaseRoot
+    && (await command(['rev-parse', '--is-bare-repository'])).stdout.trim() === 'false'
+    && [baseSha, releaseSha].includes((await command(['rev-parse', 'HEAD'])).stdout.trim()));
+  need((await command(['for-each-ref', '--format=%(refname)'])).stdout.split('\n').filter(Boolean)
+    .every(name => /^refs\/(?:heads\/|remotes\/origin\/|tags\/)[A-Za-z0-9_./-]+$/.test(name)));
+  const config = (await command(['config', '--local', '--no-includes', '--null', '--list'])).stdout.split('\0').filter(Boolean), values = new Map();
+  for (const item of config) {
+    const split = item.indexOf('\n'), key = item.slice(0, split), value = item.slice(split + 1);
+    need(split > 0 && !values.has(key)); values.set(key, value);
+    const exact = { 'core.repositoryformatversion': '0', 'core.bare': 'false', 'core.logallrefupdates': 'true',
+      'remote.origin.url': appRoot, 'remote.origin.fetch': '+refs/heads/*:refs/remotes/origin/*' };
+    need(Object.hasOwn(exact, key) ? value === exact[key]
+      : ['core.filemode', 'core.ignorecase', 'core.precomposeunicode'].includes(key) ? ['true', 'false'].includes(value)
+        : /^branch\.[A-Za-z0-9_./-]+\.remote$/.test(key) ? value === 'origin'
+          : /^branch\.[A-Za-z0-9_./-]+\.merge$/.test(key) && /^refs\/heads\/[A-Za-z0-9_./-]+$/.test(value));
+  }
+  need(values.get('remote.origin.url') === appRoot && values.get('remote.origin.fetch') === '+refs/heads/*:refs/remotes/origin/*'
+    && values.get('core.bare') === 'false' && values.get('core.repositoryformatversion') === '0'
+    && !await read(path.join(gitRoot, 'objects/info/alternates'), { optional: true, privateMode: false })
+    && !await read(path.join(gitRoot, 'objects/info/http-alternates'), { optional: true, privateMode: false })
+    && JSON.stringify(await inventory()) === JSON.stringify(before)
+    && JSON.stringify(await fs.readdir(releaseRoot)) === '[".git"]');
+}
+
 async function secureReleasePackageCopies({ releaseRoot, targetServer, exec, releaseCheck }) {
   await directory(releaseRoot); await releaseCheck();
   await inDirectory(releaseRoot, async anchored => {
@@ -858,20 +914,30 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
   const rootId = sha(JSON.stringify(['driver-reports-supabase-sync-v1', bootstrap.releaseSha, pins.source, pins.builder, pins.baseline, pins.candidate]));
   const releases = path.join(server, '.private/driver-report-app-releases'), releaseRoot = path.join(releases, bootstrap.releaseSha);
   await mkdirPrivate(releases);
+  let freshRelease = false;
   try { await directory(releaseRoot); }
   catch (error) {
     if (error.code !== 'ENOENT') throw error;
-    try { await releaseGit('commit', ['cat-file', '-e', bootstrap.releaseSha + '^{commit}']); }
-    catch {
-      await releaseGit('fetch', ['fetch', '--no-tags', 'origin', bootstrap.releaseSha], 120_000);
-      await releaseGit('fetched-commit', ['cat-file', '-e', bootstrap.releaseSha + '^{commit}']);
-    }
+    await releaseGit('commit', ['cat-file', '-e', bootstrap.releaseSha + '^{commit}']);
     await mkdirPrivate(releaseRoot);
     await releaseGit('clone', ['clone', '--shared', '--dissociate', '--no-checkout', '--', appRoot, releaseRoot], 120_000);
-    await releaseGit('checkout', ['-C', releaseRoot, 'checkout', '--detach', bootstrap.releaseSha], 60_000);
+    freshRelease = true;
     await fs.chmod(releaseRoot, 0o700); await directory(releaseRoot);
   }
   const targetServer = path.join(releaseRoot, 'server');
+  const missingServer = await fs.lstat(targetServer).then(() => false, error => { if (error.code === 'ENOENT') return true; throw error; });
+  if (freshRelease || missingServer) {
+    const partial = () => requirePartialRelease({ releaseRoot, appRoot, baseSha: before.metadata.applicationCommit,
+      releaseSha: bootstrap.releaseSha, exec });
+    if (!freshRelease) { setPhase('release-partial-check'); await partial(); }
+    // A dissociated clone retains advertised refs, not a FETCH_HEAD-only commit.
+    // Fetch that exact object from this already verified LOCAL checkout only.
+    await releaseGit('local-commit', ['cat-file', '-e', bootstrap.releaseSha + '^{commit}']);
+    await releaseGit('local-fetch', ['-C', releaseRoot, 'fetch', '--no-tags', '--no-write-fetch-head', '--no-recurse-submodules',
+      '--no-auto-maintenance', '--', appRoot, bootstrap.releaseSha], 120_000);
+    if (!freshRelease) { setPhase('release-partial-readback'); await partial(); }
+    await releaseGit('checkout', ['-C', releaseRoot, 'checkout', '--detach', bootstrap.releaseSha], 60_000);
+  }
   const releaseCheck = async () => {
     need((await exec('git', ['-C', releaseRoot, 'rev-parse', 'HEAD'])).stdout.trim() === bootstrap.releaseSha);
     need((await exec('git', ['-C', releaseRoot, 'rev-parse', '--show-toplevel'])).stdout.trim() === releaseRoot);
@@ -884,8 +950,20 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
   };
   setPhase('release-readback'); await releaseCheck();
   setPhase('release-permissions'); await secureReleasePackageCopies({ releaseRoot, targetServer, exec, releaseCheck });
-  const originalLock = await read(path.join(server, 'package-lock.json'), { privateMode: false });
-  const targetLock = await read(path.join(targetServer, 'package-lock.json'), { privateMode: false });
+  setPhase('release-original-lock');
+  const originalGit = (args, options) => exec('git', ['-C', appRoot, '--no-replace-objects', ...args], options);
+  const checkOriginalLock = async () => {
+    need((await originalGit(['rev-parse', 'HEAD'])).stdout.trim() === before.metadata.applicationCommit);
+    await originalGit(['ls-files', '--error-unmatch', 'server/package-lock.json']);
+    await originalGit(['diff', '--quiet', '--no-ext-diff', '--no-textconv', 'HEAD', '--', 'server/package-lock.json']);
+  };
+  await checkOriginalLock();
+  const lockBlob = (await originalGit(['show', '--no-ext-diff', '--no-textconv', 'HEAD:server/package-lock.json'],
+    { encoding: 'buffer', maxBuffer: 2 * 1024 ** 2 })).stdout;
+  const originalLockBytes = Buffer.isBuffer(lockBlob) ? lockBlob : Buffer.from(lockBlob, 'utf8');
+  need(originalLockBytes.length > 0 && originalLockBytes.length <= 2 * 1024 ** 2); await checkOriginalLock();
+  const originalLock = { sha256: sha(originalLockBytes) };
+  const targetLock = await read(path.join(targetServer, 'package-lock.json'));
   need(originalLock.sha256 === bootstrap.packageLockSha256 && targetLock.sha256 === originalLock.sha256);
   setPhase('dependencies');
   const dependencies = await prepareDependencies({ targetServer, packageLockSha256: originalLock.sha256,

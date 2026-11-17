@@ -429,7 +429,7 @@ async function preparationFixture(t) {
       const name=args.at(-1);assert(name.startsWith('HEAD:server/'));assert(args.includes('--no-ext-diff')&&args.includes('--no-textconv'));
       return{stdout:await fs.readFile(path.join(args[1],name.slice(5)))};
     }
-    if (file === 'git' && args[0] === '-C') return { stdout: args[2] === 'rev-parse' ? (args[3] === '--show-toplevel' ? args[1] : args[1]===f.appRoot?commit:releaseSha) + '\n' : '' };
+    if (file === 'git' && args[0] === '-C') return { stdout: args.includes('rev-parse') ? (args.includes('--show-toplevel') ? args[1] : args[1]===f.appRoot?commit:releaseSha) + '\n' : '' };
     if (file === '/usr/bin/npm') {
       if (args[0] === 'ci') {
         await f.write(path.join(options.cwd, 'node_modules/fictional-package/index.js'), 'module.exports = "isolated";\n');
@@ -784,8 +784,9 @@ test('the host bridge forwards only the bootstrap hash and recipient before any 
   assert.deepEqual(JSON.parse(result.stdout), { status: 'supabase-host-prepared', workersStarted: false, mongoConnections: 0 });
 });
 
-async function realGitPreparationFixture(t) {
+async function realGitPreparationFixture(t, { originalLockMode = 0o600 } = {}) {
   const f = await preparationFixture(t), execute = promisify(execFile);
+  await fs.chmod(path.join(f.server, 'package-lock.json'), originalLockMode);
   const git = async args => execute('git', args, { cwd: f.appRoot, timeout: 10000, maxBuffer: 1024 * 1024 });
   await f.write(path.join(f.appRoot, '.gitignore'), '/server/.private/\n/server/.env*\n/server/node_modules/\n');
   for (const name of ['scripts/driverAuditHttp.js', 'scripts/driverAuditSourceStage.js', 'services/driverAuditSource.js',
@@ -797,6 +798,8 @@ async function realGitPreparationFixture(t) {
   const commitArgs = ['-c', 'user.name=Fictional Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m'];
   await git([...commitArgs, 'Original fixture']);
   const base = (await git(['rev-parse', 'HEAD'])).stdout.trim();
+  // Match the production FETCH_HEAD-only release: no branch retains this commit.
+  await git(['checkout', '--quiet', '--detach', base]);
   await f.write(path.join(f.appRoot, 'reviewed-release.txt'), 'Separate reviewed fixture release\n');
   await git(['add', 'reviewed-release.txt']); await git([...commitArgs, 'Reviewed fixture']);
   const releaseSha = (await git(['rev-parse', 'HEAD'])).stdout.trim(); await git(['checkout', '--quiet', '--detach', base]);
@@ -816,6 +819,95 @@ async function realGitPreparationFixture(t) {
     bootstrapSha256: hash(gzipSync(Buffer.from(JSON.stringify(f.bootstrap)))) }, f.adapters);
   return { ...f, git, base, releaseSha, release, run, legacyCode, statuses };
 }
+
+async function unreferencedPartialRelease(t) {
+  const f = await realGitPreparationFixture(t);
+  assert(!(await f.git(['for-each-ref', '--format=%(objectname)'])).stdout.split('\n').includes(f.releaseSha));
+  await fs.mkdir(f.release, { recursive: true, mode: 0o700 });
+  const previous = process.umask(0o002);
+  try { await f.git(['clone', '--quiet', '--shared', '--dissociate', '--no-checkout', '--', f.appRoot, f.release]); }
+  finally { process.umask(previous); }
+  assert.deepEqual(await fs.readdir(f.release), ['.git']);
+  assert.equal((await f.git(['-C', f.release, 'rev-parse', 'HEAD'])).stdout.trim(), f.base);
+  await assert.rejects(f.git(['-C', f.release, 'cat-file', '-e', f.releaseSha + '^{commit}']));
+  await assert.rejects(fs.access(path.join(f.release, '.git/index')), { code: 'ENOENT' });
+  return f;
+}
+
+test('a FETCH_HEAD-only detached release is fetched from the fixed local app checkout before staging', async t => {
+  const f = await realGitPreparationFixture(t), refs = (await f.git(['show-ref'])).stdout;
+  await f.write(path.join(f.appRoot, '.git/FETCH_HEAD'), f.releaseSha + '\t\tfixture-local-source\n');
+  const fetchHead = await fs.readFile(path.join(f.appRoot, '.git/FETCH_HEAD'));
+  await f.run();
+  assert.equal((await f.git(['-C', f.release, 'rev-parse', 'HEAD'])).stdout.trim(), f.releaseSha);
+  assert.equal((await f.git(['rev-parse', 'HEAD'])).stdout.trim(), f.base);
+  assert.equal((await f.git(['show-ref'])).stdout, refs);
+  assert.deepEqual(await fs.readFile(path.join(f.appRoot, '.git/FETCH_HEAD')), fetchHead);
+});
+
+test('normal664 original tracked package-lock uses exact Git bytes without changing the original lock', async t => {
+  const f = await realGitPreparationFixture(t, { originalLockMode: 0o664 }), file = path.join(f.server, 'package-lock.json');
+  const before = await fs.stat(file, { bigint: true }), bytes = await fs.readFile(file);
+  await f.run();
+  const after = await fs.stat(file, { bigint: true });
+  for (const key of ['ino', 'dev', 'mode', 'uid', 'gid', 'size', 'mtimeNs', 'ctimeNs']) assert.equal(after[key], before[key]);
+  assert.deepEqual(await fs.readFile(file), bytes);
+  assert.equal((await fs.stat(path.join(f.release, 'server/package-lock.json'))).mode & 0o777, 0o600);
+});
+
+test('original lock Git-byte admission preserves independent byte or HEAD changes and stops before dependency installation', async t => {
+  for (const kind of ['bytes', 'head']) {
+    const f = await realGitPreparationFixture(t, { originalLockMode: 0o664 }), execute = f.adapters.exec;
+    let reached = false;
+    f.adapters.exec = async (file, args, options) => {
+      const result = await execute(file, args, options);
+      if (file === 'git' && args.includes('--no-replace-objects') && args.includes('show') && !reached) {
+        reached = true;
+        if (kind === 'bytes') await fs.writeFile(path.join(f.server, 'package-lock.json'), '{"independent":true}');
+        else await f.git(['checkout', '--quiet', '--detach', f.releaseSha]);
+      }
+      return result;
+    };
+    await assert.rejects(f.run(), error => error.phase === 'prepare-release-original-lock'); assert(reached);
+    if (kind === 'bytes') assert.equal(await fs.readFile(path.join(f.server, 'package-lock.json'), 'utf8'), '{"independent":true}');
+    else assert.equal((await f.git(['rev-parse', 'HEAD'])).stdout.trim(), f.releaseSha);
+    assert(!f.commands.some(row=>row.file==='/usr/bin/npm'&&row.args[0]==='ci'));
+  }
+});
+
+test('an exact private git-only partial clone resumes the missing detached release and retries without altering originals', async t => {
+  const f = await unreferencedPartialRelease(t), original = await fs.readFile(f.configFile);
+  await f.run(); await f.run();
+  assert.equal((await f.git(['-C', f.release, 'rev-parse', 'HEAD'])).stdout.trim(), f.releaseSha);
+  assert.deepEqual(await fs.readFile(f.configFile), original);
+  assert.equal((await f.git(['rev-parse', 'HEAD'])).stdout.trim(), f.base);
+});
+
+test('partial checkout recovery preserves and rejects foreign files, index, origin, hooks, indirection and HEAD drift', async t => {
+  for (const kind of ['file', 'old-data', 'index', 'origin', 'config', 'hook', 'alternates', 'commondir', 'head', 'graft', 'replace']) {
+    const f = await unreferencedPartialRelease(t), file = path.join(f.release, 'preserve.private');
+    if (kind === 'file') await f.write(file, 'independent retained bytes');
+    if (kind === 'old-data') await f.write(path.join(f.release, 'server/.private/original.private'), 'original data');
+    if (kind === 'index') await f.git(['-C', f.release, 'read-tree', 'HEAD']);
+    if (kind === 'origin') await f.git(['-C', f.release, 'remote', 'set-url', 'origin', '/unrelated-local-repository']);
+    if (kind === 'config') await f.git(['-C', f.release, 'config', 'core.hooksPath', '/unrelated-private-hooks']);
+    if (kind === 'hook') await f.write(path.join(f.release, '.git/hooks/post-checkout'), '#!/bin/sh\nexit 99\n');
+    if (kind === 'alternates') await f.write(path.join(f.release, '.git/objects/info/alternates'), path.join(f.appRoot, '.git/objects') + '\n');
+    if (kind === 'commondir') await f.write(path.join(f.release, '.git/commondir'), path.join(f.appRoot, '.git') + '\n');
+    if (kind === 'head') await f.git(['-C', f.release, 'symbolic-ref', 'HEAD', 'refs/heads/unborn-foreign']);
+    if (kind === 'graft') await f.write(path.join(f.release, '.git/info/grafts'), f.base + '\n');
+    if (kind === 'replace') await f.write(path.join(f.release, '.git/refs/replace', f.base), f.base + '\n');
+    const snapshot = async () => { const rows = []; const visit = async (root, prefix = '') => {
+      for (const entry of (await fs.readdir(root, { withFileTypes: true })).sort((a,b)=>a.name.localeCompare(b.name))) {
+        const name = prefix + entry.name, p = path.join(root, entry.name), st = await fs.lstat(p);
+        rows.push({ name, mode: st.mode, ...(entry.isFile() ? { sha256: hash(await fs.readFile(p)) } : {}) });
+        if (entry.isDirectory()) await visit(p, name + '/');
+      } }; await visit(f.release); return rows; };
+    const before = await snapshot(); await assert.rejects(f.run());
+    assert.deepEqual(await snapshot(), before);
+    assert(!f.commands.some(row=>row.file==='/usr/bin/npm'&&row.args[0]==='ci'));
+  }
+});
 
 test('real local Git staging checks out the reviewed release while the original checkout and private inputs remain exact', async t => {
   const f = await realGitPreparationFixture(t), { git, base, releaseSha, legacyCode, release } = f;
@@ -864,6 +956,7 @@ async function existingOrdinaryGitRelease(t) {
   const previous = process.umask(0o002);
   try {
     await f.git(['clone', '--quiet', '--shared', '--dissociate', '--no-checkout', '--', f.appRoot, f.release]);
+    await f.git(['-C', f.release, 'fetch', '--no-tags', '--no-write-fetch-head', '--', f.appRoot, f.releaseSha]);
     await f.git(['-C', f.release, 'checkout', '--quiet', '--detach', f.releaseSha]);
   } finally { process.umask(previous); }
   assert.equal((await fs.stat(path.join(f.release, 'server'))).mode & 0o777, 0o775);
@@ -1250,19 +1343,18 @@ test('ordinary data directories never relax the existing600 leaf or strict code 
   assert.equal((await fs.lstat(file)).mode&0o777,0o664);assert(!f.commands.some(row=>row.args[0]==='clone'));
 });
 
-test('release transport failures seal the bounded private cause and retain exact original data', async t => {
+test('a missing local release commit seals its bounded private cause and never fetches a remote or changes original data', async t => {
   const { driverAuditSupabaseStoppedReceipt } = await import('./driver-audit-native-handoff.mjs');
   const f = await preparationFixture(t), execute = f.adapters.exec, pointer = await fs.readFile(path.join(f.root, 'work/current.private.json'));
   f.adapters.exec = async (file, args, options) => {
-    if (file === 'git' && args[0] === 'cat-file') throw Error('fixture commit needs fetch');
-    if (file === 'git' && args[0] === 'fetch') {
-      assert.equal(options.timeout, 120_000);
+    if (file === 'git' && args[0] === 'cat-file') {
+      assert.equal(options.timeout, 10_000);
       throw Object.assign(Error('fictional credential ' + f.secret), { code: 128, stderr: 'fictional remote: ' + f.secret, stdout: '' });
     }
     return execute(file, args, options);
   };
   await assert.rejects(f.runPrepare(), error => {
-    assert.equal(error.phase, 'prepare-release-fetch');
+    assert.equal(error.phase, 'prepare-release-commit');
     assert(!JSON.stringify(error).includes(f.secret));
     const { supabaseHostStopped: stopped } = error;
     assert(stopped); assert(!JSON.stringify(stopped).includes(f.secret));
@@ -1278,6 +1370,7 @@ test('release transport failures seal the bounded private cause and retain exact
   });
   assert.deepEqual(await fs.readFile(path.join(f.root, 'work/current.private.json')), pointer);
   assert(!f.commands.some(row => row.args[0] === 'clone'));
+  assert(!f.commands.some(row => row.file === 'git' && row.args.includes('fetch')));
 });
 
 test('a release readback guard seals its private stack and fixed metadata without accepting or changing the release', async t => {
