@@ -38,13 +38,19 @@ test('retains original notes without approving an adaptation', () => {
   expect(component.originalText).toBe('Review adaptation');
 });
 
-test('rejects orphan components, duplicate meal IDs and missing second sauce', () => {
+test('rejects orphan components, conflicting repeated meal IDs and missing second sauce', () => {
   const orphan = sheets(); orphan.Components[1][0] = 'UNKNOWN';
   expect(() => parseMealWorkbook(orphan)).toThrow('was not found');
   const duplicate = sheets(); duplicate.Meals.push([...duplicate.Meals[1]]);
+  duplicate.Meals[2][4]='Different recipe';
   expect(() => parseMealWorkbook(duplicate)).toThrow('duplicate Meal ID');
   const missing = sheets(); missing.Components = missing.Components.filter(row => row[1] !== 'Sauce 2');
   expect(() => parseMealWorkbook(missing)).toThrow('Sauce 2');
+});
+
+test('identical repeated meal rows keep one recipe and retain all source cycle days',()=>{
+  const data=sheets();data.Meals.push([...data.Meals[1]]);data.Meals[2][1]='DAY 1';
+  const meals=parseMealWorkbook(data);expect(meals).toHaveLength(1);expect(meals[0].components).toHaveLength(4);expect(meals[0].cycleDays).toEqual(['DAY 6 & 7','DAY 1']);
 });
 
 test('an empty workbook produces no meals', () => {
