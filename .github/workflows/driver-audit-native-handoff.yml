@@ -12,6 +12,8 @@ on:
           - inspect-database-config
           - inspect-supabase-host
           - inspect-supabase-routing
+          - inspect-supabase-storage
+          - inspect-supabase-root-access
           - prepare-supabase-host
           - prepare-supabase-serving
           - start-supabase-report
@@ -93,7 +95,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        if: inputs.operation != 'inspect-supabase-root-access'
+      - name: Inspect existing root SSH access
+        if: inputs.operation == 'inspect-supabase-root-access'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          timeout: 30s
+          command_timeout: 30s
+          script: |
+            set -euo pipefail
+            root_uid="$(id -u)"
+            test "$root_uid" = 0
+            printf '%s%s%s\n' '{' '"status":"supabase-root-access-verified","readOnly":true,"effectiveUid":0,"applicationInspected":false,"databaseAccessed":false,"filesWritten":false' '}'
       - name: Prepare reviewed operator
+        if: inputs.operation != 'inspect-supabase-root-access'
         id: prepare
         env:
           EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
@@ -104,7 +123,7 @@ jobs:
           printf 'code=%s\n' "$(gzip -cn .github/scripts/driver-audit-native-handoff.mjs | base64 -w0)" >> "$GITHUB_OUTPUT"
           case "$OPERATION" in
             inspect-supabase-host|prepare-supabase-host) operator=supabase-handoff ;;
-            inspect-supabase-routing) operator=supabase-routing ;;
+            inspect-supabase-routing|inspect-supabase-storage) operator=supabase-routing ;;
             prepare-supabase-serving|start-supabase-report|qualify-supabase-source-held|run-supabase-report-once) operator=supabase-control ;;
             probe-supabase-canary|plan-supabase-canary|enable-supabase-canary|seal-supabase-canary-entry|restore-supabase-canary|promote-supabase-report) operator=supabase-canary-control ;;
             export-supabase-release-inputs|export-supabase-previous-manifest|stage-supabase-source-release|start-supabase-source-sync) operator=supabase-release-control ;;
@@ -125,6 +144,7 @@ jobs:
           fi
           printf 'import_code=%s\n' "$(gzip -cn "$operator_file" | base64 -w0)" >> "$GITHUB_OUTPUT"
       - name: Run reviewed handoff operation
+        if: inputs.operation != 'inspect-supabase-root-access'
         uses: appleboy/ssh-action@v1.2.0
         env:
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
