@@ -314,12 +314,41 @@ async function fileHash(file, { maximum = 512 * 1024 ** 2, privateMode = true, p
   } finally { await handle.close(); }
 }
 
-async function packageFiles(root, expectedManifest, { objects = false, archiveBackedManifest = false, phase = () => {}, observe = () => {} } = {}) {
-  need(!objects || !archiveBackedManifest);
+async function withPrivatePackageDirectory(folder, boundary, operation, { mutating = false } = {}) {
+  need(path.isAbsolute(boundary || '') && path.normalize(boundary) === boundary
+    && path.isAbsolute(folder) && path.normalize(folder) === folder
+    && (folder === boundary || folder.startsWith(boundary + path.sep)));
+  await directory(boundary);
+  const relativePath = path.relative(boundary, folder), parts = relativePath ? relativePath.split(path.sep) : [];
+  need(parts.length <= 64 && parts.every(part => relative(part) && !part.includes('/')));
+  const paths = [boundary]; for (const part of parts) paths.push(path.join(paths.at(-1), part));
+  const opened = [];
+  try {
+    for (const file of paths) {
+      const before = await fs.lstat(file, { bigint: true });
+      need(before.isDirectory() && before.uid === BigInt(process.getuid()) && await fs.realpath(file) === file
+        && (file !== boundary || !(Number(before.mode) & 0o077)));
+      const handle = await fs.open(file, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      opened.push({ file, before, handle });
+      need(signature(await handle.stat({ bigint: true })) === signature(before));
+    }
+    const check = async identity => {
+      for (const item of opened) need(identity(await item.handle.stat({ bigint: true })) === identity(item.before)
+        && identity(await fs.lstat(item.file, { bigint: true })) === identity(item.before) && await fs.realpath(item.file) === item.file);
+    };
+    await check(signature); const value = await operation(); await check(mutating ? directoryIdentity : signature); return value;
+  } finally { for (const item of opened.reverse()) await item.handle.close(); }
+}
+
+async function packageFiles(root, expectedManifest, { objects = false, archiveBackedManifest = false,
+  privateDirectoryBoundary, phase = () => {}, observe = () => {} } = {}) {
+  need(!objects || !archiveBackedManifest && privateDirectoryBoundary === undefined);
+  need(!privateDirectoryBoundary || archiveBackedManifest);
+  const inspect = async () => {
   const observing = (file, declaredSha256 = null, alreadyReadSha256 = null) => observe({ root, file, declaredSha256, alreadyReadSha256 });
   phase('root');
   observing(root);
-  await directory(root);
+  if (!privateDirectoryBoundary) await directory(root);
   let manifest = null;
   if (!objects) {
     phase('manifest-read');
@@ -334,9 +363,11 @@ async function packageFiles(root, expectedManifest, { objects = false, archiveBa
     && Object.entries(declared).every(([name, hash]) => relative(name) && digest(hash)));
   const files = []; let total = 0;
   async function visit(folder, prefix = '') {
+    phase('directory-metadata'); observing(folder);
+    const inspectDirectory = async () => {
     phase('directory-metadata');
     observing(folder);
-    await directory(folder);
+    if (!privateDirectoryBoundary) await directory(folder);
     phase('directory-listing');
     const names = (await fs.readdir(folder, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
     need(names.length <= 100000);
@@ -357,6 +388,9 @@ async function packageFiles(root, expectedManifest, { objects = false, archiveBa
         files.push({ name, ...saved });
       }
     }
+    };
+    if (privateDirectoryBoundary) return withPrivatePackageDirectory(folder, privateDirectoryBoundary, inspectDirectory);
+    return inspectDirectory();
   }
   await visit(root);
   phase('manifest-members');
@@ -371,8 +405,14 @@ async function packageFiles(root, expectedManifest, { objects = false, archiveBa
   missingArchiveReferences.sort();
   phase('inventory'); const inventorySha256 = sha(JSON.stringify(files.map(({ name, sha256, bytes }) => ({ name, sha256, bytes }))));
   return { root, files, bytes: total, inventorySha256, manifestSha256: manifest?.sha256 ?? null,
-    archiveBackedManifest, declaredFiles: declared ? Object.keys(declared).length : 0, missingArchiveReferences,
+    archiveBackedManifest, privateDirectoryBoundary, declaredFiles: declared ? Object.keys(declared).length : 0, missingArchiveReferences,
     missingArchiveReferencesSha256: sha(JSON.stringify(missingArchiveReferences)) };
+  };
+  if (privateDirectoryBoundary) {
+    phase('root'); observe({ root, file: root });
+    return withPrivatePackageDirectory(root, privateDirectoryBoundary, inspect);
+  }
+  return inspect();
 }
 
 function sameArchiveMask(value, current) {
@@ -381,20 +421,28 @@ function sameArchiveMask(value, current) {
     declaredFiles: current.declaredFiles, physicalFiles: current.files.length, missingArchiveReferences: current.missingArchiveReferences });
 }
 
-async function linkPackage(saved, target, presenceFile) {
+async function linkPackage(saved, target, presenceFile, targetBoundary) {
   await mkdirPrivate(target);
   for (const row of saved.files) {
     const file = path.join(target, row.name); await mkdirPrivate(path.dirname(file));
-    if (row.name === 'files.private.json') { await writeOnce(file, (await read(row.path, { maximum: 8 * 1024 ** 2 })).data); continue; }
+    const mutate = async () => {
+    if (row.name === 'files.private.json') { await writeOnce(file, (await read(row.path, { maximum: 8 * 1024 ** 2 })).data); return; }
     await inDirectory(path.dirname(file), async anchored => {
       try { await fs.link(row.path, path.join(anchored, path.basename(file))); } catch (error) { if (error.code !== 'EEXIST') throw error; }
     });
+    };
+    const copy = () => saved.privateDirectoryBoundary
+      ? withPrivatePackageDirectory(path.dirname(file), targetBoundary, mutate, { mutating: true }) : mutate();
+    if (saved.privateDirectoryBoundary) await withPrivatePackageDirectory(path.dirname(row.path), saved.privateDirectoryBoundary, copy);
+    else await copy();
     const current = await fileHash(file);
-    need(current.stat.dev === row.stat.dev && current.stat.ino === row.stat.ino
-      && current.sha256 === row.sha256 && current.bytes === row.bytes && current.stat.mtimeNs === row.stat.mtimeNs);
+    need(current.sha256 === row.sha256 && current.bytes === row.bytes);
+    if (row.name !== 'files.private.json') need(current.stat.dev === row.stat.dev && current.stat.ino === row.stat.ino
+      && current.stat.mtimeNs === row.stat.mtimeNs);
   }
   const checked = await packageFiles(target, saved.manifestSha256,
-    { objects: saved.manifestSha256 === null, archiveBackedManifest: saved.archiveBackedManifest });
+    { objects: saved.manifestSha256 === null, archiveBackedManifest: saved.archiveBackedManifest,
+      privateDirectoryBoundary: saved.privateDirectoryBoundary ? targetBoundary : undefined });
   need(checked.inventorySha256 === saved.inventorySha256 && checked.missingArchiveReferencesSha256 === saved.missingArchiveReferencesSha256);
   let archiveReferences;
   if (saved.archiveBackedManifest) {
@@ -409,7 +457,8 @@ async function linkPackage(saved, target, presenceFile) {
   }
   return { root: target, files: checked.files.length, bytes: checked.bytes, inventorySha256: checked.inventorySha256,
     manifestSha256: checked.manifestSha256, ...(archiveReferences ? { archiveBackedManifest: true,
-      declaredFiles: checked.declaredFiles, missingArchiveReferencesSha256: checked.missingArchiveReferencesSha256, archiveReferences } : {}) };
+      privateDirectoryBoundary: checked.privateDirectoryBoundary, declaredFiles: checked.declaredFiles,
+      missingArchiveReferencesSha256: checked.missingArchiveReferencesSha256, archiveReferences } : {}) };
 }
 
 function codeArchive(ref, expectedManifest, name, count) {
@@ -564,7 +613,7 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
   const packagePhase = prefix => name => setPhase(prefix + '-' + name);
   const observeRole = role => value => observeFailure({ role, ...value });
   const baseline = await packageFiles(sync.config.baselineRoot, pins.baseline,
-    { archiveBackedManifest: true, phase: packagePhase('baseline'), observe: observeRole('baseline') });
+    { archiveBackedManifest: true, privateDirectoryBoundary: sync.config.root, phase: packagePhase('baseline'), observe: observeRole('baseline') });
   const retained = [];
   for (const row of [candidate, ...bootstrap.retained]) {
     need(['candidate', 'serving-current', 'serving-previous'].includes(row.role));
@@ -599,7 +648,8 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
       objects = await packageFiles(value.bundleRoot, null, { objects: true, phase: packagePhase(row.role + '-audit-objects'), observe: observeRole(row.role) });
     }
     retained.push({ value: row, files: await packageFiles(row.privateRoot, row.manifestSha256,
-      { archiveBackedManifest: true, phase: packagePhase(row.role + '-package'), observe: observeRole(row.role) }), accepted, seed, objects });
+      { archiveBackedManifest: true, privateDirectoryBoundary: sync.config.root,
+        phase: packagePhase(row.role + '-package'), observe: observeRole(row.role) }), accepted, seed, objects });
   }
   setPhase('release');
   const rootId = sha(JSON.stringify(['driver-reports-supabase-sync-v1', bootstrap.releaseSha, pins.source, pins.builder, pins.baseline, pins.candidate]));
@@ -639,7 +689,7 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
   setPhase('stage-packages');
   const presenceFile = role => path.join(syncRoot, 'retained/package-presence', role + '.private.json');
   const packages = [{ role: 'baseline-builder-input', ...await linkPackage(baseline, path.join(syncRoot, 'baseline'),
-    presenceFile('baseline-builder-input')) }], stagedObjects = [], copiedControls = [];
+    presenceFile('baseline-builder-input'), syncRoot) }], stagedObjects = [], copiedControls = [];
   const copyControl = async (file, bytes) => { await writeOnce(file, bytes); copiedControls.push({ file, sha256: sha(bytes) }); };
   await copyControl(path.join(syncRoot, 'retained/original-sync.private.json'), (await read(sync.configFile.path)).data);
   await copyControl(path.join(syncRoot, 'retained/original-seed.private.json'), (await read(sync.seed.path)).data);
@@ -648,7 +698,7 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
     : import(pathToFileURL(path.join(targetServer, name)).href);
   for (const row of retained) {
     const folder = path.join(syncRoot, 'retained', row.value.role); await mkdirPrivate(folder);
-    const data = await linkPackage(row.files, path.join(folder, 'server-data'), presenceFile(row.value.role));
+    const data = await linkPackage(row.files, path.join(folder, 'server-data'), presenceFile(row.value.role), syncRoot);
     if (row.accepted) await copyControl(path.join(folder, 'accepted.original.private.json'), row.accepted.data);
     let descriptorVerified = false;
     if (row.seed) {
@@ -704,7 +754,7 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
   const recheck = async () => {
     for (const row of [baseline, ...retained.flatMap(item => [item.files, ...(item.objects ? [item.objects] : [])])]) {
       const current = await packageFiles(row.root, row.manifestSha256,
-        { objects: row.manifestSha256 === null, archiveBackedManifest: row.archiveBackedManifest });
+        { objects: row.manifestSha256 === null, archiveBackedManifest: row.archiveBackedManifest, privateDirectoryBoundary: row.privateDirectoryBoundary });
       need(current.inventorySha256 === row.inventorySha256 && current.missingArchiveReferencesSha256 === row.missingArchiveReferencesSha256);
     }
     for (const row of retained) for (const [name, original] of [['accepted.private.json', row.accepted], ['direct-seed.private.json', row.seed]]) {
@@ -713,7 +763,7 @@ async function prepareHost({ appRoot, server, before, environment, bootstrapSha2
     }
     for (const row of [...packages, ...stagedObjects]) {
       const actual = await packageFiles(row.root, row.manifestSha256,
-        { objects: row.manifestSha256 === null, archiveBackedManifest: row.archiveBackedManifest });
+        { objects: row.manifestSha256 === null, archiveBackedManifest: row.archiveBackedManifest, privateDirectoryBoundary: row.privateDirectoryBoundary });
       need(actual.inventorySha256 === row.inventorySha256);
       if (row.archiveBackedManifest) {
         need(actual.missingArchiveReferencesSha256 === row.missingArchiveReferencesSha256

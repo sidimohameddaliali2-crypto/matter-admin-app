@@ -7,6 +7,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
+import { constants } from 'node:fs';
 import test from 'node:test';
 import dotenv from '../../server/node_modules/dotenv/lib/main.js';
 import { sealTransferSecrets, openTransferSecrets } from '../../server/services/driverAuditTransferCodec.js';
@@ -786,7 +787,6 @@ test('a preexisting dependency symlink is rejected before any install or modific
 test('retained-package diagnostics identify only fixed role and read boundaries without exposing private names', async t => {
   for (const [change, phase] of [
     [f => fs.chmod(path.join(f.root, 'baseline/input.private.json'), 0o644), 'prepare-baseline-file-metadata'],
-    [f => fs.mkdir(path.join(f.root, 'baseline/unlisted-directory'), { mode: 0o755 }), 'prepare-baseline-directory-metadata'],
     [f => fs.unlink(path.join(f.root, 'baseline/input.private.json')), 'prepare-baseline-manifest-members'],
     [f => f.write(path.join(path.dirname(f.bootstrap.retained[0].privateRoot), 'accepted.private.json'), '{"private":"' + f.secret + '"}'),
       'prepare-serving-current-accepted-pin'],
@@ -973,4 +973,49 @@ test('an archive reference never excuses a present corrupt file, directory or sy
     await assert.rejects(f.runPrepare(), /Supabase handoff stopped at prepare-baseline/);
     assert(!f.commands.some(row => row.args[0] === 'clone'));
   }
+});
+
+test('normal generated data directories stay private through an explicit owner700 boundary without chmodding original directories or leaves', async t => {
+  const f=await preparationFixture(t), pointer=JSON.parse(await fs.readFile(path.join(f.root,'work/current.private.json'))), root=pointer.privateRoot;
+  await fs.chmod(root,0o775);const extra=path.join(root,'generated-data');await fs.mkdir(extra,{mode:0o775});await fs.chmod(extra,0o775);
+  await f.write(path.join(extra,'unlisted-immutable.private.json'),'fictional retained artifact');
+  const original=await fs.stat(path.join(extra,'unlisted-immutable.private.json'),{bigint:true});
+  const result=await f.runPrepare(),{gunzipSync}=await import('node:zlib');
+  const prepared=JSON.parse(gunzipSync(Buffer.from(openTransferSecrets(privateKey,result.capsule).metadataGzipBase64,'base64'))).preparation;
+  const candidate=prepared.packages.find(row=>row.role==='candidate');
+  assert.equal(candidate.privateDirectoryBoundary,prepared.syncRoot);
+  assert.equal((await fs.lstat(root)).mode&0o777,0o775);assert.equal((await fs.lstat(extra)).mode&0o777,0o775);
+  assert.equal((await fs.lstat(f.root)).mode&0o777,0o700);
+  const copied=await fs.stat(path.join(candidate.root,'generated-data/unlisted-immutable.private.json'),{bigint:true});
+  assert.equal(copied.ino,original.ino);assert.equal(copied.mode,original.mode);assert.equal(copied.mtimeNs,original.mtimeNs);
+  assert.equal(Number(copied.mode)&0o777,0o600);assert.equal((await fs.lstat(candidate.root)).mode&0o777,0o700);
+});
+
+test('an exposed package boundary or unsafe owner, symlink or changing ancestor is rejected before a candidate data file is opened', async t => {
+  for(const kind of ['boundary','owner','symlink','mode-drift']){
+    const f=await preparationFixture(t),pointer=JSON.parse(await fs.readFile(path.join(f.root,'work/current.private.json'))),root=pointer.privateRoot;
+    await fs.chmod(root,0o775);const manifest=path.join(root,'files.private.json');
+    const open=fs.open,lstat=fs.lstat;let candidateReads=0,changed=false;
+    if(kind==='boundary')await fs.chmod(f.root,0o755);
+    if(kind==='symlink'){
+      const parent=path.dirname(root),retained=path.join(f.root,'moved-original-attempt');await fs.rename(parent,retained);await fs.symlink(retained,parent);
+    }
+    if(kind==='owner')fs.lstat=async(name,options)=>{const value=await lstat(name,options);if(name===path.dirname(root))value.uid=options?.bigint?99999n:99999;return value;};
+    fs.open=async(name,flags,...rest)=>{
+      if(name===manifest)candidateReads++;
+      const handle=await open(name,flags,...rest);
+      if(kind==='mode-drift'&&name===root&&typeof flags==='number'&&(flags&constants.O_DIRECTORY)&&!changed){changed=true;await fs.chmod(root,0o755);}
+      return handle;
+    };
+    try{await assert.rejects(f.runPrepare(),/Supabase handoff stopped/);}finally{fs.open=open;fs.lstat=lstat;}
+    assert.equal(candidateReads,0);assert(!f.commands.some(row=>row.args[0]==='clone'));
+    if(kind==='mode-drift')assert.equal((await fs.lstat(root)).mode&0o777,0o755,'An independent mode change is preserved');
+  }
+});
+
+test('ordinary data directories never relax the existing600 leaf or strict code and configuration guards', async t => {
+  const f=await preparationFixture(t),pointer=JSON.parse(await fs.readFile(path.join(f.root,'work/current.private.json'))),root=pointer.privateRoot;
+  await fs.chmod(root,0o775);const file=path.join(root,'original-data.private.json');await fs.chmod(file,0o664);
+  await assert.rejects(f.runPrepare(),error=>error.phase==='prepare-candidate-package-file-metadata');
+  assert.equal((await fs.lstat(file)).mode&0o777,0o664);assert(!f.commands.some(row=>row.args[0]==='clone'));
 });
