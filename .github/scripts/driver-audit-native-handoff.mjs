@@ -205,7 +205,7 @@ async function main() {
   if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'stage-lineage', 'qualify-source',
     'diagnose-roots', 'disable-pruning', 'prepare-native-settings', 'swap-builder-held', 'verify-native-parity',
     'activate-native', 'start-native', 'stage-native-proofs', 'export-native-controls',
-    'plan-native-cleanup', 'apply-native-cleanup'].includes(operation)) {
+    'plan-native-cleanup', 'apply-native-cleanup', 'inspect-database-config'].includes(operation)) {
     phase = 'native-' + operation;
     const encoded = process.env.NATIVE_IMPORT_CODE;
     if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
@@ -222,7 +222,7 @@ async function main() {
     if (hash(await readPrivateDriverAuditSource(filename, 256 * 1024)) !== hash(code)) throw Error('Reviewed import operator hash differs');
     const operator = await import(pathToFileURL(filename).href);
     let recipientPublicKey;
-    if (['diagnose-roots', 'export-native-controls', 'verify-native-parity'].includes(operation) && process.env.NATIVE_TRANSFER_PLAN_B64) {
+    if (['diagnose-roots', 'export-native-controls', 'verify-native-parity', 'inspect-database-config'].includes(operation) && process.env.NATIVE_TRANSFER_PLAN_B64) {
       const encodedPlan = process.env.NATIVE_TRANSFER_PLAN_B64;
       if (encodedPlan.length > 24576 || !/^[A-Za-z0-9+/]+=*$/.test(encodedPlan)) throw Error('Bounded public diagnostic recipient required');
       const { validateDriverAuditTransferPlan } = await load('services/driverAuditTransferSession.js');
@@ -231,6 +231,9 @@ async function main() {
     const common = { operation, appRoot, expectedSha: expected, sessionId: process.env.NATIVE_TRANSFER_SESSION_ID,
       profileSha256: process.env.NATIVE_IMPORT_PROFILE_SHA256 || undefined,
       templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256 || undefined };
+    if (operation === 'inspect-database-config') {
+      console.log(JSON.stringify(await operator.runDriverAuditNativeDatabaseCheck({ ...common, recipientPublicKey }))); return;
+    }
     if (['plan-native-cleanup', 'apply-native-cleanup'].includes(operation)) {
       console.log(JSON.stringify(await operator.runDriverAuditNativeCleanup(common))); return;
     }
