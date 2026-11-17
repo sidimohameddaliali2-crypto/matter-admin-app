@@ -206,7 +206,7 @@ async function main() {
     'diagnose-roots', 'disable-pruning', 'prepare-native-settings', 'swap-builder-held', 'verify-native-parity',
     'activate-native', 'start-native', 'stage-native-proofs', 'export-native-controls',
     'plan-native-cleanup', 'apply-native-cleanup', 'inspect-database-config',
-    'prepare-object-store', 'externalize-native-archive', 'inspect-supabase-host'].includes(operation)) {
+    'prepare-object-store', 'externalize-native-archive', 'inspect-supabase-host', 'prepare-supabase-host'].includes(operation)) {
     phase = 'native-' + operation;
     const encoded = process.env.NATIVE_IMPORT_CODE;
     if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
@@ -222,7 +222,7 @@ async function main() {
     catch (error) { if (error.code !== 'EEXIST') throw error; }
     if (hash(await readPrivateDriverAuditSource(filename, 256 * 1024)) !== hash(code)) throw Error('Reviewed import operator hash differs');
     const operator = await import(pathToFileURL(filename).href);
-    if (operation === 'inspect-supabase-host') {
+    if (['inspect-supabase-host', 'prepare-supabase-host'].includes(operation)) {
       const encodedPlan = process.env.NATIVE_TRANSFER_PLAN_B64;
       if (!encodedPlan || encodedPlan.length > 24576 || !/^[A-Za-z0-9+/]+=*$/.test(encodedPlan)) throw Error('Bounded public Supabase recipient required');
       const bytes = Buffer.from(encodedPlan, 'base64');
@@ -230,8 +230,12 @@ async function main() {
       const request = JSON.parse(bytes);
       if (request?.version !== 1 || Object.keys(request).length !== 2 || typeof request.recipientPublicKey !== 'string')
         throw Error('An exact public Supabase recipient is required');
+      const bootstrapSha256 = process.env.SUPABASE_BOOTSTRAP_SHA256;
+      if (operation === 'prepare-supabase-host' && !/^[a-f0-9]{64}$/.test(bootstrapSha256 || ''))
+        throw Error('An exact private Supabase bootstrap hash is required');
       console.log(JSON.stringify(await operator.runDriverAuditSupabaseHandoff({ operation, appRoot,
-        expectedSha: expected, recipientPublicKey: request.recipientPublicKey })));
+        expectedSha: expected, recipientPublicKey: request.recipientPublicKey,
+        ...(operation === 'prepare-supabase-host' ? { bootstrapSha256 } : {}) })));
       return;
     }
     let recipientPublicKey;
