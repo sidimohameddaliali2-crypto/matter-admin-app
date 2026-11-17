@@ -10,11 +10,19 @@ on:
           - inspect
           - pause-builder
           - resume-builder
+          - prepare-transfer
+          - receive-transfer
         default: inspect
       expected_deployed_sha:
         description: Exact current application commit on the host
         type: string
         required: true
+      transfer_plan_b64:
+        description: Public inventory totals, target and one-use RSA public recipient, encoded as base64 JSON
+        type: string
+      transfer_session_id:
+        description: Prepared encrypted transfer session UUID
+        type: string
 
 concurrency:
   group: production-deploy
@@ -45,13 +53,15 @@ jobs:
           EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
           NATIVE_HANDOFF_OPERATION: ${{ inputs.operation }}
           NATIVE_HANDOFF_CODE: ${{ steps.prepare.outputs.code }}
+          NATIVE_TRANSFER_PLAN_B64: ${{ inputs.transfer_plan_b64 }}
+          NATIVE_TRANSFER_SESSION_ID: ${{ inputs.transfer_session_id }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
-          command_timeout: 5m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,NATIVE_HANDOFF_OPERATION,NATIVE_HANDOFF_CODE
+          command_timeout: 60m
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,NATIVE_HANDOFF_OPERATION,NATIVE_HANDOFF_CODE,NATIVE_TRANSFER_PLAN_B64,NATIVE_TRANSFER_SESSION_ID
           script: |
             set -e
             cd -- "$DO_APP_PATH"

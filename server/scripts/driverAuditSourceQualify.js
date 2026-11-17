@@ -139,14 +139,18 @@ function meter({ apiPid, syncPid, directory }) {
 
 export function runDriverAuditQualificationChild({ mode, inputFile, executable, args, root, readRoots,
   timeoutMs, signal, readArchive, archiveCacheDirectory, pid: onPid = () => {} }) {
-  requireQualification(archiveCacheDirectory === undefined || mode === 'source'
+  requireQualification(archiveCacheDirectory === undefined || ['source', 'builder'].includes(mode)
     && archiveCacheDirectory === path.join(path.dirname(root), 'source-archive-cache'),
   'Qualification needs an isolated archive cache.');
   const writable = archiveCacheDirectory === undefined ? [root] : [root, archiveCacheDirectory];
   const child = fork(script, [inputFile, mode], {
     execPath: executable, cwd: root, env: { HOME: root, LANG: 'C', TZ: 'UTC' },
     execArgv: [...args, '--permission', ...writable.map(file => '--allow-fs-write=' + file), ...[
-      root, path.join(serverRoot, 'package.json'), path.join(serverRoot, 'services', 'driverAuditSource.js'), ...readRoots,
+      root, path.join(serverRoot, 'package.json'), path.join(serverRoot, 'services', 'driverAuditSource.js'),
+      path.join(serverRoot, 'services', 'driverAuditFixedHostBudget.js'),
+      path.join(serverRoot, 'services', 'driverAuditReadCache.js'),
+      path.join(serverRoot, 'vendor', 'driver-audits', 'integration', 'hosted', 'worker-lock.mjs'),
+      ...(archiveCacheDirectory ? [archiveCacheDirectory] : []), ...readRoots,
     ].map(file => '--allow-fs-read=' + file)],
     stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
   });
@@ -227,7 +231,7 @@ export function driverAuditSyncArchiveCacheDirectory(sync) {
   return path.join(managedSyncConfig(sync).work, 'archive-cache');
 }
 
-async function builderInputs(sync) {
+async function builderInputs(sync, { native = false } = {}) {
   const { root, work, file } = managedSyncConfig(sync);
   const config = await readJson(file);
   requireQualification(config.version === 1 && config.root === root && config.codeRoot === path.join(root, 'builder')
@@ -235,6 +239,10 @@ async function builderInputs(sync) {
     && config.journals?.path === path.join(root, 'validation-journals.private.json')
     && config.rendererBuild?.path === path.join(config.baselineRoot, 'build.private.json'), 'Pinned builder configuration differs.');
   await verifyAuditBuilder(config.codeRoot, config.builderSha256);
+  if (native) {
+    const { supportsManagedArchiveCache } = await import(pathToFileURL(path.join(config.codeRoot, 'integration/cloud/automatic-release-source.mjs')).href);
+    requireQualification(supportsManagedArchiveCache === true, 'The builder must delegate native cache ownership.');
+  }
   const { compactDirectBuildVersion } = await import(pathToFileURL(path.join(config.codeRoot, 'integration/cloud/automatic-release-build.mjs')).href);
   const compact = compactDirectBuildVersion === 1;
   const candidate = await readJson(path.join(work, 'current.private.json'));
@@ -400,7 +408,8 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
         const root = path.join(directory, phase);
         await fs.mkdir(root, { mode: 0o700 });
         const inputFile = path.join(root, 'input.private.json');
-        await writeDriverAuditSourceState(inputFile, { root, ...saved, runtimeRoot: config.runtimeRoot, entrypoint, failPublication, archiveCacheDirectory });
+        await writeDriverAuditSourceState(inputFile, { root, ...saved, runtimeRoot: config.runtimeRoot, entrypoint,
+          failPublication, archiveCacheDirectory, nativeReplay: native });
         const child = await measureChild({ phase, retained, measure, signal, specification: { mode: 'source', root, inputFile,
           executable: process.execPath, args: ['--max-old-space-size=3072'], readRoots: [directory, config.runtimeRoot],
           timeoutMs: entrypoint.maxDurationSeconds * 1000, archiveCacheDirectory } });
@@ -419,7 +428,7 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
           return;
         }
         let builderConfiguration;
-        try { builderConfiguration = await builderInputs(sync); }
+        try { builderConfiguration = await builderInputs(sync, { native }); }
         catch { receipt.blocked = { phase: 'builder', reason: 'configuration' }; return; }
         const { builder, compact, executable, nodeVersion, args } = builderConfiguration;
         const diskReserve = { start: (compact ? 1024 : 2560) * MiB, inProgress: (compact ? 256 : 2560) * MiB };
@@ -440,9 +449,11 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
           const workingBaseline = path.join(root, 'baseline');
           await stageBuilderBaseline(builder.baselineRoot, workingBaseline, builder.baselineManifestSha256, diskReserve.start, signal);
           await writeDriverAuditSourceState(inputFile, { root, objectsRoot: saved.objectsRoot, sourceRoot: source.root,
-            builder: { ...builder, baselineRoot: workingBaseline, archiveBaseline: builder.baselineRoot }, diskReserve });
+            builder: { ...builder, baselineRoot: workingBaseline, archiveBaseline: builder.baselineRoot }, diskReserve,
+            nativeReplay: native, archiveCacheDirectory });
           builderChild = await measureChild({ phase: 'builder', measure, signal, specification: { mode: 'builder', root, inputFile, executable, args,
             readRoots: [directory, builder.codeRoot, builder.baselineRoot, builder.cacheRoot, builder.initialBaseline, builder.journals.path],
+            archiveCacheDirectory,
             timeoutMs: 35 * 60_000, readArchive: loader.read } });
           requireQualification(builderChild.result.nodeVersion === nodeVersion, 'Managed builder Node version changed.');
           receipt.builder = { ...builderChild.result, nodeExecutable: executable, nodeArgs: args,
@@ -486,6 +497,10 @@ function requireSharedArchiveCache(config, builder, receipt) {
   const warm = receipt.sourceAfterBuilder?.archiveReads;
   requireQualification(config.archiveCacheDirectory === builder.cacheRoot
     && receipt.sourceArchiveCacheDirectory === builder.cacheRoot
+    && (config.environment?.DRIVER_AUDIT_DATA_STORE !== 'mongo'
+      || [receipt.source, receipt.sourceAfterBuilder].every(row => row.nativeManagedArchiveCache === true
+        && row.nativeArchiveCacheEnabled === true)
+        && receipt.builder.nativeArchiveCacheEnabled === true)
     && [cold, warm].every(item => Number.isSafeInteger(item?.requests) && item.requests >= 0
       && Number.isSafeInteger(item?.bytes) && item.bytes >= 0)
     && warm.requests < cold.requests && warm.bytes < cold.bytes,
@@ -505,9 +520,14 @@ export async function verifyDriverAuditSourceHostQualification({ config, commit,
     && receipt.manifestSha256 === config.manifestSha256 && receipt.environmentSha256 === config.environmentReference.sha256
     && receipt.nodeExecutable === config.nodeExecutable && receipt.nodeVersion === config.nodeVersion
     && [receipt.source, receipt.sourceAfterBuilder].every(row => row?.status === 'verified' && row.platform === 'linux'
-      && row.nodeVersion === config.nodeVersion && row.networkAttempts === 0)
+      && row.nodeVersion === config.nodeVersion && row.networkAttempts === 0
+      && (config.environment?.DRIVER_AUDIT_DATA_STORE !== 'mongo'
+        || row.executionAdmission === 'fixed-host-v1' && row.executionLedgersPreserved === true
+          && row.nativeManagedArchiveCache === true))
     && receipt.source.failureRetry === true && receipt.builder?.status === 'verified' && receipt.builder.platform === 'linux'
+    && (config.environment?.DRIVER_AUDIT_DATA_STORE !== 'mongo' || receipt.builder.nativeManagedArchiveCache === true)
     && receipt.builder.networkAttempts === 0 && receipt.builder.builderSha256 === builder.builderSha256
+    && (config.environment?.DRIVER_AUDIT_DATA_STORE !== 'mongo' || receipt.builder.nativeManagedArchiveCache === true)
     && receipt.builder.rendererSha256 === builder.rendererBuild.sha256 && receipt.builder.journalsSha256 === builder.journals.sha256
     && receipt.builder.nodeExecutable === nodeExecutable && receipt.builder.nodeVersion === nodeVersion
     && JSON.stringify(receipt.builder.nodeArgs) === JSON.stringify(nodeArgs)
@@ -523,7 +543,8 @@ export async function requireDriverAuditSourceHostQualification({ config, commit
   const rows = await supervisor();
   noSourceActive(rows);
   const [, sync] = checkedWorkers(rows);
-  const { builder, compact, executable, nodeVersion, args } = await builderInputs(sync);
+  const { builder, compact, executable, nodeVersion, args } = await builderInputs(sync,
+    { native: config.environment?.DRIVER_AUDIT_DATA_STORE === 'mongo' });
   if (config.archiveCacheDirectory) {
     await requirePrivateDriverAuditSourceDirectory(builder.cacheRoot);
     requireQualification(hasDriverAuditBuildSpace(await freeDisk(builder.cacheRoot), { compact }),

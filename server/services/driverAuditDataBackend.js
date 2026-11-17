@@ -35,8 +35,15 @@ export async function createDriverAuditDataBackend({ db, env = process.env, stag
     db, client: db.client, capacityBytes: Number(env.DRIVER_AUDIT_NATIVE_CAPACITY_BYTES),
   });
   await initializeDriverAuditMongoRpc({ db, client: db.client });
-  return { kind, archive, rpc: createDriverAuditMongoRpc({ db, client: db.client, objects: archive }),
-    reviewContexts: createDriverAuditReviewContexts({ db, archive }) };
+  const { createDriverAuditFixedHostBudgetFactory } = await import('./driverAuditFixedHostBudget.js');
+  const { createDriverAuditReadCache } = await import('./driverAuditReadCache.js');
+  const archiveCacheDirectory = env.MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY || null;
+  if (!staging && !archiveCacheDirectory) throw Error('The qualified shared native archive cache directory is required');
+  const cachedArchive = createDriverAuditReadCache({ archive,
+    cacheDirectory: archiveCacheDirectory, cacheEnabled: Boolean(archiveCacheDirectory) });
+  return { kind, archive: cachedArchive, archiveCacheDirectory, rpc: createDriverAuditMongoRpc({ db, client: db.client, objects: archive }),
+    reviewContexts: createDriverAuditReviewContexts({ db, archive: cachedArchive }),
+    createExecutionBudget: createDriverAuditFixedHostBudgetFactory() };
 }
 
 // CLI workers use the same MongoDB setting as the app. It stays out of the

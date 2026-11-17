@@ -68,6 +68,10 @@ The route optimizer needs Python with `ortools` (`server/optimizer/requirements.
 - Public customer flows: `/menu-select/:token` (menu selection link, with components in `components/menuSelectionLink/`) and `/join/:token` (member registration).
 - The partner and member portals use the MATTER dark/lime brand styling.
 
+## Driver Reports maintenance
+
+Before changing Driver Reports staff routes/UI, collection/grading/GPS, reviews/storage, or worker/release controls, read [the maintenance map](docs/driver-audits/maintenance-map.md) for component ownership, routes, configuration, tests and live acceptance. Follow [the source-worker guide](docs/driver-audits/source-worker.md) for native handoff and source controls, and [the builder guide](docs/driver-audits/builder-transition.md) before replacing the builder. The tracked serving adapter and private source/builder/renderer exports have separate release identities; verify the documented source owner before rebuilding them. Update the affected map and acceptance checks with an authorized change. Startup and fixture parity do not establish live data flow.
+
 ## Deployment
 
 Every push to `main` triggers the GitHub Action, which SSHes into the DigitalOcean droplet. There it runs `git reset --hard origin/main`, installs server deps with `npm ci --omit=dev`, runs `npm ci && npm run build` for the client, and restarts PM2 as `matter-delivery-api`. Merging to main means shipping to production, so make sure the client builds before you push.
