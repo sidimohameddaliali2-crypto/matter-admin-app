@@ -11,6 +11,7 @@ on:
           - inspect-bindings
           - inspect-database-config
           - inspect-supabase-host
+          - inspect-supabase-routing
           - prepare-supabase-host
           - pause-builder
           - resume-builder
@@ -89,6 +90,7 @@ jobs:
           printf 'code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-handoff.mjs)" >> "$GITHUB_OUTPUT"
           case "$OPERATION" in
             inspect-supabase-host|prepare-supabase-host) operator=supabase-handoff ;;
+            inspect-supabase-routing) operator=supabase-routing ;;
             inspect-database-config) operator=database-check ;;
             prepare-object-store|externalize-native-archive) operator=object-store ;;
             plan-native-cleanup|apply-native-cleanup) operator=cleanup ;;
@@ -99,8 +101,8 @@ jobs:
             stage-native-proofs|export-native-controls) operator=proofs ;;
             *) operator=import ;;
           esac
-          if [[ "$operator" == supabase-handoff ]]; then
-            operator_file=.github/scripts/driver-audit-supabase-handoff.mjs
+          if [[ "$operator" == supabase-handoff || "$operator" == supabase-routing ]]; then
+            operator_file=".github/scripts/driver-audit-$operator.mjs"
           else
             operator_file=".github/scripts/driver-audit-native-$operator.mjs"
           fi

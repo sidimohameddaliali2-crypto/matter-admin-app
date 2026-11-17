@@ -890,3 +890,87 @@ test('the actual host bridge prints only the encrypted stopped schema and exits 
     assert(error.stderr.includes('operatorPhase=' + receipt.operatorPhase)); return true;
   });
 });
+
+async function archiveBackedFixture(f, role, { present = false, mismatchedName = false } = {}) {
+  const body = Buffer.from('fictional retained archive ' + role), expected = hash(body);
+  const name = 'archive-' + (mismatchedName ? hash('different filename') : expected) + '.private.bin';
+  let row, root;
+  if (role === 'baseline-builder-input') root = path.join(f.root, 'baseline');
+  else if (role === 'candidate') {
+    row = JSON.parse(await fs.readFile(path.join(f.root, 'work/current.private.json'))); root = row.privateRoot;
+  } else { row = f.bootstrap.retained.find(item => item.role === role); root = row.privateRoot; }
+  const file = path.join(root, 'files.private.json'), values = JSON.parse(await fs.readFile(file));
+  values[name] = expected; const manifest = await f.write(file, JSON.stringify(values));
+  if (present) await f.write(path.join(root, name), body);
+  if (role === 'baseline-builder-input') {
+    f.pins.baseline = manifest.sha256; f.seed.manifestSha256 = manifest.sha256;
+    f.bootstrap.expected.seedSha256 = (await f.write(path.join(f.root, 'seed.json'), JSON.stringify(f.seed))).sha256;
+  } else {
+    row.manifestSha256 = manifest.sha256;
+    const acceptedFile = path.join(path.dirname(root), 'accepted.private.json');
+    const accepted = JSON.parse(await fs.readFile(acceptedFile)); accepted.manifestSha256 = manifest.sha256;
+    row.acceptedSha256 = (await f.write(acceptedFile, JSON.stringify(accepted))).sha256;
+    if (role === 'candidate') {
+      f.pins.candidate = manifest.sha256;
+      f.bootstrap.expected.currentPointerSha256 = (await f.write(path.join(f.root, 'work/current.private.json'), JSON.stringify(row))).sha256;
+    } else (role === 'serving-current' ? f.pins.servingCurrent : f.pins.servingPrevious).manifestSha256 = manifest.sha256;
+  }
+  f.bootstrap.expected.sourceEnvironmentSha256 = hash(JSON.stringify(f.expectedEnvironment()));
+  f.bootstrap.inspectionMetadataSha256 = (await f.run()).metadataSha256;
+  return { root, name, sha256: expected, body, manifest: manifest.sha256 };
+}
+
+test('archive-backed package manifests retain exact remote references and a separately pinned physical-presence mask', async t => {
+  const f = await preparationFixture(t), refs = new Map();
+  for (const role of ['baseline-builder-input', 'candidate', 'serving-current', 'serving-previous']) refs.set(role, await archiveBackedFixture(f, role));
+  const result = await f.runPrepare(), { gunzipSync } = await import('node:zlib');
+  const prepared = JSON.parse(gunzipSync(Buffer.from(openTransferSecrets(privateKey, result.capsule).metadataGzipBase64, 'base64'))).preparation;
+  for (const row of prepared.packages) {
+    const original = refs.get(row.role); assert.equal(row.archiveBackedManifest, true);
+    assert.equal(row.archiveReferences.locallyMissing, 1); assert.equal(row.archiveReferences.remoteAvailabilityVerified, false);
+    const raw = await fs.readFile(row.archiveReferences.path), mask = JSON.parse(raw);
+    assert.equal(hash(raw), row.archiveReferences.sha256);
+    assert.deepEqual(mask.missingArchiveReferences, [original.sha256]);
+    assert.equal(mask.manifestSha256, original.manifest); assert.equal(mask.inventorySha256, row.inventorySha256);
+    assert.equal(row.missingArchiveReferencesSha256, hash(JSON.stringify([original.sha256])));
+    assert.deepEqual(await fs.readFile(path.join(row.root, 'files.private.json')), await fs.readFile(path.join(original.root, 'files.private.json')));
+    await assert.rejects(fs.access(path.join(row.root, original.name)), { code: 'ENOENT' });
+    assert.equal((await fs.lstat(row.archiveReferences.path)).mode & 0o777, 0o600);
+  }
+  assert.equal(f.reads(), 1, 'Only the already authorized bootstrap is downloaded; omitted archive bytes are not restaged');
+});
+
+test('missing archive-name/hash mismatches and every other missing declared file remain rejected', async t => {
+  const f = await preparationFixture(t); await archiveBackedFixture(f, 'baseline-builder-input', { mismatchedName: true });
+  await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-baseline-manifest-members');
+  assert(!f.commands.some(row => row.args[0] === 'clone'));
+});
+
+test('physical archive presence must remain stable and independent additions or removals are never undone', async t => {
+  for (const [present, target] of [[false, false], [true, false], [false, true], [true, true]]) {
+    const f = await preparationFixture(t), ref = await archiveBackedFixture(f, 'baseline-builder-input', { present });
+    const stage = f.adapters.stageSource;
+    const root = target ? path.join(path.dirname(path.dirname(f.expectedEnvironment().MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY)), 'baseline') : ref.root;
+    const file = path.join(root, ref.name);
+    f.adapters.stageSource = async args => {
+      const value = await stage(args);
+      if (present) await fs.unlink(file); else await f.write(file, ref.body);
+      return value;
+    };
+    await assert.rejects(f.runPrepare(), error => error.phase === 'prepare-staging-readback');
+    if (present) await assert.rejects(fs.access(file), { code: 'ENOENT' });
+    else assert.deepEqual(await fs.readFile(file), ref.body);
+  }
+});
+
+test('an archive reference never excuses a present corrupt file, directory or symbolic link', async t => {
+  for (const kind of ['corrupt', 'directory', 'symlink']) {
+    const f = await preparationFixture(t), ref = await archiveBackedFixture(f, 'baseline-builder-input');
+    const file = path.join(ref.root, ref.name);
+    if (kind === 'corrupt') await f.write(file, 'different actual bytes');
+    else if (kind === 'directory') await fs.mkdir(file, { mode: 0o700 });
+    else await fs.symlink(path.join(f.appRoot, 'absent-outside-target'), file);
+    await assert.rejects(f.runPrepare(), /Supabase handoff stopped at prepare-baseline/);
+    assert(!f.commands.some(row => row.args[0] === 'clone'));
+  }
+});
