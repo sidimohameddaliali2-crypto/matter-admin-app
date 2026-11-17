@@ -65,8 +65,11 @@ async function updateSchedule(id, menuId, syncKey) {
         .flatMap(day => day.items || []).map(id => String(id?._id || id)) : [];
       const items = ids.length ? await MenuItem.find({_id: {$in: ids}, mealType: 'breakfast', isAvailable: true})
         .session(session).select('mealName itemDate isAvailable').lean() : [];
+      // Master Menu names are editable; the source identity survives renames.
+      // The supplied key/name fallback adopts legacy items without a stored key.
+      const sourceKey = item.breakfastSyncKey ?? syncKey ?? partnerMenuNameKey(item.name);
       const dish = menu.isPublished ? partnerBreakfastDays(menu, items)
-        .find(dish => partnerMenuNameKey(dish.name) === partnerMenuNameKey(item.name)) : null;
+        .find(dish => partnerMenuNameKey(dish.name) === sourceKey) : null;
       const schedule = Object.fromEntries(entries(item.menuSelectionDatesByMenu));
       if (!dish) {
         if (!Object.hasOwn(schedule, menuId)) return true;

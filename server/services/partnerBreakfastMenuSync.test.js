@@ -268,3 +268,34 @@ test('a delayed option edit cannot replace the dates from a newer edit of the sa
   assert.ok(state.sourceConflicts > 0);
   assert.deepEqual(records[0].availableDates.map(key), ['2026-11-20']);
 });
+
+test('Master Menu renames preserve stable breakfast identity, edited prices and source-date updates', async t => {
+  const {records, sync} = breakfastStore(t);
+  await sync(week());
+  const item = records[0], originalId = item._id;
+  item.name = 'Chef breakfast'; item.sellingPrice = 27;
+  await sync(week());
+  assert.equal(records.length, 1);
+  assert.equal(item._id, originalId);
+  assert.equal(item.breakfastSyncKey, 'egg toast');
+  assert.equal(item.name, 'Chef breakfast');
+  assert.equal(item.sellingPrice, 27);
+  assert.deepEqual(item.availableDates.map(key), ['2026-11-17', '2026-11-19']);
+  await sync(nextWeek());
+  await sync({...week(), breakfastOptionsByDate: {'2026-11-20': [{name: 'Egg Toast'}]}});
+  assert.deepEqual(item.availableDates.map(key), ['2026-11-20', '2026-11-24']);
+  await sync({...week(), isPublished: false});
+  assert.deepEqual(item.availableDates.map(key), ['2026-11-24']);
+  await sync({...nextWeek(), isPublished: false});
+  assert.deepEqual(item.availableDates, []);
+});
+
+test('cleanup of a stale withdrawal matches renamed breakfasts using their stored key', async t => {
+  const {records, sync, saveSource} = breakfastStore(t);
+  await sync(week());
+  records[0].name = 'Chef breakfast';
+  saveSource(week());
+  // Cleanup calls updateSchedule without the source dish key argument.
+  await syncMenuSelectionBreakfastsToPartnerMenu({...week(), isPublished: false});
+  assert.deepEqual(records[0].availableDates.map(key), ['2026-11-17', '2026-11-19']);
+});
