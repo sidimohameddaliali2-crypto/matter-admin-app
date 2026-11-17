@@ -153,6 +153,10 @@ if (process.argv.includes('--run')) main().catch(error => {
     'Collector root needs a fresh source snapshot', 'Serving and retained workspace collector roots differ',
     'The managed reporting configuration is required'].includes(error.message) ? '; ' + error.message : '';
   const status = [400, 401, 403, 404, 409, 429, 500, 503].includes(error.status) ? '; status=' + error.status : '';
-  console.error('Native handoff operation stopped at ' + phase + reason + status + '; existing report authority is unchanged.');
+  const censusLines = phase === 'collector-census' ? [...(error.stack || '').matchAll(/driverAuditLiveImport\.js:(\d+):\d+/g)]
+    .map(match => Number(match[1])).filter(line => line > 0 && line < 10000).slice(0, 8) : [];
+  const location = censusLines.length ? '; censusLines=' + censusLines.join(',') : '';
+  const fileCode = ['ENOENT', 'EACCES', 'EPERM', 'ELOOP'].includes(error.code) ? '; fileCode=' + error.code : '';
+  console.error('Native handoff operation stopped at ' + phase + reason + status + location + fileCode + '; existing report authority is unchanged.');
   process.exitCode = 1;
 });
