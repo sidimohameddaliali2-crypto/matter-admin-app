@@ -164,8 +164,10 @@ async function main() {
       recipientSha256: hash(request.recipientPublicKey), capsule }));
     return;
   }
-  if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'stage-lineage', 'diagnose-roots'].includes(operation)) {
-    phase = 'native-import-' + operation;
+  if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'stage-lineage', 'qualify-source',
+    'diagnose-roots', 'disable-pruning', 'prepare-native-settings', 'swap-builder-held', 'verify-native-parity',
+    'activate-native', 'start-native', 'stage-native-proofs'].includes(operation)) {
+    phase = 'native-' + operation;
     const encoded = process.env.NATIVE_IMPORT_CODE;
     if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
     const code = Buffer.from(encoded, 'base64');
@@ -179,7 +181,32 @@ async function main() {
     try { await fs.writeFile(filename, code, { flag: 'wx', mode: 0o600 }); }
     catch (error) { if (error.code !== 'EEXIST') throw error; }
     if (hash(await readPrivateDriverAuditSource(filename, 256 * 1024)) !== hash(code)) throw Error('Reviewed import operator hash differs');
-    const { runDriverAuditNativeImport } = await import(pathToFileURL(filename).href);
+    const operator = await import(pathToFileURL(filename).href);
+    const common = { operation, appRoot, expectedSha: expected, sessionId: process.env.NATIVE_TRANSFER_SESSION_ID,
+      profileSha256: process.env.NATIVE_IMPORT_PROFILE_SHA256 || undefined,
+      templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256 || undefined };
+    if (['disable-pruning', 'prepare-native-settings'].includes(operation)) {
+      console.log(JSON.stringify(await operator.runDriverAuditNativeSettings(common))); return;
+    }
+    if (operation === 'swap-builder-held') {
+      console.log(JSON.stringify(await operator.runDriverAuditNativeBuilder(common))); return;
+    }
+    if (operation === 'verify-native-parity') {
+      const result = await operator.runDriverAuditNativeParity({ ...common, closureProofSha256: common.templateSha256 });
+      const names = ['version', 'status', 'verified', 'sessionId', 'profileSha256', 'closureProofSha256', 'collectorRootsSha256',
+        'sourceRevision', 'counts', 'fingerprints', 'originSha256', 'bootstrapSha256', 'semanticCoverage', 'sourceGaps',
+        'completeByteParity', 'archive', 'resultsEqual', 'gpsEqual', 'photosEqual', 'reviewHistoryEqual',
+        'freshOriginalRecordComparisons', 'authorityChanged', 'activationPending', 'receiptSha256'];
+      console.log(JSON.stringify(Object.fromEntries(names.filter(name => result[name] !== undefined).map(name => [name, result[name]]))));
+      return;
+    }
+    if (['activate-native', 'start-native'].includes(operation)) {
+      console.log(JSON.stringify(await operator.runDriverAuditNativeActivation(common))); return;
+    }
+    if (operation === 'stage-native-proofs') {
+      console.log(JSON.stringify(await operator.runDriverAuditNativeProofs(common))); return;
+    }
+    const { runDriverAuditNativeImport } = operator;
     let recipientPublicKey;
     if (operation === 'diagnose-roots' && process.env.NATIVE_TRANSFER_PLAN_B64) {
       const encodedPlan = process.env.NATIVE_TRANSFER_PLAN_B64;
@@ -191,6 +218,7 @@ async function main() {
     const argumentsFor = diagnosticPage => ({ operation, appRoot, expectedSha: expected,
       sessionId: process.env.NATIVE_TRANSFER_SESSION_ID, templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256 || undefined,
       profileSha256: process.env.NATIVE_IMPORT_PROFILE_SHA256 || undefined,
+      qualificationFixtureSha256: process.env.NATIVE_QUALIFICATION_FIXTURE_SHA256 || undefined,
       recipientPublicKey, diagnosticPage });
     const selectedPage = allPages || !process.env.NATIVE_DIAGNOSTIC_PAGE ? 0 : Number(process.env.NATIVE_DIAGNOSTIC_PAGE);
     const first = await runDriverAuditNativeImport(argumentsFor(selectedPage));
@@ -244,6 +272,6 @@ if (process.argv.includes('--run')) main().catch(error => {
     .map(match => Number(match[1])).filter(line => line > 0 && line < 10000).slice(0, 8) : [];
   const location = censusLines.length ? '; censusLines=' + censusLines.join(',') : '';
   const fileCode = ['ENOENT', 'EACCES', 'EPERM', 'ELOOP'].includes(error.code) ? '; fileCode=' + error.code : '';
-  console.error('Native handoff operation stopped at ' + phase + reason + status + location + fileCode + '; existing report authority is unchanged.');
+  console.error('Native handoff operation stopped at ' + phase + reason + status + location + fileCode + '; check its private recovery receipt before retrying.');
   process.exitCode = 1;
 });

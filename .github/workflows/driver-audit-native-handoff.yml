@@ -20,6 +20,14 @@ on:
           - stage-builder
           - stage-source
           - stage-lineage
+          - qualify-source
+          - disable-pruning
+          - prepare-native-settings
+          - swap-builder-held
+          - verify-native-parity
+          - activate-native
+          - start-native
+          - stage-native-proofs
           - diagnose-roots
         default: inspect
       expected_deployed_sha:
@@ -33,10 +41,13 @@ on:
         description: Prepared encrypted transfer session UUID
         type: string
       import_template_sha256:
-        description: SHA-256 of the received private import template
+        description: SHA-256 of the private import, supplement or activation template; final closure SHA for parity
         type: string
       import_profile_sha256:
         description: SHA-256 of the host-created native import profile
+        type: string
+      qualification_fixture_sha256:
+        description: SHA-256 of the original saved native source replay fixture
         type: string
       diagnostic_page:
         description: Page of RSA-sealed private metadata, starting at zero; all returns at most sixteen pages
@@ -60,11 +71,20 @@ jobs:
         id: prepare
         env:
           EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
+          OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
           [[ "$EXPECTED_DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ ]]
           printf 'code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-handoff.mjs)" >> "$GITHUB_OUTPUT"
-          printf 'import_code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-import.mjs)" >> "$GITHUB_OUTPUT"
+          case "$OPERATION" in
+            disable-pruning|prepare-native-settings) operator=settings ;;
+            swap-builder-held) operator=builder ;;
+            verify-native-parity) operator=parity ;;
+            activate-native|start-native) operator=activation ;;
+            stage-native-proofs) operator=proofs ;;
+            *) operator=import ;;
+          esac
+          printf 'import_code=%s\n' "$(base64 -w0 ".github/scripts/driver-audit-native-$operator.mjs")" >> "$GITHUB_OUTPUT"
       - name: Run reviewed handoff operation
         uses: appleboy/ssh-action@v1.2.0
         env:
@@ -78,13 +98,14 @@ jobs:
           NATIVE_IMPORT_TEMPLATE_SHA256: ${{ inputs.import_template_sha256 }}
           NATIVE_IMPORT_PROFILE_SHA256: ${{ inputs.import_profile_sha256 }}
           NATIVE_DIAGNOSTIC_PAGE: ${{ inputs.diagnostic_page }}
+          NATIVE_QUALIFICATION_FIXTURE_SHA256: ${{ inputs.qualification_fixture_sha256 }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 60m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,NATIVE_HANDOFF_OPERATION,NATIVE_HANDOFF_CODE,NATIVE_TRANSFER_PLAN_B64,NATIVE_TRANSFER_SESSION_ID,NATIVE_IMPORT_CODE,NATIVE_IMPORT_TEMPLATE_SHA256,NATIVE_IMPORT_PROFILE_SHA256,NATIVE_DIAGNOSTIC_PAGE
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,NATIVE_HANDOFF_OPERATION,NATIVE_HANDOFF_CODE,NATIVE_TRANSFER_PLAN_B64,NATIVE_TRANSFER_SESSION_ID,NATIVE_IMPORT_CODE,NATIVE_IMPORT_TEMPLATE_SHA256,NATIVE_IMPORT_PROFILE_SHA256,NATIVE_DIAGNOSTIC_PAGE,NATIVE_QUALIFICATION_FIXTURE_SHA256
           script: |
             set -e
             cd -- "$DO_APP_PATH"

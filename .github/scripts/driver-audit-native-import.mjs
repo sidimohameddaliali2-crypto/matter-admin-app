@@ -73,6 +73,50 @@ async function stageHistoricalSource({ folder, received, proofSha256, syncRoot, 
     authorityChanged: false, activationPending: true };
 }
 
+async function qualifySource({ sourceRoot, syncRoot, fixtureSha256, expectedSha, server, appRoot, read, load, env, execute }) {
+  const { default: dotenv } = await load('node_modules/dotenv/lib/main.js');
+  const durable = dotenv.parse(await read(path.join(server, '.env.local'), 1024 * 1024));
+  requireImport(env.DRIVER_AUDIT_REPLICA_GC_ENABLED === '0' && durable.DRIVER_AUDIT_REPLICA_GC_ENABLED === '0',
+    'Source qualification requires durably disabled replica pruning');
+  const sync = JSON.parse(await read(path.join(syncRoot, 'sync.json'), 1024 * 1024));
+  requireImport(sync.builderSha256 === NATIVE_BUILDER_TO, 'Source qualification requires the reviewed managed-cache builder');
+  const { readDriverAuditSourceConfig } = await load('services/driverAuditSource.js');
+  const config = await readDriverAuditSourceConfig(path.join(sourceRoot, 'source.json'));
+  requireImport(config.manifestSha256 === NATIVE_IMPORT_SOURCE_MANIFEST && config.dataStore === 'mongo'
+    && config.environment?.DRIVER_AUDIT_DATA_STORE === 'mongo'
+    && config.archiveCacheDirectory === path.join(syncRoot, 'work/archive-cache'), 'The exact native source configuration differs');
+  const { acquireWorkerLock } = await load('vendor/driver-audits/integration/hosted/worker-lock.mjs');
+  const held = await acquireWorkerLock(path.join(path.dirname(sourceRoot), 'source-deployment.lock'));
+  try {
+    const { qualifyDriverAuditSourceWhileHeld } = await load('scripts/driverAuditSourceQualify.js');
+    requireImport(typeof qualifyDriverAuditSourceWhileHeld === 'function', 'The reviewed held qualification implementation is required');
+    const supervisor = async () => JSON.parse((await execute('pm2', ['jlist'], { timeout: 5000, maxBuffer: 8 * 1024 * 1024 })).stdout);
+    const control = async action => {
+      const result = await execute(process.execPath, [path.join(server, 'scripts/driverAuditDeploy.js'), action], {
+        cwd: appRoot, env: { ...env, DRIVER_AUDIT_DEPLOY_SHA: expectedSha }, timeout: 240000, maxBuffer: 65536,
+      });
+      requireImport((action === 'deploy-worker-resume' ? ['resumed'] : ['paused', 'inactive']).includes(result.stdout.trim()),
+        'The actual managed sync lifecycle result differs');
+    };
+    const result = await qualifyDriverAuditSourceWhileHeld({ config, commit: expectedSha, fixtureSha256, supervisor,
+      startSync: () => control('deploy-worker-resume'), stopSync: async () => {
+        await control('deploy-worker-pause'); await execute('pm2', ['save'], { timeout: 10000, maxBuffer: 65536 });
+      } });
+    requireImport(digest(result.receiptSha256) && result.commit === expectedSha && result.configSha256 === config.configSha256
+      && result.fixtureSha256 === fixtureSha256, 'The actual host qualification receipt differs');
+    const verified = result.status === 'verified' && result.verified === true;
+    const blocked = result.blocked && Object.fromEntries(Object.entries(result.blocked).filter(([key, value]) =>
+      ['phase', 'reason', 'availableBytes', 'requiredBytes', 'line', 'workerPhase'].includes(key)
+      && (integer(value) || typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value))));
+    return { status: verified ? 'source-qualified' : 'source-qualification-partial', verified,
+      fixtureSha256, qualificationReceiptSha256: result.receiptSha256, configSha256: config.configSha256,
+      ...(blocked ? { blocked } : {}), sourcePeakRssBytes: integer(result.source?.peakRssBytes) ? result.source.peakRssBytes : null,
+      builderPeakRssBytes: integer(result.builder?.peakRssBytes) ? result.builder.peakRssBytes : null,
+      sourceAfterBuilderPeakRssBytes: integer(result.sourceAfterBuilder?.peakRssBytes) ? result.sourceAfterBuilder.peakRssBytes : null,
+      reportWorkersHeld: true, authorityChanged: false, activationPending: true };
+  } finally { await held.release(); }
+}
+
 async function stageBuilder({ folder, received, bundleSha256, syncRoot, read, privateDirectory, load, pins }) {
   const changed = 'integration/cloud/automatic-release-source.mjs', filename = 'builder-bundle.private.json.gz';
   requireImport(digest(pins.from) && digest(pins.to) && pins.from !== pins.to, 'The reviewed builder identities differ');
@@ -436,12 +480,12 @@ async function diagnoseRoots({ db, syncRoot, read, privateDirectory, load, recip
 
 // The optional adapters are for isolated fixture tests. Dispatch supplies only
 // reviewed public identities; all private paths/modules come from the host.
-export async function runDriverAuditNativeImport({ operation, sessionId, templateSha256, profileSha256,
+export async function runDriverAuditNativeImport({ operation, sessionId, templateSha256, profileSha256, qualificationFixtureSha256,
   expectedSha, appRoot, recipientPublicKey, diagnosticPage = 0 }, adapters = {}) {
   let phase = 'checkout', lock, connection;
   const execute = adapters.exec || exec, env = adapters.env || process.env;
   try {
-    requireImport(['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'stage-lineage', 'diagnose-roots'].includes(operation)
+    requireImport(['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'stage-lineage', 'qualify-source', 'diagnose-roots'].includes(operation)
       && typeof sessionId === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(sessionId)
       && (operation === 'diagnose-roots' ? templateSha256 === undefined || digest(templateSha256) : digest(templateSha256)),
     'A reviewed import operation and public input identities are required');
@@ -449,7 +493,9 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
       || typeof recipientPublicKey === 'string' && recipientPublicKey.length <= 8192 && !recipientPublicKey.includes('PRIVATE KEY')
         && /-----BEGIN (?:RSA )?PUBLIC KEY-----/.test(recipientPublicKey)), 'A bounded public diagnostic recipient is required');
     requireImport(profileSha256 === undefined || digest(profileSha256), 'The import profile pin is invalid');
-    requireImport(!['stage-import', 'verify-import'].includes(operation) || digest(profileSha256), 'The exact import profile pin is required');
+    requireImport(!['stage-import', 'verify-import', 'qualify-source'].includes(operation) || digest(profileSha256), 'The exact import profile pin is required');
+    requireImport(operation === 'qualify-source' ? digest(qualificationFixtureSha256) : qualificationFixtureSha256 === undefined,
+      'The exact qualification fixture identity is required');
     requireImport(typeof appRoot === 'string' && path.isAbsolute(appRoot) && path.resolve(appRoot) === appRoot
       && await fs.realpath(appRoot) === appRoot, 'The exact application root is required');
     const checkout = async () => {
@@ -614,6 +660,13 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
     const output = { version: 1, sessionId, applicationCommit: expectedSha, templateSha256, profileSha256: actualProfileSha,
       collectorRootsSha256, capacityBytes: NATIVE_IMPORT_CAPACITY_BYTES, activationPending: true };
     if (operation === 'create-profile') return { ...output, status: 'profile-created' };
+    if (operation === 'qualify-source') {
+      phase = 'source-qualification';
+      const result = await qualifySource({ sourceRoot, syncRoot, fixtureSha256: qualificationFixtureSha256, expectedSha,
+        server, appRoot, read, load, env, execute });
+      await safety();
+      return { ...output, ...result };
+    }
     phase = operation;
     const cliOperation = { 'plan-import': 'plan', 'stage-import': 'stage', 'verify-import': 'verify' }[operation];
     const result = await execute(process.execPath, [path.join(server, 'scripts/driverAuditMongoMigrate.js'), cliOperation,
@@ -650,6 +703,7 @@ if (process.argv[1] && await fs.realpath(process.argv[1]).catch(() => null) === 
     console.log(JSON.stringify(await runDriverAuditNativeImport({ operation: process.env.NATIVE_HANDOFF_OPERATION,
       sessionId: process.env.NATIVE_TRANSFER_SESSION_ID, templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256,
       profileSha256: process.env.NATIVE_IMPORT_PROFILE_SHA256 || undefined,
+      qualificationFixtureSha256: process.env.NATIVE_QUALIFICATION_FIXTURE_SHA256 || undefined,
       expectedSha: process.env.EXPECTED_DEPLOYED_SHA, appRoot: await fs.realpath(process.cwd()) })));
   } catch (error) {
     console.error('Native import stopped at ' + (error.phase || 'checkout') + '. Check the reviewed inputs and stopped report workers.');

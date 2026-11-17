@@ -13,7 +13,7 @@ import { stageDriverAuditSource } from '../../server/scripts/driverAuditSourceSt
 import { readDriverAuditImportRows } from '../../server/services/driverAuditLiveImport.js';
 import { verifyAuditBuilder } from '../../server/vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
 import { runDriverAuditNativeImport, NATIVE_IMPORT_FILES, NATIVE_IMPORT_SOURCE_MANIFEST,
-  NATIVE_IMPORT_CAPACITY_BYTES } from './driver-audit-native-import.mjs';
+  NATIVE_IMPORT_CAPACITY_BYTES, NATIVE_BUILDER_TO } from './driver-audit-native-import.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const commit = 'a'.repeat(40), censusSha = 'b'.repeat(64), sessionId = '00000000-0000-4000-8000-000000000001';
@@ -566,6 +566,79 @@ test('historical source retention rejects input, source, proof or existing-targe
     await assert.rejects(f.runLineage(), error => !String(error).includes('fictional-private'));
     if (reason === 'conflict') assert.equal(await fs.readFile(path.join(f.syncRoot, f.name), 'utf8'), 'preserve-existing');
     assert.equal(f.cli.length, 0); assert.equal(f.locked(), false);
+  });
+});
+
+async function qualificationFixture(t) {
+  const f = await fixture(t), created = await f.run('create-profile'), file = path.join(f.syncRoot, 'sync.json');
+  const sync = JSON.parse(await fs.readFile(file));
+  await fs.writeFile(file, JSON.stringify({ ...sync, builderSha256: NATIVE_BUILDER_TO }), { mode: 0o600 });
+  const local = path.join(f.appRoot, 'server/.env.local');
+  await fs.writeFile(local, 'DRIVER_AUDIT_REPLICA_GC_ENABLED=0\n', { mode: 0o600 });
+  f.adapters.env.DRIVER_AUDIT_REPLICA_GC_ENABLED = '0';
+  const source = { root: f.sourceRoot, manifestSha256: NATIVE_IMPORT_SOURCE_MANIFEST, configSha256: 'e'.repeat(64),
+    dataStore: 'mongo', environment: { DRIVER_AUDIT_DATA_STORE: 'mongo' }, archiveCacheDirectory: path.join(f.syncRoot, 'work/archive-cache') };
+  const fixtureSha256 = 'f'.repeat(64), originalLoad = f.adapters.load, originalExec = f.adapters.exec;
+  const result = { status: 'verified', verified: true, receiptSha256: hash('original host receipt'), commit,
+    configSha256: source.configSha256, fixtureSha256, source: { peakRssBytes: 300 }, builder: { peakRssBytes: 400 },
+    sourceAfterBuilder: { peakRssBytes: 350 } };
+  let fail = false, calls = 0;
+  f.adapters.load = async name => {
+    if (name === 'node_modules/dotenv/lib/main.js') return import('../../server/node_modules/dotenv/lib/main.js');
+    if (name === 'services/driverAuditSource.js') return { ...await originalLoad(name), async readDriverAuditSourceConfig(file) {
+      assert.equal(file, path.join(f.sourceRoot, 'source.json')); return source;
+    } };
+    if (name === 'scripts/driverAuditSourceQualify.js') return { async qualifyDriverAuditSourceWhileHeld(input) {
+      calls++; assert.equal(input.commit, commit); assert.equal(input.fixtureSha256, fixtureSha256); assert.equal(input.config, source);
+      assert.equal((await input.supervisor())[1].pm2_env.status, 'stopped');
+      try { await input.startSync(); assert.equal((await input.supervisor())[1].pm2_env.status, 'online');
+        if (fail) throw Error('fictional-private-replay-failure'); return result;
+      } finally { await input.stopSync(); assert.equal((await input.supervisor())[1].pm2_env.status, 'stopped'); }
+    } };
+    return originalLoad(name);
+  };
+  f.adapters.exec = async (file, args, options) => {
+    if (file === process.execPath && args[0] === path.join(f.appRoot, 'server/scripts/driverAuditDeploy.js')) {
+      assert.equal(options.env.DRIVER_AUDIT_DEPLOY_SHA, commit);
+      if (args[1] === 'deploy-worker-resume') { f.entries[1].pm2_env.status = 'online'; return { stdout: 'resumed' }; }
+      assert.equal(args[1], 'deploy-worker-pause'); f.entries[1].pm2_env.status = 'stopped'; return { stdout: 'paused' };
+    }
+    if (file === 'pm2' && args[0] === 'save') return { stdout: 'saved' };
+    return originalExec(file, args, options);
+  };
+  return { ...f, source, result, local, fixtureSha256, profileSha256: created.profileSha256, calls: () => calls,
+    fail: () => { fail = true; }, runQualification: extra => f.run('qualify-source', { profileSha256: created.profileSha256,
+      qualificationFixtureSha256: fixtureSha256, ...extra }) };
+}
+
+test('native source rehearsal uses exact profile and real held lifecycle with no authority or publishing switch', async t => {
+  const f = await qualificationFixture(t), result = await f.runQualification();
+  assert.equal(result.status, 'source-qualified'); assert.equal(result.verified, true);
+  assert.equal(result.qualificationReceiptSha256, f.result.receiptSha256); assert.equal(result.reportWorkersHeld, true);
+  assert.equal(result.authorityChanged, false); assert.equal(f.entries[1].pm2_env.status, 'stopped');
+  assert.equal(f.cli.length, 0); assert.equal(f.locked(), false); assert(!JSON.stringify(result).includes(f.appRoot));
+});
+
+test('qualification refuses unsafe gates and exposes a partial original host result without calling it verified', async t => {
+  for (const reason of ['fixture', 'profile', 'durable-pruning', 'effective-pruning', 'cache', 'backend', 'failure', 'partial']) await t.test(reason, async sub => {
+    const f = await qualificationFixture(sub), extra = {};
+    if (reason === 'fixture') extra.qualificationFixtureSha256 = undefined;
+    if (reason === 'profile') extra.profileSha256 = '0'.repeat(64);
+    if (reason === 'durable-pruning') await fs.writeFile(f.local, 'DRIVER_AUDIT_REPLICA_GC_ENABLED=1\n');
+    if (reason === 'effective-pruning') f.adapters.env.DRIVER_AUDIT_REPLICA_GC_ENABLED = '1';
+    if (reason === 'cache') f.source.archiveCacheDirectory = '/unapproved';
+    if (reason === 'backend') f.source.dataStore = 'supabase';
+    if (reason === 'failure') f.fail();
+    if (reason === 'partial') {
+      f.result.status = 'partial'; f.result.verified = false; f.result.blocked = { phase: 'builder', reason: 'memory',
+        privateError: 'fictional-private-source-value' };
+      const value = await f.runQualification(extra);
+      assert.equal(value.status, 'source-qualification-partial'); assert.equal(value.verified, false);
+      assert.deepEqual(value.blocked, { phase: 'builder', reason: 'memory' });
+      assert(!JSON.stringify(value).includes('fictional-private'));
+    } else await assert.rejects(f.runQualification(extra), error => !String(error).includes('fictional-private'));
+    assert.equal(f.entries[1].pm2_env.status, 'stopped'); assert.equal(f.locked(), false);
+    if (!['failure', 'partial'].includes(reason)) assert.equal(f.calls(), 0);
   });
 });
 
