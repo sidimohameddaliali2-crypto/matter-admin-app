@@ -164,7 +164,7 @@ async function main() {
       recipientSha256: hash(request.recipientPublicKey), capsule }));
     return;
   }
-  if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'diagnose-roots'].includes(operation)) {
+  if (['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'diagnose-roots'].includes(operation)) {
     phase = 'native-import-' + operation;
     const encoded = process.env.NATIVE_IMPORT_CODE;
     if (!encoded || encoded.length > 256 * 1024 || !/^[A-Za-z0-9+/]+=*$/.test(encoded)) throw Error('Reviewed import operator required');
@@ -187,11 +187,26 @@ async function main() {
       const { validateDriverAuditTransferPlan } = await load('services/driverAuditTransferSession.js');
       recipientPublicKey = validateDriverAuditTransferPlan(JSON.parse(Buffer.from(encodedPlan, 'base64').toString('utf8'))).recipientPublicKey;
     }
-    console.log(JSON.stringify(await runDriverAuditNativeImport({ operation, appRoot, expectedSha: expected,
+    const allPages = operation === 'diagnose-roots' && process.env.NATIVE_DIAGNOSTIC_PAGE === 'all';
+    const argumentsFor = diagnosticPage => ({ operation, appRoot, expectedSha: expected,
       sessionId: process.env.NATIVE_TRANSFER_SESSION_ID, templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256 || undefined,
       profileSha256: process.env.NATIVE_IMPORT_PROFILE_SHA256 || undefined,
-      recipientPublicKey, diagnosticPage: process.env.NATIVE_DIAGNOSTIC_PAGE === '' || process.env.NATIVE_DIAGNOSTIC_PAGE === undefined
-        ? 0 : Number(process.env.NATIVE_DIAGNOSTIC_PAGE) })));
+      recipientPublicKey, diagnosticPage });
+    const selectedPage = allPages || !process.env.NATIVE_DIAGNOSTIC_PAGE ? 0 : Number(process.env.NATIVE_DIAGNOSTIC_PAGE);
+    const first = await runDriverAuditNativeImport(argumentsFor(selectedPage));
+    console.log(JSON.stringify(first));
+    if (allPages) {
+      if (!Number.isSafeInteger(first.diagnosticPages) || first.diagnosticPages < 1 || first.diagnosticPages > 16) {
+        throw Error('Use individual pages for a larger diagnostic envelope');
+      }
+      for (let page = 1; page < first.diagnosticPages; page++) {
+        const next = await runDriverAuditNativeImport(argumentsFor(page));
+        if (next.rootMetadataSha256 !== first.rootMetadataSha256 || next.diagnosticPages !== first.diagnosticPages) {
+          throw Error('Diagnostic control metadata changed between pages');
+        }
+        console.log(JSON.stringify(next));
+      }
+    }
     return;
   }
   if (['prepare-transfer', 'receive-transfer'].includes(operation)) {

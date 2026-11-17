@@ -105,23 +105,104 @@ async function stageBuilder({ folder, received, bundleSha256, syncRoot, read, pr
   return { ...result, status: 'builder-staged' };
 }
 
+async function stageSource({ folder, received, bundleSha256, syncRoot, server, db, client, read, privateDirectory, load, execute, pins }) {
+  const names = ['source-bundle.private.json.gz', 'environment.private.json'];
+  requireImport(Array.isArray(received.inputFiles) && received.inputFiles.length === names.length
+    && names.every(name => received.inputFiles.filter(row => row?.name === name).length === 1),
+  'The exact two private source inputs are required');
+  const input = async (name, maximum) => {
+    const matches = received.inputFiles?.filter(row => row?.name === name);
+    requireImport(Array.isArray(matches) && matches.length === 1 && digest(matches[0].sha256)
+      && integer(matches[0].bytes) && matches[0].bytes > 0 && matches[0].bytes <= maximum, 'The received private source inputs differ');
+    const bytes = await read(path.join(folder, name), maximum);
+    requireImport(bytes.length === matches[0].bytes && hash(bytes) === matches[0].sha256, 'The received private source input hash differs');
+    return bytes;
+  };
+  const compressed = await input('source-bundle.private.json.gz', 1024 * 1024);
+  const environmentBytes = await input('environment.private.json', 64 * 1024);
+  requireImport(hash(compressed) === bundleSha256 && digest(pins.manifest) && pins.files === 134, 'The reviewed complete source bundle differs');
+  const bundle = JSON.parse(gunzipSync(compressed, { maxOutputLength: 16 * 1024 * 1024 }));
+  requireImport(object(bundle) && Object.keys(bundle).sort().join(',') === 'files,manifestSha256,nodeExecutable,nodeVersion,version'
+    && bundle.version === 1 && bundle.manifestSha256 === pins.manifest && Array.isArray(bundle.files) && bundle.files.length === pins.files + 1
+    && bundle.files.every(row => object(row) && Object.keys(row).sort().join(',') === 'dataBase64,path'
+      && typeof row.path === 'string' && typeof row.dataBase64 === 'string'), 'The source archive must contain only the complete pinned code envelope');
+  const environment = JSON.parse(environmentBytes), cacheDirectory = path.join(syncRoot, 'work/archive-cache');
+  const forbidden = ['MONGODB_URI', 'DRIVER_AUDIT_NATIVE_CAPACITY_BYTES', 'NODE_OPTIONS', 'NODE_PATH', 'PATH', 'HOME', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES'];
+  requireImport(object(environment) && environment.DRIVER_AUDIT_DATA_STORE === 'mongo'
+    && environment.MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY === cacheDirectory
+    && Object.entries(environment).every(([key, value]) => /^[A-Z][A-Z0-9_]*$/.test(key) && typeof value === 'string'
+      && value.length <= 16384 && !value.includes('\0') && !forbidden.includes(key) && !key.includes('OIDC')),
+  'The private source environment must use the app native connection and managed cache');
+  const manifestEntry = bundle.files.find(row => row.path === 'manifest.private.json');
+  const manifestBytes = manifestEntry && Buffer.from(manifestEntry.dataBase64, 'base64');
+  requireImport(manifestBytes && hash(manifestBytes) === pins.manifest, 'The complete source manifest pin differs');
+  const manifest = JSON.parse(manifestBytes);
+  const switches = ['MATTER_DELIVERY_ENABLED', 'MATTER_PHOTO_READ_ENABLED', 'MATTER_PHOTO_GRADE_ENABLED', 'MATTER_GPS_ENABLED', 'MATTER_GPS_PUBLICATION_ENABLED'];
+  requireImport(Array.isArray(manifest.files) && manifest.files.length === pins.files && Array.isArray(manifest.entrypoints)
+    && manifest.entrypoints.length === 13 && manifest.entrypoints.every(row => Array.isArray(row.requiredEnvironment)
+      && row.requiredEnvironment.every(key => typeof environment[key] === 'string' && environment[key].length > 0))
+    && typeof environment.CRON_SECRET === 'string' && environment.CRON_SECRET.length >= 32
+    && switches.every(key => environment[key] === undefined || ['0', '1'].includes(environment[key]))
+    && (environment.MATTER_PHOTO_GRADE_ENABLED !== '1' || typeof environment.AI_GATEWAY_API_KEY === 'string' && environment.AI_GATEWAY_API_KEY.length > 0),
+  'The private source environment does not satisfy the pinned handlers');
+  await privateDirectory(cacheDirectory);
+  requireImport(typeof bundle.nodeExecutable === 'string' && path.isAbsolute(bundle.nodeExecutable)
+    && path.resolve(bundle.nodeExecutable) === bundle.nodeExecutable
+    && await fs.realpath(bundle.nodeExecutable) === await fs.realpath(process.execPath)
+    && bundle.nodeVersion === process.version, 'The source bundle must identify the current host Node');
+  const node = await execute(bundle.nodeExecutable, ['--version'], { env: {}, timeout: 5000, maxBuffer: 4096 });
+  requireImport(node.stdout.trim() === bundle.nodeVersion, 'The freshly checked source Node version differs');
+  const sourceRoot = path.join(server, '.private/driver-audit-source');
+  await fs.mkdir(sourceRoot, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
+  await privateDirectory(sourceRoot);
+  const { acquireWorkerLock } = await load('vendor/driver-audits/integration/hosted/worker-lock.mjs');
+  const lock = await acquireWorkerLock(path.join(sourceRoot, 'source-deployment.lock'));
+  try {
+    const { stageDriverAuditSource } = await load('scripts/driverAuditSourceStage.js');
+    const result = await stageDriverAuditSource({ sourceRoot, compressed, expectedBundleSha256: bundleSha256,
+      expectedManifestSha256: pins.manifest, environmentBytes, nodeExecutable: bundle.nodeExecutable });
+    requireImport(['staged', 'already-staged'].includes(result.status) && result.manifestSha256 === pins.manifest
+      && result.configFile === path.join(sourceRoot, pins.manifest, 'source.json'), 'The actual source stage receipt differs');
+    const { readDriverAuditSourceConfig } = await load('services/driverAuditSource.js');
+    const config = await readDriverAuditSourceConfig(result.configFile);
+    requireImport(config.dataStore === 'mongo' && config.archiveCacheDirectory === cacheDirectory
+      && config.manifestSha256 === pins.manifest && config.runtime.files.length === pins.files,
+    'The staged complete native source configuration differs');
+    const receipt = JSON.parse(await read(path.join(sourceRoot, pins.manifest, 'stage.private.json'), 1024 * 1024));
+    requireImport(receipt.bundleSha256 === bundleSha256 && receipt.environmentSha256 === hash(environmentBytes),
+      'The staged source code and private environment pins differ');
+    const { createDriverAuditMongoArchive } = await load('services/driverAuditMongoArchive.js');
+    const archive = createDriverAuditMongoArchive({ db, client, capacityBytes: NATIVE_IMPORT_CAPACITY_BYTES });
+    const key = bundleSha256 + '.gz', saved = await archive.putVerifiedObject(key, compressed);
+    requireImport(saved.verified === true && saved.key === key && saved.sha256 === bundleSha256 && saved.bytes === compressed.length,
+      'The complete native code archive receipt differs');
+    requireImport(Buffer.concat(await archive.readObject(key, { maxBytes: compressed.length })).equals(compressed),
+      'The complete native code archive readback differs');
+    return { status: result.status === 'staged' ? 'source-staged' : 'source-already-staged',
+      manifestSha256: pins.manifest, bundleSha256, archiveCodeKey: key, files: pins.files, bundleBytes: compressed.length,
+      nodeVersion: bundle.nodeVersion, configSha256: config.configSha256, environmentArchived: false,
+      authorityChanged: false, activationPending: true };
+  } finally { await lock.release(); }
+}
+
 async function diagnoseRoots({ db, syncRoot, read, privateDirectory, load, recipientPublicKey, diagnosticPage }) {
   const signatures = new Map(), controls = [], inventories = [], records = new Map(), references = [], candidates = new Set();
+  const orphans = [], orphanProbes = [], orphanIndexes = new Map(), unresolvedPaths = new Set(), directorySignatures = new Map();
   const attemptPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i;
   let metadataBytes = 0;
   async function bytes(relative, maximum, optional = true) {
     const file = path.join(syncRoot, relative);
     try {
       const value = await read(file, maximum);
-      signatures.set(relative, { sha256: hash(value), maximum });
+      signatures.set(relative, { sha256: hash(value), maximum, bytes: value.length });
       return value;
     } catch (error) {
       if (optional && error.code === 'ENOENT') { signatures.set(relative, { sha256: null, maximum }); return null; }
       throw error;
     }
   }
-  async function control(relative, kind, optional = true) {
-    const raw = await bytes(relative, 1024 * 1024, optional);
+  async function control(relative, kind, optional = true, maximum = 1024 * 1024) {
+    const raw = await bytes(relative, maximum, optional);
     if (!raw) return null;
     metadataBytes += raw.length;
     requireImport(metadataBytes <= 8 * 1024 * 1024, 'Diagnostic control metadata exceeds its bound');
@@ -134,8 +215,76 @@ async function diagnoseRoots({ db, syncRoot, read, privateDirectory, load, recip
     const raw = await bytes(relative, 16 * 1024 * 1024);
     const value = raw && JSON.parse(raw);
     const result = { relative, present: !!raw, bytes: raw?.length ?? 0, sha256: raw ? hash(raw) : null,
-      entries: value && object(value) ? Object.keys(value).length : null };
+      entries: value && object(value) ? Object.keys(value).length : null,
+      entriesValid: !!value && object(value) && Object.keys(value).length > 0
+        && Object.entries(value).every(([name, expected]) => name.length <= 512
+          && name.split('/').every(part => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(part)) && digest(expected)) };
     inventories.push(result); return result;
+  }
+  async function directory(relative) {
+    const root = path.join(syncRoot, relative);
+    const info = await fs.lstat(root).catch(error => { if (error.code !== 'ENOENT') throw error; return null; });
+    if (!info) return { present: false, ownerPrivate: false, entries: [], counts: { file: 0, directory: 0, symlink: 0, other: 0 } };
+    await privateDirectory(root);
+    const entries = await fs.readdir(root, { withFileTypes: true });
+    requireImport(entries.length <= 32768, 'Diagnostic orphan directory exceeds its bound');
+    const counts = { file: 0, directory: 0, symlink: 0, other: 0 };
+    const listed = entries.map(entry => {
+      const type = entry.isFile() ? 'file' : entry.isDirectory() ? 'directory' : entry.isSymbolicLink() ? 'symlink' : 'other';
+      counts[type]++; return { name: entry.name, type };
+    }).sort((a, b) => a.name.localeCompare(b.name, 'en'));
+    return { present: true, ownerPrivate: true, entries: listed, counts };
+  }
+  async function orphanProbe(root, reference, index) {
+    unresolvedPaths.add(root);
+    if (!orphanIndexes.has(root)) {
+      if (orphans.length === 8) return;
+      const relative = path.relative(syncRoot, root), prefix = path.dirname(relative);
+      const attempt = await directory(prefix), serverData = await directory(relative), savedCurrent = await directory(prefix + '/saved-current');
+      const source = await directory(prefix + '/source');
+      for (const [name, value] of [[prefix, attempt], [relative, serverData], [prefix + '/saved-current', savedCurrent], [prefix + '/source', source]]) {
+        directorySignatures.set(name, JSON.stringify(value));
+      }
+      const savedInventory = await inventory(relative + '/files.private.json');
+      const metadataFiles = [], sourceSnapshots = [];
+      for (const [location, name, kind, maximum = 1024 * 1024] of [
+        ['attempt', 'accepted.private.json', 'orphan-accepted'],
+        ['attempt', 'direct-seed.private.json', 'orphan-direct-seed'],
+        ['attempt', 'retired-workspace.private.json', 'orphan-retired'],
+        ['attempt', 'build-recipe.private.json', 'orphan-build-recipe'],
+        ['attempt', 'automatic-build.private.json', 'orphan-build-summary'],
+        ['server-data', 'publication.private.json', 'orphan-publication', 2 * 1024 * 1024],
+        ['server-data', 'build.private.json', 'orphan-renderer-build'],
+        ['server-data', 'build-recipe.private.json', 'orphan-server-recipe'],
+        ['saved-current', 'collector-state.private.json', 'orphan-saved-collector', 2 * 1024 * 1024],
+        ['source', 'collector-state.private.json', 'orphan-source-collector', 2 * 1024 * 1024],
+      ]) {
+        const file = (location === 'attempt' ? prefix : location === 'server-data' ? relative : prefix + '/' + location) + '/' + name;
+        const value = await control(file, kind, true, maximum);
+        const saved = signatures.get(file);
+        metadataFiles.push({ location, name, type: saved.sha256 ? 'file' : 'missing',
+          present: saved.sha256 !== null, bytes: saved.bytes ?? 0, sha256: saved.sha256 });
+        if (name === 'collector-state.private.json' && value) sourceSnapshots.push({ location,
+          revision: Number.isSafeInteger(value.revision) && value.revision > 0 ? value.revision : null,
+          bodySha256: typeof value.body === 'string' ? hash(value.body) : null, fileSha256: saved.sha256 });
+      }
+      for (const location of ['saved-current', 'source']) for (const name of ['current-reviews.private.json', 'current-browser.private.json']) {
+        const raw = await bytes(prefix + '/' + location + '/' + name, 64 * 1024 * 1024);
+        metadataFiles.push({ location, name, type: raw ? 'file' : 'missing',
+          present: !!raw, bytes: raw?.length ?? 0, sha256: raw ? hash(raw) : null });
+      }
+      const summary = value => ({ present: value.present, ownerPrivate: value.ownerPrivate, counts: value.counts });
+      const probe = { probe: orphanProbes.length, referenceIndices: [], identityRecovered: false,
+        attempt: summary(attempt), serverData: summary(serverData), savedCurrent: summary(savedCurrent), source: summary(source),
+        inventory: { present: savedInventory.present, bytes: savedInventory.bytes, sha256: savedInventory.sha256,
+          entries: savedInventory.entries, entriesValid: savedInventory.entriesValid, matchesReference: true },
+        metadataFiles, sourceSnapshots };
+      orphanIndexes.set(root, probe.probe); orphanProbes.push(probe);
+      orphans.push({ relative, attempt, serverData, savedCurrent, source, inventory: savedInventory, metadataFiles, sourceSnapshots });
+    }
+    const probe = orphanProbes[orphanIndexes.get(root)];
+    probe.referenceIndices.push(index);
+    probe.inventory.matchesReference &&= probe.inventory.present && probe.inventory.sha256 === reference.manifestSha256;
   }
   const config = await control('sync.json', 'sync-config', false), baseline = path.join(syncRoot, 'baseline');
   requireImport(config.root === syncRoot && config.baselineRoot === baseline, 'Diagnostic managed baseline differs');
@@ -202,6 +351,7 @@ async function diagnoseRoots({ db, syncRoot, read, privateDirectory, load, recip
   const mismatches = [], allMatches = [];
   for (const [index, item] of references.entries()) {
     const targetPath = workspace(item.reference.privateRoot), target = targetPath && records.get(targetPath), value = target?.identity;
+    if (targetPath && !target && targetPath !== baseline) await orphanProbe(targetPath, item.reference, index);
     const matches = { resolved: !!target, manifest: !!target && item.reference.manifestSha256 === value.manifestSha256,
       basis: !!target && item.reference.basis === (target.accepted?.basis || value.sourceBasis),
       revision: !!target && (item.reference.collectorRevision === undefined || item.reference.collectorRevision === value.revision),
@@ -217,23 +367,28 @@ async function diagnoseRoots({ db, syncRoot, read, privateDirectory, load, recip
   }
   requireImport(JSON.stringify(directories) === JSON.stringify(await names()), 'Diagnostic workspace inventory changed');
   requireImport(hash(JSON.stringify(await db.collection('driverAuditControl').findOne({ _id: 'head' }))) === headHash, 'Diagnostic serving roots changed');
+  for (const [relative, expected] of directorySignatures) {
+    requireImport(JSON.stringify(await directory(relative)) === expected, 'Diagnostic orphan directory changed');
+  }
   for (const [relative, expected] of signatures) {
     let actual = null;
     try { actual = hash(await read(path.join(syncRoot, relative), expected.maximum)); }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     requireImport(actual === expected.sha256, 'Diagnostic control metadata changed');
   }
-  const metadata = { version: 1, syncRoot, controls, inventories, matches: allMatches }, raw = Buffer.from(JSON.stringify(metadata));
+  const metadata = { version: 1, syncRoot, controls, inventories, matches: allMatches, orphans }, raw = Buffer.from(JSON.stringify(metadata));
   requireImport(raw.length <= 8 * 1024 * 1024, 'Diagnostic metadata exceeds its bound');
   const candidateRevisions = [...candidates].sort((a, b) => a - b);
   const output = { status: 'roots-diagnosed', censusVerified: false, authorityChanged: false, activationPending: true,
     controls: controls.length, workspaces: directories.length, referenceCount: references.length, mismatchCount: mismatches.length,
     mismatches: mismatches.slice(0, 8), candidateCount: candidateRevisions.length, candidateRevisions: candidateRevisions.slice(0, 256),
+    orphanProbeCount: orphanProbes.length, orphanUnprobedCount: unresolvedPaths.size - orphanProbes.length, orphanProbes,
     candidateRevisionsSha256: hash(JSON.stringify(candidateRevisions)), rootMetadataSha256: hash(raw),
     bootstrap: { ...identity(seed), inventorySha256: baselineInventory.sha256,
       inventoryBytes: baselineInventory.bytes, inventoryMatches: seed.manifestSha256 === baselineInventory.sha256 } };
   if (recipientPublicKey) {
     const compressed = gzipSync(raw), chunkBytes = 32 * 1024, pages = Math.ceil(compressed.length / chunkBytes);
+    output.diagnosticPages = pages;
     requireImport(diagnosticPage < pages, 'Diagnostic metadata page is outside its bound');
     const { sealTransferSecrets } = await load('services/driverAuditTransferCodec.js');
     output.capsule = sealTransferSecrets(recipientPublicKey, { version: 1, page: diagnosticPage, pages,
@@ -251,7 +406,7 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
   let phase = 'checkout', lock, connection;
   const execute = adapters.exec || exec, env = adapters.env || process.env;
   try {
-    requireImport(['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'diagnose-roots'].includes(operation)
+    requireImport(['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'diagnose-roots'].includes(operation)
       && typeof sessionId === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(sessionId)
       && (operation === 'diagnose-roots' ? templateSha256 === undefined || digest(templateSha256) : digest(templateSha256)),
     'A reviewed import operation and public input identities are required');
@@ -337,6 +492,14 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
     if (operation === 'diagnose-roots') {
       phase = 'root-diagnostics';
       const result = await diagnoseRoots({ db, syncRoot, read, privateDirectory, load, recipientPublicKey, diagnosticPage });
+      await stopped(); await checkout();
+      return { version: 1, sessionId, applicationCommit: expectedSha, ...result };
+    }
+    if (operation === 'stage-source') {
+      phase = 'source-staging';
+      const result = await stageSource({ folder, received, bundleSha256: templateSha256, syncRoot, server,
+        db, client: connection.getClient(), read, privateDirectory, load, execute,
+        pins: adapters.sourcePins || { manifest: NATIVE_IMPORT_SOURCE_MANIFEST, files: 134 } });
       await stopped(); await checkout();
       return { version: 1, sessionId, applicationCommit: expectedSha, ...result };
     }
