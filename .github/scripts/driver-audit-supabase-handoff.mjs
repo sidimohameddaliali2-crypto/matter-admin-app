@@ -12,8 +12,9 @@ const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 const commit = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
 const need = value => { if (!value) throw Error('Guard failed'); };
-const relative = value => typeof value === 'string' && value.length <= 512
-  && value.split('/').every(part => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(part) && part !== '.' && part !== '..');
+const relative = value => typeof value === 'string' && value.length <= 1024
+  && value.split('/').every(part => /^[A-Za-z0-9_.-]+$/.test(part) && part !== '.' && part !== '..');
+const nginxName = value => typeof value === 'string' && value.length <= 512 && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
 const signature = value => [value.dev, value.ino, value.uid, value.gid, value.mode, value.size, value.mtimeNs, value.ctimeNs].map(String).join(':');
 const codeFiles = ['server/package.json', 'server/package-lock.json', 'server/loadEnv.js',
   'server/services/driverAuditTransferCodec.js', 'server/vendor/driver-audits/integration/hosted/worker-lock.mjs'];
@@ -214,7 +215,7 @@ async function nginx(root) {
     let entries;
     try { entries = await fs.readdir(path.join(root, folder)); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
     need(entries.length <= 64);
-    for (const name of entries) { need(relative(name) && !name.includes('/')); paths.push(path.join(root, folder, name)); }
+    for (const name of entries) { need(nginxName(name)); paths.push(path.join(root, folder, name)); }
   }
   need(paths.length <= 64);
   const result = [];
