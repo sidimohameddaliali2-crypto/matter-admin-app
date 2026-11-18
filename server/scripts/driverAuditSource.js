@@ -136,8 +136,9 @@ async function main() {
   const [flag, file, mode] = process.argv.slice(2);
   if (flag !== '--config' || !path.isAbsolute(file ?? '') || ![undefined, '--check', '--child'].includes(mode)
     || process.argv.length > 5) throw new Error('Invalid source worker arguments.');
-  await import('../loadEnv.js');
+  if (process.env.DRIVER_AUDIT_EXECUTION_HOST !== 'off-host') await import('../loadEnv.js');
   const config = await readDriverAuditSourceConfig(file);
+  if (mode === undefined && config.executionHost === 'off-host') throw Error('Use the scheduled off-host report worker.');
   if (mode === undefined && (process.env.DRIVER_AUDIT_DATA_STORE || 'supabase') !== config.dataStore) {
     throw Error('App and source reporting stores differ.');
   }

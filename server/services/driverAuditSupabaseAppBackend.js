@@ -6,10 +6,13 @@ import { createDriverAuditFixedHostBudgetFactory } from './driverAuditFixedHostB
 import { createDriverAuditPollProgress } from './driverAuditPollProgress.js';
 import { createDriverAuditReadCache } from './driverAuditReadCache.js';
 import { createDriverAuditCollectorReadCache } from './driverAuditCollectorReadCache.js';
-import { createDriverAuditSpacesArchive } from './driverAuditSpacesArchive.js';
+import { createDriverAuditLinkedPhotoReader, createDriverAuditSpacesArchive } from './driverAuditSpacesArchive.js';
 import { createDriverAuditSupabaseArchive } from './driverAuditSupabaseArchive.js';
 import { createDriverAuditSupabaseTransfer } from './driverAuditSupabaseTransfer.js';
-import { readDriverAuditFileSyncStatus } from './driverAuditSyncStatus.js';
+import { createDriverAuditSupabaseWorkerStatusStore, driverAuditSupabaseWorkerStatusKey,
+  readDriverAuditFileSyncStatus } from './driverAuditSyncStatus.js';
+import { createDriverAuditPhotoRecovery } from './driverAuditPhotoRecovery.js';
+import { createCloudState } from '../vendor/driver-audits/integration/cloud/cloud-state.mjs';
 
 const check = (condition, message) => { if (!condition) throw Error(message); };
 
@@ -23,8 +26,9 @@ const meteredReader = Object.freeze({
 
 export async function createDriverAuditSupabaseAppBackend({ env = process.env, fetchImpl = fetch,
   photoStore, cacheFreeBytes } = {}) {
-  check(env.DRIVER_AUDIT_EXECUTION_HOST === 'sidi'
-    && (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase', 'Explicit Sidi Supabase execution is required');
+  const executionHost = env.DRIVER_AUDIT_EXECUTION_HOST;
+  check(['sidi', 'off-host'].includes(executionHost)
+    && (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase', 'Explicit managed Supabase execution is required');
   const secret = env.DRIVER_AUDIT_SUPABASE_SECRET || env.MATTER_SUPABASE_SECRET;
   const cacheDirectory = env.MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY;
   check(typeof cacheDirectory === 'string' && path.isAbsolute(cacheDirectory)
@@ -40,16 +44,29 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
     fetchImpl: transfer.wrapFetch({ maxResponseBytes }) }), { maxResponseBytes });
   const rpc = rpcForResponseLimit(70 * 1024 ** 2);
   const original = createSupabaseArchiveTransport({ secret, drainAcknowledgements: true,
-    fetchImpl: transfer.wrapFetch({ maxResponseBytes: 16 * 1024 ** 2 }) });
-  const uploads = photoStore || createDriverAuditSpacesArchive({ env });
-  const photoArchive = createDriverAuditSupabaseArchive({ archive: original, rpc, photoStore: uploads, env });
+    fetchImpl: (url, options, maxResponseBytes) => transfer.wrapFetch({ maxResponseBytes })(url, options) });
+  const uploads = photoStore || (executionHost === 'off-host'
+    ? createDriverAuditLinkedPhotoReader({ env, fetchImpl }) : createDriverAuditSpacesArchive({ env }));
+  const recoveryDirectory = env.DRIVER_AUDIT_PHOTO_RECOVERY_DIRECTORY;
+  const photoRecovery = recoveryDirectory === undefined ? undefined : createDriverAuditPhotoRecovery(recoveryDirectory);
+  check(executionHost !== 'off-host' || photoRecovery, 'Off-host reporting requires its private photo recovery directory');
+  check(!photoRecovery || recoveryDirectory !== cacheDirectory && !recoveryDirectory.startsWith(cacheDirectory + path.sep),
+    'Original photo recovery must be outside the disposable archive cache');
+  const photoArchive = createDriverAuditSupabaseArchive({ archive: original, rpc: rpcForResponseLimit(16 * 1024),
+    photoStore: uploads, photoRecovery, env });
   const progressRpc = (name, args) => {
     check(['matter_hosted_state_read', 'matter_hosted_native_progress_cas'].includes(name),
       'Unexpected Sidi polling progress operation');
     return rpc(name === 'matter_hosted_state_read' ? 'matter_hosted_app_progress_read' : 'matter_hosted_app_progress_cas', args);
   };
+  const remoteStatus = env.DRIVER_AUDIT_SERVING_STORE === 'supabase'
+    ? createDriverAuditSupabaseWorkerStatusStore({ state: createCloudState({ rpc: (name, args) => {
+      check(name === 'matter_hosted_state_read' && [driverAuditSupabaseWorkerStatusKey, 'app-sidi-report-head'].includes(args.p_key),
+        'Unexpected shared report-status read');
+      return rpcForResponseLimit(args.p_key === driverAuditSupabaseWorkerStatusKey ? 16 * 1024 : 768 * 1024)(name, args);
+    } }) }) : null;
   return {
-    kind: 'supabase', executionHost: 'sidi', executionAdmission: 'fixed-host-v1',
+    kind: 'supabase', executionHost, executionAdmission: 'fixed-host-v1',
     transferAccounting: 'supabase-http-bytes-v1',
     rpc, rpcForResponseLimit,
     archive: createDriverAuditReadCache({ archive: photoArchive, cacheDirectory, cacheFreeBytes }),
@@ -59,7 +76,7 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
     createExecutionBudget: createDriverAuditFixedHostBudgetFactory(),
     archiveReadBudget: meteredReader,
     readTransferUsage: transfer.readTransferUsage,
-    readSyncStatus: (generation, clock) => readDriverAuditFileSyncStatus(
-      path.join(path.dirname(path.dirname(cacheDirectory)), 'sync-status.private.json'), generation, clock),
+    readSyncStatus: (generation, clock) => remoteStatus ? remoteStatus.read(generation, clock)
+      : readDriverAuditFileSyncStatus(path.join(path.dirname(path.dirname(cacheDirectory)), 'sync-status.private.json'), generation, clock),
   };
 }

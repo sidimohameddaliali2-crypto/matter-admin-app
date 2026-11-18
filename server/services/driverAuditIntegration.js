@@ -35,12 +35,20 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    const verified=req&&verifiedRequests.get(req);
    return verified&&verified.cookie===cookie?verified.session:auth.authenticate(cookie);
   }};
-  const backend=dependencies.backend||(env.DRIVER_AUDIT_DATA_STORE||env.DRIVER_AUDIT_EXECUTION_HOST
-   ?await createDriverAuditDataBackend({db:env.DRIVER_AUDIT_EXECUTION_HOST==='sidi'?undefined:db(),env}):null);
+  const supabaseReader=env.DRIVER_AUDIT_SERVING_STORE==='supabase';
+  if(env.DRIVER_AUDIT_SERVING_STORE!==undefined&&(!supabaseReader||env.DRIVER_AUDIT_IMPORT_ENABLED!=='0'))
+   throw Error('Explicit Supabase report serving requires the legacy importer disabled');
+  // This selection applies only to staff routes. The scheduled worker owns a
+  // separate environment and the business app keeps its operational store.
+  const backendEnv=supabaseReader?{...env,DRIVER_AUDIT_EXECUTION_HOST:'sidi',DRIVER_AUDIT_DATA_STORE:'supabase'}:env;
+  const backend=dependencies.backend||(backendEnv.DRIVER_AUDIT_DATA_STORE||backendEnv.DRIVER_AUDIT_EXECUTION_HOST
+   ?await createDriverAuditDataBackend({db:backendEnv.DRIVER_AUDIT_EXECUTION_HOST==='sidi'?undefined:db(),env:backendEnv}):null);
   const state=dependencies.state||createCloudState({rpc:backend?.rpc||createHostedRpc({secret:env.DRIVER_AUDIT_SUPABASE_SECRET})});
   const rawArchive=dependencies.archive||backend?.archive||createSupabaseArchiveTransport({secret:env.DRIVER_AUDIT_SUPABASE_SECRET});
   const supabaseHost=backend?.kind==='supabase'&&backend.executionHost==='sidi';
-  const store=dependencies.store||(supabaseHost?createDriverAuditSupabaseReplica({state,archive:rawArchive})
+  const pointerState=supabaseHost&&!dependencies.state&&backend.rpcForResponseLimit
+   ?createCloudState({rpc:backend.rpcForResponseLimit(768*1024)}):state;
+  const store=dependencies.store||(supabaseHost?createDriverAuditSupabaseReplica({state:pointerState,archive:rawArchive})
    :createDriverAuditReplica(db(),{capacityBytes:Number(env.DRIVER_AUDIT_CAPACITY_BYTES)}));
   async function isRetiredAuditGeneration(generation){
    const active=await store.head();
@@ -71,7 +79,7 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
   const createRuntime=dependencies.createRuntime||createImportedAuditRuntime;
   const staffRenderer=await loadStaffAuditRenderer(env.DRIVER_AUDIT_STAFF_RENDERER_DIR,env.DRIVER_AUDIT_STAFF_RENDERER_SHA256);
   let preload,preloadFailed=false;
-  const coordinator=createCoordinator({clock,refreshOnRequest:false,restorePrevious:true,loadPointer:async()=>await store.head(),async loadPackage({descriptor,pointer}){
+  const coordinator=createCoordinator({clock,refreshOnRequest:false,restorePrevious:true,maxHandlers:supabaseHost?2:3,limitPreparation:supabaseHost,loadPointer:async()=>await store.head(),async loadPackage({descriptor,pointer}){
    const directSnapshot=pointer?.directImport?.version===1;
    const staffSnapshot=directSnapshot||pointer?.servingPackage?.version===1&&pointer.servingPackage.dataStore==='supabase';
    let localOnly=Boolean(preload)&&!supabaseHost;
@@ -134,7 +142,10 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    }
    const cookie=req.headers.cookie;
    const session=await context.auth.authenticate(cookie);
-   if(session?.activityActor)req.activityActor=Object.freeze({...session.activityActor});
+   if(session?.activityActor){
+    req.activityActor=Object.freeze({...session.activityActor});
+    dependencies.onStaffAuthenticated?.(res,req.activityActor);
+   }
    // The existing audit client probes its session before enabling review/maps.
    // Staff identity stays with this app; never invoke the Supabase login flow.
    if(path==='/api/session/refresh'){
@@ -162,5 +173,6 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
   if(env.DRIVER_AUDIT_ENABLED!=='1'||env.DRIVER_AUDIT_IMPORT_ENABLED!=='0')return;
   return (await getContext()).prewarm();
  };
+ middleware.isPreparedFor=async head=> (await getContext()).coordinator.isPreparedFor(head);
  return middleware;
 }

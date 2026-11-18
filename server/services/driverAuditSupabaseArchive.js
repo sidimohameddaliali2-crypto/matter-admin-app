@@ -10,15 +10,18 @@ const check = (condition, message) => { if (!condition) throw Error(message); };
 // Existing Supabase objects stay untouched. Only new, fully verified photo
 // references use the original delivery uploads; no image or archive is copied
 // to Spaces by this adapter.
-export function createDriverAuditSupabaseArchive({ archive, rpc, photoStore, env = process.env } = {}) {
+export function createDriverAuditSupabaseArchive({ archive, rpc, photoStore, photoRecovery, env = process.env } = {}) {
   check(typeof archive?.readObject === 'function' && typeof archive?.putVerifiedObject === 'function'
     && typeof archive?.assertPrivate === 'function' && typeof rpc === 'function'
     && typeof photoStore?.verifyExistingPhoto === 'function' && typeof photoStore?.readExistingPhoto === 'function'
-    && typeof photoStore?.assertExistingPhotoRetention === 'function'
+    && (photoRecovery || typeof photoStore?.assertExistingPhotoRetention === 'function')
     && /^[a-f0-9]{64}$/.test(photoStore.identitySha256 || ''), 'Supabase photo archive dependencies are required');
+  check(!photoRecovery || ['assertReady', 'preserve', 'read'].every(name => typeof photoRecovery[name] === 'function'),
+    'The private photo recovery store is invalid');
   const candidates = new Map();
   let retained;
-  const retention = () => retained ??= photoStore.assertExistingPhotoRetention().catch(error => { retained = null; throw error; });
+  const retention = () => retained ??= (photoRecovery ? photoRecovery.assertReady() : photoStore.assertExistingPhotoRetention())
+    .catch(error => { retained = null; throw error; });
   function reference(value, key, bytes) {
     check(value && typeof value === 'object' && !Array.isArray(value)
       && Object.keys(value).length === 1 && Object.hasOwn(value, 'reference'), 'Supabase photo alias response is invalid');
@@ -39,6 +42,10 @@ export function createDriverAuditSupabaseArchive({ archive, rpc, photoStore, env
       return bytes;
     } catch (photoError) {
       options.signal?.throwIfAborted();
+      if (photoRecovery) {
+        try { return await photoRecovery.read(row); }
+        catch (error) { if (error.code !== 'ENOENT') throw error; }
+      }
       // Admission of a reference must never make a preserved older Supabase
       // object inaccessible. Only the exact same size/hash can recover it;
       // the immutable reference and original uploads are never changed.
@@ -97,6 +104,7 @@ export function createDriverAuditSupabaseArchive({ archive, rpc, photoStore, env
       options.signal?.throwIfAborted();
       if (key.endsWith('.gz')) {
         let alias = await readAlias(key, body.length);
+        let newlyPreserved = false;
         if (!alias) {
           const candidate = candidates.get(key.slice(0, 64));
           if (candidate?.size === body.length) {
@@ -108,12 +116,16 @@ export function createDriverAuditSupabaseArchive({ archive, rpc, photoStore, env
               options.signal?.throwIfAborted();
               // An upload changed before admission cannot represent historical
               // bytes. Preserve the caller's exact original in Supabase instead.
-              if (!(error?.$metadata?.httpStatusCode === 404 || error?.name === 'NoSuchKey'
+              if (photoRecovery || !(error?.$metadata?.httpStatusCode === 404 || error?.name === 'NoSuchKey'
                 || /integrity|reference/.test(error?.message || ''))) throw error;
               candidates.delete(key.slice(0, 64));
             }
             if (proposed) {
               const checked = reference({ reference: proposed }, key, body.length);
+              if (photoRecovery) {
+                await photoRecovery.preserve(checked, body);
+                newlyPreserved = true;
+              }
               alias = reference(await rpc('matter_hosted_app_photo_alias_register',
                 { p_key: key, p_reference: checked }), key, body.length);
               check(alias, 'Supabase photo alias admission was not confirmed');
@@ -121,6 +133,7 @@ export function createDriverAuditSupabaseArchive({ archive, rpc, photoStore, env
           }
         }
         if (alias) {
+          if (photoRecovery && !newlyPreserved) await photoRecovery.preserve(alias, body);
           await readPhoto(alias, { ...options, maxBytes: body.length }, key);
           return { key, bytes: body.length, sha256: key.slice(0, 64), verified: true, reusedExistingPhoto: true };
         }

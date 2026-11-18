@@ -2,7 +2,7 @@ import {createHash} from 'node:crypto';
 import {compareUploadLocation,assessLocationTiming} from '../../app/src/content/dashboard/upload-location.mjs';
 const digest=x=>createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const fail=status=>{throw Object.assign(Error('GPS evidence unavailable'),{status});};
-export function createPreviewGps({snapshotFor,index,readStream}){
+export function createPreviewGps({snapshotFor,index,readStream,readProjection}){
  if(index?.version!==1||!index.records)throw Error('Invalid GPS index');
  return {async read(params,actor){
   if(!actor||!['owner','reviewer','viewer'].includes(actor.role))fail(403);
@@ -23,7 +23,9 @@ export function createPreviewGps({snapshotFor,index,readStream}){
    assignment:{state:context.assignmentState,verified:context.assignmentVerified===true,candidates:context.vehicleAlternatives||[],...(context.assignmentBasis?{sourceBasis:context.assignmentBasis}:{})},
    destination:validPin?{...pin,verified:context.destinationVerified===true,basis:context.pinRole||'recorded_reference_not_independently_validated',...(context.pinBasis?{sourceBasis:context.pinBasis}:{}),label:context.destinationVerified?'Verified delivery address':/photo|proof/i.test(context.pinRole||'')?'Photo location':'Saved location candidate'}:null,
    observation:alternative?'alternative_vehicle_context':r.observation,timingState:alternative?'alternative_vehicle_context':r.deliveryTiming?.state,stops:alternative?[]:r.sampledStops||[],laterWindowSamples:alternative?[]:r.laterWindowSamples||[],uploadComparison:alternative?null:r.uploadComparison||null,gaps:streams.flatMap(s=>s.gaps||[]),assessmentGaps:alternative?[]:r.coverage?.unobservedIntervals||[],addressStop:entry.addressStop?.assessmentHash===row.assessmentHash&&entry.addressStop?.deliverySourceSha256===row.delivery?.source_sha256?entry.addressStop:null,related:entry.related||[],policy:r.policy,sourceRefs:r.sourceRefs||[]};
-  const projection=!alternative?entry.evidenceResult:null;
+  const projection=alternative?null:entry.evidenceFile?await readProjection(entry.evidenceFile,key):entry.evidenceResult;
+  if(!alternative&&entry.evidenceFile&&projection?.versionId!==entry.evidenceSummary?.versionId)
+   throw Error('GPS projection file identity differs');
   if(projection&&(projection.assessmentHash!==row.assessmentHash||projection.deliveryDigest!==digest(row.delivery)||JSON.stringify(projection.uploadLocation)!==JSON.stringify(evidence.uploadLocation)))throw Error('GPS evidence projection mismatch');
   return {...evidence,...(projection?{gpsEvidence:projection,uploadLocation:projection.uploadLocation,locationTiming:projection.locationTiming}:{locationTiming:assessLocationTiming(evidence)})};
  }};

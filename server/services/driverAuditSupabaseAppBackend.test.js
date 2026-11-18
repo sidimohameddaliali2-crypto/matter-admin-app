@@ -18,7 +18,7 @@ async function fixture(t) {
   const env = { DRIVER_AUDIT_EXECUTION_HOST: 'sidi', MATTER_SUPABASE_SECRET: 'fictional-private-credential',
     MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: directory, SPACES_BUCKET: 'fixture-photos',
     SPACES_ENDPOINT: 'fra1.digitaloceanspaces.com', SPACES_REGION: 'fra1' };
-  const calls = [], objects = new Map([[key, bytes]]), aliases = new Map();
+  const calls = [], objects = new Map([[key, bytes]]), aliases = new Map(), sharedState = new Map();
   let offline = false, photoReads = 0, collectorFullReads = 0;
   const fetchImpl = async (input, options) => {
     if (offline) throw Error('Offline fixture');
@@ -41,6 +41,7 @@ async function fixture(t) {
         value = { reference: aliases.get(args.p_key) };
       } else if (name.endsWith('_photo_alias_read')) value = { reference: aliases.get(args.p_key) ?? null };
       else if (name.endsWith('_progress_read')) value = { revision: 0, body_text: null };
+      else if (name === 'matter_hosted_state_read' && sharedState.has(args.p_key)) value = sharedState.get(args.p_key);
       else if (name === 'matter_hosted_state_read') { collectorFullReads++; value = { revision: 17, body_text: originalCollector }; }
       else if (name === 'matter_hosted_state_read_if_changed') {
         const unchanged = args.p_revision === 17;
@@ -62,7 +63,7 @@ async function fixture(t) {
     async readExistingPhoto() { photoReads++; return bytes; },
   };
   const open = () => createDriverAuditSupabaseAppBackend({ env, fetchImpl, photoStore, cacheFreeBytes: async () => 4 * 1024 ** 3 });
-  return { env, calls, objects, aliases, open, offline: () => { offline = true; }, photoReads: () => photoReads,
+  return { env, calls, objects, aliases, sharedState, open, offline: () => { offline = true; }, photoReads: () => photoReads,
     collectorFullReads: () => collectorFullReads };
 }
 
@@ -72,6 +73,33 @@ test('unmarked Supabase remains the original backend and has no Sidi capabilitie
   assert.equal(backend.executionHost, undefined);
   assert.equal(backend.pollProgress, undefined);
   await assert.rejects(createDriverAuditDataBackend({ env: { DRIVER_AUDIT_EXECUTION_HOST: 'other' } }), /execution host/);
+});
+
+test('the explicit app reader uses shared cross-host status rather than the stopped local sync file', async t => {
+  const f = await fixture(t);
+  f.env.DRIVER_AUDIT_SERVING_STORE = 'supabase';
+  const generation = hash('selected-report'), now = Date.parse('2026-11-18T07:45:00.000Z');
+  f.sharedState.set('app-sidi-report-worker-status', { revision: 0, body_text: null });
+  const backend = await f.open();
+  assert.deepEqual(await backend.readSyncStatus(generation, () => now),
+    { status: 'pending', pending: true, latestCaptureAt: null, checkedAt: null });
+  const head = { version: 1, generation, visibleCutoffAt: '2026-11-18T06:31:00.000Z',
+    servingPackage: { version: 1, dataStore: 'supabase', collectorRevision: 5772 } }, headBody = JSON.stringify(head);
+  f.sharedState.set('app-sidi-report-head', { revision: 9, body_text: headBody });
+  const value = { version: 1, kind: 'supabase-report-worker-slot-status', executionHost: 'off-host',
+    syncConfigSha256: hash('sync'), sourceConfigSha256: hash('source'),
+    scheduledAt: '2026-11-18T06:30:00.000Z', nextCheckAt: '2026-11-18T08:00:00.000Z', checkedAt: '2026-11-18T06:40:00.000Z',
+    outcome: 'unchanged', status: 'ready', activeGeneration: generation, servingHeadRevision: 9,
+    servingHeadBodySha256: hash(headBody), collectorRevision: 5772, visibleCutoffAt: head.visibleCutoffAt,
+    latestCaptureAt: head.visibleCutoffAt, errorCode: null };
+  f.sharedState.set('app-sidi-report-worker-status', { revision: 1, body_text: JSON.stringify(value) });
+  assert.equal((await backend.readSyncStatus(generation, () => now)).status, 'ready');
+  assert.equal((await backend.readSyncStatus(generation, () => Date.parse('2026-11-18T08:31:00Z'))).status, 'pending');
+  assert.equal(f.calls.filter(call => call.path.endsWith('/matter_hosted_state_cas')).length, 0);
+  const requests = f.calls.filter(call => call.args?.p_key === 'app-sidi-report-worker-status');
+  assert.equal(requests.length, 3);
+  f.offline();
+  assert.equal((await backend.readSyncStatus(generation, () => now)).status, 'pending');
 });
 
 test('Sidi execution preserves truthful storage kind and requires a private shared cache', async t => {
@@ -99,10 +127,14 @@ test('explicit Sidi reporting ignores parked inherited Mongo settings without op
 
 test('one verified download fills the shared cache and reload works without remote access', async t => {
   const f = await fixture(t), backend = await f.open();
-  assert.deepEqual(Buffer.concat(await backend.archive.readObject(key)), bytes);
+  assert.deepEqual(Buffer.concat(await backend.archive.readObject(key, { maxBytes: bytes.length })), bytes);
   const count = f.calls.length;
   assert.ok(count > 0);
   assert.equal(f.calls.filter(call => call.path.includes('/storage/')).length, 1);
+  const reservations = f.calls.filter(call => call.path.endsWith('_egress_reserve'));
+  assert.equal(reservations.length, 2);
+  assert.ok(reservations.every(call => call.args.p_response_bytes <= 128 * 1024),
+    'A short archive request and photo reference must reserve only their response bounds');
   assert.deepEqual(Buffer.concat(await backend.archive.readObject(key)), bytes);
   assert.equal(f.calls.length, count, 'A disk cache hit must not reserve or fetch remote bytes');
   f.offline();

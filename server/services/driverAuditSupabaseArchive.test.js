@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
+import { createDriverAuditPhotoRecovery } from './driverAuditPhotoRecovery.js';
 import { createDriverAuditSupabaseArchive } from './driverAuditSupabaseArchive.js';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -9,10 +13,10 @@ const photoUrl = 'https://fixture-photos.fra1.cdn.digitaloceanspaces.com/photos/
 const bytes = Buffer.from('fictional preserved delivery photo'), key = hash(bytes) + '.gz';
 const alias = { version: 1, provider: 'spaces', identitySha256: 'a'.repeat(64), kind: 'existing-photo-v1',
   key: 'photos/fixture.jpg', size: bytes.length, sha256: hash(bytes), etag: '"fixture-etag"', versionId: null };
-function fixture({ original = bytes, existing, corrupt = false, missing = false, failRegister = false, retentionFails = false } = {}) {
+function fixture({ original = bytes, existing, corrupt = false, missing = false, failRegister = false, retentionFails = false, photoRecovery } = {}) {
   const aliases = new Map(existing ? [[key, { ...alias }]] : []), calls = [], originals = new Map(original ? [[key, original]] : []);
   let originalWrites = 0, photoReads = 0, checks = 0;
-  const archive = createDriverAuditSupabaseArchive({ env, archive: {
+  const archive = createDriverAuditSupabaseArchive({ env, photoRecovery, archive: {
     async assertPrivate() { return { bucket: 'matter-report-archive', public: false }; },
     async readObject(k) { calls.push('supabase-read'); if (!originals.has(k)) throw Error('Original missing'); return [originals.get(k)]; },
     async putVerifiedObject(k, b) { originalWrites++; originals.set(k, Buffer.from(b)); return { key: k, verified: true }; },
@@ -107,6 +111,24 @@ test('inconclusive retention or a failed alias commit cannot cause an image copy
     assert.equal(f.counts().originalWrites, 0);
     assert.equal(f.aliases.size, 0);
   }
+});
+
+test('original upload recovery admits and reuses the alias after verifying one independent backup', async t => {
+  const directory = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'driver-audit-photo-recovery-'));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const photoRecovery = createDriverAuditPhotoRecovery(directory);
+  const f = fixture({ original: null, retentionFails: true, photoRecovery });
+  f.archive.offerSourcePhotoCandidate({ sha256: hash(bytes), size: bytes.length, url: photoUrl });
+  await Promise.all([f.archive.putVerifiedObject(key, bytes), f.archive.putVerifiedObject(key, bytes)]);
+  assert.deepEqual(await fs.readdir(directory), [hash(bytes)]);
+  assert.deepEqual(await photoRecovery.read(alias), bytes);
+  assert.equal(f.counts().originalWrites, 0);
+  assert.equal(f.counts().checks, 0);
+  const restored = fixture({ original: null, existing: true, missing: true, photoRecovery });
+  assert.deepEqual(Buffer.concat(await restored.archive.readObject(key)), bytes);
+  await fs.writeFile(path.join(directory, hash(bytes)), Buffer.alloc(bytes.length));
+  await assert.rejects(restored.archive.readObject(key), /Preserved photo bytes differ/);
+  await assert.rejects(f.archive.putVerifiedObject(key, bytes), /Preserved photo bytes differ/);
 });
 
 test('foreign and noncanonical photo hints do not become references', async () => {

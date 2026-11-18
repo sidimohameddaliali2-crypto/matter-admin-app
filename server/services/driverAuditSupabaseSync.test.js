@@ -10,6 +10,8 @@ import { prepareRemotePreviewPackage } from '../vendor/driver-audits/integration
 import { acquireWorkerLock } from '../vendor/driver-audits/integration/hosted/worker-lock.mjs';
 import { createDriverAuditSupabaseSync, runDriverAuditSupabaseSync } from './driverAuditSupabaseSync.js';
 import { readDriverAuditFileSyncStatus } from './driverAuditSyncStatus.js';
+import { createDriverAuditSupabaseReplica } from './driverAuditSupabaseReplica.js';
+import { createCloudState } from '../vendor/driver-audits/integration/cloud/cloud-state.mjs';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const at = '2026-11-12T00:00:00.000Z';
@@ -102,7 +104,7 @@ async function packageFiles(directory, revision) {
     restore: { version: 1, archive: 'matter-report-archive', verified: true, ...binding } } };
 }
 
-async function fixture(t, { signal, clock } = {}) {
+async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource, armedAt } = {}) {
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'driver-audit-supabase-sync-')));
   let worker;
   t.after(async () => { try { await worker?.close(); } finally { await fs.rm(temporary, { recursive: true, force: true }); } });
@@ -120,7 +122,7 @@ async function fixture(t, { signal, clock } = {}) {
   const states = new Map([['collector-state', { revision: 43, body: JSON.stringify(next.publication) }]]), calls = [], uploads = [], objects = new Map();
   const receipts = new Map([initial, next].map((entry, i) => [42 + i, { revision: 42 + i, body_text: JSON.stringify(entry.publication),
     body_sha256: sha(JSON.stringify(entry.publication)), event_text: '{}', event_id: 'collector-' + (42 + i), request_sha256: sha('request-' + i) }]));
-  const reservations = new Map(); let lostAck = false, corrupt = false, afterCas;
+  const reservations = new Map(); let lostAck = false, corrupt = false, afterCas, beforeHeadRead, failWorkerStatus = false, loseWorkerStatusAck = false;
   const archive = { managedReadCache: true,
     async assertPrivate() { return { bucket: 'matter-report-archive', public: false }; },
     async readObject(key, { maxBytes }) {
@@ -136,6 +138,7 @@ async function fixture(t, { signal, clock } = {}) {
   };
   async function rpc(name, args) {
     calls.push({ name, args: structuredClone(args) });
+    if (name === 'matter_hosted_state_read' && args.p_key === 'app-sidi-report-head') await beforeHeadRead?.();
     if (name === 'matter_hosted_state_read') { const row = states.get(args.p_key) ?? { revision: 0, body: null }; return { revision: row.revision, body_text: row.body }; }
     if (name === 'matter_hosted_state_read_if_changed') {
       const row = states.get(args.p_key) ?? { revision: 0, body: null };
@@ -144,11 +147,17 @@ async function fixture(t, { signal, clock } = {}) {
     if (name === 'matter_hosted_state_receipts') return [...receipts.values()].filter(row => row.revision > args.p_after)
       .sort((left, right) => left.revision - right.revision).slice(0, 1);
     if (name === 'matter_hosted_state_cas') {
-      assert.equal(args.p_key, 'app-sidi-report-head');
+      assert.ok(['app-sidi-report-head', 'app-sidi-report-worker-status'].includes(args.p_key));
+      if (args.p_key === 'app-sidi-report-worker-status' && failWorkerStatus) {
+        failWorkerStatus = false; throw Error('Fictional worker status transport failed');
+      }
       const row = states.get(args.p_key) ?? { revision: 0, body: null };
       if (row.revision !== args.p_expected) throw Object.assign(Error('Concurrent fixture'), { status: 409 });
       const result = { revision: row.revision + 1, body: args.p_body_text }; states.set(args.p_key, result);
-      if (afterCas) { const callback = afterCas; afterCas = null; callback(); }
+      if (args.p_key === 'app-sidi-report-head' && afterCas) { const callback = afterCas; afterCas = null; callback(); }
+      if (args.p_key === 'app-sidi-report-worker-status' && loseWorkerStatusAck) {
+        loseWorkerStatusAck = false; throw Error('Fictional status acknowledgement lost');
+      }
       if (lostAck) { lostAck = false; throw Error('Lost acknowledgement'); }
       return { revision: result.revision, body_text: result.body, body_sha256: sha(result.body), event_text: args.p_event_text, replayed: false };
     }
@@ -158,14 +167,17 @@ async function fixture(t, { signal, clock } = {}) {
     if (name === 'matter_hosted_archive_release') { const row = reservations.get(args.p_id); row.released = true; return { ...row }; }
     throw Error('Unexpected fixture RPC: ' + name);
   }
-  const backend = { kind: 'supabase', executionHost: 'sidi', executionAdmission: 'fixed-host-v1', transferAccounting: 'supabase-http-bytes-v1',
+  const backend = { kind: 'supabase', executionHost, executionAdmission: 'fixed-host-v1', transferAccounting: 'supabase-http-bytes-v1',
     rpc, rpcForResponseLimit: () => rpc, archive, archiveCacheDirectory: path.join(root, 'work', 'archive-cache'),
     readTransferUsage: async () => ({}), archiveReadBudget: { reserve: async () => ({ allowed: true }), settle: async () => ({ settled: true }) } };
   const f = { root, file, config, backend, states, objects, calls, uploads, initial, next, receipts,
-    loseNextAck() { lostAck = true; }, corruptUploads() { corrupt = true; }, onNextCas(callback) { afterCas = callback; } };
+    loseNextAck() { lostAck = true; }, corruptUploads() { corrupt = true; }, onNextCas(callback) { afterCas = callback; },
+    onHeadRead(callback) { beforeHeadRead = callback; },
+    failNextWorkerStatus() { failWorkerStatus = true; }, loseNextWorkerStatusAck() { loseWorkerStatusAck = true; } };
   f.reopen = async (signalOverride = signal) => {
     await worker?.close();
-    f.worker = worker = await createDriverAuditSupabaseSync({ config, file, backend, signal: signalOverride, clock });
+    f.worker = worker = await createDriverAuditSupabaseSync({ config, file, backend, collectSource, armedAt, signal: signalOverride, clock,
+      sourceConfigSha256: sha('fictional-offhost-source-configuration') });
   };
   await f.reopen();
   return f;
@@ -317,6 +329,296 @@ test('10:30 Dubai builds once and an unchanged noon check survives restart witho
   await f.reopen();
   await f.worker.scheduledTick();
   assert.equal(f.calls.length, afterNoonCalls);
+});
+
+test('the off-host worker collects before building and retains unchanged noon evidence across restart', async t => {
+  const morning = Date.parse('2026-11-18T06:30:00Z'), noon = Date.parse('2026-11-18T08:00:00Z');
+  let now = morning - 1;
+  const slots = [];
+  const f = await fixture(t, { clock: () => now, executionHost: 'off-host', async collectSource({ dueAt, onAdmission }) {
+    await onAdmission();
+    slots.push(dueAt);
+    if (dueAt === morning) f.states.set('collector-state', { revision: 43, body: JSON.stringify(f.next.publication) });
+  } });
+  f.states.set('collector-state', { revision: 42, body: JSON.stringify(f.initial.publication) });
+  await f.worker.seed();
+  const initial = f.calls.length;
+  await f.worker.scheduledTick();
+  assert.equal(f.calls.length, initial);
+  now = morning;
+  await f.worker.scheduledTick();
+  const head = f.states.get('app-sidi-report-head'), uploads = f.uploads.length;
+  assert.equal(JSON.parse(head.body).servingPackage.collectorRevision, 43);
+  now = noon;
+  await f.reopen();
+  await f.worker.scheduledTick();
+  await f.reopen();
+  await f.worker.scheduledTick();
+  assert.deepEqual(slots, [morning, noon]);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.equal(f.uploads.length, uploads);
+});
+
+test('one due-slot run exits not-due without collecting or reading evidence before the real slot', async t => {
+  const morning = Date.parse('2026-11-18T06:30:00Z');
+  let sourceCalls = 0;
+  const f = await fixture(t, { executionHost: 'off-host', clock: () => morning - 1,
+    async collectSource() { sourceCalls++; } });
+  await f.worker.seed();
+  const calls = f.calls.length, uploads = f.uploads.length;
+  const result = await f.worker.runDueSlot();
+  assert.equal(result.status, 'not-due');
+  assert.equal(result.scheduledAt, null);
+  assert.equal(result.nextCheckAt, '2026-11-18T06:30:00.000Z');
+  assert.equal(sourceCalls, 0);
+  assert.equal(f.calls.length, calls);
+  assert.equal(f.uploads.length, uploads);
+});
+
+test('one due-slot run publishes real changed evidence once and reports an unchanged noon check truthfully', async t => {
+  const morning = Date.parse('2026-11-18T06:30:00Z'), noon = Date.parse('2026-11-18T08:00:00Z');
+  let now = morning;
+  const slots = [];
+  const f = await fixture(t, { executionHost: 'off-host', clock: () => now,
+    async collectSource({ dueAt, onAdmission }) { await onAdmission(); slots.push(dueAt); } });
+  await f.worker.seed();
+  const checked = await f.worker.runDueSlot();
+  const head = f.states.get('app-sidi-report-head'), uploads = f.uploads.length;
+  assert.equal(checked.status, 'checked');
+  assert.equal(checked.scheduledAt, '2026-11-18T06:30:00.000Z');
+  assert.equal(checked.reportStatus, 'ready');
+  assert.equal(checked.pending, false);
+  assert.equal(checked.activeGeneration, JSON.parse(head.body).generation);
+  assert.equal(JSON.parse(head.body).servingPackage.collectorRevision, 43);
+  await f.reopen();
+  assert.equal((await f.worker.runDueSlot()).status, 'not-due');
+  assert.deepEqual(slots, [morning]);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  now = noon;
+  const unchanged = await f.worker.runDueSlot();
+  assert.equal(unchanged.status, 'checked');
+  assert.equal(unchanged.scheduledAt, '2026-11-18T08:00:00.000Z');
+  assert.equal(unchanged.activeGeneration, checked.activeGeneration);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.equal(f.uploads.length, uploads);
+  assert.deepEqual(slots, [morning, noon]);
+  await f.reopen();
+  assert.equal((await f.worker.runDueSlot()).status, 'not-due');
+  assert.deepEqual(slots, [morning, noon]);
+});
+
+test('one due-slot failure rejects and retains its durable attempt plus the original serving head', async t => {
+  let now = Date.parse('2026-11-18T06:30:00Z'), fail = true, sourceCalls = 0;
+  const f = await fixture(t, { executionHost: 'off-host', clock: () => now,
+    async collectSource({ onAdmission }) {
+      await onAdmission(); sourceCalls++;
+      if (fail) throw Error('Fictional source failure');
+    } });
+  await f.worker.seed();
+  const head = structuredClone(f.states.get('app-sidi-report-head')), uploads = f.uploads.length;
+  await assert.rejects(f.worker.runDueSlot(), /Fictional source failure/);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.equal(f.uploads.length, uploads);
+  const saved = JSON.parse(await fs.readFile(path.join(f.root, 'sync-status.private.json')));
+  assert.equal(saved.status, 'failed');
+  assert.equal(saved.lastScheduledAt, '2026-11-18T06:30:00.000Z');
+  await f.reopen();
+  assert.equal((await f.worker.runDueSlot()).status, 'not-due');
+  assert.equal(sourceCalls, 1);
+  fail = false; now = Date.parse('2026-11-18T08:00:00Z');
+  assert.equal((await f.worker.runDueSlot()).status, 'checked');
+  assert.equal(sourceCalls, 2);
+});
+
+test('the bounded runner requires off-host enrollment and source collection before configuration or I/O', async () => {
+  const env = { DRIVER_AUDIT_EXECUTION_HOST: 'off-host', DRIVER_AUDIT_DATA_STORE: 'supabase',
+    DRIVER_AUDIT_IMPORT_ENABLED: '0', DRIVER_AUDIT_ENABLED: '1' };
+  const input = { config: {}, file: '/not-used', mode: '--once', env };
+  await assert.rejects(runDriverAuditSupabaseSync(input), /Explicit managed Supabase/);
+  const enrolled = { ...input, armedAt: new Date().toISOString(), collectSource: async () => {}, sourceConfigSha256: 'a'.repeat(64) };
+  await assert.rejects(runDriverAuditSupabaseSync(enrolled), /staged.*configuration/);
+  await assert.rejects(runDriverAuditSupabaseSync({ ...enrolled, env: { ...env, DRIVER_AUDIT_EXECUTION_HOST: 'sidi' } }),
+    /Explicit managed Supabase/);
+});
+
+test('an existing off-host seed and check do not require the new scheduled outcome source pin', async t => {
+  const f = await fixture(t, { executionHost: 'off-host' }); await f.worker.close();
+  let worker;
+  try {
+    worker = await createDriverAuditSupabaseSync({ config: f.config, file: f.file, backend: f.backend });
+    assert.equal((await worker.seed()).status, 'published');
+    assert.equal((await worker.check()).status, 'checked');
+    assert.equal(f.states.has('app-sidi-report-worker-status'), false);
+    await assert.rejects(worker.runDueSlot(), /source configuration/);
+  } finally { await worker?.close(); }
+});
+
+test('an off-host terminal slot records only one generation-bound outcome and no idle status writes', async t => {
+  let now = Date.parse('2026-11-18T06:30:00Z');
+  const f = await fixture(t, { executionHost: 'off-host', clock: () => now,
+    async collectSource({ onAdmission }) { await onAdmission(); } });
+  await f.worker.seed(); await f.worker.runDueSlot();
+  const key = 'app-sidi-report-worker-status', first = f.states.get(key);
+  assert.ok(first, 'The completed source/build slot must publish its bound terminal status');
+  const body = JSON.parse(first.body), head = f.states.get('app-sidi-report-head');
+  assert.equal(body.outcome, 'published'); assert.equal(body.status, 'ready');
+  assert.equal(body.scheduledAt, '2026-11-18T06:30:00.000Z');
+  assert.equal(body.servingHeadRevision, head.revision); assert.equal(body.servingHeadBodySha256, sha(head.body));
+  assert.equal(body.activeGeneration, JSON.parse(head.body).generation);
+  assert.equal(body.collectorRevision, 43); assert.equal(body.visibleCutoffAt, at);
+  assert.equal(body.sourceConfigSha256, sha('fictional-offhost-source-configuration'));
+  await f.reopen(); await f.worker.runDueSlot();
+  assert.deepEqual(f.states.get(key), first);
+  now = Date.parse('2026-11-18T08:00:00Z'); await f.worker.runDueSlot();
+  const noon = f.states.get(key); assert.equal(noon.revision, first.revision + 1);
+  assert.equal(JSON.parse(noon.body).outcome, 'unchanged');
+  assert.equal(JSON.parse(noon.body).activeGeneration, body.activeGeneration);
+  assert.equal(f.calls.filter(call => call.name === 'matter_hosted_state_cas' && call.args.p_key === key).length, 2);
+});
+
+test('a failed terminal status bridge retries only the exact pending metadata without repeating source or publication', async t => {
+  let now = Date.parse('2026-11-18T06:30:00Z'), sourceCalls = 0;
+  const f = await fixture(t, { executionHost: 'off-host', clock: () => now,
+    async collectSource({ onAdmission }) { await onAdmission(); sourceCalls++; } });
+  await f.worker.seed(); f.failNextWorkerStatus();
+  await assert.rejects(f.worker.runDueSlot(), /status|transport/i);
+  const original = JSON.parse(await fs.readFile(path.join(f.root, 'sync-status.private.json')));
+  assert.ok(original.pendingWorkerStatus);
+  const payload = structuredClone(original.pendingWorkerStatus), head = structuredClone(f.states.get('app-sidi-report-head'));
+  const uploaded = f.uploads.length;
+  assert.equal(payload.outcome, 'published'); assert.equal(sourceCalls, 1);
+  now += 5 * 60_000; await f.reopen();
+  const retry = await f.worker.runDueSlot();
+  assert.equal(retry.status, 'not-due'); assert.equal(retry.workerStatusRecovered, 'recorded');
+  assert.equal(sourceCalls, 1); assert.equal(f.uploads.length, uploaded);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.deepEqual(JSON.parse(f.states.get('app-sidi-report-worker-status').body), payload);
+  assert.equal(JSON.parse(await fs.readFile(path.join(f.root, 'sync-status.private.json'))).pendingWorkerStatus, undefined);
+});
+
+test('a real source failure records failed against the retained head without claiming a completed report', async t => {
+  const f = await fixture(t, { executionHost: 'off-host', clock: () => Date.parse('2026-11-18T06:30:00Z'),
+    async collectSource({ onAdmission }) { await onAdmission(); throw Error('Fictional actual source failed'); } });
+  await f.worker.seed(); const head = structuredClone(f.states.get('app-sidi-report-head'));
+  await assert.rejects(f.worker.runDueSlot(), /Fictional actual source failed/);
+  const row = f.states.get('app-sidi-report-worker-status'); assert.ok(row);
+  const body = JSON.parse(row.body);
+  assert.equal(body.outcome, 'failed'); assert.equal(body.status, 'failed'); assert.equal(body.errorCode, 'SYNC_FAILED');
+  assert.equal(body.servingHeadBodySha256, sha(head.body)); assert.equal(body.collectorRevision, 42);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+});
+
+test('a lost status acknowledgement does not repeat the genuine completed source slot', async t => {
+  let sourceCalls = 0;
+  const f = await fixture(t, { executionHost: 'off-host', clock: () => Date.parse('2026-11-18T06:30:00Z'),
+    async collectSource({ onAdmission }) { await onAdmission(); sourceCalls++; } });
+  await f.worker.seed(); f.loseNextWorkerStatusAck();
+  const result = await f.worker.runDueSlot(); assert.equal(result.status, 'checked');
+  assert.equal(f.states.get('app-sidi-report-worker-status')?.revision, 1);
+  await f.reopen(); assert.equal((await f.worker.runDueSlot()).status, 'not-due'); assert.equal(sourceCalls, 1);
+});
+
+test('a concurrent genuine report cannot inherit this slot outcome after its final evidence check', async t => {
+  const morning = Date.parse('2026-11-18T06:30:00Z');
+  const f = await fixture(t, { executionHost: 'off-host', clock: () => morning,
+    async collectSource({ onAdmission }) { await onAdmission(); } });
+  const later = await fixture(t); await later.worker.seed(); await saveFixtureCollector(later, 44); await later.worker.tick();
+  for (const [key, body] of later.objects) f.objects.set(key, body);
+  const candidate = JSON.parse(later.states.get('app-sidi-report-head').body); delete candidate.previous;
+  await f.worker.seed();
+  const replica = createDriverAuditSupabaseReplica({ state: createCloudState({ rpc: f.backend.rpc }), archive: f.backend.archive });
+  let reached = false;
+  f.onHeadRead(async () => {
+    if (reached) return;
+    const status = JSON.parse(await fs.readFile(path.join(f.root, 'sync-status.private.json')).catch(() => 'null'));
+    if (status?.status !== 'ready') return;
+    reached = true;
+    f.states.set('collector-state', structuredClone(later.states.get('collector-state')));
+    f.receipts.set(44, structuredClone(later.receipts.get(44)));
+    await replica.activate({ expected: await replica.head(), head: candidate });
+  });
+  const result = await f.worker.runDueSlot(); assert(reached);
+  assert.equal(result.status, 'checked');
+  assert.equal(JSON.parse(f.states.get('app-sidi-report-head').body).servingPackage.collectorRevision, 44);
+  assert.equal(f.states.has('app-sidi-report-worker-status'), false,
+    'The already-checked older slot must be superseded, not relabeled as the later generation');
+});
+
+test('a report advancing during the final status read cannot replace the actual readiness decision head', async t => {
+  const f = await fixture(t, { executionHost: 'off-host', clock: () => Date.parse('2026-11-18T06:30:00Z'),
+    async collectSource({ onAdmission }) { await onAdmission(); } });
+  const later = await fixture(t); await later.worker.seed(); await saveFixtureCollector(later, 44); await later.worker.tick();
+  for (const [key, body] of later.objects) f.objects.set(key, body);
+  const candidate = JSON.parse(later.states.get('app-sidi-report-head').body); delete candidate.previous;
+  await f.worker.seed();
+  const replica = createDriverAuditSupabaseReplica({ state: createCloudState({ rpc: f.backend.rpc }), archive: f.backend.archive });
+  let reached = false;
+  f.onHeadRead(async () => {
+    if (reached) return;
+    const head = f.states.get('app-sidi-report-head');
+    if (!head || JSON.parse(head.body).servingPackage.collectorRevision !== 43) return;
+    const previous = f.calls.at(-2);
+    if (!['matter_hosted_state_read', 'matter_hosted_state_read_if_changed'].includes(previous?.name)
+      || previous.args.p_key !== 'collector-state') return;
+    const status = JSON.parse(await fs.readFile(path.join(f.root, 'sync-status.private.json')));
+    if (status.status !== 'checking') return;
+    reached = true;
+    f.states.set('collector-state', structuredClone(later.states.get('collector-state')));
+    f.receipts.set(44, structuredClone(later.receipts.get(44)));
+    await replica.activate({ expected: await replica.head(), head: candidate });
+  });
+  await f.worker.runDueSlot(); assert(reached, 'The final status read boundary must be exercised');
+  assert.equal(f.states.has('app-sidi-report-worker-status'), false,
+    'Generation 44 was never the source/head readiness decision of this slot');
+});
+
+test('a new enrollment skips elapsed slots and catches up the next day after restart', async t => {
+  let now = Date.parse('2026-11-18T10:00:00Z');
+  const morning = Date.parse('2026-11-19T06:30:00Z');
+  const slots = [];
+  const f = await fixture(t, { clock: () => now, executionHost: 'off-host', armedAt: new Date(now).toISOString(),
+    async collectSource({ dueAt, onAdmission }) {
+      await onAdmission();
+      slots.push(dueAt);
+    } });
+  await f.worker.seed();
+  const initialCalls = f.calls.length;
+  await f.worker.scheduledTick();
+  const status = path.join(f.config.root, 'sync-status.private.json');
+  assert.equal(JSON.parse(await fs.readFile(status)).lastScheduledAt, null);
+  assert.equal(f.calls.length, initialCalls);
+  await f.reopen();
+  now = morning + 2 * 60_000;
+  await f.worker.scheduledTick();
+  await f.reopen();
+  await f.worker.scheduledTick();
+  assert.deepEqual(slots, [morning]);
+  assert.equal(JSON.parse(await fs.readFile(status)).lastScheduledAt, new Date(morning).toISOString());
+});
+
+test('restarting before off-host source admission keeps the same slot available', async t => {
+  const morning = Date.parse('2026-11-18T06:30:00Z');
+  const first = new AbortController();
+  let waiting, admitted = 0;
+  const startedWaiting = new Promise(resolve => { waiting = resolve; });
+  const f = await fixture(t, { signal: first.signal, clock: () => morning, executionHost: 'off-host',
+    async collectSource({ signal, onAdmission }) {
+      if (signal === first.signal) {
+        waiting();
+        await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+      }
+      await onAdmission();
+      admitted++;
+    } });
+  await f.worker.seed();
+  const stopping = f.worker.scheduledTick();
+  await startedWaiting;
+  first.abort(Error('Stopped before admission'));
+  await assert.rejects(stopping, /Stopped before admission/);
+  await f.reopen(new AbortController().signal);
+  await f.worker.scheduledTick();
+  assert.equal(admitted, 1);
+  assert.equal(JSON.parse(f.states.get('app-sidi-report-head').body).servingPackage.collectorRevision, 43);
 });
 
 test('noon publishes changed evidence saved after the morning report once', async t => {
@@ -519,6 +821,6 @@ test('runner rejects Mongo and implicit host mode before opening a connection', 
   await assert.rejects(runDriverAuditSupabaseSync({ config: {}, file: '/not-used', env: {} }), /Supabase|Sidi/i);
   const env = { DRIVER_AUDIT_EXECUTION_HOST: 'sidi', DRIVER_AUDIT_DATA_STORE: 'supabase',
     DRIVER_AUDIT_IMPORT_ENABLED: '0', DRIVER_AUDIT_ENABLED: '0' };
-  await assert.rejects(runDriverAuditSupabaseSync({ config: {}, file: '/not-used', env }), /Explicit Sidi Supabase/);
+  await assert.rejects(runDriverAuditSupabaseSync({ config: {}, file: '/not-used', env }), /Explicit managed Supabase/);
   await assert.rejects(runDriverAuditSupabaseSync({ config: {}, file: '/not-used', mode: '--seed-only', env }), /staged.*configuration/);
 });
