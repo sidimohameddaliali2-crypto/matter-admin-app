@@ -46,7 +46,9 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
   const state=dependencies.state||createCloudState({rpc:backend?.rpc||createHostedRpc({secret:env.DRIVER_AUDIT_SUPABASE_SECRET})});
   const rawArchive=dependencies.archive||backend?.archive||createSupabaseArchiveTransport({secret:env.DRIVER_AUDIT_SUPABASE_SECRET});
   const supabaseHost=backend?.kind==='supabase'&&backend.executionHost==='sidi';
-  const store=dependencies.store||(supabaseHost?createDriverAuditSupabaseReplica({state,archive:rawArchive})
+  const pointerState=supabaseHost&&!dependencies.state&&backend.rpcForResponseLimit
+   ?createCloudState({rpc:backend.rpcForResponseLimit(768*1024)}):state;
+  const store=dependencies.store||(supabaseHost?createDriverAuditSupabaseReplica({state:pointerState,archive:rawArchive})
    :createDriverAuditReplica(db(),{capacityBytes:Number(env.DRIVER_AUDIT_CAPACITY_BYTES)}));
   async function isRetiredAuditGeneration(generation){
    const active=await store.head();

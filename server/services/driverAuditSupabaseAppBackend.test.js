@@ -99,10 +99,14 @@ test('explicit Sidi reporting ignores parked inherited Mongo settings without op
 
 test('one verified download fills the shared cache and reload works without remote access', async t => {
   const f = await fixture(t), backend = await f.open();
-  assert.deepEqual(Buffer.concat(await backend.archive.readObject(key)), bytes);
+  assert.deepEqual(Buffer.concat(await backend.archive.readObject(key, { maxBytes: bytes.length })), bytes);
   const count = f.calls.length;
   assert.ok(count > 0);
   assert.equal(f.calls.filter(call => call.path.includes('/storage/')).length, 1);
+  const reservations = f.calls.filter(call => call.path.endsWith('_egress_reserve'));
+  assert.equal(reservations.length, 2);
+  assert.ok(reservations.every(call => call.args.p_response_bytes <= 128 * 1024),
+    'A short archive request and photo reference must reserve only their response bounds');
   assert.deepEqual(Buffer.concat(await backend.archive.readObject(key)), bytes);
   assert.equal(f.calls.length, count, 'A disk cache hit must not reserve or fetch remote bytes');
   f.offline();

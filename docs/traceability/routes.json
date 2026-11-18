@@ -172,7 +172,7 @@
     "server/routes/yellowblock.js": "7369950e2f9b35759a4bd71678566c3e6b9bb9c2c2109020f2bf8967d03259e4",
     "server/server.js": "c6d428a7ed9949cbee59e4fa39e61606ab1e0b3ba406171d1765373ea42c928a",
     "server/services/customerServiceAdminMount.js": "ecb83e0ab51bd9ea272ba45bfb7c00409130c845b8003b0ae5bba540cba00b51",
-    "server/services/driverAuditIntegration.js": "4fe00d8e69d8303ef09b8096424f4372061935f61ca3bcc405c6bffe2ac27d68",
+    "server/services/driverAuditIntegration.js": "c378bf851abf9ec5f2d0586b618b6967ac5856d6befc772ad4c9003f70f53803",
     "server/vendor/driver-audits/integration/cloud/cloud-http.mjs": "dbeff48a0a4d9916b5b7c3ae66147c33a5ccf3a7bb839c2cddd18667cd778327"
   },
   "schemaVersion": 1,
@@ -12112,19 +12112,19 @@
     },
     {
       "pathLiteral": "/api/driver-audits/session",
-      "source": "server/services/driverAuditIntegration.js:131"
+      "source": "server/services/driverAuditIntegration.js:133"
     },
     {
       "pathLiteral": "/api/session/refresh",
-      "source": "server/services/driverAuditIntegration.js:146"
+      "source": "server/services/driverAuditIntegration.js:148"
     },
     {
       "pathLiteral": "/api/session",
-      "source": "server/services/driverAuditIntegration.js:150"
+      "source": "server/services/driverAuditIntegration.js:152"
     },
     {
       "pathLiteral": "/api/reporting/status",
-      "source": "server/services/driverAuditIntegration.js:157"
+      "source": "server/services/driverAuditIntegration.js:159"
     },
     {
       "pathPattern": "^\\/report-assets\\/font-[a-f0-9]{64}\\.(woff2?|ttf|otf)$",

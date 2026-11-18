@@ -42,7 +42,7 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
     fetchImpl: transfer.wrapFetch({ maxResponseBytes }) }), { maxResponseBytes });
   const rpc = rpcForResponseLimit(70 * 1024 ** 2);
   const original = createSupabaseArchiveTransport({ secret, drainAcknowledgements: true,
-    fetchImpl: transfer.wrapFetch({ maxResponseBytes: 16 * 1024 ** 2 }) });
+    fetchImpl: (url, options, maxResponseBytes) => transfer.wrapFetch({ maxResponseBytes })(url, options) });
   const uploads = photoStore || (executionHost === 'off-host'
     ? createDriverAuditLinkedPhotoReader({ env, fetchImpl }) : createDriverAuditSpacesArchive({ env }));
   const recoveryDirectory = env.DRIVER_AUDIT_PHOTO_RECOVERY_DIRECTORY;
@@ -50,7 +50,8 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
   check(executionHost !== 'off-host' || photoRecovery, 'Off-host reporting requires its private photo recovery directory');
   check(!photoRecovery || recoveryDirectory !== cacheDirectory && !recoveryDirectory.startsWith(cacheDirectory + path.sep),
     'Original photo recovery must be outside the disposable archive cache');
-  const photoArchive = createDriverAuditSupabaseArchive({ archive: original, rpc, photoStore: uploads, photoRecovery, env });
+  const photoArchive = createDriverAuditSupabaseArchive({ archive: original, rpc: rpcForResponseLimit(16 * 1024),
+    photoStore: uploads, photoRecovery, env });
   const progressRpc = (name, args) => {
     check(['matter_hosted_state_read', 'matter_hosted_native_progress_cas'].includes(name),
       'Unexpected Sidi polling progress operation');

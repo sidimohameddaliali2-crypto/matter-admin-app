@@ -148,10 +148,13 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
     check(supportsManagedArchiveCache === true && [automaticReleaseBasis, createAutomaticRelease,
       createAutomaticReleaseSource, buildAutomaticRelease, validateAutomaticCandidate].every(fn => typeof fn === 'function'),
     'The pinned managed Sidi audit builder is required');
-    const state = createCloudState({ rpc: backend.rpc }), remote = backend.archive;
+    // Pointer and capacity responses are small. The larger evidence and review
+    // reads below have separate bounds so this check can keep serving on a tight day.
+    const controlRpc = backend.rpcForResponseLimit(768 * 1024);
+    const state = createCloudState({ rpc: controlRpc }), remote = backend.archive;
     const replica = createDriverAuditSupabaseReplica({ state, archive: remote });
     const budgetOverride = backend.archiveReadBudget;
-    const archive = createBudgetedAuditArchive({ rpc: backend.rpc, state, remote,
+    const archive = createBudgetedAuditArchive({ rpc: controlRpc, state, remote,
       receiptRoot: path.join(root, 'archive-receipts'), budgetOverride });
     const boundedState = responseLimit => createBudgetedAuditState({
       state: createCloudState({ rpc: backend.rpcForResponseLimit(responseLimit) }), budgetState: state, responseLimit, budgetOverride,
