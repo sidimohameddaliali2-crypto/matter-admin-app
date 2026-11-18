@@ -396,9 +396,10 @@ test('a selected light release persists the explicit selector and requires a lig
 });
 
 async function lightPreflightFixture(t) {
-  const [{ createDriverAuditLightArchive, stageDriverAuditLightView }, { createDriverAuditIntegration },
+  const [{ stageDriverAuditLightView }, { createDriverAuditIntegration }, { createDriverAuditDeliveryView },
     { archiveBytes, archiveCatalog }, { compareUploadLocation }] = await Promise.all([
     import('../../server/services/driverAuditLightArchive.js'), import('../../server/services/driverAuditIntegration.js'),
+    import('../../server/services/driverAuditDeliveryView.js'),
     import('../../server/vendor/driver-audits/integration/cloud/repository.mjs'),
     import('../../server/vendor/driver-audits/app/src/content/dashboard/upload-location.mjs'),
   ]);
@@ -419,6 +420,10 @@ async function lightPreflightFixture(t) {
     sourceBodySha256: request.reportHeadSha256, visibleCutoffAt: '2026-11-18T07:00:00.000Z' };
   const photo = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwcB/UtqpEwAAAAASUVORK5CYII=', 'base64');
   const key = '2025-11-05/old-delivery', delivery = { id: 'old-delivery', upload: '2025-11-05T06:00:00.000Z' };
+  const recentKey = '2026-11-18/current-delivery', pointers = {};
+  const reviewEvent = { id: '00000000-0000-4000-8000-000000000001', created_at: '2026-10-19T00:00:00.000Z',
+    data: { issueId: 'unlinked-archived-issue', snapshotHash: sha('unlinked original snapshot'),
+      authorName: 'Archived reviewer', response: 'Source review', revision: 1, status: 'explained' } };
   const assessmentHash = sha('original assessment'), deliveryDigest = sha(JSON.stringify(delivery));
   const uploadLocation = compareUploadLocation({ upload: delivery.upload });
   const gps = { result: { binding: { assessmentHash, deliveryDigest }, vehicle: 'original-vehicle', gps: { streams: [] } },
@@ -427,25 +432,55 @@ async function lightPreflightFixture(t) {
   const historySha = sha(historyBytes), historyUrl = 'report-data/history-' + historySha + '.json';
   const refs = [await archiveBytes(archive, gzipSync(historyBytes), { domain: 'state', path: 'assets/' + historyUrl.slice(12) + '.gz' }),
     await archiveBytes(archive, photo, { domain: 'objects', path: sha(photo) })];
-  const catalog = await archiveCatalog(archive, refs);
   const entry = { row: { key }, summary: { key, driverId: 'original-driver' },
     gpsRow: { key, date: '2025-11-05', assessmentHash, delivery }, gps, photo: { sha256: sha(photo) },
     history: { staff: { url: historyUrl, sha256: historySha, count: 1 }, source: null },
     reviewRow: { key, findings: [] }, issues: [{ id: 'original-issue', deliveryId: key,
       evidence: { source_sha256: sha('original source'), rule_version: 'original-rule' } }] };
-  const current = { ...structuredClone(entry), row: { key: '2026-11-18/current-delivery' },
-    summary: { key: '2026-11-18/current-delivery', driverId: 'original-driver' } };
-  // No new GPS/photo/review result is fabricated for the current date. The
-  // deterministic samples deliberately exercise the retained historical case.
-  current.gps = null; current.photo.sha256 = null; current.issues = [];
+  const current = { ...structuredClone(entry), row: { key: recentKey },
+    summary: { key: recentKey, driverId: 'original-driver' } };
+  current.gps = null; current.issues = [];
   current.gpsRow = { ...current.gpsRow, key: current.row.key, date: '2026-11-18' };
   current.reviewRow = { key: current.row.key, findings: [] };
   current.history = { staff: null, source: null };
+  const cases = [];
+  for (const saved of [entry, current]) {
+    const recordKey = saved.row.key, sourceUrl = 'https://uploads.example.invalid/' + recordKey;
+    const proofTimestamp = saved.gpsRow.delivery.upload, imageSha256 = sha(photo);
+    saved.photo = { sha256: imageSha256, sourceUrl, proofTimestamp };
+    const binding = { recordKey, urlSha256: sha(sourceUrl), proofTimestamp, imageSha256 };
+    const status = saved === entry ? 'proposed' : 'needs_review';
+    const proposal = { recordKey, status, ...(status === 'proposed' ? { grade: 2, imageSha256 } : {}),
+      reason: 'Saved fictional suggestion', uncertainty: '', rubricVersion: 'fixture', reviewerModel: 'fixture',
+      reviewMethod: 'cloud-ai-gateway', reviewMethodVersion: 'cloud-ai-gateway-v1-20261103', reviewedAt: proofTimestamp };
+    const attemptId = sha(recordKey + ':attempt');
+    const imageResult = Buffer.from(JSON.stringify({ ...proposal, grade: proposal.grade ?? null, binding,
+      requestSha256: sha(recordKey + ':request'), attemptId }));
+    const resultSha = sha(imageResult), resultPath = 'cloud-photo-results/' + resultSha + '.json';
+    refs.push(await archiveBytes(archive, imageResult, { domain: 'state', path: resultPath }));
+    pointers[sha(recordKey)] = [{ sha256: resultSha, path: resultPath, bindingSha256: sha(JSON.stringify(binding)), attemptId }];
+    const detail = Buffer.from(JSON.stringify({ rows: [saved.gpsRow] })), detailSha = sha(detail);
+    const file = 'detail-' + detailSha + '.json';
+    refs.push(await archiveBytes(archive, gzipSync(detail), { domain: 'state', path: 'assets/' + file + '.gz' }));
+    saved.detail = { sha256: detailSha, url: 'report-data/' + file, count: 1 };
+    cases.push({ record: recordKey, responseSha256: sha(JSON.stringify(proposal)) });
+  }
+  const catalog = await archiveCatalog(archive, refs);
+  const publicationName = 'publication.private.json';
+  const publication = await archiveBytes(archive, Buffer.from(JSON.stringify({ version: 1, catalog, cloudPhotoResults: pointers,
+    head: { reportHash: head.reportHash, manifest: { sha256: head.generation } } })), { domain: 'previewRuntime', path: publicationName });
+  head.descriptor = await archiveBytes(archive, Buffer.from(JSON.stringify({ version: 1, generation: head.generation,
+    reportHash: head.reportHash, files: { [publicationName]: publication } })), { domain: 'previewRuntime', path: 'descriptor.private.json' });
   head.lightView = await stageDriverAuditLightView({ head, archive, projection: {
     days: new Map([['2025-11-05', [entry]], ['2026-11-18', [current]]]),
     context: { generation: head.generation, reportHash: head.reportHash, cutoff: head.visibleCutoffAt,
       records: 2, history: { staffRows: 1 }, review: { snapshotHash: head.reportHash, deliveryReview: true },
       reviewResolved: true, refs: { catalog }, gpsStreamRefs: {}, gpsEvidenceRefs: {}, gpsMetadata: {},
+      photoLookup: { version: 1, reportHash: head.reportHash, catalogSha256: catalog.sha256,
+        inventorySha256: sha('original inventory'), acceptance: { cases, reviews: [sha(JSON.stringify(reviewEvent))] }, blocked: [], queues: [
+          { rubricVersion: 'fixture', completedReportDays: [], byKey: {} },
+          { rubricVersion: 'fixture', completedReportDays: [], byKey: {} },
+        ] },
       extraSourceHistoryCases: {}, extraStaffHistoryCases: {} },
   } });
   const replica = { head: async () => head };
@@ -456,7 +491,8 @@ async function lightPreflightFixture(t) {
     rpcForResponseLimit: limit => async (name, args) => {
       rpcReads.push({ name, key: args.p_key, limit });
       assert.equal(name, 'matter_hosted_state_read'); assert.equal(args.p_key, 'preview-gps-map-20261106:review-journal');
-      return { body_text: null, revision: 0 };
+      return { revision: 1, body_text: JSON.stringify({ overrides: {}, removed: {}, preferences: {},
+        records: { reportingReviews: [reviewEvent] } }) };
     },
     archiveReadBudget: { reserve: async () => ({ allowed: true }), settle: async () => ({ settled: true }) },
     readTransferUsage: async () => usage,
@@ -465,7 +501,7 @@ async function lightPreflightFixture(t) {
   return { head, backend, replica, cacheDirectory, usage, blobs, reads, rpcReads, routes, entry,
     env: { DRIVER_AUDIT_ENABLED: '1', DRIVER_AUDIT_IMPORT_ENABLED: '0', DRIVER_AUDIT_SERVING_STORE: 'supabase',
       DRIVER_AUDIT_LIGHT_READER: '1', DRIVER_AUDIT_ORIGIN: 'https://matterapp.online' },
-    expected: request, signal: new AbortController().signal, createDriverAuditLightArchive,
+    expected: request, signal: new AbortController().signal, createDriverAuditLightArchive: createDriverAuditDeliveryView,
     createDriverAuditIntegration(options) {
       const actual = createDriverAuditIntegration({ ...options, dependencies: { ...options.dependencies, store: replica,
         createCoordinator: () => ({ status: () => ({}), poll: () => assert.fail('The full CORE must not load') }) } });
@@ -481,7 +517,7 @@ test('light release preflight exercises the actual staff routes, named hashes an
   const f = await lightPreflightFixture(t);
   const result = await implementation.preflightLightAppReader(f);
   assert.equal(result.lightweight, true); assert.equal(result.namedEvidenceVerified, true);
-  for (const endpoint of ['dates', 'deliveries', 'gps', 'photo', 'history', 'reviews', 'review-history'])
+  for (const endpoint of ['dates', 'deliveries', 'gps', 'photo', 'photo-suggestion', 'history', 'reviews', 'review-history'])
     assert(f.routes.includes('/api/reporting/light/' + endpoint));
   assert(f.reads.length > 0); assert(f.rpcReads.length > 0);
   assert(f.rpcReads.every(row => row.limit === 512 * 1024));
@@ -531,6 +567,29 @@ test('light preflight rejects a missing review even when case-scoped history suc
     return handler;
   };
   await assert.rejects(implementation.preflightLightAppReader(f), /differs from the original journal/);
+});
+
+test('light preflight requires the preserved reviews even when the current journal is empty', async t => {
+  const f = await lightPreflightFixture(t);
+  f.backend.rpcForResponseLimit = () => async () => ({ revision: 0, body_text: null });
+  await assert.rejects(implementation.preflightLightAppReader(f), /original preserved staff review is missing/);
+});
+
+test('light preflight rejects a missing named suggestion even though its original photo is readable', async t => {
+  const f = await lightPreflightFixture(t), original = f.createDriverAuditIntegration;
+  f.createDriverAuditIntegration = options => {
+    const real = original(options);
+    const handler = (req, res, next) => {
+      if (req.url.startsWith('/api/reporting/light/photo-suggestion?')) {
+        const recordKey = new URL(req.url, 'https://example.invalid').searchParams.get('record');
+        res.writeHead(200, { 'Cache-Control': 'private, no-store', 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ recordKey, status: 'none' }));
+      }
+      return real(req, res, next);
+    };
+    handler.prewarm = real.prewarm; return handler;
+  };
+  await assert.rejects(implementation.preflightLightAppReader(f), /suggestion differs from its verified original/);
 });
 
 test('light preflight rejects an advanced serving head rather than releasing a stale selected generation', async t => {

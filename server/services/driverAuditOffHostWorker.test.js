@@ -13,7 +13,7 @@ const sourceModule = new URL('./driverAuditSource.js', import.meta.url).href;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 
 async function fixture(t, { failure = false, exerciseCollection = false, historyFailure = false, omitHistory = false,
-  incrementalDeliveries = true } = {}) {
+  incrementalDeliveries = true, expectedScheduledResult = null } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'driver-audit-offhost-cli-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   async function write(file, bytes) {
@@ -63,7 +63,8 @@ async function fixture(t, { failure = false, exerciseCollection = false, history
       console.log(JSON.stringify({routes:globalThis.fixtureSourceRoutes,admissions}));return;
     }
     console.log(JSON.stringify({mode:input.mode??null,enrolled:typeof input.armedAt==='string',
-      sourceConfigured:typeof input.collectSource==='function'}));
+      sourceConfigured:typeof input.collectSource==='function', expectedScheduledAt:input.expectedScheduledAt}));
+    return ${JSON.stringify(expectedScheduledResult)};
   }`;
   const sourceBoundary = `export {readDriverAuditSourceConfig,readPrivateDriverAuditSource} from ${JSON.stringify(sourceModule)};
     export async function runDriverAuditSourceChild(config,entry,{onAdmission}={}){
@@ -77,10 +78,10 @@ async function fixture(t, { failure = false, exerciseCollection = false, history
     load(url,context,next){
     if(url===${JSON.stringify(runner)})return{format:'module',source:${JSON.stringify(replacement)},shortCircuit:true};
     return next(url,context);}});`);
-  async function run(mode) {
+  async function run(mode, ...options) {
     return new Promise((resolve, reject) => {
       const child = spawn(process.execPath, ['--import', hook, script, '--config', syncFile, '--source', sourceFile,
-        ...(mode === undefined ? [] : [mode])], { env: { PATH: process.env.PATH, HOME: os.homedir() }, stdio: ['ignore', 'pipe', 'pipe'] });
+        ...(mode === undefined ? [] : [mode]), ...options], { env: { PATH: process.env.PATH, HOME: os.homedir() }, stdio: ['ignore', 'pipe', 'pipe'] });
       let stdout = '', stderr = '';
       child.stdout.on('data', part => { stdout += part; }); child.stderr.on('data', part => { stderr += part; });
       child.once('error', reject); child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr }));
@@ -94,6 +95,29 @@ test('off-host --once forwards only the enrolled configuration and exits without
   const result = await f.run('--once');
   assert.equal(result.code, 0); assert.equal(result.signal, null); assert.equal(result.stderr, '');
   assert.deepEqual(JSON.parse(result.stdout), { mode: '--once', enrolled: true, sourceConfigured: true });
+});
+
+test('an ineligible expected slot returns a distinct process exit without reporting a successful check', async t => {
+  const f = await fixture(t, { expectedScheduledResult: { status: 'not-due' } });
+  await f.write(f.enrollmentFile, JSON.stringify(f.enrolled));
+  const expectedScheduledAt = '2026-11-18T06:30:00.000Z';
+  const result = await f.run('--once', '--scheduled-at', expectedScheduledAt);
+  assert.equal(result.code, 2);
+  assert.equal(result.stderr, '');
+  assert.deepEqual(JSON.parse(result.stdout), { mode: '--once', enrolled: true, sourceConfigured: true, expectedScheduledAt });
+  assert.equal((await f.run('--once')).code, 0, 'Manual runs retain the normal not-due outcome');
+  for (const mode of ['--check', '--seed-only']) {
+    assert.equal((await f.run(mode, '--scheduled-at', expectedScheduledAt)).code, 1);
+  }
+  assert.equal((await f.run('--once', '--scheduled-at', '2026-11-18T08:05:00.000Z')).code, 1);
+});
+
+test('an expected slot can only acknowledge completion of that exact slot', async t => {
+  const morning = '2026-11-18T06:30:00.000Z';
+  const f = await fixture(t, { expectedScheduledResult: { status: 'checked', scheduledAt: morning } });
+  await f.write(f.enrollmentFile, JSON.stringify(f.enrolled));
+  assert.equal((await f.run('--once', '--scheduled-at', morning)).code, 0);
+  assert.equal((await f.run('--once', '--scheduled-at', '2026-11-18T08:00:00.000Z')).code, 1);
 });
 
 test('off-host --once rejects absent, different and future enrollment before the runner', async t => {

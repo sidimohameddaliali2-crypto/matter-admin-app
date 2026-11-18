@@ -5,8 +5,10 @@ import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { createDriverAuditIntegration } from './driverAuditIntegration.js';
 import { createDriverAuditDeliveryView } from './driverAuditDeliveryView.js';
-import { createDriverAuditLightArchive, stageDriverAuditLightView } from './driverAuditLightArchive.js';
+import { createDriverAuditLightArchive, stageDriverAuditLightPhotoLookup, stageDriverAuditLightView } from './driverAuditLightArchive.js';
 import { createDriverAuditLightReader } from './driverAuditLightReader.js';
+import { buildDriverAuditLightPhotoLookup, createDriverAuditLightPhotoSuggestions } from './driverAuditLightPhotoSuggestions.js';
+import { createDriverAuditLightEvidence } from './driverAuditLightEvidence.js';
 import { archiveBytes, archiveCatalog } from '../vendor/driver-audits/integration/cloud/repository.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -19,7 +21,7 @@ const reviewer = { id: 'matter:fixture-staff', role: 'reviewer', email: 'reviewe
 const viewer = { ...reviewer, role: 'viewer' };
 const csrf = 'a'.repeat(64);
 
-async function fixture({ deliveryReview = true, extraIssue = false } = {}) {
+async function fixture({ deliveryReview = true, extraIssue = false, suggestions = false } = {}) {
   const blobs = new Map(), reads = [], writes = [];
   const archive = {
     async readObject(key, { maxBytes }) {
@@ -57,21 +59,80 @@ async function fixture({ deliveryReview = true, extraIssue = false } = {}) {
   const originalHistory = refOf('history', { rows: [saved] });
   const extraRecord = olderDay + '/original-source-only';
   const extra = refOf('history', { rows: [{ key: extraRecord, result: 'original' }] });
+  const newest = Array.from({ length: 45 }, (_, index) => makeCase(day, index, index < 37 ? 'driver-a' : 'driver-b'));
   const asset = async value => archiveBytes(archive, value.bytes, { domain: 'state', path: 'assets/' + value.url.slice(12) + '.gz' });
   const refs = await Promise.all([asset(originalHistory), asset(extra),
     archiveBytes(archive, rawPhoto, { domain: 'objects', path: old.photo.sha256 })]);
-  const catalog = await archiveCatalog(archive, refs);
+  let catalog, laterPublication, legacyInventoryKeys;
+  if (suggestions) {
+    const makeBinding = entry => {
+      entry.photo = { sha256: sha(rawPhoto), sourceUrl: 'https://uploads.example.invalid/' + entry.row.key,
+        proofTimestamp: '2026-11-18T07:00:00.000Z' };
+      return { recordKey: entry.row.key, urlSha256: sha(entry.photo.sourceUrl),
+        proofTimestamp: entry.photo.proofTimestamp, imageSha256: entry.photo.sha256 };
+    };
+    const saveResult = async (entry, status) => {
+      const binding = makeBinding(entry), attemptId = sha(entry.row.key + ' saved attempt');
+      const result = { binding, attemptId, status, grade: status === 'proposed' ? 0 : null,
+        reason: 'Fictional observation', uncertainty: 'Fictional uncertainty', rubricVersion: 'fixture-v1',
+        reviewerModel: 'fixture', reviewedAt: '2026-11-18T07:30:00.000Z', requestSha256: sha('saved input'),
+        reviewMethod: 'cloud-ai-gateway', reviewMethodVersion: 'cloud-ai-gateway-v1-20261103' };
+      const bytes = Buffer.from(JSON.stringify(result)), path = 'cloud-photo-results/' + sha(bytes) + '.json';
+      refs.push(await archiveBytes(archive, bytes, { domain: 'state', path }));
+      return { path, sha256: sha(bytes), attemptId, bindingSha256: sha(JSON.stringify(binding)) };
+    };
+    const frozen = { [sha(old.row.key)]: [await saveResult(old, 'proposed')] };
+    const detail = refOf('detail', { rows: [{ ...old.gpsRow, sourceOnly: { assessmentState: 'unavailable' } }] });
+    refs.push(await asset(detail));
+    old.detail = { url: detail.url, sha256: detail.sha256, count: 1 };
+    const later = await saveResult(newest[0], 'needs_review');
+    const recentDetail = refOf('detail', { rows: [newest[0].gpsRow] });
+    refs.push(await asset(recentDetail));
+    newest[0].detail = { url: recentDetail.url, sha256: recentDetail.sha256, count: 1 };
+    const archived = makeBinding(newest[1]);
+    const id = sha('original legacy queue item'), flag = { id, status: 'needs_review',
+      reason: 'Fictional archived observation', flaggedAt: '2026-11-18T06:30:00.000Z' };
+    const inventories = [{ queue: { items: [{ id, ...archived }], rubricVersion: 'fixture-v1', completedReportDays: [olderDay] },
+      flags: { [id]: flag }, proposals: {}, unavailable: {} },
+    { queue: { items: [], rubricVersion: 'fixture-v2' }, flags: {}, proposals: {}, unavailable: {} }];
+    const inventoryDigest = sha(JSON.stringify(inventories));
+    const inventoryRefs = [], queues = [];
+    for (const { queue, ...receipts } of inventories) {
+      const bytes = Buffer.from(JSON.stringify(queue)), queueDigest = sha(bytes);
+      const manifest = await archiveBytes(archive, bytes, { domain: 'state', path: 'photo-inventories/queues/' + queueDigest + '.json' });
+      queues.push(manifest);
+      inventoryRefs.push({ queueDigest, ...receipts });
+    }
+    legacyInventoryKeys = queues.flatMap(queue => queue.chunks.map(chunk => chunk.sha256 + '.gz'));
+    refs.push(...queues, await archiveBytes(archive, Buffer.from(JSON.stringify(inventoryRefs)),
+      { domain: 'state', path: 'photo-inventories/' + inventoryDigest + '.json' }),
+    await archiveBytes(archive, Buffer.from(JSON.stringify({ digest: inventoryDigest })),
+      { domain: 'state', path: 'photo-generations/' + head.reportHash + '.json' }));
+    catalog = await archiveCatalog(archive, refs);
+    const publication = { version: 1, catalog, head: { reportHash: head.reportHash, manifest: { sha256: head.generation } },
+      cloudPhotoResults: frozen };
+    const file = 'publication.private.json';
+    const publicationRef = await archiveBytes(archive, Buffer.from(JSON.stringify(publication)), { domain: 'previewRuntime', path: file });
+    head.descriptor = await archiveBytes(archive, Buffer.from(JSON.stringify({ version: 1, generation: head.generation,
+      reportHash: head.reportHash, files: { [file]: publicationRef } })), { domain: 'previewRuntime', path: 'descriptor.private.json' });
+    laterPublication = { ...publication, cloudPhotoResults: { ...frozen, [sha(newest[0].row.key)]: [later] } };
+  }
+  catalog ??= await archiveCatalog(archive, refs);
   const history = ({ bytes, ...value }) => ({ ...value, count: 1 });
   old.history.staff = history(originalHistory);
   old.history.source = old.history.staff;
-  const newest = Array.from({ length: 45 }, (_, index) => makeCase(day, index, index < 37 ? 'driver-a' : 'driver-b'));
   const projection = { days: new Map([[olderDay, [old]], [day, newest]]),
     context: { generation: head.generation, reportHash: head.reportHash, cutoff: head.visibleCutoffAt,
       records: 46, history: { staffRows: 1 }, refs: { catalog },
       review: { snapshotHash: head.reportHash, deliveryReview }, reviewResolved: true,
       gpsStreamRefs: {}, gpsEvidenceRefs: {}, gpsMetadata: {}, extraSourceHistoryCases: { [extraRecord]: history(extra) } } };
   head.lightView = await stageDriverAuditLightView({ projection, head, archive });
-  return { archive, blobs, reads, writes, head, projection, old, saved, extraRecord, rawPhoto };
+  const attachPhotoLookup = async () => {
+    const lookup = await buildDriverAuditLightPhotoLookup({ publication: laterPublication, archive });
+    head.lightView = await stageDriverAuditLightPhotoLookup({ head, lookup, archive });
+  };
+  return { archive, blobs, reads, writes, head, projection, old, saved, extraRecord, rawPhoto,
+    attachPhotoLookup, laterPublication, legacyInventoryKeys, newest };
 }
 
 test('the initial date and first delivery page load only the specific immutable objects', async () => {
@@ -123,8 +184,49 @@ test('a saved date projection cannot be attached to a different report generatio
   assert.equal(writes.length, 0);
 });
 
+test('prior incremental suggestions use the exact archived source revision and keep a saved staff grade first', async () => {
+  const f = await fixture({ suggestions: true });
+  await f.attachPhotoLookup();
+  const pages = createDriverAuditLightArchive({ archive: f.archive });
+  const evidence = createDriverAuditLightEvidence({ archive: f.archive });
+  const index = await pages.index(f.head);
+  const entry = await pages.record(f.head, f.newest[0].row.key);
+  const body = JSON.stringify(f.laterPublication), calls = [];
+  const head = { ...f.head, deliveryView: { collectorRevision: 2, sourceBodySha256: sha(body) } };
+  const setup = {
+    archive: f.archive, readPhoto: evidence.photo, readDetail: evidence.detail, readLookup: pages.photoSuggestions,
+    readJournal: async () => ({ history: [] }),
+    rpcForResponseLimit: () => async (name, args) => {
+      calls.push({ name, args });
+      return [{ revision: 2, body_text: body, body_sha256: sha(body), event_id: 'original-publication',
+        request_sha256: sha('request'), event_text: '{}' }];
+    },
+  };
+  const suggestion = createDriverAuditLightPhotoSuggestions(setup);
+  assert.equal((await suggestion(head, index, entry, viewer, false)).status, 'needs_review');
+  assert.equal((await suggestion(head, index, entry, viewer, false)).status, 'needs_review');
+  assert.deepEqual(calls, [{ name: 'matter_hosted_state_receipts', args: { p_key: 'collector-state', p_after: 1, p_limit: 1 } }]);
+  await assert.rejects(suggestion({ ...head, deliveryView: { ...head.deliveryView, sourceBodySha256: sha('foreign') } },
+    index, entry, viewer, false), /retained photo suggestion publication differs/);
+  const reviewed = createDriverAuditLightPhotoSuggestions({ ...setup, async readDetail(...args) {
+    const saved = structuredClone(await evidence.detail(...args));
+    saved.rows[0].photo = { reviewStatus: 'reviewed', grade: 1 };
+    return saved;
+  } });
+  assert.equal((await reviewed(head, index, entry, viewer, false)).status, 'retained');
+});
+
 test('the existing report route opens with exact old date evidence and staff review save and reload', async t => {
-  const f = await fixture();
+  const f = await fixture({ suggestions: true });
+  const detail = createDriverAuditLightArchive({ archive: f.archive });
+  const oldDates = (await detail.index(f.head)).days;
+  f.writes.length = 0;
+  await f.attachPhotoLookup();
+  assert.equal(f.writes.length, 2, 'only the compact photo index and its pointer are staged');
+  assert.deepEqual((await detail.index(f.head)).days, oldDates);
+  await f.attachPhotoLookup();
+  assert.equal(f.writes.length, 2, 'a repeat reuses the exact verified photo index');
+  f.reads.length = 0;
   const archived = Array.from({ length: 5 }, (_, index) => ({
     id: '00000000-0000-4000-8000-' + String(index + 1).padStart(12, '0'),
     created_at: '2026-10-19T09:10:00.000Z',
@@ -139,7 +241,16 @@ test('the existing report route opens with exact old date evidence and staff rev
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));
   const origin = 'http://127.0.0.1:' + server.address().port;
+  let now = Date.now(), collectorRevision = 1;
+  const collectorReads = [];
+  const savedCloud = f.laterPublication.cloudPhotoResults;
   const rpc = async (name, args) => {
+    if (args.p_key === 'collector-state') {
+      collectorReads.push(name);
+      if (args.p_revision === collectorRevision) return { unchanged: true, body_text: null, revision: collectorRevision };
+      return { unchanged: false, revision: collectorRevision, body_text: JSON.stringify({ ...f.laterPublication,
+        cloudPhotoResults: collectorRevision === 1 ? {} : savedCloud }) };
+    }
     assert.equal(args.p_key, 'preview-gps-map-20261106:review-journal');
     if (name === 'matter_hosted_state_read') return { revision: state.revision, body_text: state.body };
     assert.equal(name, 'matter_hosted_state_cas');
@@ -153,6 +264,7 @@ test('the existing report route opens with exact old date evidence and staff rev
       DRIVER_AUDIT_ENABLED: '1', DRIVER_AUDIT_IMPORT_ENABLED: '0', DRIVER_AUDIT_LIGHT_READER: '1' },
     dependencies: {
       backend: { kind: 'supabase', executionHost: 'sidi', archive: f.archive, rpc, rpcForResponseLimit: () => rpc },
+      clock: () => now,
       store: { head: async () => f.head },
       budget: { reserve: async () => ({ allowed: true }), settle: async () => ({ settled: true }) },
       createCoordinator: () => ({ status: () => ({}), poll: () => { legacyPolls++; assert.fail('legacy package loaded'); } }),
@@ -179,7 +291,30 @@ test('the existing report route opens with exact old date evidence and staff rev
   }), options);
   assert.equal((await request('dates', {}, { headers: { cookie: '' } })).status, 401);
   assert.equal((await (await request('dates')).json()).records, 46);
+  assert.deepEqual(collectorReads, [], 'the initial report does not read any suggestion state');
   const record = f.old.row.key;
+  const suggested = await request('photo-suggestion', { record });
+  assert.equal(suggested.headers.get('cache-control'), 'private, no-store');
+  assert.deepEqual(await suggested.json(), { recordKey: record, status: 'proposed', grade: 0, imageSha256: sha(f.rawPhoto),
+    reason: 'Fictional observation', uncertainty: 'Fictional uncertainty', rubricVersion: 'fixture-v1',
+    reviewerModel: 'fixture', reviewMethod: 'cloud-ai-gateway', reviewMethodVersion: 'cloud-ai-gateway-v1-20261103',
+    reviewedAt: '2026-11-18T07:30:00.000Z' });
+  assert.equal((await request('photo-suggestion', { record }, { headers: { cookie: '' } })).status, 401);
+  assert.equal((await request('photo-suggestion', { record }, { method: 'POST' })).status, 405);
+  const legacyRecord = f.newest[1].row.key;
+  assert.deepEqual(await (await request('photo-suggestion', { record: legacyRecord })).json(), { recordKey: legacyRecord,
+    status: 'needs_review', reason: 'Fictional archived observation', flaggedAt: '2026-11-18T06:30:00.000Z' });
+  assert.deepEqual(collectorReads, [], 'exact archived suggestions require no collector read');
+  assert.ok(f.legacyInventoryKeys.every(key => !f.reads.includes(key)), 'the reader never downloads either original queue');
+  const lateRecord = f.newest[0].row.key;
+  assert.deepEqual(await (await request('photo-suggestion', { record: lateRecord })).json(),
+    { recordKey: lateRecord, status: 'none' });
+  ++collectorRevision;
+  now += 31_000;
+  assert.equal((await (await request('photo-suggestion', { record: lateRecord })).json()).status, 'needs_review');
+  now += 31_000;
+  assert.equal((await (await request('photo-suggestion', { record: lateRecord })).json()).status, 'needs_review');
+  assert.deepEqual(collectorReads, ['matter_hosted_state_read', ...Array(2).fill('matter_hosted_state_read_if_changed')]);
   const photo = await request('photo', { record });
   assert.equal(photo.status, 200);
   assert.equal(photo.headers.get('x-report-image-sha256'), sha(f.rawPhoto));
@@ -199,6 +334,7 @@ test('the existing report route opens with exact old date evidence and staff rev
   const reload = await (await request('reviews', { record, issueId }, { headers: { cookie: 'Staff=viewer' } })).json();
   assert.equal(reload.history[0].data.response, input.response);
   assert.equal(reload.history[0].data.actorId, reviewer.id);
+  assert.deepEqual(await (await request('photo-suggestion', { record })).json(), { recordKey: record, status: 'retained' });
   const saved = state.body, history = await request('review-history', {}, { headers: { cookie: 'Staff=viewer' } });
   assert.equal(history.status, 200);
   assert.equal(history.headers.get('cache-control'), 'private, no-store');

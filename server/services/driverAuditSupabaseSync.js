@@ -10,7 +10,7 @@ import { buildDriverAuditLightView } from './driverAuditLightBuild.js';
 import { createDriverAuditDeliveryCaseProjector } from './driverAuditDeliveryCaseProjection.js';
 import { driverAuditDeliveryIdentity } from './driverAuditDeliveryHead.js';
 import { createDriverAuditDeliveryPublisher } from './driverAuditDeliveryPublish.js';
-import { createDriverAuditHostedSlots } from './driverAuditHostedSlots.js';
+import { createDriverAuditHostedSlots, isDriverAuditHostedSlot } from './driverAuditHostedSlots.js';
 import { writeDriverAuditSourceState } from './driverAuditSource.js';
 import { withDriverAuditHeavyWork } from './driverAuditHeavyWork.js';
 import { saveDriverAuditBuildRecipe } from './driverAuditBuildRecipe.js';
@@ -470,19 +470,23 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
       return flushWorkerStatus();
     }
 
-    async function runDueSlot() {
+    async function runDueSlot({ expectedScheduledAt } = {}) {
       check(!closed, 'The Sidi audit sync has closed');
       check(executionHost !== 'off-host' || hex(sourceConfigSha256), 'The exact off-host source configuration is required');
+      check(expectedScheduledAt === undefined || hostedSlots && isDriverAuditHostedSlot(expectedScheduledAt),
+        'The exact hosted slot is required');
       signal?.throwIfAborted();
       const recovered = await flushWorkerStatus();
       const { dueAt, nextAt } = reportSchedule(clock());
       const saved = await readHeartbeat() ?? { status: 'pending', pending: true };
       let changedRecords;
-      // Catch up at most the latest elapsed slot for this Dubai day.
-      const due = dueAt !== null && dueAt >= firstEligibleAt && dueAt > (Date.parse(saved.lastScheduledAt) || -Infinity);
+      // A scheduled GitHub trigger may only run its own slot. Manual runs and
+      // the daemon can still catch up the latest eligible slot for this day.
+      const due = dueAt !== null && dueAt >= firstEligibleAt && dueAt > (Date.parse(saved.lastScheduledAt) || -Infinity)
+        && (expectedScheduledAt === undefined || dueAt === Date.parse(expectedScheduledAt));
       if (due) {
         let failure, published = false, checkedHead;
-        const alreadyClaimed = Error('A hosted worker already claimed this report slot');
+        const slotUnavailable = Error('The hosted report slot is no longer available');
         try {
           if (executionHost === 'off-host') {
             check(collectSource, 'The off-host source checker is required');
@@ -490,8 +494,9 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
             let admitted = false;
             await collectSource({ dueAt, signal, async onAdmission() {
               signal?.throwIfAborted();
+              if (expectedScheduledAt && reportSchedule(clock()).dueAt !== dueAt) throw slotUnavailable;
               if (hostedSlots && !await hostedSlots.claim({ scheduledAt: new Date(dueAt).toISOString(),
-                enrolledAt: armedAt, syncConfigSha256: pins.configSha256, sourceConfigSha256 })) throw alreadyClaimed;
+                enrolledAt: armedAt, syncConfigSha256: pins.configSha256, sourceConfigSha256 })) throw slotUnavailable;
               admitted = true;
               await writeHeartbeat({ ...saved, status: 'checking', pending: true, errorCode: null,
                 lastScheduledAt: new Date(dueAt).toISOString() }, clock(), nextAt);
@@ -501,7 +506,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
           ({ published, checkedHead, changedRecords } = await tick({ scheduledAt: dueAt }));
         }
         catch (error) {
-          if (error === alreadyClaimed) return { status: 'not-due', scheduledAt: null, nextCheckAt: new Date(nextAt).toISOString() };
+          if (error === slotUnavailable) return { status: 'not-due', scheduledAt: null, nextCheckAt: new Date(nextAt).toISOString() };
           signal?.throwIfAborted();
           const prior = await readHeartbeat() ?? saved;
           await writeHeartbeat({ ...prior, ...describeDriverAuditSyncFailure(error), pending: true,
@@ -550,13 +555,14 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
   } catch (error) { await lock.release(); throw error; }
 }
 
-export async function runDriverAuditSupabaseSync({ config, file, mode, collectSource, armedAt, sourceConfigSha256, env = process.env } = {}) {
+export async function runDriverAuditSupabaseSync({ config, file, mode, collectSource, armedAt, expectedScheduledAt, sourceConfigSha256, env = process.env } = {}) {
   const executionHost = env.DRIVER_AUDIT_EXECUTION_HOST;
   check(['sidi', 'off-host'].includes(executionHost) && (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase'
     && env.DRIVER_AUDIT_IMPORT_ENABLED === '0'
     && (env.DRIVER_AUDIT_ENABLED === '1' || mode === '--seed-only' && env.DRIVER_AUDIT_ENABLED === '0')
     && [undefined, '--check', '--seed-only', '--once'].includes(mode)
     && (mode !== '--once' || executionHost === 'off-host')
+    && (expectedScheduledAt === undefined || mode === '--once' && config?.hostedSlotClaims === true && isDriverAuditHostedSlot(expectedScheduledAt))
     && (executionHost !== 'off-host' || ['--check', '--seed-only'].includes(mode)
       || typeof collectSource === 'function' && iso(armedAt) === armedAt && hex(sourceConfigSha256)),
   'Explicit managed Supabase sync with import disabled is required');
@@ -577,7 +583,7 @@ export async function runDriverAuditSupabaseSync({ config, file, mode, collectSo
       return result;
     }
     if (executionHost === 'off-host') await worker.check({ requireLightIndex: true });
-    if (mode === '--once') onceResult = await worker.runDueSlot();
+    if (mode === '--once') onceResult = await worker.runDueSlot({ expectedScheduledAt });
     else while (!stop.signal.aborted) {
       const now = Date.now();
       let wakeAt = Math.min(reportSchedule(now).nextAt, now + idleHeartbeatInterval);

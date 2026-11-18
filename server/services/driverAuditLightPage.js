@@ -46,6 +46,7 @@ section{margin-top:1rem;background:white;border:1px solid #cbd7d0;border-radius:
 details,article{margin:.75rem 0}summary{cursor:pointer}
 pre{max-height:24rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f6f4;padding:.6rem}
 img,canvas{display:block;max-width:100%;height:auto;margin:.5rem 0}
+.photo-suggestion{overflow-wrap:anywhere}
 form{display:grid;gap:.6rem;max-width:35rem}form button{justify-self:start}
 textarea{min-height:5rem;width:calc(100% - 1.45rem)}
 :focus-visible{outline:2px solid #247252;outline-offset:3px}
@@ -181,6 +182,39 @@ function runDriverAuditLightPage() {
     }
     body.append(savedBody('Recorded GPS evidence', value));
   }
+  function showPhoto(params, details, body) {
+    const original = make('div'), suggestion = make('article');
+    suggestion.className = 'photo-suggestion';
+    const heading = make('h3', 'Automated photo suggestion');
+    const content = make('div');
+    content.setAttribute('aria-live', 'polite');
+    content.append(make('p', 'Loading the saved suggestion…'));
+    suggestion.append(heading, content);
+    if (details.photo) {
+      const img = make('img');
+      img.alt = 'Original delivery photo';
+      img.src = base + 'photo?' + new URLSearchParams(params);
+      img.addEventListener('error', () => original.replaceChildren(make('p', 'The saved photo is unavailable.')));
+      original.append(img);
+    } else original.append(make('p', 'No verified photo is saved for this delivery.'));
+    body.replaceChildren(original, suggestion);
+    void call('photo-suggestion', params).then(value => {
+      const { status, grade, reason, uncertainty } = value;
+      if (status === 'proposed' || status === 'needs_review') {
+        content.replaceChildren(make('strong', status === 'proposed' ? 'Suggested grade ' + grade + ' of 3' : 'Needs staff review'),
+          make('p', reason));
+        if (uncertainty) content.append(make('p', uncertainty));
+      } else {
+        const messages = {
+          retained: 'See the saved assessment and reviews for this delivery.',
+          stale: 'The saved suggestion could not be matched to this photo.',
+          submitted: 'An automated review was submitted. Its validated result is pending.',
+          needs_recovery: 'The saved review attempt needs to be checked before it can be retried.',
+        };
+        content.replaceChildren(make('p', reason || messages[status] || 'No automated suggestion is saved for this photo.'));
+      }
+    }).catch(error => content.replaceChildren(make('p', error.message)));
+  }
   function showReviews(params, details, body) {
     body.replaceChildren();
     if (!details.issues.length) {
@@ -289,15 +323,7 @@ function runDriverAuditLightPage() {
           node.replaceChildren(saved);
         })),
         button('GPS', () => void load('gps', gpsView)),
-        button('Photo', () => {
-          ++pane;
-          if (!details.photo) { body.replaceChildren(make('p', 'No verified photo is saved for this delivery.')); return; }
-          const img = make('img');
-          img.alt = 'Original delivery photo';
-          img.src = base + 'photo?' + new URLSearchParams(params);
-          img.addEventListener('error', () => { if (img.isConnected) body.replaceChildren(make('p', 'The saved photo is unavailable.')); });
-          body.replaceChildren(img);
-        }),
+        button('Photo', () => { ++pane; showPhoto(params, details, body); }),
         button('Assessment history', () => void load('history', (value, node) => {
           node.replaceChildren(savedBody('Saved assessments (' + value.staff.length + ')', value.staff),
             savedBody('Additional source assessments (' + value.additionalSource.length + ')', value.additionalSource));

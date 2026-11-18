@@ -6,8 +6,10 @@ const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4})
 const sha = value => createHash('sha256').update(value).digest('hex');
 const validTime = value => typeof value === 'string' && Number.isFinite(Date.parse(value))
   && new Date(value).toISOString() === value;
-const validSlot = value => validTime(value) && /T(?:06:30|08:00):00\.000Z$/.test(value);
 const check = (condition, message) => { if (!condition) throw Error(message); };
+
+export const driverAuditHostedSlotSkippedExitCode = 2;
+export const isDriverAuditHostedSlot = value => validTime(value) && /T(?:06:30|08:00):00\.000Z$/.test(value);
 
 function parse(row) {
   check(Number.isSafeInteger(row?.revision) && row.revision >= 0, 'The report slot revision differs');
@@ -16,7 +18,7 @@ function parse(row) {
     'The stored report slot claim differs');
   const value = JSON.parse(row.body);
   check(value?.version === 1 && Object.keys(value).length === 6 && uuid(value.owner)
-    && validSlot(value.scheduledAt) && validTime(value.enrolledAt) && value.scheduledAt >= value.enrolledAt
+    && isDriverAuditHostedSlot(value.scheduledAt) && validTime(value.enrolledAt) && value.scheduledAt >= value.enrolledAt
     && hex(value.syncConfigSha256) && hex(value.sourceConfigSha256), 'The stored report slot identity differs');
   return value;
 }
@@ -29,7 +31,7 @@ export function createDriverAuditHostedSlots({ state, clock = Date.now, owner = 
     && typeof clock === 'function' && uuid(owner), 'A durable report slot owner is required');
   return Object.freeze({
     async claim({ scheduledAt, enrolledAt, syncConfigSha256, sourceConfigSha256 } = {}) {
-      check(validSlot(scheduledAt) && validTime(enrolledAt) && scheduledAt >= enrolledAt
+      check(isDriverAuditHostedSlot(scheduledAt) && validTime(enrolledAt) && scheduledAt >= enrolledAt
         && Date.parse(scheduledAt) <= clock() && clock() - Date.parse(scheduledAt) <= 16 * 60 * 60 * 1000
         && hex(syncConfigSha256) && hex(sourceConfigSha256), 'The hosted report slot is unavailable');
       const prior = await state.read(key), found = parse(prior);

@@ -376,13 +376,7 @@ test('one due-slot run exits not-due without collecting or reading evidence befo
   assert.equal(f.uploads.length, uploads);
 });
 
-test('the delivery-scoped off-host worker claims and checks both Dubai slots without rebuilding an unchanged report', async t => {
-  const morning = Date.parse('2026-11-18T06:30:00Z'), noon = Date.parse('2026-11-18T08:00:00Z');
-  let now = morning;
-  const slots = [];
-  const f = await fixture(t, { incrementalDeliveries: true, executionHost: 'off-host', clock: () => now,
-    armedAt: '2026-11-18T00:00:00.000Z',
-    async collectSource({ dueAt, onAdmission }) { await onAdmission(); slots.push(dueAt); } });
+function stageIncrementalSeed(f) {
   const seed = f.initial.seed, { generation, reportHash } = seed.pointer;
   const bytes = gzipSync(JSON.stringify({ version: 1, generation, reportHash, visibleCutoffAt: at, records: 0,
     history: { staffRows: 0 }, catalog: f.initial.publication.catalog, review: { snapshotHash: reportHash }, days: [] }));
@@ -393,6 +387,17 @@ test('the delivery-scoped off-host worker claims and checks both Dubai slots wit
   f.objects.set(lightView.sha256 + '.gz', bytes);
   f.states.set('app-sidi-report-head', head);
   f.states.set('collector-state', { revision: 42, body: JSON.stringify(f.initial.publication) });
+  return head;
+}
+
+test('the delivery-scoped off-host worker claims and checks both Dubai slots without rebuilding an unchanged report', async t => {
+  const morning = Date.parse('2026-11-18T06:30:00Z'), noon = Date.parse('2026-11-18T08:00:00Z');
+  let now = morning;
+  const slots = [];
+  const f = await fixture(t, { incrementalDeliveries: true, executionHost: 'off-host', clock: () => now,
+    armedAt: '2026-11-18T00:00:00.000Z',
+    async collectSource({ dueAt, onAdmission }) { await onAdmission(); slots.push(dueAt); } });
+  const head = stageIncrementalSeed(f);
   for (const dueAt of [morning, noon]) {
     now = dueAt;
     const result = await f.worker.runDueSlot();
@@ -441,6 +446,52 @@ test('one due-slot run publishes real changed evidence once and reports an uncha
   await f.reopen();
   assert.equal((await f.worker.runDueSlot()).status, 'not-due');
   assert.deepEqual(slots, [morning, noon]);
+});
+
+test('a late hosted morning trigger cannot claim noon or leave a terminal outcome for it', async t => {
+  const morning = '2026-11-18T06:30:00.000Z', noon = '2026-11-18T08:00:00.000Z';
+  const observedSlots = [];
+  const f = await fixture(t, { executionHost: 'off-host', incrementalDeliveries: true,
+    armedAt: '2026-11-18T06:00:00.000Z', clock: () => Date.parse(noon) + 300_000,
+    async collectSource({ dueAt, onAdmission }) {
+      await onAdmission(); observedSlots.push(new Date(dueAt).toISOString());
+    } });
+  const head = stageIncrementalSeed(f), uploads = f.uploads.length;
+
+  const missed = await f.worker.runDueSlot({ expectedScheduledAt: morning });
+  assert.equal(missed.status, 'not-due');
+  assert.equal(missed.scheduledAt, null);
+  assert.deepEqual(observedSlots, []);
+  assert.equal(f.states.has('app-sidi-report-worker-claim'), false);
+  assert.equal(f.states.has('app-sidi-report-worker-status'), false);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.equal(f.uploads.length, uploads);
+
+  const checked = await f.worker.runDueSlot({ expectedScheduledAt: noon });
+  assert.equal(checked.status, 'checked');
+  assert.equal(checked.scheduledAt, noon);
+  assert.deepEqual(observedSlots, [noon]);
+  assert.equal(JSON.parse(f.states.get('app-sidi-report-worker-status').body).scheduledAt, noon);
+  assert.equal((await f.worker.runDueSlot({ expectedScheduledAt: noon })).status, 'not-due');
+  assert.deepEqual(observedSlots, [noon]);
+});
+
+test('a hosted slot ending before source admission cannot start that source check', async t => {
+  const morning = '2026-11-18T06:30:00.000Z';
+  let now = Date.parse('2026-11-18T07:59:59Z'), acquired = 0;
+  const f = await fixture(t, { executionHost: 'off-host', incrementalDeliveries: true,
+    armedAt: '2026-11-18T06:00:00.000Z', clock: () => now,
+    async collectSource({ onAdmission }) {
+      now = Date.parse('2026-11-18T08:00:00Z');
+      await onAdmission(); acquired++;
+    } });
+  stageIncrementalSeed(f);
+
+  const result = await f.worker.runDueSlot({ expectedScheduledAt: morning });
+  assert.equal(result.status, 'not-due');
+  assert.equal(acquired, 0);
+  assert.equal(f.states.has('app-sidi-report-worker-claim'), false);
+  assert.equal(f.states.has('app-sidi-report-worker-status'), false);
 });
 
 test('one due-slot failure rejects and retains its durable attempt plus the original serving head', async t => {

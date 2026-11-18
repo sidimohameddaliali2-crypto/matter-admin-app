@@ -3,6 +3,7 @@ import { driverAuditPageSize } from './driverAuditLightArchive.js';
 import { driverAuditDeliveryIdentity, driverAuditRetainedLightHeads } from './driverAuditDeliveryHead.js';
 import { createDriverAuditDeliveryView } from './driverAuditDeliveryView.js';
 import { createDriverAuditLightEvidence } from './driverAuditLightEvidence.js';
+import { createDriverAuditLightPhotoSuggestions } from './driverAuditLightPhotoSuggestions.js';
 import { driverAuditLightCss, driverAuditLightHtml, driverAuditLightJs } from './driverAuditLightPage.js';
 import { createDriverAuditLightReviews } from './driverAuditLightReviews.js';
 
@@ -13,7 +14,7 @@ const readHeaders = { 'Cache-Control': 'private, no-store', 'X-Content-Type-Opti
 const fail = (status, message) => { throw Object.assign(Error(message), { status }); };
 const allowedMethods = new Set(['GET', 'HEAD', 'POST']);
 const endpoints = new Set(['dates', 'deliveries', 'case', 'detail', 'gps', 'photo', 'history', 'source-cases',
-  'source-history', 'reviews', 'review-history', 'reader.css', 'reader.js']);
+  'source-history', 'reviews', 'review-history', 'photo-suggestion', 'reader.css', 'reader.js']);
 const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 
 function reviewOptions(entry) {
@@ -58,6 +59,9 @@ async function readReview(request) {
 export function createDriverAuditLightReader({ store, archive, rpcForResponseLimit, clock = Date.now } = {}) {
   const pages = createDriverAuditDeliveryView({ archive });
   const evidence = createDriverAuditLightEvidence({ archive });
+  const photoSuggestion = createDriverAuditLightPhotoSuggestions({ archive, rpcForResponseLimit, clock,
+    readPhoto: evidence.photo, readDetail: evidence.detail, readLookup: pages.photoSuggestions,
+    readJournal: actor => createDriverAuditLightReviews({ rpcForResponseLimit }).readJournal(actor) });
   let cached, inFlight, prepared;
 
   async function current(fresh = false) {
@@ -159,6 +163,7 @@ export function createDriverAuditLightReader({ store, archive, rpcForResponseLim
     if (endpoint === 'detail') return send(request, response,
       { saved: await evidence.detail(index, entry) ?? { delivery: entry.gpsRow.delivery }, policy: entry.policy ?? null });
     if (endpoint === 'history') return send(request, response, await evidence.history(index, entry));
+    if (endpoint === 'photo-suggestion') return send(request, response, await photoSuggestion(head, index, entry, actor, head === live));
     if (endpoint === 'gps') return send(request, response,
       await evidence.gps(index, entry, actor, queryValue(url, 'vehicle', { optional: true })));
     const photo = await evidence.photo(index, entry);

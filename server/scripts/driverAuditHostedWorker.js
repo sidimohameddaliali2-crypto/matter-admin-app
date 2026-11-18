@@ -2,11 +2,12 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { preflightDriverAuditHostedBootstrap } from './driverAuditHostedBootstrap.js';
+import { driverAuditHostedWorkerPlan, preflightDriverAuditHostedBootstrap } from './driverAuditHostedBootstrap.js';
 import { runDriverAuditQualificationChild, stageDriverAuditQualification,
   validateDriverAuditSourceTransferUsage } from './driverAuditSourceQualify.js';
 import { driverAuditSourceHash, readDriverAuditSourceConfig, readPrivateDriverAuditSource,
   requirePrivateDriverAuditSourceDirectory, writeDriverAuditSourceState } from '../services/driverAuditSource.js';
+import { driverAuditHostedSlotSkippedExitCode } from '../services/driverAuditHostedSlots.js';
 
 const repo = 'sidimohameddaliali2-crypto/matter-admin-app';
 const nodeVersion = 'v24.22.1';
@@ -26,20 +27,27 @@ const scopedFixtureTests = ['driverAuditDeliveryChanges', 'driverAuditDeliveryCa
   'driverAuditDeliveryView', 'driverAuditSupabaseReplica', 'driverAuditSupabaseSync', 'driverAuditOffHostWorker', 'driverAuditLightReader']
   .map(name => fileURLToPath(new URL('../services/' + name + '.test.js', import.meta.url)));
 
-export function hostedDriverAuditWorkerSettings(env, mode, runtime = process) {
+export function hostedDriverAuditWorkerSettings(env, operation, runtime = process, now = Date.now()) {
   const releaseSha = env.DRIVER_AUDIT_WORKER_RELEASE_SHA, bootstrapSha256 = env.DRIVER_AUDIT_WORKER_BOOTSTRAP_SHA256;
   check(env.GITHUB_ACTIONS === 'true' && env.GITHUB_REPOSITORY === repo && env.GITHUB_REF === 'refs/heads/main'
     && commit(env.GITHUB_SHA) && commit(releaseSha) && releaseSha === env.DRIVER_AUDIT_WORKER_CHECKOUT_SHA && digest(bootstrapSha256)
     && runtime.platform === 'linux' && runtime.version === nodeVersion);
-  check(mode === '--qualify' && env.GITHUB_EVENT_NAME === 'workflow_dispatch'
-    || mode === '--once' && env.DRIVER_AUDIT_WORKER_ARMED === '1'
-      && ['workflow_dispatch', 'schedule'].includes(env.GITHUB_EVENT_NAME));
+  check(env.GITHUB_EVENT_NAME === 'workflow_dispatch'
+    ? operation === '--qualify' || operation === '--once' && env.DRIVER_AUDIT_WORKER_ARMED === '1'
+    : env.GITHUB_EVENT_NAME === 'schedule' && operation === '--scheduled' && env.DRIVER_AUDIT_WORKER_ARMED === '1');
+  let expectedScheduledAt;
+  if (operation === '--scheduled') {
+    const slot = driverAuditHostedWorkerPlan().schedules.find(({ cron }) => cron === env.DRIVER_AUDIT_WORKER_EVENT_SCHEDULE);
+    const createdAt = env.DRIVER_AUDIT_WORKER_RUN_CREATED_AT;
+    check(slot && iso(createdAt) && Number.isFinite(now) && Date.parse(createdAt) <= now);
+    expectedScheduledAt = `${createdAt.slice(0, 10)}T${slot.utc}:00.000Z`;
+  }
   const cacheKeyText = env.DRIVER_AUDIT_WORKER_CACHE_KEY, supabaseSecret = env.DRIVER_AUDIT_WORKER_SUPABASE_SECRET;
   check(typeof cacheKeyText === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(cacheKeyText)
     && typeof supabaseSecret === 'string' && supabaseSecret.length > 24 && supabaseSecret.length <= 4096 && !/[\r\n\0]/.test(supabaseSecret));
   const cacheKey = Buffer.from(cacheKeyText, 'base64');
   check(cacheKey.length === 32 && cacheKey.toString('base64') === cacheKeyText && cacheKey.some(byte => byte !== 0));
-  return { releaseSha, bootstrapSha256, supabaseSecret, cacheKey };
+  return { releaseSha, bootstrapSha256, supabaseSecret, cacheKey, expectedScheduledAt };
 }
 
 export function requireHostedDriverAuditQualification(receipt, binding, now = Date.now()) {
@@ -121,11 +129,11 @@ export async function allowEncryptedCacheSave(env, bundle, checkpoint) {
   } finally { await file.close(); }
 }
 
-function runPrivateChild(args, root, signal, fixture = {}) {
+function runPrivateChild(args, root, signal, { environment = {}, toleratedExitCode = 0 } = {}) {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, {
-      cwd: root, env: { HOME: root, LANG: 'C', TZ: 'UTC', ...fixture }, stdio: 'ignore',
+      cwd: root, env: { HOME: root, LANG: 'C', TZ: 'UTC', ...environment }, stdio: 'ignore',
     });
     let killTimer;
     const stop = () => {
@@ -139,14 +147,17 @@ function runPrivateChild(args, root, signal, fixture = {}) {
     child.on('close', (code, stopped) => {
       clearTimeout(killTimer);
       signal.removeEventListener('abort', stop);
-      if (code === 0 && !stopped && !signal.aborted) resolve();
+      if ((code === 0 || code === toleratedExitCode) && !stopped && !signal.aborted) resolve(code);
       else reject(Error('The pinned report worker did not finish.'));
     });
   });
 }
 
-function runWorker({ root, syncFile, sourceFile }, mode, signal) {
-  return runPrivateChild([workerScript, '--config', syncFile, '--source', sourceFile, mode], root, signal);
+function runWorker({ root, syncFile, sourceFile }, mode, signal, expectedScheduledAt) {
+  const args = [workerScript, '--config', syncFile, '--source', sourceFile, mode];
+  if (!expectedScheduledAt) return runPrivateChild(args, root, signal);
+  return runPrivateChild([...args, '--scheduled-at', expectedScheduledAt], root, signal,
+    { toleratedExitCode: driverAuditHostedSlotSkippedExitCode });
 }
 
 async function replayChild({ phase, input, directory, signal, readRoots, archiveCacheDirectory, mode = 'source', readArchive }) {
@@ -170,7 +181,7 @@ async function qualifyWorker(context, configuration, binding, signal) {
   const { root, sync, source } = configuration;
   check(await linuxMemoryAvailable() >= priorSourcePeak + memorySafetyReserve);
   await runPrivateChild(['--test', ...scopedFixtureTests], root, signal, {
-    DRIVER_AUDIT_FIXTURE_BUILDER_ROOT: sync.codeRoot, DRIVER_AUDIT_FIXTURE_BUILDER_SHA256: sync.builderSha256,
+    environment: { DRIVER_AUDIT_FIXTURE_BUILDER_ROOT: sync.codeRoot, DRIVER_AUDIT_FIXTURE_BUILDER_SHA256: sync.builderSha256 },
   });
   const before = validateDriverAuditSourceTransferUsage(await context.readTransferUsage());
   await runWorker(configuration, '--check', signal);
@@ -247,7 +258,8 @@ async function qualifyWorker(context, configuration, binding, signal) {
 
 async function main(args, env = process.env) {
   check(args.length === 1);
-  const [mode] = args, settings = hostedDriverAuditWorkerSettings(env, mode);
+  const [operation] = args, settings = hostedDriverAuditWorkerSettings(env, operation);
+  const mode = operation === '--scheduled' ? '--once' : operation;
   const { openDriverAuditHostedWorkerBootstrap } = await import('./driverAuditHostedWorkerBootstrap.js');
   const previousUmask = process.umask(0o077), stopped = new AbortController();
   const cancel = () => stopped.abort(Error('Hosted report worker interrupted.'));
@@ -287,9 +299,16 @@ async function main(args, env = process.env) {
     const enrollment = requireHostedDriverAuditEnrollment(JSON.parse(await readPrivateDriverAuditSource(
       path.join(root, 'launch-verified.private.json'), 32 * 1024)), binding, qualification);
     await context.restoreCheckpoint({ qualification, enrollment });
-    try { await runWorker(configuration, '--once', signal); }
+    let exitCode;
+    try { exitCode = await runWorker(configuration, '--once', signal, settings.expectedScheduledAt); }
     finally { await allowEncryptedCacheSave(env, cacheBundle, await context.writeCheckpoint({ qualification, enrollment })); }
-    console.info('Hosted report worker completed its eligible-slot check.');
+    if (exitCode === driverAuditHostedSlotSkippedExitCode) {
+      console.error(`Hosted report worker skipped the ${settings.expectedScheduledAt} scheduled slot.`);
+      process.exitCode = exitCode;
+    } else {
+      console.info(settings.expectedScheduledAt ? `Hosted report worker completed its ${settings.expectedScheduledAt} slot check.`
+        : 'Hosted report worker completed its eligible-slot check.');
+    }
   } finally {
     settings.cacheKey.fill(0);
     try { await context?.close(); }

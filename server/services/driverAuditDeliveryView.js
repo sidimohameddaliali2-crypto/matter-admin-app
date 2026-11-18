@@ -345,7 +345,7 @@ export function createDriverAuditDeliveryView({ archive } = {}) {
   }
 
   return Object.freeze({
-    index, stage,
+    index, stage, photoSuggestions: base.photoSuggestions,
     async directory(head, date) { return presentDate(await dateFor(head, date)); },
     async hasCase(head, key) {
       const { directory, cases } = await dateFor(head, caseDate(key));

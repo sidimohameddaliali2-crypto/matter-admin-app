@@ -23,7 +23,7 @@ const safeRelative = name => typeof name === 'string' && name.length <= 400 && !
 const appServices = new Set(['driverAuditCollectorReadCache', 'driverAuditDataBackend', 'driverAuditDirectImport',
   'driverAuditDeliveryCaseProjection', 'driverAuditDeliveryChanges', 'driverAuditDeliveryHead', 'driverAuditDeliveryPublish', 'driverAuditDeliveryView',
   'driverAuditLightArchive', 'driverAuditLightEvidence', 'driverAuditLightPage', 'driverAuditLightReader',
-  'driverAuditLightProjection', 'driverAuditLightReviews', 'driverAuditLightBuild', 'driverAuditLightPolicy',
+  'driverAuditLightProjection', 'driverAuditLightReviews', 'driverAuditLightBuild', 'driverAuditLightPolicy', 'driverAuditLightPhotoSuggestions',
   'driverAuditHostedCache', 'driverAuditHostedSlots',
   'driverAuditHttp', 'driverAuditIntegration', 'driverAuditReaderProxy', 'driverAuditPhotoRecovery', 'driverAuditPollProgress', 'driverAuditSource',
   'driverAuditSourceDeployment', 'driverAuditSourceQualification', 'driverAuditSourceStage', 'driverAuditSpacesArchive',
@@ -34,7 +34,7 @@ const appScripts = new Set(['driverAuditHostedBootstrap', 'driverAuditHostedInde
   'driverAuditOffHostWorker', 'driverAuditQualificationChild', 'driverAuditSource',
   'driverAuditSourceDeploy', 'driverAuditSourceQualify', 'driverAuditSourceStage', 'driverAuditSync']);
 const vendorFiles = new Set(['integration/cloud/automatic-hosted-preview.mjs', 'integration/cloud/preview-gps.mjs', 'integration/cloud/preview-order-timing.mjs',
-  'integration/cloud/preview-runtime.mjs', 'integration/cloud/remote-preview-package.mjs',
+  'integration/cloud/preview-runtime.mjs', 'integration/cloud/remote-preview-package.mjs', 'integration/cloud/report-service.mjs',
   'integration/cloud/cloud-http.mjs', 'integration/cloud/preview-source-history.mjs',
   'integration/hosted/supabase-archive.mjs', 'runtime-manifest.json']);
 function allowedChange(name) {
@@ -321,6 +321,14 @@ export async function preflightLightAppReader({ backend, replica, head, env, exp
   await planLightAppReaderStartup({ ...startup, usage: await backend.readTransferUsage() });
   const pages = createDriverAuditLightArchive({ archive: backend.archive });
   const index = await pages.index(head), keys = index.samples;
+  check(index.photoSuggestions, 'The original photo suggestions must be indexed before release');
+  const { acceptance } = await pages.photoSuggestions(index);
+  check(Array.isArray(acceptance?.cases) && acceptance.cases.length >= 2 && acceptance.cases.length <= 4
+    && new Set(acceptance.cases.map(value => value?.record)).size === acceptance.cases.length
+    && acceptance.cases.every(value => typeof value?.record === 'string' && value.record.length <= 300
+      && /^\d{4}-\d{2}-\d{2}\//.test(value.record) && digest(value.responseSha256))
+    && Array.isArray(acceptance.reviews) && acceptance.reviews.length > 0 && acceptance.reviews.length <= 1024
+    && acceptance.reviews.every(digest), 'The original suggestion and staff review acceptance proof is required');
   check(keys && ['gps', 'photo', 'review'].every(name => typeof keys[name] === 'string'
     && keys[name].length <= 300 && /^\d{4}-\d{2}-\d{2}\//.test(keys[name])),
   'Named original lightweight GPS, photo and review samples are required');
@@ -367,6 +375,13 @@ export async function preflightLightAppReader({ backend, replica, head, env, exp
     const image = await get('photo', { record: keys.photo });
     check(sha(image.bytes) === photo.photo.sha256 && image.response.headers.get('x-report-image-sha256') === photo.photo.sha256,
       'The lightweight original photo bytes differ');
+    for (const sample of acceptance.cases) {
+      const suggestion = (await get('photo-suggestion', { record: sample.record })).value;
+      check(suggestion.recordKey === sample.record && ['proposed', 'needs_review'].includes(suggestion.status)
+        && sha(JSON.stringify(suggestion)) === sample.responseSha256,
+      'A saved automated photo suggestion differs from its verified original');
+    }
+    await get('photo-suggestion', { record: acceptance.cases[0].record }, false);
     const historical = (await get(oldKey ? 'history' : 'source-history', { record: oldKey ?? directory.extraCases[0][0] })).value;
     check(Array.isArray(historical.staff) && Array.isArray(historical.additionalSource)
       && (oldEntry.retainedHistory ? historical.staff.length >= (oldEntry.history?.staff?.count ?? 0)
@@ -384,6 +399,8 @@ export async function preflightLightAppReader({ backend, replica, head, env, exp
     const savedReviews = (await get('review-history')).value;
     check(Array.isArray(originalEvents) && same(savedReviews.history, originalEvents),
       'The saved review history differs from the original journal');
+    const preservedReviews = new Set(savedReviews.history.map(event => sha(JSON.stringify(event))));
+    check(acceptance.reviews.every(hash => preservedReviews.has(hash)), 'An original preserved staff review is missing');
     await get('review-history', {}, false);
     await get('dates', {}, false);
   } finally { await new Promise(resolve => server.close(resolve)); }
