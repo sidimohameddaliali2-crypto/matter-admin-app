@@ -8,6 +8,7 @@ import { buildDriverAuditLightProjection } from './driverAuditLightProjection.js
 import { buildDriverAuditLightPolicy } from './driverAuditLightPolicy.js';
 import { stageDriverAuditLightView } from './driverAuditLightArchive.js';
 import { readRetainedDriverAuditFile } from './driverAuditLightEvidence.js';
+import { buildDriverAuditLightPhotoLookup } from './driverAuditLightPhotoSuggestions.js';
 
 const MiB = 1024 ** 2;
 const unpack = (bytes, maxOutputLength) => JSON.parse(gunzipSync(bytes, { maxOutputLength }));
@@ -44,6 +45,8 @@ export async function buildDriverAuditLightView({ head, previous, archive, sourc
     browser: unpack(pack.read('browser-data.private.json.gz'), 128 * MiB), corrections,
     decisions, photoBindingRegistry: optional('preview-photo-bindings.private.json'),
     sourceHistoryCases, reviewSnapshot });
+  projection.context.photoLookup = await buildDriverAuditLightPhotoLookup({ publication, archive: sourceArchive })
+    .catch(error => { if (error.code !== 'ENOENT') throw error; return null; });
   const arrangements = householdArrangements ?? (await createHouseholdStore(namespaceState(reviewState)).read()).arrangements;
   const policy = await buildDriverAuditLightPolicy({ view, gps, corrections, decisions, availability: availability ?? optional(gpsAvailabilityFile),
     reviewSnapshot, householdArrangements: arrangements });

@@ -20,6 +20,41 @@ import {loadDirectVisualReviews,directVisualReviewForRow} from './direct-visual-
 import {loadRouteEvidence,bindRouteEvidence} from './route-evidence.mjs';
 const sha=x=>createHash('sha256').update(x).digest('hex'),hash=x=>sha(Buffer.from(JSON.stringify(x))),hex=x=>typeof x==='string'&&/^[a-f0-9]{64}$/.test(x),fail=status=>Object.assign(Error('Report unavailable'),{status});
 const route=/^report-data\/(detail|history|query|archive|snapshot)-([a-f0-9]{64})\.json$/;
+export async function readCloudPhotoProposal({ row, pointers, readResult, readImage }) {
+ const list = pointers[sha(row.key)];
+ if (list === undefined) return null;
+ if (!Array.isArray(list)) throw Error('Invalid cloud photo results');
+ const delivery = row.delivery || {};
+ const binding = { recordKey: row.key, urlSha256: sha(delivery.photo_url || ''),
+  proofTimestamp: delivery.raw_upload ?? delivery.upload ?? null, imageSha256: delivery.photo_sha256 };
+ const matches = list.filter(result => result.bindingSha256 === hash(binding));
+ if (matches.length > 1) throw Error('Ambiguous cloud photo result');
+ const pointer = matches[0];
+ if (!pointer) return null;
+ if (!hex(pointer.sha256) || pointer.path !== 'cloud-photo-results/' + pointer.sha256 + '.json')
+  throw Error('Invalid cloud photo result pointer');
+ const bytes = await readResult(pointer.path);
+ if (!Buffer.isBuffer(bytes) || bytes.length > 65536 || sha(bytes) !== pointer.sha256)
+  throw Error('Cloud photo result integrity failure');
+ const result = JSON.parse(bytes), saved = result.binding;
+ if (result.attemptId !== pointer.attemptId || result.reviewMethod !== 'cloud-ai-gateway'
+  || result.reviewMethodVersion !== 'cloud-ai-gateway-v1-20261103' || !hex(result.requestSha256)
+  || saved?.recordKey !== row.key || saved.urlSha256 !== binding.urlSha256
+  || saved.proofTimestamp !== binding.proofTimestamp || saved.imageSha256 !== binding.imageSha256
+  || !['proposed', 'needs_review'].includes(result.status)
+  || result.status === 'proposed' && (!Number.isInteger(result.grade) || result.grade < 0 || result.grade > 3)
+  || result.status === 'needs_review' && result.grade !== null
+  || typeof result.reason !== 'string' || !result.reason.trim() || result.reason.length > 2000
+  || typeof result.uncertainty !== 'string' || result.uncertainty.length > 2000
+  || typeof result.reviewerModel !== 'string' || !Number.isFinite(Date.parse(result.reviewedAt))) return null;
+ try { await readImage(saved.imageSha256); }
+ catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+ return { recordKey: row.key, status: result.status,
+  ...(result.status === 'proposed' ? { grade: result.grade, imageSha256: saved.imageSha256 } : {}),
+  reason: result.reason, uncertainty: result.uncertainty, rubricVersion: result.rubricVersion,
+  reviewerModel: result.reviewerModel, reviewMethod: result.reviewMethod,
+  reviewMethodVersion: result.reviewMethodVersion, reviewedAt: result.reviewedAt };
+}
 const generationCache=new Map();
 const photoProgressCache=new Map();
 const photoProgressRetryMs=30_000;
@@ -116,7 +151,7 @@ export function createCloudReportService({repository,reviewStore,identityStore,n
    const reportHash=params.get('snapshot'),results=await Promise.all(proposals.map(s=>s(params))),inventories=await pinnedInventories(reportHash);if(results.length!==2)throw Error('Photo inventory unavailable');
    const merged=results[0].proposals.map((old,i)=>chooseLegacyProposal(old,results[1].proposals[i])),snapshot=await snapshotFor(reportHash),rows=await photoBoundRows(reportHash,snapshot.rows,inventories),pointers=repository.publication?.cloudPhotoResults||{},journal=actor?await reviewStore.read(actor):{records:{reportingReviews:[]}};if(!Array.isArray(journal?.records?.reportingReviews))throw Error('Invalid review journal');
    const completedDays=new Set(),blockedKeys=new Set();for(const inv of inventories){for(const day of inv.queue.completedReportDays||[])completedDays.add(day);for(const item of inv.queue.items)if(inv.proposals?.[item.id]||inv.flags?.[item.id]||inv.attempts?.[item.id]){if(item.recordKey)blockedKeys.add(item.recordKey);if(item.datedRecordKey)blockedKeys.add(item.datedRecordKey);}}
-   async function loadCloud(row){const list=pointers[sha(row.key)];if(list===undefined)return null;if(!Array.isArray(list)||photoCaseReviewed(row,journal)||completedPhotoDay(row,completedDays)||blockedKeys.has(row.key))return null;const d=row.delivery||{},binding={recordKey:row.key,urlSha256:sha(d.photo_url||''),proofTimestamp:d.raw_upload??d.upload??null,imageSha256:d.photo_sha256},matches=list.filter(x=>x.bindingSha256===hash(binding));if(matches.length>1)throw Error('Ambiguous cloud photo result');const pointer=matches[0];if(!pointer)return null;if(!hex(pointer.sha256)||pointer.path!=='cloud-photo-results/'+pointer.sha256+'.json')throw Error('Invalid cloud photo result pointer');const bytes=await read('state',pointer.path,65536);if(sha(bytes)!==pointer.sha256)throw Error('Cloud photo result integrity failure');const result=JSON.parse(bytes),b=result.binding;if(result.attemptId!==pointer.attemptId||result.reviewMethod!=='cloud-ai-gateway'||result.reviewMethodVersion!=='cloud-ai-gateway-v1-20261103'||!hex(result.requestSha256)||b?.recordKey!==row.key||b.urlSha256!==binding.urlSha256||b.proofTimestamp!==binding.proofTimestamp||b.imageSha256!==binding.imageSha256||!['proposed','needs_review'].includes(result.status)||result.status==='proposed'&&(!Number.isInteger(result.grade)||result.grade<0||result.grade>3)||result.status==='needs_review'&&result.grade!==null||typeof result.reason!=='string'||!result.reason.trim()||result.reason.length>2000||typeof result.uncertainty!=='string'||result.uncertainty.length>2000||typeof result.reviewerModel!=='string'||!Number.isFinite(Date.parse(result.reviewedAt)))return null;try{await readImage(b.imageSha256);}catch(e){if(e.code==='ENOENT')return null;throw e;}return {recordKey:row.key,status:result.status,...(result.status==='proposed'?{grade:result.grade,imageSha256:b.imageSha256}:{}),reason:result.reason,uncertainty:result.uncertainty,rubricVersion:result.rubricVersion,reviewerModel:result.reviewerModel,reviewMethod:result.reviewMethod,reviewMethodVersion:result.reviewMethodVersion,reviewedAt:result.reviewedAt};}
+   async function loadCloud(row){if(!Array.isArray(pointers[sha(row.key)])||photoCaseReviewed(row,journal)||completedPhotoDay(row,completedDays)||blockedKeys.has(row.key))return null;return readCloudPhotoProposal({row,pointers,readResult:path=>read('state',path,65536),readImage});}
    const cacheKey=hex(repository.publication?.catalog?.sha256)?[
     deferredPhotoProgress?'deferred':'blocking',repository.publication.catalog.sha256,reportHash,
     hash(journal),hash(photoBindingRegistry),hash(pointers),!!actor,

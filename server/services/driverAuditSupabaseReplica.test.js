@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { archiveBytes } from '../vendor/driver-audits/integration/cloud/repository.mjs';
+import { createDriverAuditDeliveryPublisher } from './driverAuditDeliveryPublish.js';
+import { createDriverAuditDeliveryView } from './driverAuditDeliveryView.js';
+import { stageDriverAuditLightView } from './driverAuditLightArchive.js';
 import { createDriverAuditSupabaseReplica, driverAuditSupabaseReportHeadKey } from './driverAuditSupabaseReplica.js';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -119,6 +122,113 @@ test('an explicit bootstrap previous pointer is preserved only after all its byt
   const later = (await packageFixture(archive, 5772, { previous: older })).head;
   await assert.rejects(replica.activate({ expected: await replica.head(), head: later }), /previous/i);
   assert.equal(state.requests.length, 1);
+});
+
+test('scheduled delivery publication selects only new and changed cases and never reads a complete package', async () => {
+  const state = stateFixture(), archive = storage(), { head, files } = await packageFixture(archive);
+  const viewFile = 'preview-read-view.private.json.gz';
+  files[viewFile] = await archiveBytes(archive, gzipSync(JSON.stringify({
+    generation: head.generation, reportHash: head.reportHash, overlay: { status: 'ready', bindingsVerified: true, entries: [] },
+  })), { domain: 'previewRuntime', path: viewFile });
+  head.descriptor = await archiveBytes(archive, Buffer.from(JSON.stringify({ version: 1, files, generation: head.generation,
+    reportHash: head.reportHash, sourceManifestSha256: head.servingPackage.manifestSha256 })),
+  { domain: 'previewPackage', path: 'descriptor.json' });
+  head.closureReceipt.descriptorSha256 = head.descriptor.sha256;
+  head.restore.descriptorSha256 = head.descriptor.sha256;
+  const day = '2026-11-18', oldDay = '2026-10-19', stable = oldDay + '/original', updated = day + '/updated', added = day + '/new';
+  const makeEntry = (key, version) => ({
+    row: { key }, summary: { key, driverId: 'fixture', driverName: 'Fixture', status: version },
+    gpsRow: { key, date: key.slice(0, 10), assessmentHash: sha(version), delivery: {} },
+    photo: { sha256: sha('unchanged photo ' + key) }, gps: null, gpsFiles: { streams: {}, projections: {} }, gpsAsOf: null,
+    issues: [{ id: 'review/' + key, deliveryId: key }], reviewRow: { key, findings: [] },
+    generation: sha('generation ' + version), reportHash: sha('review ' + version),
+    review: { snapshotHash: sha('review ' + version), deliveryReview: true, raw: false },
+    catalog: { sha256: sha('catalogue') }, history: { staff: null, source: null },
+  });
+  const stableOriginal = makeEntry(stable, 'preserved original'), updatedOriginal = makeEntry(updated, 'prior grade');
+  head.lightView = await stageDriverAuditLightView({ head, archive, projection: {
+    days: new Map([[oldDay, [stableOriginal]], [day, [updatedOriginal]]]),
+    context: { generation: head.generation, reportHash: head.reportHash, cutoff: head.visibleCutoffAt,
+      sourceManifestSha256: head.servingPackage.manifestSha256,
+      records: 2, history: { staffRows: 0 }, review: { ...updatedOriginal.review, snapshotHash: head.reportHash },
+      reviewResolved: true, refs: { catalog: updatedOriginal.catalog }, gpsStreamRefs: {}, gpsEvidenceRefs: {},
+      gpsMetadata: {}, extraSourceHistoryCases: {}, extraStaffHistoryCases: {} },
+  } });
+  state.row = { revision: 1, body: JSON.stringify(head) };
+  for (const [file, ref] of Object.entries(files)) if (file !== viewFile) {
+    for (const chunk of ref.chunks) archive.objects.delete(chunk.sha256 + '.gz');
+  }
+  const replica = createDriverAuditSupabaseReplica({ state, archive });
+  const initial = await replica.head(), pages = createDriverAuditDeliveryView({ archive });
+  const original = await pages.record(initial, stable), originalDay = (await pages.index(initial)).days.at(-1);
+  const old = { head: { source: { observedAt: at } }, fixture: 'base' };
+  const latest = { head: { source: { observedAt: day + 'T06:29:00.000Z' } }, fixture: 'latest' };
+  let collector = { revision: 5772, body: JSON.stringify(latest) };
+  const baselineBody = JSON.stringify(old);
+  const input = (key, version) => [key, { key, day: key.slice(0, 10), sourceHash: sha(version),
+    summary: makeEntry(key, version).gpsRow, inputs: { gpsCoverage: { sources: 'not-in-published-scope' } } }];
+  const originalSource = new Map([input(stable, 'original unchanged'), input(updated, 'previous')]);
+  const latestSource = new Map([input(stable, 'original unchanged'), input(updated, 'changed'), input(added, 'new')]);
+  const built = [], comparisons = [], scopeReads = [];
+  let gpsPending = false;
+  const publish = createDriverAuditDeliveryPublisher({ archive, replica, sourceState: { read: async () => collector },
+    automaticReleaseBasis: publication => publication.fixture === 'base' ? head.servingPackage.sourceBasis : sha('latest basis'),
+    originalCollectorReceipt: async () => ({ revision: 5771, body_text: baselineBody, body_sha256: sha(baselineBody) }),
+    readSource: async ({ publication }) => {
+      comparisons.push(publication.revision);
+      return { cases: publication.fixture === 'base' ? originalSource : latestSource, gpsPending, readCase: async key => {
+        scopeReads.push(key);
+        return latestSource.get(key).summary;
+      } };
+    },
+    reviewState: { async read(key) {
+      assert.equal(key, 'preview-gps-map-20261106:household-arrangements');
+      return { body: null, revision: 0 };
+    } },
+    openProjector: async () => async ({ candidate }) => {
+      built.push(candidate.key);
+      assert.notEqual(candidate.key, stable);
+      return makeEntry(candidate.key, candidate.key === added ? 'fresh grade' : 'corrected grade');
+    },
+    verifyInputs: async () => {},
+  });
+  archive.writes.length = 0;
+  const morning = await publish(Date.parse(day + 'T06:30:00.000Z'));
+  assert.deepEqual(built, [added]);
+  assert.deepEqual(comparisons, [5772]);
+  assert.equal(morning.changedRecords, 1);
+  assert.equal(archive.writes.length, 3);
+  assert.deepEqual(scopeReads, [added]);
+  assert.ok(!archive.reads.includes(files[viewFile].chunks[0].sha256 + '.gz'));
+  assert.deepEqual(await pages.record(morning.head, updated), await pages.record(initial, updated));
+  assert.deepEqual(morning.head.descriptor, initial.descriptor);
+  assert.deepEqual(morning.head.lightView, initial.lightView);
+  const ack = state.compareAndSwap;
+  state.compareAndSwap = async request => { await ack(request); throw Error('Fixture lost an acknowledgement'); };
+  const noon = await publish(Date.parse(day + 'T08:00:00.000Z'));
+  assert.deepEqual(built, [added, updated]);
+  assert.equal(noon.changedRecords, 1);
+  assert.deepEqual(scopeReads, [added, updated]);
+  assert.equal(noon.recoveredAcknowledgement, true);
+  assert.deepEqual(noon.head.previousDeliveryView, morning.head.deliveryView);
+  assert.deepEqual(await pages.record(noon.head, stable), original);
+  assert.deepEqual((await pages.index(noon.head)).days.at(-1), originalDay);
+  assert.equal((await pages.record(noon.head, updated)).summary.status, 'corrected grade');
+  assert.equal(archive.writes.length, 6);
+  const committed = state.row;
+  collector = { revision: 5773, body: JSON.stringify({ ...latest, pollOnly: true }) };
+  gpsPending = true;
+  const noChange = await publish(Date.parse('2026-11-19T08:00:00.000Z'));
+  assert.equal(noChange.status, 'unchanged');
+  assert.equal(noChange.pendingEvidence, true);
+  assert.deepEqual(state.row, committed);
+  assert.equal(state.requests.length, 2);
+  assert.deepEqual(built, [added, updated]);
+  assert.equal(archive.writes.length, 6);
+  await assert.rejects(replica.activate({ expected: noon.head, head }), /full builder cannot replace/);
+  await assert.rejects(replica.activateDeliveryView({ expected: noon.head,
+    staged: { changedRecords: 1, deliveryView: morning.head.deliveryView } }), /verified delivery-scoped/i);
+  assert.deepEqual(state.row, committed);
 });
 
 test('missing or corrupt deferred, GPS and otherwise declared bytes prevent any publication', async () => {

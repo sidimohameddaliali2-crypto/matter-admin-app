@@ -7,7 +7,10 @@ export const driverAuditLightHtml = `<!doctype html>
 <title>Driver Reports</title><link rel="stylesheet" href="${base}reader.css">
 <script defer src="${base}reader.js"></script></head>
 <body><main>
-<header><h1>Driver Reports</h1><a href="/api/reporting/view?screen=reports&amp;view=1&amp;tab=mirror&amp;fullArchive=1" target="_blank" rel="noopener">Full report tools</a></header>
+<header><h1>Driver Reports</h1><div class="actions">
+<button id="review-history" type="button">Saved review history</button>
+<a id="full-tools" href="/api/reporting/view?screen=reports&amp;view=1&amp;tab=mirror&amp;fullArchive=1" target="_blank" rel="noopener">Full report tools</a>
+</div></header>
 <p id="cutoff"></p>
 <div class="filters"><label>Report date <select id="day"></select></label>
 <label>Driver <select id="driver"></select></label></div>
@@ -43,6 +46,7 @@ section{margin-top:1rem;background:white;border:1px solid #cbd7d0;border-radius:
 details,article{margin:.75rem 0}summary{cursor:pointer}
 pre{max-height:24rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f6f4;padding:.6rem}
 img,canvas{display:block;max-width:100%;height:auto;margin:.5rem 0}
+.photo-suggestion{overflow-wrap:anywhere}
 form{display:grid;gap:.6rem;max-width:35rem}form button{justify-self:start}
 textarea{min-height:5rem;width:calc(100% - 1.45rem)}
 :focus-visible{outline:2px solid #247252;outline-offset:3px}
@@ -91,6 +95,12 @@ function runDriverAuditLightPage() {
     const node = make('details');
     node.append(make('summary', label), make('pre', JSON.stringify(value, null, 2)));
     return node;
+  }
+  function reviewArticle(event) {
+    const article = make('article');
+    article.append(make('strong', event.data.authorName), make('p', event.created_at + ' · ' + title(event.data.status)),
+      make('p', event.data.response), savedBody('Saved review details', event));
+    return article;
   }
   function saveFilters() {
     const url = new URL(location.href);
@@ -172,6 +182,39 @@ function runDriverAuditLightPage() {
     }
     body.append(savedBody('Recorded GPS evidence', value));
   }
+  function showPhoto(params, details, body) {
+    const original = make('div'), suggestion = make('article');
+    suggestion.className = 'photo-suggestion';
+    const heading = make('h3', 'Automated photo suggestion');
+    const content = make('div');
+    content.setAttribute('aria-live', 'polite');
+    content.append(make('p', 'Loading the saved suggestion…'));
+    suggestion.append(heading, content);
+    if (details.photo) {
+      const img = make('img');
+      img.alt = 'Original delivery photo';
+      img.src = base + 'photo?' + new URLSearchParams(params);
+      img.addEventListener('error', () => original.replaceChildren(make('p', 'The saved photo is unavailable.')));
+      original.append(img);
+    } else original.append(make('p', 'No verified photo is saved for this delivery.'));
+    body.replaceChildren(original, suggestion);
+    void call('photo-suggestion', params).then(value => {
+      const { status, grade, reason, uncertainty } = value;
+      if (status === 'proposed' || status === 'needs_review') {
+        content.replaceChildren(make('strong', status === 'proposed' ? 'Suggested grade ' + grade + ' of 3' : 'Needs staff review'),
+          make('p', reason));
+        if (uncertainty) content.append(make('p', uncertainty));
+      } else {
+        const messages = {
+          retained: 'See the saved assessment and reviews for this delivery.',
+          stale: 'The saved suggestion could not be matched to this photo.',
+          submitted: 'An automated review was submitted. Its validated result is pending.',
+          needs_recovery: 'The saved review attempt needs to be checked before it can be retried.',
+        };
+        content.replaceChildren(make('p', reason || messages[status] || 'No automated suggestion is saved for this photo.'));
+      }
+    }).catch(error => content.replaceChildren(make('p', error.message)));
+  }
   function showReviews(params, details, body) {
     body.replaceChildren();
     if (!details.issues.length) {
@@ -179,8 +222,10 @@ function runDriverAuditLightPage() {
       return;
     }
     const choices = make('select'), label = make('label', 'Review case'), content = make('div');
-    choices.append(...details.issues.map((item, position) =>
-      option(item.id, item.label || (details.issues.length === 1 ? 'Delivery review' : 'Case ' + (position + 1)))));
+    choices.append(...details.issues.map((item, position) => {
+      const label = item.label || (details.issues.length === 1 ? 'Delivery review' : 'Case ' + (position + 1));
+      return option(item.id, item.archived ? label + ' (previous evidence)' : label);
+    }));
     label.append(choices);
     body.append(label, content);
     let request = 0;
@@ -192,14 +237,11 @@ function runDriverAuditLightPage() {
         const result = await call('reviews', scoped);
         if (id !== request) return;
         content.replaceChildren();
-        for (const event of result.history) {
-          const article = make('article');
-          article.append(make('strong', event.data.authorName), make('p', event.created_at + ' · ' + title(event.data.status)),
-            make('p', event.data.response), savedBody('Saved review details', event));
-          content.append(article);
-        }
-        if (result.history.length === 0) content.append(make('p', 'No reviews have been saved for this case.'));
-        if (!report.canReview) return;
+        content.append(...result.history.map(reviewArticle));
+        if (result.archivedHistory?.length) content.append(make('h3', 'Reviews on previous evidence'),
+          ...result.archivedHistory.map(reviewArticle));
+        if (!result.history.length && !result.archivedHistory?.length) content.append(make('p', 'No reviews have been saved for this case.'));
+        if (!report.canReview || result.historicalOnly) return;
         const draftKey = params.record + ':' + issueId;
         const draft = drafts.get(draftKey);
         const form = make('form'), response = make('textarea'), findingStatus = make('select');
@@ -231,7 +273,7 @@ function runDriverAuditLightPage() {
         form.addEventListener('submit', async event => {
           event.preventDefault();
           const fields = readForm();
-          const input = { ...fields, issueId, snapshotHash: report.reportHash, expectedRevision: result.revision };
+          const input = { ...fields, issueId, snapshotHash: result.snapshotHash, expectedRevision: result.revision };
           const fingerprint = JSON.stringify(input);
           if (submitted?.fingerprint !== fingerprint) submitted = { fingerprint, eventId: crypto.randomUUID() };
           drafts.set(draftKey, { ...fields, submitted });
@@ -281,15 +323,7 @@ function runDriverAuditLightPage() {
           node.replaceChildren(saved);
         })),
         button('GPS', () => void load('gps', gpsView)),
-        button('Photo', () => {
-          ++pane;
-          if (!details.photo) { body.replaceChildren(make('p', 'No verified photo is saved for this delivery.')); return; }
-          const img = make('img');
-          img.alt = 'Original delivery photo';
-          img.src = base + 'photo?' + new URLSearchParams(params);
-          img.addEventListener('error', () => { if (img.isConnected) body.replaceChildren(make('p', 'The saved photo is unavailable.')); });
-          body.replaceChildren(img);
-        }),
+        button('Photo', () => { ++pane; showPhoto(params, details, body); }),
         button('Assessment history', () => void load('history', (value, node) => {
           node.replaceChildren(savedBody('Saved assessments (' + value.staff.length + ')', value.staff),
             savedBody('Additional source assessments (' + value.additionalSource.length + ')', value.additionalSource));
@@ -327,6 +361,19 @@ function runDriverAuditLightPage() {
     } catch (error) { if (request === opened) delivery.replaceChildren(make('p', error.message)); }
   };
   previous.onclick = () => { offset = Math.max(0, offset - report.pageSize); void list(); };
+  byId('review-history').onclick = async () => {
+    const request = ++opened, heading = make('h2', 'Saved review history');
+    delivery.hidden = false;
+    delivery.replaceChildren(heading, make('p', 'Loading saved reviews…'));
+    try {
+      const { history } = await call('review-history');
+      if (request !== opened) return;
+      delivery.replaceChildren(heading);
+      if (history.length) delivery.append(...history.slice().reverse().map(reviewArticle));
+      else delivery.append(make('p', 'No reviews have been saved.'));
+      delivery.scrollIntoView({ block: 'nearest' });
+    } catch (error) { if (request === opened) delivery.replaceChildren(heading, make('p', error.message)); }
+  };
   date.addEventListener('change', () => { offset = 0; driver.value = ''; void list(); });
   driver.addEventListener('change', () => { offset = 0; void list(); });
   window.addEventListener('beforeunload', event => {
@@ -335,6 +382,7 @@ function runDriverAuditLightPage() {
   void (async () => {
     try {
       report = await call('dates');
+      if (report.archiveReadOnly) byId('full-tools').textContent = 'Saved report archive';
       if (report.visibleCutoffAt) {
         const format = new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Dubai' });
         byId('cutoff').textContent = (report.stale ? 'Last verified evidence through ' : 'Evidence checked through ')

@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 import { loadRemotePreviewPackage } from '../vendor/driver-audits/integration/cloud/remote-preview-package.mjs';
 import { readManifestBytes } from '../vendor/driver-audits/integration/cloud/repository.mjs';
 import { createDriverAuditLightArchive, isDriverAuditLightReference } from './driverAuditLightArchive.js';
+import { isDriverAuditDeliveryHead } from './driverAuditDeliveryHead.js';
+import { verifyDriverAuditDeliveryStage } from './driverAuditDeliveryView.js';
 
 export const driverAuditSupabaseReportHeadKey = 'app-sidi-report-head';
 
@@ -48,7 +50,8 @@ function manifest(ref, domain, name, maximum) {
 
 function pointer(value, { previous = true, identity = false } = {}) {
   check(fields(value, ['version', 'generation', 'reportHash', 'descriptor', 'servingPackage',
-    'closureReceipt', 'restore', 'visibleCutoffAt'], ['publishedAt', 'lightView', ...(previous ? ['previous'] : []),
+    'closureReceipt', 'restore', 'visibleCutoffAt'], ['publishedAt', 'lightView',
+    ...(previous ? ['previous', 'deliveryView', 'previousDeliveryView'] : []),
     ...(identity ? ['sourceRevision', 'sourceBodySha256'] : [])]), 'Invalid Supabase serving pointer metadata');
   check(value.version === 1 && hex(value.generation) && hex(value.reportHash)
     && (value.visibleCutoffAt === null || timestamp(value.visibleCutoffAt))
@@ -60,6 +63,22 @@ function pointer(value, { previous = true, identity = false } = {}) {
   check(fields(source, ['version', 'dataStore', 'collectorRevision', 'sourceBasis', 'manifestSha256'])
     && source.version === 1 && source.dataStore === 'supabase' && positive(source.collectorRevision)
     && hex(source.sourceBasis) && hex(source.manifestSha256), 'Invalid Supabase serving source metadata');
+  if (Object.hasOwn(value, 'deliveryView')) {
+    check(value.lightView && isDriverAuditDeliveryHead(value.deliveryView)
+      && value.deliveryView.collectorRevision > source.collectorRevision
+      && (!value.visibleCutoffAt || Date.parse(value.deliveryView.visibleCutoffAt) >= Date.parse(value.visibleCutoffAt)),
+    'The incremental report must retain its verified base');
+  }
+  if (Object.hasOwn(value, 'previousDeliveryView')) {
+    check(value.deliveryView && isDriverAuditDeliveryHead(value.previousDeliveryView)
+      && value.previousDeliveryView.collectorRevision > source.collectorRevision
+      && value.previousDeliveryView.collectorRevision <= value.deliveryView.collectorRevision
+      && Date.parse(value.previousDeliveryView.visibleCutoffAt) <= Date.parse(value.deliveryView.visibleCutoffAt)
+      && (value.previousDeliveryView.collectorRevision !== value.deliveryView.collectorRevision
+        || value.previousDeliveryView.sourceBodySha256 === value.deliveryView.sourceBodySha256)
+      && value.previousDeliveryView.ref.sha256 !== value.deliveryView.ref.sha256,
+    'The previous incremental report identity differs');
+  }
   const closure = value.closureReceipt;
   check(fields(closure, ['version', 'status', 'sourceBasis', 'manifestSha256', 'generation', 'reportHash',
     'descriptorSha256', 'checkedAt', 'checks'], ['collectorRevision'])
@@ -180,6 +199,29 @@ export function createDriverAuditSupabaseReplica({ state, archive } = {}) {
   }
 
   const verifiedPackage = head => verifyDriverAuditSupabaseServingPackage({ head, archive: { readObject } });
+  async function writeSelection(before, next, event) {
+    const body = JSON.stringify(next);
+    check(Buffer.byteLength(body) <= pointerLimit, 'Supabase serving pointer exceeds its metadata bound');
+    const revision = before?.sourceRevision ?? 0;
+    check(revision < Number.MAX_SAFE_INTEGER, 'Supabase serving pointer revision exhausted');
+    const bodySha256 = sha(body);
+    const request = JSON.stringify({ expectedRevision: revision, expectedBodySha256: before?.sourceBodySha256 ?? null, bodySha256 });
+    let recoveredAcknowledgement = false;
+    try {
+      const receipt = await state.compareAndSwap({ key: driverAuditSupabaseReportHeadKey,
+        expectedRevision: revision, eventId: 'sidi-preview-' + sha(request), body, event: JSON.stringify(event), request });
+      check(receipt?.revision === revision + 1 && receipt.body_text === body && receipt.body_sha256 === bodySha256,
+        'Supabase serving publication acknowledgement mismatch');
+    } catch (error) {
+      const actual = await readRow();
+      if (actual?.revision !== revision + 1 || actual.body !== body) throw error;
+      recoveredAcknowledgement = true;
+    }
+    const actual = await readRow();
+    check(actual?.revision === revision + 1 && actual.body === body,
+      'Concurrent Supabase serving publication or exact readback mismatch');
+    return { status: 'published', head: parsedRow(actual), ...(recoveredAcknowledgement ? { recoveredAcknowledgement: true } : {}) };
+  }
 
   const replica = {
     async head() { return parsedRow(await readRow()); },
@@ -213,6 +255,7 @@ export function createDriverAuditSupabaseReplica({ state, archive } = {}) {
       };
       const candidate = JSON.parse(encoded), before = parsedRow(await readRow());
       expectedState(before, expectedIdentity);
+      check(!candidate.deliveryView && !before?.deliveryView, 'The full builder cannot replace a delivery-scoped report');
       if (before) {
         check(candidate.previous === null || candidate.previous === undefined,
           'Previous Supabase pointer must be derived from the actual current head');
@@ -231,29 +274,28 @@ export function createDriverAuditSupabaseReplica({ state, archive } = {}) {
       const next = { ...candidate,
         previous: before ? sameCorePackage(candidate, before) ? before.previous ?? null : previousSnapshot(before)
           : candidate.previous ?? null };
-      const body = JSON.stringify(next);
-      check(Buffer.byteLength(body) <= pointerLimit, 'Supabase serving pointer exceeds its metadata bound');
-      const revision = before?.sourceRevision ?? 0;
-      check(revision < Number.MAX_SAFE_INTEGER, 'Supabase serving pointer revision exhausted');
-      const request = JSON.stringify({ expectedRevision: revision, expectedBodySha256: before?.sourceBodySha256 ?? null,
-        bodySha256: sha(body) });
-      const event = JSON.stringify({ kind: 'app-sidi-report-publication', ...candidate.servingPackage,
+      return writeSelection(before, next, { kind: 'app-sidi-report-publication', ...candidate.servingPackage,
         generation: candidate.generation, reportHash: candidate.reportHash, descriptorSha256: candidate.descriptor.sha256 });
-      let recoveredAcknowledgement = false;
-      try {
-        const receipt = await state.compareAndSwap({ key: driverAuditSupabaseReportHeadKey,
-          expectedRevision: revision, eventId: 'sidi-preview-' + sha(request), body, event, request });
-        check(receipt?.revision === revision + 1 && receipt.body_text === body && receipt.body_sha256 === sha(body),
-          'Supabase serving publication acknowledgement mismatch');
-      } catch (error) {
-        const actual = await readRow();
-        if (actual?.revision !== revision + 1 || actual.body !== body) throw error;
-        recoveredAcknowledgement = true;
-      }
-      const actual = await readRow();
-      check(actual?.revision === revision + 1 && actual.body === body,
-        'Concurrent Supabase serving publication or exact readback mismatch');
-      return { status: 'published', head: parsedRow(actual), ...(recoveredAcknowledgement ? { recoveredAcknowledgement: true } : {}) };
+    },
+    async activateDeliveryView({ expected, staged } = {}) {
+      const expectedIdentity = { sourceRevision: expected?.sourceRevision, sourceBodySha256: expected?.sourceBodySha256 };
+      const before = parsedRow(await readRow());
+      expectedState(before, expectedIdentity);
+      check(verifyDriverAuditDeliveryStage(staged, before), 'Verified delivery-scoped staging is required');
+      if (!staged.changedRecords) return { status: 'unchanged', head: before };
+      const selected = staged.deliveryView, previous = before.deliveryView;
+      check(isDriverAuditDeliveryHead(selected)
+        && selected.collectorRevision >= (previous?.collectorRevision ?? before.servingPackage.collectorRevision)
+        && (!previous || selected.collectorRevision !== previous.collectorRevision
+          || selected.sourceBodySha256 === previous.sourceBodySha256)
+        && (!previous || Date.parse(selected.visibleCutoffAt) >= Date.parse(previous.visibleCutoffAt)),
+      'The delivery-scoped report source moved backwards');
+      const { sourceRevision, sourceBodySha256, ...saved } = before;
+      const next = { ...saved, deliveryView: selected, ...(previous ? { previousDeliveryView: previous } : {}) };
+      pointer(next);
+      return writeSelection(before, next, { kind: 'app-sidi-delivery-scoped-publication',
+        generation: selected.ref.sha256, baseGeneration: before.generation,
+        collectorRevision: selected.collectorRevision, changedRecords: staged.changedRecords, changedDays: staged.changedDays });
     },
   };
   return Object.freeze(replica);

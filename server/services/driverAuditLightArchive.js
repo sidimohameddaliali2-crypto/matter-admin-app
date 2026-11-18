@@ -63,6 +63,7 @@ function indexFor(value, head) {
   ensure(value?.version === 1 && value.generation === head?.generation && value.reportHash === head?.reportHash
     && value.visibleCutoffAt === head?.visibleCutoffAt && Array.isArray(value.days) && value.days.length <= 20000
     && integer(value.records) && integer(value.history?.staffRows) && hex(value.catalog?.sha256)
+    && (value.photoSuggestions === undefined || isDriverAuditLightReference(value.photoSuggestions))
     && value.review?.snapshotHash === head.reportHash, 'The saved report index differs from its publication');
   let count = 0, last;
   for (const day of value.days) {
@@ -137,6 +138,15 @@ export function createDriverAuditLightArchive({ archive } = {}) {
     return indexFor(await read(head.lightView), head);
   }
 
+  async function photoSuggestions(publication) {
+    const lookup = await read(publication.photoSuggestions);
+    ensure(lookup.version === 1 && lookup.reportHash === publication.reportHash
+      && lookup.catalogSha256 === publication.catalog.sha256 && hex(lookup.inventorySha256)
+      && Array.isArray(lookup.blocked) && Array.isArray(lookup.queues) && lookup.queues.length === 2,
+    'The original photo suggestions differ from the report');
+    return lookup;
+  }
+
   async function day(head, key) {
     if (!dateKey(key)) throw fail(400, 'Choose a report date');
     const selected = (await index(head)).days.find(entry => entry.day === key);
@@ -159,7 +169,7 @@ export function createDriverAuditLightArchive({ archive } = {}) {
   }
 
   return Object.freeze({
-    index,
+    index, photoSuggestions,
     directory: day,
     async additionalCases(head, key) {
       const directory = await day(head, key);
@@ -202,6 +212,7 @@ export function createDriverAuditLightArchive({ archive } = {}) {
     },
     async verify(head, savedKeys) {
       const publication = await index(head);
+      if (publication.photoSuggestions) await photoSuggestions(publication);
       const expected = new Set(savedKeys);
       ensure(expected.size === savedKeys.length && publication.records === expected.size,
         'The indexed report differs from the saved delivery census');
@@ -236,7 +247,7 @@ export async function stageDriverAuditLightView({ projection, head, previous, ar
   const reader = createDriverAuditLightArchive({ archive });
   const prior = previous?.lightView ? await reader.index(previous) : null;
   const priorDays = new Map(prior?.days.map(day => [day.day, day]));
-  const previouslyWritten = new Set(previous?.lightView ? [previous.lightView.sha256] : []);
+  const previouslyWritten = new Set([previous?.lightView?.sha256, prior?.photoSuggestions?.sha256].filter(Boolean));
   async function write({ ref, bytes }) {
     if (!previouslyWritten.has(ref.sha256)) {
       const key = ref.sha256 + '.gz';
@@ -344,6 +355,28 @@ export async function stageDriverAuditLightView({ projection, head, previous, ar
     gpsAsOf: context.gpsMetadata.asOf ?? null, review: { snapshotHash: context.review.snapshotHash,
       deliveryReview: context.review.deliveryReview, raw: context.review.raw },
     catalog: context.refs.catalog, sourceManifest: context.refs.sourceManifest ?? null, days, samples };
+  if (context.photoLookup) index.photoSuggestions = await write(pack(context.photoLookup));
+  else if (prior?.reportHash === index.reportHash && prior.catalog.sha256 === index.catalog.sha256 && prior.photoSuggestions) {
+    index.photoSuggestions = prior.photoSuggestions;
+  }
   indexFor(index, head);
   return write(pack(index));
+}
+
+// Attach the one-time lookup to a previously staged view without rewriting
+// a date, evidence page, or original report. Each new object is verified.
+export async function stageDriverAuditLightPhotoLookup({ head, lookup, archive }) {
+  const reader = createDriverAuditLightArchive({ archive }), original = await reader.index(head);
+  ensure(lookup?.reportHash === original.reportHash && lookup.catalogSha256 === original.catalog.sha256,
+    'The original photo suggestions differ from the report');
+  const savedLookup = pack(lookup);
+  if (original.photoSuggestions?.sha256 === savedLookup.ref.sha256) return head.lightView;
+  const root = pack({ ...original, photoSuggestions: savedLookup.ref });
+  for (const { ref, bytes } of [savedLookup, root]) {
+    const key = ref.sha256 + '.gz', receipt = await archive.putVerifiedObject(key, bytes);
+    ensure(receipt?.verified === true && receipt.key === key && receipt.sha256 === ref.sha256,
+      'The saved photo suggestions could not be verified');
+  }
+  await reader.photoSuggestions(await reader.index({ ...head, lightView: root.ref }));
+  return root.ref;
 }

@@ -104,7 +104,7 @@ async function packageFiles(directory, revision) {
     restore: { version: 1, archive: 'matter-report-archive', verified: true, ...binding } } };
 }
 
-async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource, armedAt } = {}) {
+async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource, armedAt, incrementalDeliveries = false } = {}) {
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'driver-audit-supabase-sync-')));
   let worker;
   t.after(async () => { try { await worker?.close(); } finally { await fs.rm(temporary, { recursive: true, force: true }); } });
@@ -117,7 +117,8 @@ async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource
   await write(path.join(root, 'seed.json'), initial.seed);
   const config = { version: 1, root, baselineRoot, codeRoot, builderSha256: sha(manifestBytes),
     rendererBuild: { path: path.join(baselineRoot, 'build.private.json'), sha256: sha('{}') },
-    journals: { path: path.join(root, 'validation-journals.private.json'), sha256: sha('{}') } };
+    journals: { path: path.join(root, 'validation-journals.private.json'), sha256: sha('{}') },
+    ...(incrementalDeliveries ? { incrementalDeliveries: true, lightReader: true, hostedSlotClaims: true } : {}) };
   const file = path.join(root, 'sync.json'); await write(file, config);
   const states = new Map([['collector-state', { revision: 43, body: JSON.stringify(next.publication) }]]), calls = [], uploads = [], objects = new Map();
   const receipts = new Map([initial, next].map((entry, i) => [42 + i, { revision: 42 + i, body_text: JSON.stringify(entry.publication),
@@ -147,7 +148,7 @@ async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource
     if (name === 'matter_hosted_state_receipts') return [...receipts.values()].filter(row => row.revision > args.p_after)
       .sort((left, right) => left.revision - right.revision).slice(0, 1);
     if (name === 'matter_hosted_state_cas') {
-      assert.ok(['app-sidi-report-head', 'app-sidi-report-worker-status'].includes(args.p_key));
+      assert.ok(['app-sidi-report-head', 'app-sidi-report-worker-status', 'app-sidi-report-worker-claim'].includes(args.p_key));
       if (args.p_key === 'app-sidi-report-worker-status' && failWorkerStatus) {
         failWorkerStatus = false; throw Error('Fictional worker status transport failed');
       }
@@ -375,6 +376,46 @@ test('one due-slot run exits not-due without collecting or reading evidence befo
   assert.equal(f.uploads.length, uploads);
 });
 
+function stageIncrementalSeed(f) {
+  const seed = f.initial.seed, { generation, reportHash } = seed.pointer;
+  const bytes = gzipSync(JSON.stringify({ version: 1, generation, reportHash, visibleCutoffAt: at, records: 0,
+    history: { staffRows: 0 }, catalog: f.initial.publication.catalog, review: { snapshotHash: reportHash }, days: [] }));
+  const lightView = { sha256: sha(bytes), size: bytes.length };
+  const head = { revision: 1, body: JSON.stringify({ ...seed.pointer, lightView, visibleCutoffAt: at,
+    servingPackage: { version: 1, dataStore: 'supabase', collectorRevision: seed.collectorRevision,
+      sourceBasis: seed.sourceBasis, manifestSha256: seed.manifestSha256 }, closureReceipt: seed.closureReceipt, restore: seed.restore }) };
+  f.objects.set(lightView.sha256 + '.gz', bytes);
+  f.states.set('app-sidi-report-head', head);
+  f.states.set('collector-state', { revision: 42, body: JSON.stringify(f.initial.publication) });
+  return head;
+}
+
+test('the delivery-scoped off-host worker claims and checks both Dubai slots without rebuilding an unchanged report', async t => {
+  const morning = Date.parse('2026-11-18T06:30:00Z'), noon = Date.parse('2026-11-18T08:00:00Z');
+  let now = morning;
+  const slots = [];
+  const f = await fixture(t, { incrementalDeliveries: true, executionHost: 'off-host', clock: () => now,
+    armedAt: '2026-11-18T00:00:00.000Z',
+    async collectSource({ dueAt, onAdmission }) { await onAdmission(); slots.push(dueAt); } });
+  const head = stageIncrementalSeed(f);
+  for (const dueAt of [morning, noon]) {
+    now = dueAt;
+    const result = await f.worker.runDueSlot();
+    assert.equal(result.status, 'checked');
+    assert.equal(result.scheduledAt, new Date(dueAt).toISOString());
+    assert.equal(result.changedRecords, 0);
+    assert.equal(result.reportStatus, 'ready');
+    await f.reopen();
+    assert.equal((await f.worker.runDueSlot()).status, 'not-due');
+  }
+  assert.deepEqual(slots, [morning, noon]);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.deepEqual(f.uploads, []);
+  assert.equal(f.calls.filter(({ name, args }) => name === 'matter_hosted_state_cas'
+    && args.p_key === 'app-sidi-report-worker-status').length, 2);
+  await assert.rejects(fs.access(path.join(f.root, 'work', 'fixture-builds.private.txt')), { code: 'ENOENT' });
+});
+
 test('one due-slot run publishes real changed evidence once and reports an unchanged noon check truthfully', async t => {
   const morning = Date.parse('2026-11-18T06:30:00Z'), noon = Date.parse('2026-11-18T08:00:00Z');
   let now = morning;
@@ -405,6 +446,52 @@ test('one due-slot run publishes real changed evidence once and reports an uncha
   await f.reopen();
   assert.equal((await f.worker.runDueSlot()).status, 'not-due');
   assert.deepEqual(slots, [morning, noon]);
+});
+
+test('a late hosted morning trigger cannot claim noon or leave a terminal outcome for it', async t => {
+  const morning = '2026-11-18T06:30:00.000Z', noon = '2026-11-18T08:00:00.000Z';
+  const observedSlots = [];
+  const f = await fixture(t, { executionHost: 'off-host', incrementalDeliveries: true,
+    armedAt: '2026-11-18T06:00:00.000Z', clock: () => Date.parse(noon) + 300_000,
+    async collectSource({ dueAt, onAdmission }) {
+      await onAdmission(); observedSlots.push(new Date(dueAt).toISOString());
+    } });
+  const head = stageIncrementalSeed(f), uploads = f.uploads.length;
+
+  const missed = await f.worker.runDueSlot({ expectedScheduledAt: morning });
+  assert.equal(missed.status, 'not-due');
+  assert.equal(missed.scheduledAt, null);
+  assert.deepEqual(observedSlots, []);
+  assert.equal(f.states.has('app-sidi-report-worker-claim'), false);
+  assert.equal(f.states.has('app-sidi-report-worker-status'), false);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.equal(f.uploads.length, uploads);
+
+  const checked = await f.worker.runDueSlot({ expectedScheduledAt: noon });
+  assert.equal(checked.status, 'checked');
+  assert.equal(checked.scheduledAt, noon);
+  assert.deepEqual(observedSlots, [noon]);
+  assert.equal(JSON.parse(f.states.get('app-sidi-report-worker-status').body).scheduledAt, noon);
+  assert.equal((await f.worker.runDueSlot({ expectedScheduledAt: noon })).status, 'not-due');
+  assert.deepEqual(observedSlots, [noon]);
+});
+
+test('a hosted slot ending before source admission cannot start that source check', async t => {
+  const morning = '2026-11-18T06:30:00.000Z';
+  let now = Date.parse('2026-11-18T07:59:59Z'), acquired = 0;
+  const f = await fixture(t, { executionHost: 'off-host', incrementalDeliveries: true,
+    armedAt: '2026-11-18T06:00:00.000Z', clock: () => now,
+    async collectSource({ onAdmission }) {
+      now = Date.parse('2026-11-18T08:00:00Z');
+      await onAdmission(); acquired++;
+    } });
+  stageIncrementalSeed(f);
+
+  const result = await f.worker.runDueSlot({ expectedScheduledAt: morning });
+  assert.equal(result.status, 'not-due');
+  assert.equal(acquired, 0);
+  assert.equal(f.states.has('app-sidi-report-worker-claim'), false);
+  assert.equal(f.states.has('app-sidi-report-worker-status'), false);
 });
 
 test('one due-slot failure rejects and retains its durable attempt plus the original serving head', async t => {

@@ -58,6 +58,35 @@ test('the existing app can select Supabase serving without selecting a reporting
  assert.equal(env.DRIVER_AUDIT_DATA_STORE,'mongo');
 });
 
+test('the saved archive stays readable when its old review form cannot write the active delivery history',async()=>{
+ const origin='https://app.example.invalid', calls=[];
+ const coordinator=async(req,res)=>{calls.push(req.method);res.end('Saved archive');};
+ coordinator.status=()=>({active:{generation:'a'.repeat(64)}});
+ coordinator.isPreparedFor=()=>true;
+ const base={generation:'a'.repeat(64)};
+ let head=base;
+ const handler=createDriverAuditIntegration({
+  env:{DRIVER_AUDIT_ENABLED:'1',DRIVER_AUDIT_IMPORT_ENABLED:'0',DRIVER_AUDIT_ORIGIN:origin,DRIVER_AUDIT_SERVING_STORE:'supabase'},
+  dependencies:{backend:{kind:'supabase',executionHost:'sidi'},auth:{authenticate:async()=>({})},state:{},
+   archive:{readObject:async()=>assert.fail('Saved review admission must not download a full report')},
+   store:{head:async()=>head},createCoordinator:()=>coordinator},
+ });
+ const request=async method=>{
+  let status=200;
+  await handler({url:'/api/reporting/reviews',method,headers:{host:new URL(origin).host},resume(){}},{
+   writeHead(value){status=value;},setHeader(){},end(){},
+  },()=>assert.fail('Expected the saved review route'));
+  return status;
+ };
+ assert.equal(await request('POST'),200);
+ assert.equal(await handler.isPreparedFor(base),true);
+ head={...base,deliveryView:{ref:{sha256:'b'.repeat(64)}}};
+ assert.equal(await request('POST'),409);
+ assert.equal(await request('GET'),200);
+ assert.equal(await handler.isPreparedFor(head),false);
+ assert.deepEqual(calls,['POST','GET']);
+});
+
 test('the API document and exact evidence aliases reach the canonical audit handler after authorization',async()=>{
  const origin='https://app.example.invalid';
  const seen=[];

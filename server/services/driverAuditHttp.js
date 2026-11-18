@@ -4,6 +4,7 @@ import { createDriverAuditIntegration } from './driverAuditIntegration.js';
 import { openDriverAuditDataBackend } from './driverAuditDataBackend.js';
 import { createCloudState } from '../vendor/driver-audits/integration/cloud/cloud-state.mjs';
 import { createDriverAuditSupabaseReplica } from './driverAuditSupabaseReplica.js';
+import { driverAuditDeliveryIdentity } from './driverAuditDeliveryHead.js';
 
 const deny = () => Object.assign(Error('The existing staff session could not be verified'), { status: 401 });
 export const readerIngressHeader = 'x-matter-report-reader';
@@ -75,11 +76,12 @@ export async function createDriverAuditHttpServer({ env = process.env, backend: 
         const warmed = await integration.prewarm();
         const head = warmed ? await store.head() : null;
         const ready = Boolean(head && await integration.isPreparedFor(head));
+        const { generation, collectorRevision } = driverAuditDeliveryIdentity(head);
         response.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         response.end(request.method === 'HEAD' ? undefined : JSON.stringify({ service: 'driver-reports',
           dataStore: 'supabase', executionHost: 'sidi', ready,
-          generation: ready ? head.generation : null, reportHash: ready ? head.reportHash : null,
-          collectorRevision: ready ? head.servingPackage.collectorRevision : null,
+          generation: ready ? generation : null, reportHash: ready ? head.reportHash : null,
+          collectorRevision: ready ? collectorRevision : null,
           release: env.DRIVER_AUDIT_RELEASE_SHA ?? null }));
         return;
       }

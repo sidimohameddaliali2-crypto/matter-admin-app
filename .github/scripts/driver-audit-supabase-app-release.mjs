@@ -21,8 +21,9 @@ const signature = s => [s.dev, s.ino, s.uid, s.gid, s.mode, s.nlink, s.size, s.m
 const safeRelative = name => typeof name === 'string' && name.length <= 400 && !name.includes('\\')
   && name.split('/').every(part => /^[A-Za-z0-9_.-]+$/.test(part) && !['.', '..'].includes(part));
 const appServices = new Set(['driverAuditCollectorReadCache', 'driverAuditDataBackend', 'driverAuditDirectImport',
+  'driverAuditDeliveryCaseProjection', 'driverAuditDeliveryChanges', 'driverAuditDeliveryHead', 'driverAuditDeliveryPublish', 'driverAuditDeliveryView',
   'driverAuditLightArchive', 'driverAuditLightEvidence', 'driverAuditLightPage', 'driverAuditLightReader',
-  'driverAuditLightProjection', 'driverAuditLightReviews', 'driverAuditLightBuild', 'driverAuditLightPolicy',
+  'driverAuditLightProjection', 'driverAuditLightReviews', 'driverAuditLightBuild', 'driverAuditLightPolicy', 'driverAuditLightPhotoSuggestions',
   'driverAuditHostedCache', 'driverAuditHostedSlots',
   'driverAuditHttp', 'driverAuditIntegration', 'driverAuditReaderProxy', 'driverAuditPhotoRecovery', 'driverAuditPollProgress', 'driverAuditSource',
   'driverAuditSourceDeployment', 'driverAuditSourceQualification', 'driverAuditSourceStage', 'driverAuditSpacesArchive',
@@ -33,7 +34,7 @@ const appScripts = new Set(['driverAuditHostedBootstrap', 'driverAuditHostedInde
   'driverAuditOffHostWorker', 'driverAuditQualificationChild', 'driverAuditSource',
   'driverAuditSourceDeploy', 'driverAuditSourceQualify', 'driverAuditSourceStage', 'driverAuditSync']);
 const vendorFiles = new Set(['integration/cloud/automatic-hosted-preview.mjs', 'integration/cloud/preview-gps.mjs', 'integration/cloud/preview-order-timing.mjs',
-  'integration/cloud/preview-runtime.mjs', 'integration/cloud/remote-preview-package.mjs',
+  'integration/cloud/preview-runtime.mjs', 'integration/cloud/remote-preview-package.mjs', 'integration/cloud/report-service.mjs',
   'integration/cloud/cloud-http.mjs', 'integration/cloud/preview-source-history.mjs',
   'integration/hosted/supabase-archive.mjs', 'runtime-manifest.json']);
 function allowedChange(name) {
@@ -261,12 +262,15 @@ export async function planAppReaderTransfer({ descriptor, cacheDirectory, usage,
   return { remoteBytesRequired, availableTransferBytes, coldLoads, requiredBytes };
 }
 
-export async function planLightAppReaderStartup({ lightView, cacheDirectory, usage }) {
-  check(lightView && digest(lightView.sha256) && Number.isSafeInteger(lightView.size)
-    && lightView.size > 0 && lightView.size <= 2 * 1024 ** 2, 'The selected lightweight index is required');
-  const cached = await read(path.join(cacheDirectory, lightView.sha256 + '.gz'), lightView.size,
-    { privateMode: true, optional: true }).catch(() => null);
-  const remoteBytesRequired = cached?.sha256 === lightView.sha256 && cached.bytes.length === lightView.size ? 0 : lightView.size;
+export async function planLightAppReaderStartup({ lightView, deliveryView, cacheDirectory, usage }) {
+  let remoteBytesRequired = 0;
+  for (const ref of deliveryView ? [lightView, deliveryView.ref] : [lightView]) {
+    check(ref && digest(ref.sha256) && Number.isSafeInteger(ref.size)
+      && ref.size > 0 && ref.size <= 2 * 1024 ** 2, 'The selected lightweight index is required');
+    const cached = await read(path.join(cacheDirectory, ref.sha256 + '.gz'), ref.size,
+      { privateMode: true, optional: true }).catch(() => null);
+    if (cached?.sha256 !== ref.sha256 || cached.bytes.length !== ref.size) remoteBytesRequired += ref.size;
+  }
   const availableTransferBytes = Math.min(...[usage?.month, usage?.day].map(period => {
     check(period && ['limitBytes', 'usedBytes', 'reservedBytes'].every(key => Number.isSafeInteger(period[key]) && period[key] >= 0));
     return period.limitBytes - period.usedBytes - period.reservedBytes;
@@ -310,17 +314,27 @@ function preflightRoute(server, env, pathname, signal, authenticated = true) {
 
 export async function preflightLightAppReader({ backend, replica, head, env, expected, cacheDirectory, signal,
   createDriverAuditLightArchive, createDriverAuditIntegration }) {
-  check(head?.sourceBodySha256 === expected.reportHeadSha256 && head.generation === expected.generation
+  const generation = head?.deliveryView?.ref.sha256 ?? head?.generation;
+  check(head?.sourceBodySha256 === expected.reportHeadSha256 && generation === expected.generation
     && head.lightView, 'The exact selected report requires its lightweight index');
-  await planLightAppReaderStartup({ lightView: head.lightView, cacheDirectory, usage: await backend.readTransferUsage() });
+  const startup = { lightView: head.lightView, deliveryView: head.deliveryView, cacheDirectory };
+  await planLightAppReaderStartup({ ...startup, usage: await backend.readTransferUsage() });
   const pages = createDriverAuditLightArchive({ archive: backend.archive });
   const index = await pages.index(head), keys = index.samples;
+  check(index.photoSuggestions, 'The original photo suggestions must be indexed before release');
+  const { acceptance } = await pages.photoSuggestions(index);
+  check(Array.isArray(acceptance?.cases) && acceptance.cases.length >= 2 && acceptance.cases.length <= 4
+    && new Set(acceptance.cases.map(value => value?.record)).size === acceptance.cases.length
+    && acceptance.cases.every(value => typeof value?.record === 'string' && value.record.length <= 300
+      && /^\d{4}-\d{2}-\d{2}\//.test(value.record) && digest(value.responseSha256))
+    && Array.isArray(acceptance.reviews) && acceptance.reviews.length > 0 && acceptance.reviews.length <= 1024
+    && acceptance.reviews.every(digest), 'The original suggestion and staff review acceptance proof is required');
   check(keys && ['gps', 'photo', 'review'].every(name => typeof keys[name] === 'string'
     && keys[name].length <= 300 && /^\d{4}-\d{2}-\d{2}\//.test(keys[name])),
   'Named original lightweight GPS, photo and review samples are required');
   const [gps, photo, review] = await Promise.all(['gps', 'photo', 'review'].map(name => pages.record(head, keys[name])));
   check(digest(gps.gpsRow?.assessmentHash) && digest(photo.photo?.sha256)
-    && review.review?.snapshotHash === head.reportHash && review.issues?.[0]?.id,
+    && digest(review.review?.snapshotHash) && review.issues?.[0]?.id,
   'Named lightweight evidence identities differ');
   const oldest = index.days.at(-1);
   check(oldest && index.days.length > 1, 'An archived service date is required');
@@ -339,7 +353,7 @@ export async function preflightLightAppReader({ backend, replica, head, env, exp
   try {
     const get = async (name, query = {}, authenticated = true) => {
       const response = await preflightRoute(server, env, '/api/reporting/light/' + name
-        + '?' + new URLSearchParams({ generation: head.generation, ...query }), signal, authenticated);
+        + '?' + new URLSearchParams({ generation, ...query }), signal, authenticated);
       if (!authenticated) { check(response.status === 401, 'Signed-out lightweight report access must be denied'); await response.body?.cancel(); return; }
       const directives = (response.headers.get('cache-control') ?? '').split(',').map(value => value.trim().toLowerCase());
       check(response.ok && directives.includes('private') && directives.includes('no-store'), 'The authenticated lightweight report is unavailable');
@@ -347,13 +361,13 @@ export async function preflightLightAppReader({ backend, replica, head, env, exp
       return { value: name === 'photo' ? null : JSON.parse(bytes), bytes, response };
     };
     const dates = (await get('dates')).value;
-    check(dates.generation === head.generation && dates.reportHash === head.reportHash && dates.records === index.records
+    check(dates.generation === generation && dates.reportHash === head.reportHash && dates.records === index.records
       && same(dates.history, index.history) && same(dates.days, index.days.map(({ day, records, extraCases }) => ({ day, records, extraCases })))
       && dates.stale === false, 'Lightweight saved dates or counts differ');
     const deliveries = (await get('deliveries', { day: keys.gps.slice(0, 10) })).value;
     check(deliveries.day === keys.gps.slice(0, 10) && Array.isArray(deliveries.rows), 'The lightweight delivery page differs');
     const evidence = (await get('gps', { record: keys.gps })).value;
-    check(evidence.recordKey === keys.gps && evidence.snapshotHash === head.reportHash
+    check(evidence.recordKey === keys.gps && evidence.snapshotHash === (gps.reportHash ?? head.reportHash)
       && evidence.assessmentHash === gps.gpsRow.assessmentHash && evidence.status === 'ready'
       && digest((gps.gps.evidenceSummary ?? gps.gps.evidenceResult)?.versionId)
       && evidence.gpsEvidence?.versionId === (gps.gps.evidenceSummary ?? gps.gps.evidenceResult).versionId,
@@ -361,22 +375,40 @@ export async function preflightLightAppReader({ backend, replica, head, env, exp
     const image = await get('photo', { record: keys.photo });
     check(sha(image.bytes) === photo.photo.sha256 && image.response.headers.get('x-report-image-sha256') === photo.photo.sha256,
       'The lightweight original photo bytes differ');
+    for (const sample of acceptance.cases) {
+      const suggestion = (await get('photo-suggestion', { record: sample.record })).value;
+      check(suggestion.recordKey === sample.record && ['proposed', 'needs_review'].includes(suggestion.status)
+        && sha(JSON.stringify(suggestion)) === sample.responseSha256,
+      'A saved automated photo suggestion differs from its verified original');
+    }
+    await get('photo-suggestion', { record: acceptance.cases[0].record }, false);
     const historical = (await get(oldKey ? 'history' : 'source-history', { record: oldKey ?? directory.extraCases[0][0] })).value;
     check(Array.isArray(historical.staff) && Array.isArray(historical.additionalSource)
-      && historical.staff.length === (oldEntry.history?.staff?.count ?? 0)
+      && (oldEntry.retainedHistory ? historical.staff.length >= (oldEntry.history?.staff?.count ?? 0)
+        : historical.staff.length === (oldEntry.history?.staff?.count ?? 0))
       && [...historical.staff, ...historical.additionalSource].every(row => row.key === (oldKey ?? directory.extraCases[0][0])),
     'Archived lightweight history differs');
     const journal = (await get('reviews', { record: keys.review, issueId: review.issues[0].id })).value;
-    check(journal.snapshotHash === head.reportHash && journal.issueId === review.issues[0].id && journal.recordKey === keys.review
+    check(journal.snapshotHash === review.review.snapshotHash && journal.issueId === review.issues[0].id && journal.recordKey === keys.review
       && Array.isArray(journal.history) && journal.revision === journal.history.length,
     'The lightweight original review history differs');
+    const originalJournal = await backend.rpcForResponseLimit(512 * 1024)('matter_hosted_state_read',
+      { p_key: 'preview-gps-map-20261106:review-journal' });
+    const originalEvents = originalJournal.body_text === null ? []
+      : JSON.parse(originalJournal.body_text).records.reportingReviews ?? [];
+    const savedReviews = (await get('review-history')).value;
+    check(Array.isArray(originalEvents) && same(savedReviews.history, originalEvents),
+      'The saved review history differs from the original journal');
+    const preservedReviews = new Set(savedReviews.history.map(event => sha(JSON.stringify(event))));
+    check(acceptance.reviews.every(hash => preservedReviews.has(hash)), 'An original preserved staff review is missing');
+    await get('review-history', {}, false);
     await get('dates', {}, false);
   } finally { await new Promise(resolve => server.close(resolve)); }
   const fresh = await replica.head();
   check(fresh?.sourceBodySha256 === head.sourceBodySha256 && fresh.lightView?.sha256 === head.lightView.sha256,
     'Supabase report advanced during lightweight preflight');
-  const plan = await planLightAppReaderStartup({ lightView: head.lightView, cacheDirectory, usage: await backend.readTransferUsage() });
-  return { reportHeadSha256: head.sourceBodySha256, generation: head.generation, prewarmed: true,
+  const plan = await planLightAppReaderStartup({ ...startup, usage: await backend.readTransferUsage() });
+  return { reportHeadSha256: head.sourceBodySha256, generation, prewarmed: true,
     namedEvidenceVerified: true, lightweight: true, ...plan };
 }
 
@@ -410,13 +442,13 @@ export async function preflightAppReader({ selectedRoot, env, expected, cacheDir
   const state = createCloudState({ rpc: backend.rpcForResponseLimit(768 * 1024) });
   const replica = createDriverAuditSupabaseReplica({ state, archive: backend.archive });
   const head = await replica.head();
-  check(head?.sourceBodySha256 === expected.reportHeadSha256 && head.generation === expected.generation,
-    'The selected Supabase report does not match');
   if (env.DRIVER_AUDIT_LIGHT_READER === '1') {
-    const { createDriverAuditLightArchive } = await load('services/driverAuditLightArchive.js');
+    const { createDriverAuditDeliveryView } = await load('services/driverAuditDeliveryView.js');
     return preflightLightAppReader({ backend, replica, head, env, expected, cacheDirectory, signal,
-      createDriverAuditLightArchive, createDriverAuditIntegration });
+      createDriverAuditLightArchive: createDriverAuditDeliveryView, createDriverAuditIntegration });
   }
+  check(!head?.deliveryView && head?.sourceBodySha256 === expected.reportHeadSha256 && head.generation === expected.generation,
+    'The selected Supabase report does not match');
   const descriptor = JSON.parse(await readManifestBytes(backend.archive, head.descriptor, { maxBytes: 8 * 1024 ** 2 }));
   check(descriptor.sourceManifestSha256 === head.servingPackage.manifestSha256
     && descriptor.generation === head.generation && descriptor.reportHash === head.reportHash, 'Selected report descriptor differs');

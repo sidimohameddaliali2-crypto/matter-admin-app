@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { checkDriverAuditSource } from './driverAuditSource.js';
+import { driverAuditHostedSlotSkippedExitCode, isDriverAuditHostedSlot } from '../services/driverAuditHostedSlots.js';
 import { readDriverAuditSourceConfig, readPrivateDriverAuditSource, runDriverAuditSourceChild } from '../services/driverAuditSource.js';
 import { runDriverAuditSupabaseSync } from '../services/driverAuditSupabaseSync.js';
 
@@ -24,9 +25,10 @@ async function readScheduleEnrollment(root, syncSha256, sourceSha256) {
 }
 
 async function main(args) {
-  const [configFlag, file, sourceFlag, sourceFile, mode] = args;
+  const [configFlag, file, sourceFlag, sourceFile, mode, slotFlag, expectedScheduledAt] = args;
+  const boundSlot = args.length === 7 && mode === '--once' && slotFlag === '--scheduled-at' && isDriverAuditHostedSlot(expectedScheduledAt);
   if (configFlag !== '--config' || sourceFlag !== '--source' || !path.isAbsolute(file || '')
-    || !path.isAbsolute(sourceFile || '') || args.length > 5 || ![undefined, '--check', '--seed-only', '--once'].includes(mode)) {
+    || !path.isAbsolute(sourceFile || '') || (args.length > 5 && !boundSlot) || ![undefined, '--check', '--seed-only', '--once'].includes(mode)) {
     throw Error('Use an exact private off-host sync and source configuration');
   }
   const configBytes = await readPrivateDriverAuditSource(file, 1024 * 1024);
@@ -47,9 +49,11 @@ async function main(args) {
     return entries[0];
   });
   if (mode === '--check') await checkDriverAuditSource(source);
-  const armedAt = mode === undefined || mode === '--once'
+  const scheduled = mode === undefined || mode === '--once';
+  if (scheduled && config.incrementalDeliveries !== true) throw Error('Delivery-scoped publishing is required for scheduled reports');
+  const armedAt = scheduled
     ? await readScheduleEnrollment(config.root, sha256(configBytes), source.configSha256) : undefined;
-  return runDriverAuditSupabaseSync({ config, file, mode, armedAt, sourceConfigSha256: source.configSha256, env: {
+  const result = await runDriverAuditSupabaseSync({ config, file, mode, armedAt, expectedScheduledAt, sourceConfigSha256: source.configSha256, env: {
     ...env, DRIVER_AUDIT_SUPABASE_SECRET: env.MATTER_SUPABASE_SECRET,
     DRIVER_AUDIT_ENABLED: mode === '--seed-only' ? '0' : '1', DRIVER_AUDIT_IMPORT_ENABLED: '0',
   }, async collectSource({ signal, onAdmission }) {
@@ -61,6 +65,9 @@ async function main(args) {
       if (!allowed.has(result.status)) throw Error('The off-host source check did not finish');
     }
   } });
+  if (!boundSlot) return;
+  if (result?.status === 'not-due') process.exitCode = driverAuditHostedSlotSkippedExitCode;
+  else if (result?.status !== 'checked' || result.scheduledAt !== expectedScheduledAt) throw Error('The scheduled outcome differs from its slot');
 }
 
 if (process.argv[1] && await fs.realpath(process.argv[1]).catch(() => null) === fileURLToPath(import.meta.url)) {

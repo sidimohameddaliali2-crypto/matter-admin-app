@@ -12,7 +12,8 @@ const runner = new URL('./driverAuditSupabaseSync.js', import.meta.url).href;
 const sourceModule = new URL('./driverAuditSource.js', import.meta.url).href;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 
-async function fixture(t, { failure = false, exerciseCollection = false, historyFailure = false, omitHistory = false } = {}) {
+async function fixture(t, { failure = false, exerciseCollection = false, historyFailure = false, omitHistory = false,
+  incrementalDeliveries = true, expectedScheduledResult = null } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'driver-audit-offhost-cli-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   async function write(file, bytes) {
@@ -44,7 +45,7 @@ async function fixture(t, { failure = false, exerciseCollection = false, history
     manifestSha256: sha(manifest), nodeVersion: process.version, nodeExecutable: await fs.realpath(process.execPath),
     environment: { path: environmentFile, sha256: sha(environment) }, gatewayCredential: null }));
   await write(sourceFile, source);
-  const syncFile = path.join(root, 'sync.json'), sync = Buffer.from(JSON.stringify({ version: 1, root }));
+  const syncFile = path.join(root, 'sync.json'), sync = Buffer.from(JSON.stringify({ version: 1, root, incrementalDeliveries }));
   await write(syncFile, sync);
   const enrolled = { version: 1, syncSha256: sha(sync), sourceSha256: sha(source),
     armedAt: new Date(Date.now() - 1000).toISOString() };
@@ -62,7 +63,8 @@ async function fixture(t, { failure = false, exerciseCollection = false, history
       console.log(JSON.stringify({routes:globalThis.fixtureSourceRoutes,admissions}));return;
     }
     console.log(JSON.stringify({mode:input.mode??null,enrolled:typeof input.armedAt==='string',
-      sourceConfigured:typeof input.collectSource==='function'}));
+      sourceConfigured:typeof input.collectSource==='function', expectedScheduledAt:input.expectedScheduledAt}));
+    return ${JSON.stringify(expectedScheduledResult)};
   }`;
   const sourceBoundary = `export {readDriverAuditSourceConfig,readPrivateDriverAuditSource} from ${JSON.stringify(sourceModule)};
     export async function runDriverAuditSourceChild(config,entry,{onAdmission}={}){
@@ -76,10 +78,10 @@ async function fixture(t, { failure = false, exerciseCollection = false, history
     load(url,context,next){
     if(url===${JSON.stringify(runner)})return{format:'module',source:${JSON.stringify(replacement)},shortCircuit:true};
     return next(url,context);}});`);
-  async function run(mode) {
+  async function run(mode, ...options) {
     return new Promise((resolve, reject) => {
       const child = spawn(process.execPath, ['--import', hook, script, '--config', syncFile, '--source', sourceFile,
-        ...(mode === undefined ? [] : [mode])], { env: { PATH: process.env.PATH, HOME: os.homedir() }, stdio: ['ignore', 'pipe', 'pipe'] });
+        ...(mode === undefined ? [] : [mode]), ...options], { env: { PATH: process.env.PATH, HOME: os.homedir() }, stdio: ['ignore', 'pipe', 'pipe'] });
       let stdout = '', stderr = '';
       child.stdout.on('data', part => { stdout += part; }); child.stderr.on('data', part => { stderr += part; });
       child.once('error', reject); child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr }));
@@ -95,6 +97,29 @@ test('off-host --once forwards only the enrolled configuration and exits without
   assert.deepEqual(JSON.parse(result.stdout), { mode: '--once', enrolled: true, sourceConfigured: true });
 });
 
+test('an ineligible expected slot returns a distinct process exit without reporting a successful check', async t => {
+  const f = await fixture(t, { expectedScheduledResult: { status: 'not-due' } });
+  await f.write(f.enrollmentFile, JSON.stringify(f.enrolled));
+  const expectedScheduledAt = '2026-11-18T06:30:00.000Z';
+  const result = await f.run('--once', '--scheduled-at', expectedScheduledAt);
+  assert.equal(result.code, 2);
+  assert.equal(result.stderr, '');
+  assert.deepEqual(JSON.parse(result.stdout), { mode: '--once', enrolled: true, sourceConfigured: true, expectedScheduledAt });
+  assert.equal((await f.run('--once')).code, 0, 'Manual runs retain the normal not-due outcome');
+  for (const mode of ['--check', '--seed-only']) {
+    assert.equal((await f.run(mode, '--scheduled-at', expectedScheduledAt)).code, 1);
+  }
+  assert.equal((await f.run('--once', '--scheduled-at', '2026-11-18T08:05:00.000Z')).code, 1);
+});
+
+test('an expected slot can only acknowledge completion of that exact slot', async t => {
+  const morning = '2026-11-18T06:30:00.000Z';
+  const f = await fixture(t, { expectedScheduledResult: { status: 'checked', scheduledAt: morning } });
+  await f.write(f.enrollmentFile, JSON.stringify(f.enrolled));
+  assert.equal((await f.run('--once', '--scheduled-at', morning)).code, 0);
+  assert.equal((await f.run('--once', '--scheduled-at', '2026-11-18T08:00:00.000Z')).code, 1);
+});
+
 test('off-host --once rejects absent, different and future enrollment before the runner', async t => {
   const f = await fixture(t);
   for (const value of [null, { ...f.enrolled, syncSha256: 'f'.repeat(64) },
@@ -103,6 +128,15 @@ test('off-host --once rejects absent, different and future enrollment before the
     const result = await f.run('--once');
     assert.equal(result.code, 1); assert.equal(result.stdout, ''); assert.match(result.stderr, /worker is held/);
   }
+});
+
+test('an enrolled off-host schedule cannot fall back to the full report builder', async t => {
+  const f = await fixture(t, { incrementalDeliveries: false });
+  await f.write(f.enrollmentFile, JSON.stringify(f.enrolled));
+  const result = await f.run('--once');
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /worker is held/);
 });
 
 test('a genuine once-run rejection exits nonzero without printing private causes or a success', async t => {

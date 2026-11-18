@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 import { sealDriverAuditHostedCache } from '../services/driverAuditHostedCache.js';
 import { allowEncryptedCacheSave, hostedDriverAuditFixtureArchive, hostedDriverAuditWorkerSettings, requireHostedDriverAuditEnrollment,
   requireHostedDriverAuditQualification } from './driverAuditHostedWorker.js';
@@ -23,22 +24,47 @@ test('qualification is manual and scheduled slots require main, exact code, a Li
   assert.equal(settings.releaseSha, releaseSha);
   assert.deepEqual(settings.cacheKey, Buffer.alloc(32, 12));
   assert.throws(() => hostedDriverAuditWorkerSettings(env, '--once', runtime));
-  const scheduled = { ...env, GITHUB_EVENT_NAME: 'schedule', DRIVER_AUDIT_WORKER_ARMED: '1' };
-  assert.equal(hostedDriverAuditWorkerSettings(scheduled, '--once', runtime).bootstrapSha256, binding.bootstrapSha256);
-  assert.throws(() => hostedDriverAuditWorkerSettings(scheduled, '--qualify', runtime));
+  const now = Date.parse('2026-11-18T07:00:00Z');
+  const scheduled = { ...env, GITHUB_EVENT_NAME: 'schedule', DRIVER_AUDIT_WORKER_ARMED: '1',
+    DRIVER_AUDIT_WORKER_EVENT_SCHEDULE: '30 6 * * *', DRIVER_AUDIT_WORKER_RUN_CREATED_AT: '2026-11-18T06:30:10.000Z' };
+  assert.equal(hostedDriverAuditWorkerSettings(scheduled, '--scheduled', runtime, now).bootstrapSha256, binding.bootstrapSha256);
+  assert.throws(() => hostedDriverAuditWorkerSettings(scheduled, '--qualify', runtime, now));
   for (const override of [{ GITHUB_REF: 'refs/heads/topic' }, { GITHUB_REPOSITORY: 'other/repo' },
     { GITHUB_SHA: 'not a commit' }, { DRIVER_AUDIT_WORKER_CHECKOUT_SHA: '3'.repeat(40) },
     { DRIVER_AUDIT_WORKER_BOOTSTRAP_SHA256: '../fixture' },
     { DRIVER_AUDIT_WORKER_CACHE_KEY: Buffer.alloc(32).toString('base64') }, { DRIVER_AUDIT_WORKER_SUPABASE_SECRET: '' }]) {
-    assert.throws(() => hostedDriverAuditWorkerSettings({ ...scheduled, ...override }, '--once', runtime));
+    assert.throws(() => hostedDriverAuditWorkerSettings({ ...scheduled, ...override }, '--scheduled', runtime, now));
   }
-  assert.throws(() => hostedDriverAuditWorkerSettings(scheduled, '--once', { ...runtime, platform: 'darwin' }));
+  assert.throws(() => hostedDriverAuditWorkerSettings(scheduled, '--scheduled', { ...runtime, platform: 'darwin' }, now));
 });
 
 test('an unrelated event-head change allows the same approved worker checkout', () => {
-  const event = { ...env, GITHUB_SHA: '3'.repeat(40), GITHUB_EVENT_NAME: 'schedule', DRIVER_AUDIT_WORKER_ARMED: '1' };
+  const event = { ...env, GITHUB_SHA: '3'.repeat(40), DRIVER_AUDIT_WORKER_ARMED: '1' };
   assert.equal(hostedDriverAuditWorkerSettings(event, '--once', runtime).releaseSha, releaseSha);
   assert.throws(() => hostedDriverAuditWorkerSettings({ ...event, DRIVER_AUDIT_WORKER_CHECKOUT_SHA: event.GITHUB_SHA }, '--once', runtime));
+});
+
+test('a next-day retry of the same GitHub run still identifies the original dated cron slot', () => {
+  const manual = { ...env, DRIVER_AUDIT_WORKER_ARMED: '1' };
+  const scheduled = { ...manual, GITHUB_EVENT_NAME: 'schedule', GITHUB_RUN_ID: '123456789' };
+  const lateStart = Date.parse('2026-11-18T08:05:00Z');
+  const retryStart = Date.parse('2026-11-19T08:05:00Z');
+  for (const [cron, expectedScheduledAt] of [['30 6 * * *', '2026-11-18T06:30:00.000Z'],
+    ['0 8 * * *', '2026-11-18T08:00:00.000Z']]) {
+    const event = { ...scheduled, DRIVER_AUDIT_WORKER_EVENT_SCHEDULE: cron,
+      DRIVER_AUDIT_WORKER_RUN_CREATED_AT: new Date(Date.parse(expectedScheduledAt) + 1000).toISOString() };
+    assert.equal(hostedDriverAuditWorkerSettings(event, '--scheduled', runtime, lateStart).expectedScheduledAt, expectedScheduledAt);
+    assert.equal(hostedDriverAuditWorkerSettings(event, '--scheduled', runtime, retryStart).expectedScheduledAt, expectedScheduledAt);
+    assert.throws(() => hostedDriverAuditWorkerSettings(event, '--once', runtime, lateStart));
+  }
+  assert.throws(() => hostedDriverAuditWorkerSettings(scheduled, '--scheduled', runtime, lateStart));
+  for (const createdAt of [undefined, '2026-11-18', '2026-02-30T06:30:00.000Z', '2026-11-18T08:30:00.000Z']) {
+    assert.throws(() => hostedDriverAuditWorkerSettings({ ...scheduled, DRIVER_AUDIT_WORKER_EVENT_SCHEDULE: '30 6 * * *',
+      DRIVER_AUDIT_WORKER_RUN_CREATED_AT: createdAt }, '--scheduled', runtime, lateStart));
+  }
+  assert.throws(() => hostedDriverAuditWorkerSettings({ ...scheduled, DRIVER_AUDIT_WORKER_EVENT_SCHEDULE: '5 8 * * *',
+    DRIVER_AUDIT_WORKER_RUN_CREATED_AT: '2026-11-18T06:30:10.000Z' }, '--scheduled', runtime, lateStart));
+  assert.equal(hostedDriverAuditWorkerSettings(manual, '--once', runtime, lateStart).expectedScheduledAt, undefined);
 });
 
 function qualification() {
@@ -48,6 +74,7 @@ function qualification() {
     day: { period: day, usedBytes, reservedBytes: 0, limitBytes: 512 * MiB }, activeReservations: 0, uncertainReservations: 0 });
   return { version: 1, kind: 'driver-report-hosted-linux-qualification-v1', verified: true, platform: 'linux', ...binding,
     qualifiedAt: '2026-11-18T00:00:00.000Z', builderCandidateManifestSha256: '2'.repeat(64),
+    deliveryScopeFixtureVerified: true,
     measurements: { coldArchiveReads: { requests: 5, bytes: 10 }, warmArchiveReads: { requests: 1, bytes: 2 },
       sourcePeakBytes: MiB, builderPeakBytes: MiB, memoryAvailableWithBuilderBytes: 900 * MiB,
       fixtureArchiveBytes: 1, builderArchiveBytes: 0 },
@@ -59,7 +86,8 @@ test('held and stale qualification receipts cannot authorize source work', () =>
   assert.deepEqual(requireHostedDriverAuditQualification(qualification(), binding, now), qualification());
   for (const mutate of [receipt => { receipt.verified = false; }, receipt => { receipt.sourceConfigSha256 = '0'.repeat(64); },
     receipt => { receipt.qualifiedAt = '2026-11-20T00:00:00.000Z'; }, receipt => { receipt.measurements.warmArchiveReads.requests = 5; },
-    receipt => { receipt.measurements.memoryAvailableWithBuilderBytes = 1; }, receipt => { receipt.transferUsage.after.day.usedBytes = 0; }]) {
+    receipt => { receipt.measurements.memoryAvailableWithBuilderBytes = 1; }, receipt => { receipt.transferUsage.after.day.usedBytes = 0; },
+    receipt => { delete receipt.deliveryScopeFixtureVerified; }]) {
     const receipt = qualification(); mutate(receipt);
     assert.throws(() => requireHostedDriverAuditQualification(receipt, binding, now));
   }
@@ -88,11 +116,65 @@ test('workflow has the two Dubai slots and runs on a protected, serialized GitHu
   assert.match(yaml, /cache-v1-\$\{\{ vars\.DRIVER_AUDIT_WORKER_RELEASE_SHA \}\}-\$\{\{ vars\.DRIVER_AUDIT_WORKER_BOOTSTRAP_SHA256 \}\}/);
   assert.doesNotMatch(yaml, /github\.sha == vars\.DRIVER_AUDIT_WORKER_RELEASE_SHA/);
   assert.match(yaml, /node-version: '24\.22\.1'/);
+  assert.match(yaml, /DRIVER_AUDIT_WORKER_EVENT_SCHEDULE: \$\{\{ github\.event\.schedule \}\}/);
+  assert.match(yaml, /environment: driver-reports-worker\n    permissions:\n      actions: read\n      contents: read/);
+  assert.match(yaml, /id: scheduled-run\n        if: github\.event_name == 'schedule'/);
+  assert.equal([...yaml.matchAll(/github\.token/g)].length, 1);
+  assert.match(yaml, /DRIVER_AUDIT_WORKER_RUN_CREATED_AT: \$\{\{ steps\.scheduled-run\.outputs\.created-at \}\}/);
+  assert.match(yaml, /\[ "\$GITHUB_EVENT_NAME" = 'schedule' \]; then\n\s*node server\/scripts\/driverAuditHostedWorker\.js --scheduled/);
   assert.equal([...yaml.matchAll(/path: \$\{\{ runner\.temp \}\}\/driver-report-worker-cache-v1\/archive\.aes/g)].length, 2);
   assert.match(yaml, /always\(\) && github\.ref == 'refs\/heads\/main' && steps\.worker\.outputs\.encrypted-cache-ready == '1'/);
   assert.match(yaml, /actions\/cache\/restore@[a-f0-9]{40}/);
   assert.match(yaml, /actions\/cache\/save@[a-f0-9]{40}/);
   assert.doesNotMatch(yaml, /pull_request|upload-artifact|self-hosted/);
+  const rehearsal = yaml.split('  rehearsal:\n')[1]?.split('\n  worker:')[0];
+  assert.match(rehearsal, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(rehearsal, /inputs\.operation == 'rehearse'/);
+  assert.match(rehearsal, /driverAuditSupabaseReplica\.test\.js/);
+  assert.doesNotMatch(rehearsal, /secrets\.|github\.token|actions: read|environment:|--once|--qualify/);
+});
+
+test('the protected workflow reads original GitHub run metadata and exports only its verified timestamp', async () => {
+  const workflow = await fs.readFile(new URL('../../.github/workflows/driver-reports-worker.yml', import.meta.url), 'utf8');
+  const script = workflow.split("node <<'NODE'\n")[1].split('\n          NODE')[0];
+  const runId = '123456789', token = 'fixture-github-token';
+  const original = { id: Number(runId), event: 'schedule', head_branch: 'main', head_sha: releaseSha,
+    repository: { full_name: env.GITHUB_REPOSITORY }, created_at: '2026-11-18T06:30:15Z',
+    run_started_at: '2026-11-19T06:35:00Z' };
+  class FixtureDate extends Date {
+    static now() { return Date.parse('2026-11-19T06:40:00Z'); }
+  }
+  for (const [metadata, expected] of [[original, 'created-at=2026-11-18T06:30:15.000Z\n'],
+    [{ ...original, id: original.id + 1 }, null], [{ ...original, event: 'workflow_dispatch' }, null],
+    [{ ...original, created_at: original.created_at + '\nkey=value' }, null]]) {
+    const outputs = [], errors = [];
+    const process = { env: { ...env, GITHUB_EVENT_NAME: 'schedule', GITHUB_RUN_ID: runId, GITHUB_TOKEN: token,
+      GITHUB_OUTPUT: 'fixture-output' } };
+    const requests = [];
+    const signal = new AbortController().signal;
+    await runInNewContext(script, {
+      AbortSignal: { timeout(milliseconds) { assert.equal(milliseconds, 10_000); return signal; } },
+      Buffer, Date: FixtureDate, process, console: { error: message => errors.push(message) },
+      require(name) {
+        assert.equal(name, 'node:fs');
+        return { appendFileSync: (file, value) => outputs.push([file, value]) };
+      },
+      async fetch(url, options) {
+        requests.push({ url, options });
+        return new Response(JSON.stringify(metadata));
+      },
+    });
+    assert.equal(requests.length, 1);
+    const [{ url, options }] = requests;
+    assert.equal(url, 'https://api.github.com/repos/' + env.GITHUB_REPOSITORY + '/actions/runs/' + runId);
+    assert.equal(options.method, 'GET');
+    assert.equal(options.redirect, 'error');
+    assert.equal(options.signal, signal);
+    assert.equal(options.headers.Authorization, 'Bearer ' + token);
+    assert.equal(process.exitCode, expected ? undefined : 1);
+    assert.equal(errors.length, expected ? 0 : 1);
+    assert.deepEqual(outputs, expected ? [['fixture-output', expected]] : []);
+  }
 });
 
 test('qualification uses the separately materialized private fixture and meters evidence object reads', async t => {

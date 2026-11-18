@@ -26,7 +26,8 @@ jobs:
       github.repository == 'sidimohameddaliali2-crypto/matter-admin-app' &&
       github.ref == 'refs/heads/main' &&
       vars.DRIVER_AUDIT_CUTOVER_RELEASE_SHA != '' &&
-      vars.DRIVER_AUDIT_CUTOVER_ENABLED == '1' &&
+      (vars.DRIVER_AUDIT_CUTOVER_ENABLED == '1' ||
+      (github.event_name == 'workflow_dispatch' && inputs.operation == 'check')) &&
       vars.DRIVER_AUDIT_CUTOVER_NOT_BEFORE != '' &&
       vars.DRIVER_AUDIT_CUTOVER_PREVIOUS_SHA != '' &&
       vars.DRIVER_AUDIT_CUTOVER_HEAD_SHA256 != '' &&

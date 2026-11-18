@@ -1,5 +1,9 @@
-import { createDriverAuditLightArchive, driverAuditPageSize } from './driverAuditLightArchive.js';
+import { isDeepStrictEqual } from 'node:util';
+import { driverAuditPageSize } from './driverAuditLightArchive.js';
+import { driverAuditDeliveryIdentity, driverAuditRetainedLightHeads } from './driverAuditDeliveryHead.js';
+import { createDriverAuditDeliveryView } from './driverAuditDeliveryView.js';
 import { createDriverAuditLightEvidence } from './driverAuditLightEvidence.js';
+import { createDriverAuditLightPhotoSuggestions } from './driverAuditLightPhotoSuggestions.js';
 import { driverAuditLightCss, driverAuditLightHtml, driverAuditLightJs } from './driverAuditLightPage.js';
 import { createDriverAuditLightReviews } from './driverAuditLightReviews.js';
 
@@ -10,8 +14,19 @@ const readHeaders = { 'Cache-Control': 'private, no-store', 'X-Content-Type-Opti
 const fail = (status, message) => { throw Object.assign(Error(message), { status }); };
 const allowedMethods = new Set(['GET', 'HEAD', 'POST']);
 const endpoints = new Set(['dates', 'deliveries', 'case', 'detail', 'gps', 'photo', 'history', 'source-cases',
-  'source-history', 'reviews', 'reader.css', 'reader.js']);
+  'source-history', 'reviews', 'review-history', 'photo-suggestion', 'reader.css', 'reader.js']);
 const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+
+function reviewOptions(entry) {
+  const options = new Map();
+  for (const issue of entry.issues ?? []) options.set(issue.id, { id: issue.id, label: issue.title || issue.issue || null });
+  for (const { issues } of entry.retainedReviews ?? []) {
+    for (const issue of issues) {
+      if (!options.has(issue.id)) options.set(issue.id, { id: issue.id, label: issue.title || issue.issue || null, archived: true });
+    }
+  }
+  return [...options.values()];
+}
 
 function send(request, response, value, type = 'application/json; charset=utf-8', metadata = {}) {
   response.writeHead(200, { ...readHeaders, ...metadata, 'Content-Type': type });
@@ -42,8 +57,11 @@ async function readReview(request) {
 }
 
 export function createDriverAuditLightReader({ store, archive, rpcForResponseLimit, clock = Date.now } = {}) {
-  const pages = createDriverAuditLightArchive({ archive });
+  const pages = createDriverAuditDeliveryView({ archive });
   const evidence = createDriverAuditLightEvidence({ archive });
+  const photoSuggestion = createDriverAuditLightPhotoSuggestions({ archive, rpcForResponseLimit, clock,
+    readPhoto: evidence.photo, readDetail: evidence.detail, readLookup: pages.photoSuggestions,
+    readJournal: actor => createDriverAuditLightReviews({ rpcForResponseLimit }).readJournal(actor) });
   let cached, inFlight, prepared;
 
   async function current(fresh = false) {
@@ -67,18 +85,6 @@ export function createDriverAuditLightReader({ store, archive, rpcForResponseLim
     }
   }
 
-  const reviews = createDriverAuditLightReviews({
-    rpcForResponseLimit,
-    async resolveIssue(reportHash, issueId, key) {
-      const head = await current();
-      const chosen = [head, head.previous].find(candidate => candidate?.lightView && candidate.reportHash === reportHash);
-      if (!chosen) return null;
-      const entry = await pages.record(chosen, key);
-      const issue = entry.issues?.find(item => item.id === issueId);
-      return issue && entry.reviewRow ? { ...entry.review, rows: [entry.reviewRow], issues: [issue] } : null;
-    },
-  });
-
   function handles(url) {
     return url.pathname.startsWith(base) || ['/api/reporting/view', '/driver-audit-view'].includes(url.pathname)
       && url.searchParams.get('fullArchive') !== '1';
@@ -93,17 +99,23 @@ export function createDriverAuditLightReader({ store, archive, rpcForResponseLim
     if (!endpoints.has(endpoint)) fail(404, 'Report path unavailable');
     if (endpoint === 'reader.css') return send(request, response, driverAuditLightCss, 'text/css; charset=utf-8');
     if (endpoint === 'reader.js') return send(request, response, driverAuditLightJs, 'application/javascript; charset=utf-8');
+    if (endpoint === 'review-history') {
+      const reviews = createDriverAuditLightReviews({ rpcForResponseLimit });
+      return send(request, response, await reviews.readJournal(actor));
+    }
     const live = await current(request.method === 'POST');
     if (endpoint === 'dates') {
       const index = await pages.index(live);
       return send(request, response, { generation: index.generation, reportHash: index.reportHash,
         visibleCutoffAt: index.visibleCutoffAt, records: index.records, history: index.history, stale: cached.stale,
+        ...(live.deliveryView ? { archiveReadOnly: true } : {}),
         days: index.days.map(({ day, records, extraCases }) => ({ day, records, extraCases })), pageSize: driverAuditPageSize,
         canReview: actor.role === 'reviewer' || actor.role === 'owner', token: session.csrf });
     }
     const generation = queryValue(url, 'generation');
     if (!hex(generation)) fail(400, 'Invalid report generation');
-    const head = [live, live.previous].find(candidate => candidate?.lightView && candidate.generation === generation);
+    const head = driverAuditRetainedLightHeads(live)
+      .find(candidate => candidate.lightView && driverAuditDeliveryIdentity(candidate).generation === generation);
     if (!head) fail(409, 'The selected report was replaced');
     if (endpoint === 'deliveries') {
       const day = queryValue(url, 'day'), raw = queryValue(url, 'offset', { optional: true }) ?? '0';
@@ -117,25 +129,41 @@ export function createDriverAuditLightReader({ store, archive, rpcForResponseLim
       const entry = await pages.additionalHistory(head, recordKey);
       return send(request, response, await evidence.history(await pages.index(head), entry));
     }
+    const entry = await pages.record(head, recordKey), index = await pages.index(head);
     if (endpoint === 'reviews') {
       const issueId = queryValue(url, 'issueId');
+      const issue = entry.issues?.find(item => item.id === issueId);
+      const archived = entry.retainedReviews ?? [];
+      if (!issue && !archived.some(context => context.issues.some(item => item.id === issueId)))
+        fail(404, 'The saved review case is unavailable');
+      const reviewHash = entry.review?.snapshotHash;
+      const reviews = createDriverAuditLightReviews({ rpcForResponseLimit,
+        resolveIssue: (hash, selectedIssue, key) => issue && entry.reviewRow && hash === reviewHash && selectedIssue === issueId && key === recordKey
+          ? { ...entry.review, rows: [entry.reviewRow], issues: [issue] } : null,
+      });
       if (request.method === 'POST') {
         if (!auth.csrfMatches(session.csrf, request.headers['x-reporting-token'])) fail(403, 'Invalid report request');
         const input = await readReview(request);
-        if (input.issueId !== issueId || input.snapshotHash !== head.reportHash) fail(409, 'The review evidence changed');
-        return send(request, response, await reviews.save(input, actor, { recordKey }));
+        if (!issue || input.issueId !== issueId || input.snapshotHash !== reviewHash)
+          fail(409, 'The review evidence changed');
+        return send(request, response, await reviews.save(input, actor, { recordKey, async beforeWrite() {
+          // An exact retry of a committed event does not call compareAndSwap.
+          // New replies recheck the current evidence just before the journal write.
+          const currentHead = await current(true);
+          const liveEntry = await pages.record(currentHead, recordKey);
+          if (!isDeepStrictEqual(liveEntry, entry)) fail(409, 'The review evidence changed');
+        } }));
       }
-      return send(request, response, await reviews.readCase({ snapshotHash: head.reportHash, issueId, recordKey }, actor));
+      return send(request, response, await reviews.readCase({ snapshotHash: reviewHash, issueId, recordKey,
+        archived, historicalOnly: !issue }, actor));
     }
-    const entry = await pages.record(head, recordKey), index = await pages.index(head);
     if (endpoint === 'case') return send(request, response, {
-      photo: hex(entry.photo?.sha256), issues: (entry.issues ?? []).map(issue => ({
-        id: issue.id, label: issue.title || issue.issue || null,
-      })), findings: entry.policy?.findings ?? [],
+      photo: hex(entry.photo?.sha256), issues: reviewOptions(entry), findings: entry.policy?.findings ?? [],
     });
     if (endpoint === 'detail') return send(request, response,
       { saved: await evidence.detail(index, entry) ?? { delivery: entry.gpsRow.delivery }, policy: entry.policy ?? null });
     if (endpoint === 'history') return send(request, response, await evidence.history(index, entry));
+    if (endpoint === 'photo-suggestion') return send(request, response, await photoSuggestion(head, index, entry, actor, head === live));
     if (endpoint === 'gps') return send(request, response,
       await evidence.gps(index, entry, actor, queryValue(url, 'vehicle', { optional: true })));
     const photo = await evidence.photo(index, entry);
@@ -146,11 +174,11 @@ export function createDriverAuditLightReader({ store, archive, rpcForResponseLim
     handles, handle,
     async prewarm() {
       const head = await current(true);
-      prepared = { generation: head.generation, reportHash: head.reportHash, index: head.lightView.sha256 };
+      prepared = { generation: driverAuditDeliveryIdentity(head).generation, index: head.lightView.sha256 };
       return true;
     },
     isPreparedFor(head) {
-      return Boolean(prepared && prepared.generation === head?.generation && prepared.reportHash === head?.reportHash
+      return Boolean(prepared && prepared.generation === driverAuditDeliveryIdentity(head).generation
         && prepared.index === head?.lightView?.sha256);
     },
   });
