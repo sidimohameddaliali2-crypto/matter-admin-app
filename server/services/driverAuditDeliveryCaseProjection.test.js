@@ -4,6 +4,7 @@ import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { archiveBytes, archiveCatalog, createCloudRepository } from '../vendor/driver-audits/integration/cloud/repository.mjs';
 import { reviewMatches } from '../vendor/driver-audits/app/src/content/dashboard/reporting-review.mjs';
+import { connectPreviewOrderTiming } from '../vendor/driver-audits/integration/cloud/preview-order-timing.mjs';
 import { createDriverAuditLightEvidence } from './driverAuditLightEvidence.js';
 import { createDriverAuditDeliveryCaseProjector, projectDriverAuditDeliveryCase,
   readDriverAuditDeliveryGpsScope } from './driverAuditDeliveryCaseProjection.js';
@@ -176,6 +177,38 @@ test('a changed neighboring delivery that affects a verified household holds bot
   const selected = await saved(archive, target);
   await assert.rejects(projectDriverAuditDeliveryCase({ ...selected, ...scope, archive, rules, policyScope }),
     { code: 'DRIVER_AUDIT_CASE_HELD', message: 'Changed neighboring deliveries require joint household evidence qualification' });
+});
+
+test('new GPS can preserve an established household timing decision with both original members', async () => {
+  const { archive } = fixtureArchive(), { rules } = qualification();
+  const target = delivery('retained household participant');
+  Object.assign(target.delivery, { upload: `${day}T06:00:00Z`, window_start: `${day}T06:15:00Z`, timing_label: 'Early upload' });
+  const peer = { ...target, key: `${day}/household-neighbor`, assessmentHash: sha('saved neighbor assessment'),
+    delivery: { ...target.delivery, delivery_id: 'household-neighbor', window_start: `${day}T02:00:00Z`,
+      source_sha256: sha('saved neighbor source'), customer: 'Other saved recipient' } };
+  const rows = [target, peer], arrangements = [{ id: 'approved-house', customerIds: ['account-a', 'account-b'],
+    unitKey: 'building-unit', effectiveFrom: day, effectiveTo: null, acceptPartnerReceipt: true,
+    maxUploadGapSeconds: 600, sourceRef: 'operator-reference', sourceSha256: sha('signed decision'),
+    acceptedBy: 'Owner', acceptedAt: cutoff }];
+  rules.recoverRetainedAddresses = (_rows, index) => ({ index: { records: Object.fromEntries(rows.map(row => [row.key,
+    { ...index.records[row.key], addressStop: { recordKey: row.key, assessmentHash: row.assessmentHash,
+      deliverySourceSha256: row.delivery.source_sha256, state: 'apartment_identified',
+      customerId: row.key === key ? 'account-a' : 'account-b', identity: { unitKey: 'building-unit' } } }])) } });
+  const captured = await saved(archive, target), policyScope = { complete: true, peers: [{ row: peer, gps: {} }],
+    householdArrangements: arrangements };
+  const original = await projectDriverAuditDeliveryCase({ ...captured, ...scope, archive, rules,
+    policyScope: { ...policyScope, householdArrangements: [] } });
+  const retained = connectPreviewOrderTiming({}, { generation: original.generation, reportHash: original.reportHash, gpsRows: rows },
+    rules.recoverRetainedAddresses(rows, { records: {} }).index, { households: { async read() { return { arrangements }; } } });
+  const stop = await retained.householdStopFor(key);
+  assert.ok(stop);
+  original.policy.sharedHouseholdStop = stop;
+  captured.candidate.gpsHash = sha('late GPS');
+  const current = await projectDriverAuditDeliveryCase({ ...captured, ...scope, archive, rules, policyScope, prior: { entry: original } });
+  assert.deepEqual(current.policy.sharedHouseholdStop, stop);
+  assert.equal(current.policy.overlay.timingReassessment.state, 'household_explained');
+  assert.equal(current.summary.timing, 'household_explained');
+  assert.deepEqual(current.review, original.review);
 });
 
 test('shared-image corrections stay tied to their explicit related delivery photo digests', async () => {

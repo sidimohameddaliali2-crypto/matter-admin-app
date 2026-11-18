@@ -246,6 +246,20 @@ function buildSummary(row, timing) {
     ...(timing ? { timing } : {}) };
 }
 
+function matchesSavedHouseholdStop(stop, match, rows) {
+  if (stop?.authority !== 'owner_accepted'
+    || !['stopId', 'arrangementId', 'arrangementHash', 'sourceRef', 'sourceSha256'].every(key => stop[key] === match[key])
+    || stop.members?.length !== 2) return false;
+  const members = [match.recordKey, match.partnerRecordKey].sort();
+  return stop.members.every((member, index) => {
+    const row = rows.find(item => item.key === members[index]), delivery = row?.delivery;
+    return delivery && member.recordKey === row.key && member.assessmentHash === row.assessmentHash
+      && member.deliverySourceSha256 === delivery.source_sha256 && member.customer === delivery.customer
+      && member.date === row.date && member.upload === delivery.upload && member.windowStart === delivery.window_start
+      && member.deadline === delivery.deadline && member.addressRelation === 'same_apartment';
+  });
+}
+
 async function projectPolicy({ row, gps, view, original, source, policyScope, review, rules }) {
   requireEvidence(Array.isArray(policyScope?.householdArrangements), 'The original household and review policy state is unavailable');
   const peers = policyScope.peers ?? [];
@@ -269,11 +283,15 @@ async function projectPolicy({ row, gps, view, original, source, policyScope, re
   const recovered = rules.recoverRetainedAddresses(rows, { records }, captures);
   if (gps.entry) gps.entry = recovered?.index?.records?.[row.key] ?? gps.entry;
   const households = householdResolutions(rows, recovered.index, policyScope.householdArrangements);
-  const affectsTarget = resolutions => resolutions.has(row.key)
-    || [...resolutions.values()].some(match => match.receivingRecordKey === row.key);
-  // One delivery's accepted reassessment may change another case's displayed household stop.
-  // Keep both saved cases while that jointly affected selection is unqualified.
-  requireEvidence(!affectsTarget(households) && !original?.entry.policy?.sharedHouseholdStop,
+  const savedHouseholdStop = original?.entry.policy?.sharedHouseholdStop ?? null;
+  const sameHousehold = (resolutions, peers) => {
+    const related = [...resolutions.values()].filter(match => match.recordKey === row.key || match.partnerRecordKey === row.key);
+    return savedHouseholdStop ? related.length > 0 && related.every(match => matchesSavedHouseholdStop(savedHouseholdStop, match, peers))
+      : related.length === 0;
+  };
+  // Keep an established stop only while both original member bindings and
+  // clocks remain exact. A different pair or arrangement requires joint review.
+  requireEvidence(sameHousehold(households, rows),
     'Accepted household changes require joint evidence qualification');
   if (policyScope.householdArrangements.length && changedPeers.length) {
     const alternateRows = new Map(rows.map(item => [item.key, item]));
@@ -284,7 +302,7 @@ async function projectPolicy({ row, gps, view, original, source, policyScope, re
     }
     const candidates = [...alternateRows.values()];
     const alternate = rules.recoverRetainedAddresses(candidates, { records: alternateRecords }, captures);
-    requireEvidence(!affectsTarget(householdResolutions(candidates, alternate.index, policyScope.householdArrangements)),
+    requireEvidence(sameHousehold(householdResolutions(candidates, alternate.index, policyScope.householdArrangements), candidates),
       'Changed neighboring deliveries require joint household evidence qualification');
   }
   const overlay = (policyScope.overlay ?? []).filter(entry => entry.recordKey === row.key);
@@ -317,6 +335,7 @@ async function projectPolicy({ row, gps, view, original, source, policyScope, re
   'The original case decision identity differs');
   const timingReassessment = row.date >= '2026-10-19' ? reassessOrderTiming(row, {
     earliestDelivery: row.delivery.earliest_delivery_evidence, gps: gps.entry?.result, addressStop: gps.entry?.addressStop,
+    household: households.get(row.key),
     acceptedDecision: decisions?.records.find(decision => decision.recordKey === row.key),
   }) : null;
   const [evidence, adjusted] = await Promise.all([service.evidenceOverlay({}), service.snapshotFor(review.snapshotHash)]);
@@ -326,7 +345,7 @@ async function projectPolicy({ row, gps, view, original, source, policyScope, re
   const entry = timingReassessment ? { ...(raw ? evidenceFields : { version: 'matter-evidence-overlay-entry-v1',
     generation: view.generation, recordKey: row.key, assessmentHash: row.assessmentHash, deliverySourceSha256: row.delivery.source_sha256 }),
   timingReassessment } : raw ? evidenceFields : null;
-  return { overlay: entry, sharedHouseholdStop: null, reviewFindingIds: [...new Set([...(corrected.findings ?? []),
+  return { overlay: entry, sharedHouseholdStop: savedHouseholdStop, reviewFindingIds: [...new Set([...(corrected.findings ?? []),
     ...(corrected.photoFindings ?? [])].map(finding => finding.issue_id))],
   ...(!equal(corrected.findings, row.findings) ? { findings: corrected.findings } : {}),
   ...(!equal(corrected.tier, row.tier) ? { tier: corrected.tier } : {}) };
