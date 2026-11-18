@@ -17,7 +17,7 @@ function bounded(value, maximum) {
 
 // Filtering is only a response projection. The original complete journal is
 // read and committed by the unchanged hosted review implementation.
-export function createDriverAuditLightReviews({ rpcForResponseLimit, resolveIssue,
+export function createDriverAuditLightReviews({ rpcForResponseLimit, resolveIssue = () => null,
   key = defaultKey, clock } = {}) {
   if (typeof rpcForResponseLimit !== 'function' || typeof resolveIssue !== 'function'
     || !text(key, 160) || !(key === 'review-journal' || key === defaultKey
@@ -57,8 +57,18 @@ export function createDriverAuditLightReviews({ rpcForResponseLimit, resolveIssu
       || snapshot.rows.filter(row => row?.key === recordKey).length !== 1) throw invalid();
     return { snapshot, issue: issues[0] };
   }
-  const reviews = snapshotFor => createHostedReviews({ stateStore, snapshotFor, key, ...(clock ? { clock } : {}) });
+  const reviews = (snapshotFor, beforeWrite) => createHostedReviews({
+    stateStore: beforeWrite ? { ...stateStore, async compareAndSwap(input) {
+      await beforeWrite();
+      return stateStore.compareAndSwap(input);
+    } } : stateStore,
+    snapshotFor, key, ...(clock ? { clock } : {}),
+  });
   return Object.freeze({
+    async readJournal(actor) {
+      const state = await reviews(() => null).read(actor);
+      return { history: reviewEvents(state) };
+    },
     async readCase({ snapshotHash, issueId, recordKey, archived = [], historicalOnly = false } = {}, actor) {
       if (!text(actor?.id, 2048) || !['owner', 'reviewer', 'viewer'].includes(actor.role)) throw denied();
       const active = historicalOnly ? null : await context(snapshotHash, issueId, recordKey);
@@ -73,10 +83,10 @@ export function createDriverAuditLightReviews({ rpcForResponseLimit, resolveIssu
       return { snapshotHash, issueId, recordKey, revision: history.length, history,
         ...(archivedHistory.length || historicalOnly ? { archivedHistory } : {}), ...(historicalOnly ? { historicalOnly } : {}) };
     },
-    async save(input, actor, { recordKey } = {}) {
+    async save(input, actor, { recordKey, beforeWrite } = {}) {
       // recordKey selects the immutable context only; the unchanged canonical
       // request/event/CAS must never acquire an additional input field.
-      return reviews(async snapshotHash => (await context(snapshotHash, input.issueId, recordKey)).snapshot).save(input, actor);
+      return reviews(async snapshotHash => (await context(snapshotHash, input.issueId, recordKey)).snapshot, beforeWrite).save(input, actor);
     },
   });
 }

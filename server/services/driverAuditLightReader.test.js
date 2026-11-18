@@ -125,7 +125,15 @@ test('a saved date projection cannot be attached to a different report generatio
 
 test('the existing report route opens with exact old date evidence and staff review save and reload', async t => {
   const f = await fixture();
-  let state = { body: null, revision: 0 }, legacyPolls = 0, openedDb = 0;
+  const archived = Array.from({ length: 5 }, (_, index) => ({
+    id: '00000000-0000-4000-8000-' + String(index + 1).padStart(12, '0'),
+    created_at: '2026-10-19T09:10:00.000Z',
+    data: { issueId: 'previous-issue-' + index, snapshotHash: sha('missing snapshot ' + index),
+      reviewScope: index < 3 ? 'raw-day-v1' : 'snapshot', revision: 1, status: 'follow_up',
+      authorName: 'Archived reviewer', response: 'Fictional original response ' + index },
+  }));
+  let state = { body: JSON.stringify({ overrides: {}, removed: {}, preferences: {},
+    records: { reportingReviews: archived } }), revision: 5 }, legacyPolls = 0, openedDb = 0;
   let integration;
   const server = createServer((req, res) => integration(req, res, () => res.writeHead(404).end()));
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -191,6 +199,13 @@ test('the existing report route opens with exact old date evidence and staff rev
   const reload = await (await request('reviews', { record, issueId }, { headers: { cookie: 'Staff=viewer' } })).json();
   assert.equal(reload.history[0].data.response, input.response);
   assert.equal(reload.history[0].data.actorId, reviewer.id);
+  const saved = state.body, history = await request('review-history', {}, { headers: { cookie: 'Staff=viewer' } });
+  assert.equal(history.status, 200);
+  assert.equal(history.headers.get('cache-control'), 'private, no-store');
+  assert.deepEqual(await history.json(), { history: [...archived, reload.history[0]] });
+  assert.equal((await request('review-history', {}, { headers: { cookie: '' } })).status, 401);
+  assert.equal((await request('review-history', {}, { method: 'POST' })).status, 405);
+  assert.equal(state.body, saved);
   assert.equal(openedDb, 0);
   assert.equal(legacyPolls, 0);
   assert.equal((await request('case', { record, generation: sha('retired') })).status, 409);
@@ -257,6 +272,9 @@ test('a changed delivery exposes original snapshot replies and keeps a removed f
   assert.deepEqual(removed.archivedHistory, [originalEvents[1]]);
   assert.equal((await save(removedIssue.id, nextSnapshot, eventIds[2])).status, 409);
   assert.equal((await save(removedIssue.id, prior.reportHash, eventIds[2], prior.generation)).status, 409);
+  const replay = await save(removedIssue.id, prior.reportHash, eventIds[1], prior.generation);
+  assert.equal(replay.status, 200);
+  assert.deepEqual(await replay.json(), { revision: 1, replayed: true });
   assert.equal(state.body, savedBefore);
   assert.deepEqual(await (await request('history')).json(), { staff: [f.saved], additionalSource: [] });
   const before = await request('photo', {}, {}, prior.generation), after = await request('photo');

@@ -7,7 +7,10 @@ export const driverAuditLightHtml = `<!doctype html>
 <title>Driver Reports</title><link rel="stylesheet" href="${base}reader.css">
 <script defer src="${base}reader.js"></script></head>
 <body><main>
-<header><h1>Driver Reports</h1><a id="full-tools" href="/api/reporting/view?screen=reports&amp;view=1&amp;tab=mirror&amp;fullArchive=1" target="_blank" rel="noopener">Full report tools</a></header>
+<header><h1>Driver Reports</h1><div class="actions">
+<button id="review-history" type="button">Saved review history</button>
+<a id="full-tools" href="/api/reporting/view?screen=reports&amp;view=1&amp;tab=mirror&amp;fullArchive=1" target="_blank" rel="noopener">Full report tools</a>
+</div></header>
 <p id="cutoff"></p>
 <div class="filters"><label>Report date <select id="day"></select></label>
 <label>Driver <select id="driver"></select></label></div>
@@ -91,6 +94,12 @@ function runDriverAuditLightPage() {
     const node = make('details');
     node.append(make('summary', label), make('pre', JSON.stringify(value, null, 2)));
     return node;
+  }
+  function reviewArticle(event) {
+    const article = make('article');
+    article.append(make('strong', event.data.authorName), make('p', event.created_at + ' · ' + title(event.data.status)),
+      make('p', event.data.response), savedBody('Saved review details', event));
+    return article;
   }
   function saveFilters() {
     const url = new URL(location.href);
@@ -194,12 +203,6 @@ function runDriverAuditLightPage() {
         const result = await call('reviews', scoped);
         if (id !== request) return;
         content.replaceChildren();
-        function reviewArticle(event) {
-          const article = make('article');
-          article.append(make('strong', event.data.authorName), make('p', event.created_at + ' · ' + title(event.data.status)),
-            make('p', event.data.response), savedBody('Saved review details', event));
-          return article;
-        }
         content.append(...result.history.map(reviewArticle));
         if (result.archivedHistory?.length) content.append(make('h3', 'Reviews on previous evidence'),
           ...result.archivedHistory.map(reviewArticle));
@@ -332,6 +335,19 @@ function runDriverAuditLightPage() {
     } catch (error) { if (request === opened) delivery.replaceChildren(make('p', error.message)); }
   };
   previous.onclick = () => { offset = Math.max(0, offset - report.pageSize); void list(); };
+  byId('review-history').onclick = async () => {
+    const request = ++opened, heading = make('h2', 'Saved review history');
+    delivery.hidden = false;
+    delivery.replaceChildren(heading, make('p', 'Loading saved reviews…'));
+    try {
+      const { history } = await call('review-history');
+      if (request !== opened) return;
+      delivery.replaceChildren(heading);
+      if (history.length) delivery.append(...history.slice().reverse().map(reviewArticle));
+      else delivery.append(make('p', 'No reviews have been saved.'));
+      delivery.scrollIntoView({ block: 'nearest' });
+    } catch (error) { if (request === opened) delivery.replaceChildren(heading, make('p', error.message)); }
+  };
   date.addEventListener('change', () => { offset = 0; driver.value = ''; void list(); });
   driver.addEventListener('change', () => { offset = 0; void list(); });
   window.addEventListener('beforeunload', event => {

@@ -377,6 +377,14 @@ export async function preflightLightAppReader({ backend, replica, head, env, exp
     check(journal.snapshotHash === review.review.snapshotHash && journal.issueId === review.issues[0].id && journal.recordKey === keys.review
       && Array.isArray(journal.history) && journal.revision === journal.history.length,
     'The lightweight original review history differs');
+    const originalJournal = await backend.rpcForResponseLimit(512 * 1024)('matter_hosted_state_read',
+      { p_key: 'preview-gps-map-20261106:review-journal' });
+    const originalEvents = originalJournal.body_text === null ? []
+      : JSON.parse(originalJournal.body_text).records.reportingReviews ?? [];
+    const savedReviews = (await get('review-history')).value;
+    check(Array.isArray(originalEvents) && same(savedReviews.history, originalEvents),
+      'The saved review history differs from the original journal');
+    await get('review-history', {}, false);
     await get('dates', {}, false);
   } finally { await new Promise(resolve => server.close(resolve)); }
   const fresh = await replica.head();

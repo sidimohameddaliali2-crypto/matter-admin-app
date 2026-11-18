@@ -117,8 +117,9 @@ function gpsForDelivery(summary, published) {
   const driver = identity(delivery.driver_id) && delivery.driver_id !== 'unassigned' ? delivery.driver_id : null;
   const vehicles = new Set([delivery.vehicle, savedGpsAssessment?.vehicleNo, savedGpsContext?.vehicleNo]
     .map(vehicleId).filter(value => value !== null));
-  const days = new Set([day]);
-  if (uploadDay) for (const offset of [-1, 0, 1]) days.add(addDaysToDateKey(uploadDay, offset));
+  // A receipt from the adjacent date can contain fixes for the delivery day.
+  const days = new Set([day, uploadDay].filter(Boolean)
+    .flatMap(date => [-1, 0, 1].map(offset => addDaysToDateKey(date, offset))));
   const refs = new Map();
   for (const date of days) {
     const bindings = [['driver', driver], ...Array.from(vehicles, vehicle => ['vehicle', vehicle])];
@@ -150,7 +151,7 @@ async function latestPhotoCapture(repository) {
   const capture = repository.publication.lastCapture;
   const ref = capture?.photoReceipt;
   if (!ref) return null;
-  check(identity(capture.runId) && /^[a-zA-Z0-9_-]{1,120}$/.test(capture.runId) && hex(capture.sha256)
+  check(identity(capture.runId) && /^[a-zA-Z0-9_-]{1,120}$/.test(capture.runId) && hex(capture.sha256) && clock(capture.observedAt)
     && hex(ref.sha256) && ref.path === `photo-capture-receipts/${capture.runId}-${ref.sha256}.json`,
   'Invalid saved photo receipt reference');
   const bytes = await readRetainedDriverAuditFile(repository, ref.path, 16 * MiB);
@@ -159,7 +160,8 @@ async function latestPhotoCapture(repository) {
   check(receipt.version === 1 && receipt.day === capture.day && isDateKey(receipt.day)
     && receipt.runId === capture.runId && receipt.captureSha256 === capture.sha256
     && object(receipt.entries) && Object.keys(receipt.entries).length <= maxCases, 'The saved photo receipt differs');
-  return { captureSha256: capture.sha256, receiptSha256: ref.sha256, day: receipt.day, entries: receipt.entries };
+  return { captureSha256: capture.sha256, receiptSha256: ref.sha256, day: receipt.day,
+    observedAt: capture.observedAt, entries: receipt.entries };
 }
 
 export async function readDriverAuditDeliverySource({ publication, archive, comparisonOnly = false } = {}) {
@@ -213,9 +215,13 @@ export async function readDriverAuditDeliverySource({ publication, archive, comp
       ? photos.entries[delivery.delivery_id] : null;
     let photoCapture = null;
     if (capture?.status === 'captured') {
-      check(hex(capture.sha256) && hex(capture.urlSha256) && (capture.proofTimestamp === null || clock(capture.proofTimestamp)),
+      check(hex(capture.sha256) && hex(capture.urlSha256) && (capture.proofTimestamp === null || clock(capture.proofTimestamp))
+        && (capture.observedAt == null || clock(capture.observedAt)),
         'The saved photo receipt binding differs');
-      photoCapture = { ...capture, captureSha256: photos.captureSha256, receiptSha256: photos.receiptSha256 };
+      // A reused image has no fresh download clock. Bind it to the original
+      // collector receipt time without changing the recorded proof timestamp.
+      photoCapture = { ...capture, observedAt: capture.observedAt ?? photos.observedAt,
+        captureSha256: photos.captureSha256, receiptSha256: photos.receiptSha256 };
     }
     const { gpsHash, ...gps } = gpsForDelivery(summary, gpsWindows);
     const inputs = { ...gps, photoRepair, photoCapture };
@@ -293,7 +299,17 @@ export async function planDriverAuditDeliveryChanges({ scheduledAt, head, pages,
       continue;
     }
     check(hex(prior), 'The last published delivery source is unavailable');
-    if (prior === candidate.sourceHash && !gpsChanged) {
+    let newPhoto = false;
+    // A verified capture can arrive independently of the assessed row. Compare
+    // with the visible case's actual binding so a rolling receipt or retry
+    // cannot overwrite or rebuild a photo the report already has.
+    const capture = candidate.inputs?.photoCapture;
+    if (prior === candidate.sourceHash && !gpsChanged && capture) {
+      const saved = (await pages.record(head, key)).photo;
+      newPhoto = typeof saved?.sourceUrl === 'string' && sha(saved.sourceUrl) === capture.urlSha256
+        && saved.proofTimestamp === capture.proofTimestamp && saved.sha256 !== capture.sha256;
+    }
+    if (prior === candidate.sourceHash && !gpsChanged && !newPhoto) {
       if (!gpsBasisKnown && candidate.gpsHash != null) heldGpsCount++;
       continue;
     }

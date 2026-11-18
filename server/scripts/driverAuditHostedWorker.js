@@ -23,7 +23,7 @@ const iso = value => typeof value === 'string' && Number.isFinite(Date.parse(val
 const check = condition => { if (!condition) throw Error('The hosted report worker is held.'); };
 const workerScript = fileURLToPath(new URL('driverAuditOffHostWorker.js', import.meta.url));
 const scopedFixtureTests = ['driverAuditDeliveryChanges', 'driverAuditDeliveryCaseProjection',
-  'driverAuditDeliveryView', 'driverAuditSupabaseReplica', 'driverAuditOffHostWorker', 'driverAuditLightReader']
+  'driverAuditDeliveryView', 'driverAuditSupabaseReplica', 'driverAuditSupabaseSync', 'driverAuditOffHostWorker', 'driverAuditLightReader']
   .map(name => fileURLToPath(new URL('../services/' + name + '.test.js', import.meta.url)));
 
 export function hostedDriverAuditWorkerSettings(env, mode, runtime = process) {
@@ -121,11 +121,11 @@ export async function allowEncryptedCacheSave(env, bundle, checkpoint) {
   } finally { await file.close(); }
 }
 
-function runPrivateChild(args, root, signal) {
+function runPrivateChild(args, root, signal, fixture = {}) {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, args, {
-      cwd: root, env: { HOME: root, LANG: 'C', TZ: 'UTC' }, stdio: 'ignore',
+      cwd: root, env: { HOME: root, LANG: 'C', TZ: 'UTC', ...fixture }, stdio: 'ignore',
     });
     let killTimer;
     const stop = () => {
@@ -169,7 +169,9 @@ async function replayChild({ phase, input, directory, signal, readRoots, archive
 async function qualifyWorker(context, configuration, binding, signal) {
   const { root, sync, source } = configuration;
   check(await linuxMemoryAvailable() >= priorSourcePeak + memorySafetyReserve);
-  await runPrivateChild(['--test', ...scopedFixtureTests], root, signal);
+  await runPrivateChild(['--test', ...scopedFixtureTests], root, signal, {
+    DRIVER_AUDIT_FIXTURE_BUILDER_ROOT: sync.codeRoot, DRIVER_AUDIT_FIXTURE_BUILDER_SHA256: sync.builderSha256,
+  });
   const before = validateDriverAuditSourceTransferUsage(await context.readTransferUsage());
   await runWorker(configuration, '--check', signal);
   const directory = await fs.mkdtemp(path.join(root, 'qualification-'));

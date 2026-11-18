@@ -95,6 +95,11 @@ test('workflow has the two Dubai slots and runs on a protected, serialized GitHu
   assert.match(yaml, /actions\/cache\/restore@[a-f0-9]{40}/);
   assert.match(yaml, /actions\/cache\/save@[a-f0-9]{40}/);
   assert.doesNotMatch(yaml, /pull_request|upload-artifact|self-hosted/);
+  const rehearsal = yaml.split('  rehearsal:\n')[1]?.split('\n  worker:')[0];
+  assert.match(rehearsal, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(rehearsal, /inputs\.operation == 'rehearse'/);
+  assert.match(rehearsal, /driverAuditSupabaseReplica\.test\.js/);
+  assert.doesNotMatch(rehearsal, /secrets\.|environment:|--once|--qualify/);
 });
 
 test('qualification uses the separately materialized private fixture and meters evidence object reads', async t => {

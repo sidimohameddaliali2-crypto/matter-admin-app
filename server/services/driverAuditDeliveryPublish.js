@@ -145,7 +145,10 @@ export function createDriverAuditDeliveryPublisher({ archive, replica, sourceSta
     const sameAsBase = !before.deliveryView && latestBasis === before.servingPackage.sourceBasis;
     requireScope(latest.revision !== before.servingPackage.collectorRevision || sameAsBase,
       'The saved collector conflicts with the original report source');
-    if (sameAsBase) return { status: 'unchanged', head: before, latestCaptureAt: latest.cutoff, changedRecords: 0 };
+    if (sameAsBase && (minutes === 630 || latest.revision === before.servingPackage.collectorRevision
+      || !latest.publication.lastCapture?.photoReceipt)) {
+      return { status: 'unchanged', head: before, latestCaptureAt: latest.cutoff, changedRecords: 0 };
+    }
     if (before.deliveryView && latest.revision === before.deliveryView.collectorRevision) {
       requireScope(latest.bodySha256 === before.deliveryView.sourceBodySha256, 'The saved collector body conflicts with its publication');
     }
@@ -172,9 +175,21 @@ export function createDriverAuditDeliveryPublisher({ archive, replica, sourceSta
     const projectCase = await openProjector();
     const changes = [];
     const byDay = plan.selected.slice().sort((left, right) => left.day.localeCompare(right.day));
+    let heldCases = 0;
     for (const candidate of byDay) {
-      const entry = await projectCase({ archive, source, candidate, ...await scopes.forCase(candidate) });
-      changes.push({ key: candidate.key, sourceHash: candidate.sourceHash, gpsHash: candidate.gpsHash, entry });
+      try {
+        const entry = await projectCase({ archive, source, candidate, ...await scopes.forCase(candidate) });
+        changes.push({ key: candidate.key, sourceHash: candidate.sourceHash, gpsHash: candidate.gpsHash, entry });
+      } catch (error) {
+        if (error.code !== 'DRIVER_AUDIT_CASE_HELD') throw error;
+        heldCases++;
+      }
+    }
+    if (!changes.length) {
+      const fresh = await replica.head();
+      requireScope(fresh?.sourceRevision === before.sourceRevision && fresh.sourceBodySha256 === before.sourceBodySha256,
+        'The original report advanced during delivery verification');
+      return { status: 'unchanged', head: before, latestCaptureAt: latest.cutoff, changedRecords: 0, pendingEvidence: true };
     }
     await verifyInputs();
     const staged = await pages.stage({ head: before, changes, collectorRevision: latest.revision,
@@ -186,6 +201,7 @@ export function createDriverAuditDeliveryPublisher({ archive, replica, sourceSta
     await scopes.verify();
     await verifyInputs();
     const result = await replica.activateDeliveryView({ expected: before, staged });
-    return { ...result, latestCaptureAt: latest.cutoff, changedRecords: staged.changedRecords, pendingEvidence };
+    return { ...result, latestCaptureAt: latest.cutoff, changedRecords: staged.changedRecords,
+      pendingEvidence: pendingEvidence || heldCases > 0 };
   };
 }

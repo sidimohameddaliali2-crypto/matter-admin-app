@@ -537,11 +537,11 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
         const result = await runDueSlot();
         return Math.min(Date.parse(result.nextCheckAt), clock() + idleHeartbeatInterval);
       },
-      async check() { return underAdmission(async () => {
+      async check({ requireLightIndex = false } = {}) { return underAdmission(async () => {
         const active = await replica.head();
         check(active, 'A verified Supabase audit seed is required');
         const { generation, collectorRevision } = driverAuditDeliveryIdentity(active);
-        check(!publishDeliverySlot || active.lightView, 'A verified delivery date index is required');
+        check(!requireLightIndex || !publishDeliverySlot || active.lightView, 'A verified delivery date index is required');
         return { status: 'checked', dataStore: 'supabase', executionHost, activeGeneration: generation,
           collectorRevision, replicaGcStatus: 'disabled-supabase' };
       }); },
@@ -576,7 +576,7 @@ export async function runDriverAuditSupabaseSync({ config, file, mode, collectSo
         activeGeneration: result.activeGeneration ?? result.head?.generation ?? null }));
       return result;
     }
-    if (executionHost === 'off-host') await worker.check();
+    if (executionHost === 'off-host') await worker.check({ requireLightIndex: true });
     if (mode === '--once') onceResult = await worker.runDueSlot();
     else while (!stop.signal.aborted) {
       const now = Date.now();

@@ -303,13 +303,14 @@ export function createDriverAuditDeliveryView({ archive } = {}) {
       for (const change of changesForDate) {
         const { key, sourceHash } = change, previous = prior.cases.get(key);
         const gpsHash = change.gpsHash ?? previous?.gpsHash ?? null;
-        if (previous?.sourceHash === sourceHash && (previous.gpsHash ?? null) === gpsHash) continue;
-        ensure(sourceAdvanced && Date.parse(visibleCutoffAt) >= Date.parse(oldCutoff),
-          'The incremental report would move backwards');
         const inBase = prior.directory?.positions.has(key), historical = prior.directory?.extraHistory.get(key);
         const former = previous ? await changedRecord(previous) : inBase ? {
           ...await base.record(head, key), ...oldContext(original),
         } : historical ? { history: historical, ...oldContext(original) } : null;
+        if (previous?.sourceHash === sourceHash && (previous.gpsHash ?? null) === gpsHash
+          && former.photo?.sha256 === change.entry.photo?.sha256) continue;
+        ensure(sourceAdvanced && Date.parse(visibleCutoffAt) >= Date.parse(oldCutoff),
+          'The incremental report would move backwards');
         if (previous || inBase) {
           const status = former.summary.status ?? null, count = totals.get(status);
           ensure(integer(count) && count > 0, 'The prior delivery is missing from its status totals');

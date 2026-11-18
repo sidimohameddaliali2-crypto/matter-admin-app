@@ -481,7 +481,7 @@ test('light release preflight exercises the actual staff routes, named hashes an
   const f = await lightPreflightFixture(t);
   const result = await implementation.preflightLightAppReader(f);
   assert.equal(result.lightweight, true); assert.equal(result.namedEvidenceVerified, true);
-  for (const endpoint of ['dates', 'deliveries', 'gps', 'photo', 'history', 'reviews'])
+  for (const endpoint of ['dates', 'deliveries', 'gps', 'photo', 'history', 'reviews', 'review-history'])
     assert(f.routes.includes('/api/reporting/light/' + endpoint));
   assert(f.reads.length > 0); assert(f.rpcReads.length > 0);
   assert(f.rpcReads.every(row => row.limit === 512 * 1024));
@@ -507,6 +507,30 @@ test('light preflight refuses a changed named photo and leaves its original sour
     handler.prewarm = real.prewarm; return handler;
   };
   await assert.rejects(implementation.preflightLightAppReader(f), /original photo bytes differ/);
+});
+
+test('light preflight rejects a missing review even when case-scoped history succeeds', async t => {
+  const f = await lightPreflightFixture(t), original = f.createDriverAuditIntegration;
+  f.backend.rpcForResponseLimit = () => async () => ({ revision: 1, body_text: JSON.stringify({
+    overrides: {}, removed: {}, preferences: {}, records: { reportingReviews: [{
+      id: '00000000-0000-4000-8000-000000000001', created_at: '2026-10-19T00:00:00.000Z',
+      data: { issueId: 'unlinked-archived-issue', snapshotHash: sha('unlinked original snapshot'),
+        authorName: 'Archived reviewer', response: 'Source review', revision: 1, status: 'explained' },
+    }] },
+  }) });
+  f.createDriverAuditIntegration = options => {
+    const real = original(options);
+    const handler = (req, res, next) => {
+      if (req.url.startsWith('/api/reporting/light/review-history?')) {
+        res.writeHead(200, { 'Cache-Control': 'private, no-store', 'Content-Type': 'application/json' });
+        return res.end('{"history":[]}');
+      }
+      return real(req, res, next);
+    };
+    handler.prewarm = real.prewarm;
+    return handler;
+  };
+  await assert.rejects(implementation.preflightLightAppReader(f), /differs from the original journal/);
 });
 
 test('light preflight rejects an advanced serving head rather than releasing a stale selected generation', async t => {

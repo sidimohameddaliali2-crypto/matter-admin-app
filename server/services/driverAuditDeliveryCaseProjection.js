@@ -341,7 +341,12 @@ async function loadRules(codeRoot, builderSha256) {
     load('integration/private-gps/gps.mjs'), load('integration/private-gps/retained-addresses.mjs'),
     load('integration/cloud/automatic-release-build.mjs'),
   ]);
-  return { ...release, ...gpsRelease, ...gps, ...addresses, sourceStreamsForDelivery: build.sourceStreamsForDelivery };
+  const rules = { ...release, ...gpsRelease, ...gps, ...addresses, sourceStreamsForDelivery: build.sourceStreamsForDelivery };
+  requireEvidence(['refreshPrivateEvidenceArrivals', 'indexPrivateReleaseSnapshot', 'projectPrivateChangedRows',
+    'rebindPrivateReleaseOverlay', 'refreshReleaseGps', 'releaseAvailability', 'ingest', 'grade',
+    'mergeRetainedGpsStreams', 'recoverRetainedAddresses', 'sourceStreamsForDelivery'].every(name => typeof rules[name] === 'function'),
+  'The pinned delivery grading rules are incomplete');
+  return rules;
 }
 
 export async function createDriverAuditDeliveryCaseProjector({ codeRoot, builderSha256, ...defaults } = {}) {

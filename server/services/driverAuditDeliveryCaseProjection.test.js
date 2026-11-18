@@ -5,7 +5,8 @@ import { gzipSync } from 'node:zlib';
 import { archiveBytes, archiveCatalog, createCloudRepository } from '../vendor/driver-audits/integration/cloud/repository.mjs';
 import { reviewMatches } from '../vendor/driver-audits/app/src/content/dashboard/reporting-review.mjs';
 import { createDriverAuditLightEvidence } from './driverAuditLightEvidence.js';
-import { projectDriverAuditDeliveryCase, readDriverAuditDeliveryGpsScope } from './driverAuditDeliveryCaseProjection.js';
+import { createDriverAuditDeliveryCaseProjector, projectDriverAuditDeliveryCase,
+  readDriverAuditDeliveryGpsScope } from './driverAuditDeliveryCaseProjection.js';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const day = '2026-11-18', key = day + '/selected-delivery', cutoff = day + 'T08:00:00.000Z';
@@ -42,8 +43,8 @@ function delivery(version, withPhoto = false) {
       deadline: day + 'T07:00:00Z', upload: withPhoto ? day + 'T06:00:00Z' : null,
       raw_upload: withPhoto ? day + 'T06:00:00Z' : null,
       photo_url: withPhoto ? url : null, source_sha256: sha('source row ' + version) },
-    tier: 0, findings: [{ issue_id: 'finding-' + version }], photoFindings: [],
-    photo: { reviewStatus: 'unreviewed', grade: null }, gps: {} };
+    tier: 0, findings: [{ issue_id: 'finding-' + version }], originalFindings: [], legacyReferences: [], photoFindings: [],
+    photo: { reviewStatus: 'unreviewed', grade: null }, gps: { limitations: [], measurements: {} } };
 }
 
 async function saved(archive, row, { previous = [], object = null, windows = [] } = {}) {
@@ -104,6 +105,29 @@ function qualification() {
 }
 const scope = { gpsScope: { complete: true, asOf: cutoff, windows: [], peers: [] },
   policyScope: { householdArrangements: [], peers: [] } };
+
+const codeRoot = process.env.DRIVER_AUDIT_FIXTURE_BUILDER_ROOT;
+const builderSha256 = process.env.DRIVER_AUDIT_FIXTURE_BUILDER_SHA256;
+test('the pinned private grader verifies a new delivery and the same delivery with late evidence',
+  { skip: codeRoot === undefined && builderSha256 === undefined }, async () => {
+    const { archive } = fixtureArchive();
+    const project = await createDriverAuditDeliveryCaseProjector({ codeRoot, builderSha256 });
+    const first = delivery('pinned-first');
+    first.findings = [];
+    const previous = await project({ ...await saved(archive, first), ...scope, archive });
+    const photo = Buffer.from([255, 216, 255, 4, 5, 255, 217]);
+    const late = delivery('pinned-noon', true);
+    late.findings = [];
+    late.delivery.photo_sha256 = sha(photo);
+    const current = await project({ ...await saved(archive, late, { previous: [first], object: photo }),
+      ...scope, archive, prior: { entry: previous } });
+    const evidence = createDriverAuditLightEvidence({ archive });
+    assert.equal(previous.photo.sha256, null);
+    assert.deepEqual((await evidence.photo(current, current)).body, photo);
+    assert.equal((await evidence.gps(current, current, { role: 'owner' })).assessmentHash, current.gpsRow.assessmentHash);
+    assert.equal(current.issues[0].id, previous.issues[0].id);
+    assert.deepEqual((await evidence.history(current, current)).staff.map(row => row.key), [first.key]);
+  });
 
 test('one new case reads its own saved assessment and remains available through the original evidence reader', async () => {
   const { archive, writes } = fixtureArchive(), { rules, calls } = qualification();

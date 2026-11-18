@@ -7,10 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Qualify the pinned worker or run the current eligible report slot
+        description: Rehearse the report slots, qualify the pinned worker, or run the current eligible slot
         type: choice
         default: qualify
         options:
+          - rehearse
           - qualify
           - run
 
@@ -22,6 +23,34 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  rehearsal:
+    if: >-
+      github.repository == 'sidimohameddaliali2-crypto/matter-admin-app' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation == 'rehearse'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.22.1'
+      - name: Install the locked report dependencies
+        run: npm ci --prefix server --omit=dev --ignore-scripts
+      - name: Verify the two Dubai slots against isolated evidence
+        run: >-
+          node --test
+          server/services/driverAuditDeliveryChanges.test.js
+          server/services/driverAuditDeliveryCaseProjection.test.js
+          server/services/driverAuditDeliveryView.test.js
+          server/services/driverAuditSupabaseReplica.test.js
+          server/services/driverAuditSupabaseSync.test.js
+          server/services/driverAuditOffHostWorker.test.js
+          server/services/driverAuditLightReader.test.js
+
   worker:
     if: >-
       github.repository == 'sidimohameddaliali2-crypto/matter-admin-app' &&

@@ -13,7 +13,7 @@ const readHeaders = { 'Cache-Control': 'private, no-store', 'X-Content-Type-Opti
 const fail = (status, message) => { throw Object.assign(Error(message), { status }); };
 const allowedMethods = new Set(['GET', 'HEAD', 'POST']);
 const endpoints = new Set(['dates', 'deliveries', 'case', 'detail', 'gps', 'photo', 'history', 'source-cases',
-  'source-history', 'reviews', 'reader.css', 'reader.js']);
+  'source-history', 'reviews', 'review-history', 'reader.css', 'reader.js']);
 const hex = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
 
 function reviewOptions(entry) {
@@ -95,6 +95,10 @@ export function createDriverAuditLightReader({ store, archive, rpcForResponseLim
     if (!endpoints.has(endpoint)) fail(404, 'Report path unavailable');
     if (endpoint === 'reader.css') return send(request, response, driverAuditLightCss, 'text/css; charset=utf-8');
     if (endpoint === 'reader.js') return send(request, response, driverAuditLightJs, 'application/javascript; charset=utf-8');
+    if (endpoint === 'review-history') {
+      const reviews = createDriverAuditLightReviews({ rpcForResponseLimit });
+      return send(request, response, await reviews.readJournal(actor));
+    }
     const live = await current(request.method === 'POST');
     if (endpoint === 'dates') {
       const index = await pages.index(live);
@@ -136,12 +140,15 @@ export function createDriverAuditLightReader({ store, archive, rpcForResponseLim
       if (request.method === 'POST') {
         if (!auth.csrfMatches(session.csrf, request.headers['x-reporting-token'])) fail(403, 'Invalid report request');
         const input = await readReview(request);
-        // An unchanged delivery can cross a publication safely. A superseded
-        // evidence binding can still be read, but cannot receive new replies.
-        const liveEntry = head === live ? entry : await pages.record(live, recordKey);
-        if (!issue || input.issueId !== issueId || input.snapshotHash !== reviewHash || !isDeepStrictEqual(liveEntry, entry))
+        if (!issue || input.issueId !== issueId || input.snapshotHash !== reviewHash)
           fail(409, 'The review evidence changed');
-        return send(request, response, await reviews.save(input, actor, { recordKey }));
+        return send(request, response, await reviews.save(input, actor, { recordKey, async beforeWrite() {
+          // An exact retry of a committed event does not call compareAndSwap.
+          // New replies recheck the current evidence just before the journal write.
+          const currentHead = await current(true);
+          const liveEntry = await pages.record(currentHead, recordKey);
+          if (!isDeepStrictEqual(liveEntry, entry)) fail(409, 'The review evidence changed');
+        } }));
       }
       return send(request, response, await reviews.readCase({ snapshotHash: reviewHash, issueId, recordKey,
         archived, historicalOnly: !issue }, actor));

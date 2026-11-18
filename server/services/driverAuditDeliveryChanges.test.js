@@ -20,7 +20,8 @@ function delivery(id, { day = date, driver = 'driver-one', vehicle = null, photo
       source_sha256: digest([key, driver, vehicle, photo]), photo_sha256: photo } };
 }
 
-async function archiveFixture(rows, { revision = 7, gps = [], history = [], captureClock = originalCapture, gpsScope } = {}) {
+async function archiveFixture(rows, { revision = 7, gps = [], history = [], captureClock = originalCapture, gpsScope,
+  capturedPhotos } = {}) {
   const objects = new Map(), reads = new Set(), byName = new Map();
   const archive = {
     async putVerifiedObject(key, bytes) {
@@ -74,9 +75,17 @@ async function archiveFixture(rows, { revision = 7, gps = [], history = [], capt
     await save('state', path, body);
     gpsPointer = { path, sha256, observedAt: captureClock };
   }
+  let lastCapture;
+  if (capturedPhotos) {
+    const runId = 'fixture-photo-capture', captureSha256 = digest(capturedPhotos);
+    const body = Buffer.from(JSON.stringify({ version: 1, day: date, runId, captureSha256, entries: capturedPhotos }));
+    const sha256 = sha(body), path = `photo-capture-receipts/${runId}-${sha256}.json`;
+    await save('state', path, body);
+    lastCapture = { day: date, runId, sha256: captureSha256, observedAt: captureClock, photoReceipt: { path, sha256 } };
+  }
   const catalog = await archiveCatalog(archive, files);
   const publication = { version: 1, revision, catalog, gpsState, head: {
-    reportHash, manifest, records: rows.length, history: history.length, gps: gpsPointer } };
+    reportHash, manifest, records: rows.length, history: history.length, gps: gpsPointer }, lastCapture };
   return { archive, publication, objects, byName, reads, details, histories,
     async read() {return readDriverAuditDeliverySource({ publication, archive });} };
 }
@@ -173,6 +182,45 @@ test('an unchanged GPS poll or an expired GPS scope does not rebuild a published
     const plan = await planDriverAuditDeliveryChanges({ scheduledAt: noon, head: {}, pages, baseline, latest });
     assert.deepEqual(plan.selected, []);
   }
+});
+
+test('a delivery without an upload clock can use its vehicle receipts across the service date boundary', async () => {
+  const row = delivery('late-receipt', { day: priorDate, vehicle: 'fixture-van' });
+  row.delivery.upload = null;
+  const gps = { namespace: 'van-late-receipt', day: date, driverId: 'other-recorded-driver',
+    scopeKind: 'vehicle', vehicleNo: 'fixture-van', material: 'verified fixes from the previous service date' };
+  const unrelated = { ...gps, namespace: 'other-van', vehicleNo: 'unrelated-van', material: 'unrelated fixes' };
+  const source = await (await archiveFixture([row], { gps: [gps, unrelated] })).read();
+  const candidate = source.cases.get(row.key);
+  assert.equal(candidate.inputs.gpsCoverage.uploadDay, null);
+  assert.deepEqual(candidate.inputs.gps.map(window => [window.namespace, window.day]), [[gps.namespace, date]]);
+  assert.equal(candidate.inputs.gpsCoverage.sources, 'bound');
+  assert.equal(typeof candidate.gpsHash, 'string');
+});
+
+test('a photo receipt alone updates its exact delivery once and scope expiry keeps the published photo', async () => {
+  const row = delivery('late-photo'), sourceUrl = 'https://photo.example.invalid/original.jpg';
+  const photo = { sha256: null, sourceUrl, proofTimestamp: row.delivery.upload };
+  const captured = { status: 'captured', sha256: digest('verified image'), urlSha256: sha(sourceUrl),
+    proofTimestamp: photo.proofTimestamp };
+  const baseline = await (await archiveFixture([row])).read();
+  const latest = await (await archiveFixture([row], { capturedPhotos: { 'late-photo': captured } })).read();
+  const pages = { ...published([row]), async record(_head, key) {
+    assert.equal(key, row.key);
+    return { photo };
+  } };
+  assert.equal(latest.cases.get(row.key).sourceHash, baseline.cases.get(row.key).sourceHash);
+  const plan = scheduledAt => planDriverAuditDeliveryChanges({ scheduledAt, head: {}, pages, baseline, latest });
+  assert.equal(latest.cases.get(row.key).inputs.photoCapture.observedAt, originalCapture);
+  assert.deepEqual((await plan(morning)).selected, []);
+  assert.deepEqual((await plan(noon)).selected.map(candidate => candidate.key), [row.key]);
+  photo.sha256 = captured.sha256;
+  assert.deepEqual((await plan(noon)).selected, []);
+  photo.sha256 = null;
+  photo.proofTimestamp = '2026-11-17T20:00:00.000Z';
+  assert.deepEqual((await plan(noon)).selected, []);
+  const expired = await planDriverAuditDeliveryChanges({ scheduledAt: noon, head: {}, pages, baseline, latest: baseline });
+  assert.deepEqual(expired.selected, []);
 });
 
 test('the first verified GPS window applies once to a delivery published without a window at 10:30', async () => {
