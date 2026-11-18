@@ -104,7 +104,7 @@ async function packageFiles(directory, revision) {
     restore: { version: 1, archive: 'matter-report-archive', verified: true, ...binding } } };
 }
 
-async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource, armedAt } = {}) {
+async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource, armedAt, incrementalDeliveries = false } = {}) {
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'driver-audit-supabase-sync-')));
   let worker;
   t.after(async () => { try { await worker?.close(); } finally { await fs.rm(temporary, { recursive: true, force: true }); } });
@@ -117,7 +117,8 @@ async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource
   await write(path.join(root, 'seed.json'), initial.seed);
   const config = { version: 1, root, baselineRoot, codeRoot, builderSha256: sha(manifestBytes),
     rendererBuild: { path: path.join(baselineRoot, 'build.private.json'), sha256: sha('{}') },
-    journals: { path: path.join(root, 'validation-journals.private.json'), sha256: sha('{}') } };
+    journals: { path: path.join(root, 'validation-journals.private.json'), sha256: sha('{}') },
+    ...(incrementalDeliveries ? { incrementalDeliveries: true, lightReader: true, hostedSlotClaims: true } : {}) };
   const file = path.join(root, 'sync.json'); await write(file, config);
   const states = new Map([['collector-state', { revision: 43, body: JSON.stringify(next.publication) }]]), calls = [], uploads = [], objects = new Map();
   const receipts = new Map([initial, next].map((entry, i) => [42 + i, { revision: 42 + i, body_text: JSON.stringify(entry.publication),
@@ -147,7 +148,7 @@ async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource
     if (name === 'matter_hosted_state_receipts') return [...receipts.values()].filter(row => row.revision > args.p_after)
       .sort((left, right) => left.revision - right.revision).slice(0, 1);
     if (name === 'matter_hosted_state_cas') {
-      assert.ok(['app-sidi-report-head', 'app-sidi-report-worker-status'].includes(args.p_key));
+      assert.ok(['app-sidi-report-head', 'app-sidi-report-worker-status', 'app-sidi-report-worker-claim'].includes(args.p_key));
       if (args.p_key === 'app-sidi-report-worker-status' && failWorkerStatus) {
         failWorkerStatus = false; throw Error('Fictional worker status transport failed');
       }
@@ -373,6 +374,41 @@ test('one due-slot run exits not-due without collecting or reading evidence befo
   assert.equal(sourceCalls, 0);
   assert.equal(f.calls.length, calls);
   assert.equal(f.uploads.length, uploads);
+});
+
+test('the delivery-scoped off-host worker claims and checks both Dubai slots without rebuilding an unchanged report', async t => {
+  const morning = Date.parse('2026-11-18T06:30:00Z'), noon = Date.parse('2026-11-18T08:00:00Z');
+  let now = morning;
+  const slots = [];
+  const f = await fixture(t, { incrementalDeliveries: true, executionHost: 'off-host', clock: () => now,
+    armedAt: '2026-11-18T00:00:00.000Z',
+    async collectSource({ dueAt, onAdmission }) { await onAdmission(); slots.push(dueAt); } });
+  const seed = f.initial.seed, { generation, reportHash } = seed.pointer;
+  const bytes = gzipSync(JSON.stringify({ version: 1, generation, reportHash, visibleCutoffAt: at, records: 0,
+    history: { staffRows: 0 }, catalog: f.initial.publication.catalog, review: { snapshotHash: reportHash }, days: [] }));
+  const lightView = { sha256: sha(bytes), size: bytes.length };
+  const head = { revision: 1, body: JSON.stringify({ ...seed.pointer, lightView, visibleCutoffAt: at,
+    servingPackage: { version: 1, dataStore: 'supabase', collectorRevision: seed.collectorRevision,
+      sourceBasis: seed.sourceBasis, manifestSha256: seed.manifestSha256 }, closureReceipt: seed.closureReceipt, restore: seed.restore }) };
+  f.objects.set(lightView.sha256 + '.gz', bytes);
+  f.states.set('app-sidi-report-head', head);
+  f.states.set('collector-state', { revision: 42, body: JSON.stringify(f.initial.publication) });
+  for (const dueAt of [morning, noon]) {
+    now = dueAt;
+    const result = await f.worker.runDueSlot();
+    assert.equal(result.status, 'checked');
+    assert.equal(result.scheduledAt, new Date(dueAt).toISOString());
+    assert.equal(result.changedRecords, 0);
+    assert.equal(result.reportStatus, 'ready');
+    await f.reopen();
+    assert.equal((await f.worker.runDueSlot()).status, 'not-due');
+  }
+  assert.deepEqual(slots, [morning, noon]);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.deepEqual(f.uploads, []);
+  assert.equal(f.calls.filter(({ name, args }) => name === 'matter_hosted_state_cas'
+    && args.p_key === 'app-sidi-report-worker-status').length, 2);
+  await assert.rejects(fs.access(path.join(f.root, 'work', 'fixture-builds.private.txt')), { code: 'ENOENT' });
 });
 
 test('one due-slot run publishes real changed evidence once and reports an unchanged noon check truthfully', async t => {
