@@ -127,7 +127,8 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    }
    return coordinator.poll();
   }
-  return {origin,auth,verifiedRequests,coordinator,refresh,prewarm,pollForStaff,light,getImportStatus:()=>health().status};
+  return {origin,auth,verifiedRequests,coordinator,refresh,prewarm,pollForStaff,light,
+   deliveryReviewIsCurrent:async()=>!supabaseHost||!(await store.head())?.deliveryView,getImportStatus:()=>health().status};
  }
  function getContext(){
   if(!pending)pending=initialize().catch(error=>{pending=null;throw error;});
@@ -174,6 +175,10 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
      res.end(JSON.stringify({error:code===503?'Saved report evidence is temporarily unavailable.':'The requested report data could not be opened.'}));return;
     }
    }
+   if(path==='/api/reporting/reviews'&&req.method==='POST'&&!await context.deliveryReviewIsCurrent()){
+    req.resume();res.writeHead(409,{'Cache-Control':'private, no-store','Content-Type':'application/json'});
+    res.end(JSON.stringify({error:'Open the current delivery in Driver Reports to save a review.'}));return;
+   }
    const isDocument=path===auditView||path==='/driver-audit-view';
    const update=async()=>{await context.refresh();await context.pollForStaff();};
    if(!context.coordinator.status().active)await update();
@@ -194,6 +199,7 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
  };
  middleware.isPreparedFor=async head=>{
   const context=await getContext();
+  if(head?.deliveryView&&!context.light)return false;
   return context.light?context.light.isPreparedFor(head):context.coordinator.isPreparedFor(head);
  };
  return middleware;

@@ -7,6 +7,9 @@ import { getBusinessDayBounds } from '../utils/businessDate.js';
 import { createDriverAuditSupabaseAppBackend } from './driverAuditSupabaseAppBackend.js';
 import { createDriverAuditSupabaseReplica, verifyDriverAuditSupabaseServingPackage } from './driverAuditSupabaseReplica.js';
 import { buildDriverAuditLightView } from './driverAuditLightBuild.js';
+import { createDriverAuditDeliveryCaseProjector } from './driverAuditDeliveryCaseProjection.js';
+import { driverAuditDeliveryIdentity } from './driverAuditDeliveryHead.js';
+import { createDriverAuditDeliveryPublisher } from './driverAuditDeliveryPublish.js';
 import { createDriverAuditHostedSlots } from './driverAuditHostedSlots.js';
 import { writeDriverAuditSourceState } from './driverAuditSource.js';
 import { withDriverAuditHeavyWork } from './driverAuditHeavyWork.js';
@@ -81,6 +84,8 @@ async function checkedConfiguration({ config, file }) {
   check(config?.version === 1 && path.isAbsolute(config.root || '') && path.resolve(config.root) === config.root
     && (config.lightReader === undefined || typeof config.lightReader === 'boolean')
     && (config.hostedSlotClaims === undefined || typeof config.hostedSlotClaims === 'boolean')
+    && (config.incrementalDeliveries === undefined || config.incrementalDeliveries === false
+      || config.incrementalDeliveries === true && config.lightReader === true && config.hostedSlotClaims === true)
     && file === path.join(config.root, 'sync.json') && config.baselineRoot === path.join(config.root, 'baseline')
     && config.codeRoot === path.join(config.root, 'builder') && hex(config.builderSha256)
     && config.rendererBuild?.path === path.join(config.baselineRoot, 'build.private.json') && hex(config.rendererBuild.sha256)
@@ -151,14 +156,15 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
     await backend.archive.assertPrivate();
     signal?.throwIfAborted();
     const load = name => import(pathToFileURL(path.join(codeRoot, name)).href);
-    const [{ automaticReleaseBasis, createAutomaticRelease }, { createAutomaticReleaseSource, supportsManagedArchiveCache },
-      { buildAutomaticRelease, compactDirectBuildVersion }, { validateAutomaticCandidate }] = await Promise.all([
-      load('integration/cloud/automatic-release.mjs'), load('integration/cloud/automatic-release-source.mjs'),
-      load('integration/cloud/automatic-release-build.mjs'), load('scripts/run-automatic-report.mjs'),
+    const { automaticReleaseBasis, createAutomaticRelease } = await load('integration/cloud/automatic-release.mjs');
+    check(typeof automaticReleaseBasis === 'function', 'The pinned audit source identity is required');
+    const [legacySource, legacyBuild, legacyValidation] = config.incrementalDeliveries ? [] : await Promise.all([
+      load('integration/cloud/automatic-release-source.mjs'), load('integration/cloud/automatic-release-build.mjs'),
+      load('scripts/run-automatic-report.mjs'),
     ]);
-    check(supportsManagedArchiveCache === true && [automaticReleaseBasis, createAutomaticRelease,
-      createAutomaticReleaseSource, buildAutomaticRelease, validateAutomaticCandidate].every(fn => typeof fn === 'function'),
-    'The pinned managed Sidi audit builder is required');
+    check(config.incrementalDeliveries || legacySource?.supportsManagedArchiveCache === true && [createAutomaticRelease,
+      legacySource.createAutomaticReleaseSource, legacyBuild.buildAutomaticRelease, legacyValidation.validateAutomaticCandidate]
+      .every(fn => typeof fn === 'function'), 'The pinned managed Sidi audit builder is required');
     // Pointer and capacity responses are small. The larger evidence and review
     // reads below have separate bounds so this check can keep serving on a tight day.
     const controlRpc = backend.rpcForResponseLimit(768 * 1024);
@@ -194,7 +200,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
     });
     const sourceState = boundedState(2 * 1024 ** 2), reviewState = boundedState(8 * 1024 ** 2);
     const receiptState = createCloudState({ rpc: backend.rpcForResponseLimit(2 * 1024 ** 2) });
-    const loadSource = createAutomaticReleaseSource({ stateStore: sourceState, cacheRoot: cache, localRoots: [baselineRoot],
+    const loadSource = legacySource?.createAutomaticReleaseSource({ stateStore: sourceState, cacheRoot: cache, localRoots: [baselineRoot],
       skipCacheWrite: true, archiveTransport: { readObject: archive.readBounded, managedReadCache: true } });
     const recipe = { builderSha256, rendererSha256: rendererBuild.sha256, journalsSha256: journals.sha256,
       baselineManifestSha256: pins.baselineManifestSha256 };
@@ -219,6 +225,22 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
       return receipt;
     }
 
+    const publishDeliverySlot = config.incrementalDeliveries ? createDriverAuditDeliveryPublisher({
+      archive: {
+        async readObject(key, options) {
+          signal?.throwIfAborted();
+          return archive.readBounded(key, options);
+        },
+        async putVerifiedObject(key, bytes) {
+          signal?.throwIfAborted();
+          await archive.verify(key, bytes.length, () => bytes);
+          return { key, sha256: sha(bytes), verified: true };
+        },
+      },
+      replica, sourceState, reviewState, originalCollectorReceipt, automaticReleaseBasis, verifyInputs: unchangedInputs,
+      openProjector: () => createDriverAuditDeliveryCaseProjector({ codeRoot, builderSha256 }),
+    }) : null;
+
     function writeHeartbeat(value, now, nextAt) {
       return writeDriverAuditSourceState(heartbeat, { capacity: null, ...value, version: 1, dataStore: 'supabase', executionHost,
         replicaGcStatus: 'disabled-supabase',
@@ -232,22 +254,23 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
       }
       const prior = await readHeartbeat(), now = clock();
       await writeHeartbeat({ lastScheduledAt: prior?.lastScheduledAt ?? null, ...value,
-        activeGeneration: active?.generation ?? null, checkedAt: new Date(now).toISOString() }, now, reportSchedule(now).nextAt);
+        activeGeneration: driverAuditDeliveryIdentity(active).generation, checkedAt: new Date(now).toISOString() }, now, reportSchedule(now).nextAt);
       return active;
     }
 
-    const builder = createAutomaticRelease({ root: work, baselineRoot, pinnedDirectSync: true, loadSource: async () => pinned,
+    const builder = publishDeliverySlot ? null : createAutomaticRelease({ root: work, baselineRoot,
+      pinnedDirectSync: true, loadSource: async () => pinned,
       async build(options) {
         signal?.throwIfAborted();
         const [output, baseline] = await Promise.all([fs.stat(options.output), fs.stat(options.baselineRoot)]);
-        const compact = compactDirectBuildVersion === 1 && output.dev === baseline.dev;
+        const compact = legacyBuild.compactDirectBuildVersion === 1 && output.dev === baseline.dev;
         requireBuildSpace(await freeBytes(work), { compact });
         await saveDriverAuditBuildRecipe(options.output, recipe);
-        return buildAutomaticRelease({ ...options, rendererBuild, archiveBackedBaseline: true,
+        return legacyBuild.buildAutomaticRelease({ ...options, rendererBuild, archiveBackedBaseline: true,
           checkSpace: async () => requireBuildSpace(await freeBytes(work), { compact, inProgress: true }) });
       },
       async validate(candidate) {
-        const validation = await validateAutomaticCandidate(candidate, { journals });
+        const validation = await legacyValidation.validateAutomaticCandidate(candidate, { journals });
         if (!validation.ok) return validation;
         try { checkVerifiedAuditPackageTransfer({ privateRoot: candidate.privateRoot, maxBytes: packageLimit, validation }); }
         catch (error) {
@@ -291,6 +314,8 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
 
     async function seed() {
       return underAdmission(async () => {
+        const expected = await replica.head();
+        check(!expected?.deliveryView, 'The original bootstrap cannot replace a delivery-scoped report');
         const seed = await privateJson(path.join(root, 'seed.json'), 1024 * 1024), head = seedPointer(seed, root);
         await privateDirectory(seed.bundleRoot);
         const local = { async readObject(key, { maxBytes }) {
@@ -315,7 +340,6 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
             objects.set(key, chunk.size);
           }
         }
-        const expected = await replica.head();
         if (expected) check(expected.servingPackage.collectorRevision === head.servingPackage.collectorRevision
           && expected.servingPackage.sourceBasis === head.servingPackage.sourceBasis
           && expected.servingPackage.manifestSha256 === head.servingPackage.manifestSha256
@@ -393,13 +417,20 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
             await writeHeartbeat({ ...prior, status: 'pending', pending: true, admission: 'running', errorCode: null, capacity: null,
               lastScheduledAt: new Date(scheduledAt).toISOString() }, now, reportSchedule(now).nextAt);
           }
+          if (publishDeliverySlot) {
+            const result = await publishDeliverySlot(scheduledAt);
+            const pending = result.pendingEvidence === true;
+            await status({ status: pending ? 'pending' : 'ready', pending, errorCode: null, latestCaptureAt: result.latestCaptureAt,
+              visibleCutoffAt: driverAuditDeliveryIdentity(result.head).visibleCutoffAt }, { head: result.head });
+            return { published: result.status === 'published', checkedHead: result.head, changedRecords: result.changedRecords };
+          }
           await sync();
           return { published, checkedHead };
         });
       } catch (error) {
         const active = await replica.head().catch(() => null), prior = await readHeartbeat().catch(() => null);
         await status({ ...describeDriverAuditSyncFailure(error), pending: true,
-          latestCaptureAt: prior?.latestCaptureAt ?? null, visibleCutoffAt: active?.visibleCutoffAt ?? null }).catch(() => {});
+          latestCaptureAt: prior?.latestCaptureAt ?? null, visibleCutoffAt: driverAuditDeliveryIdentity(active).visibleCutoffAt }).catch(() => {});
         throw error;
       }
     }
@@ -423,13 +454,14 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
       const saved = await readHeartbeat(), head = failure ? await replica.head() : checkedHead;
       check(head, 'A real serving head is required for the terminal worker outcome');
       const failed = failure ? describeDriverAuditSyncFailure(failure) : null;
+      const { generation, collectorRevision, visibleCutoffAt } = driverAuditDeliveryIdentity(head);
       const pendingWorkerStatus = {
         version: 1, kind: 'supabase-report-worker-slot-status', executionHost: 'off-host',
         syncConfigSha256: pins.configSha256, sourceConfigSha256,
         scheduledAt: new Date(dueAt).toISOString(), nextCheckAt: new Date(nextAt).toISOString(), checkedAt: new Date(clock()).toISOString(),
         outcome: failure ? 'failed' : published ? 'published' : 'unchanged', status: failed?.status ?? saved?.status,
-        activeGeneration: head.generation, servingHeadRevision: head.sourceRevision, servingHeadBodySha256: head.sourceBodySha256,
-        collectorRevision: head.servingPackage.collectorRevision, visibleCutoffAt: head.visibleCutoffAt,
+        activeGeneration: generation, servingHeadRevision: head.sourceRevision, servingHeadBodySha256: head.sourceBodySha256,
+        collectorRevision, visibleCutoffAt,
         latestCaptureAt: saved?.latestCaptureAt ?? null, errorCode: failed?.errorCode ?? null,
       };
       // Save the exact terminal payload before its one metadata CAS. A lost
@@ -445,6 +477,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
       const recovered = await flushWorkerStatus();
       const { dueAt, nextAt } = reportSchedule(clock());
       const saved = await readHeartbeat() ?? { status: 'pending', pending: true };
+      let changedRecords;
       // Catch up at most the latest elapsed slot for this Dubai day.
       const due = dueAt !== null && dueAt >= firstEligibleAt && dueAt > (Date.parse(saved.lastScheduledAt) || -Infinity);
       if (due) {
@@ -465,7 +498,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
             } });
             check(!hostedSlots || admitted, 'The hosted source did not confirm its durable slot');
           }
-          ({ published, checkedHead } = await tick({ scheduledAt: dueAt }));
+          ({ published, checkedHead, changedRecords } = await tick({ scheduledAt: dueAt }));
         }
         catch (error) {
           if (error === alreadyClaimed) return { status: 'not-due', scheduledAt: null, nextCheckAt: new Date(nextAt).toISOString() };
@@ -489,6 +522,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
       const result = { status: due ? 'checked' : 'not-due', scheduledAt: due ? new Date(dueAt).toISOString() : null,
         nextCheckAt: new Date(nextAt).toISOString() };
       if (recovered) result.workerStatusRecovered = recovered;
+      if (changedRecords !== undefined) result.changedRecords = changedRecords;
       if (due) {
         const outcome = await readHeartbeat();
         check(['ready', 'pending'].includes(outcome?.status) && typeof outcome.pending === 'boolean'
@@ -506,8 +540,10 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
       async check() { return underAdmission(async () => {
         const active = await replica.head();
         check(active, 'A verified Supabase audit seed is required');
-        return { status: 'checked', dataStore: 'supabase', executionHost, activeGeneration: active.generation,
-          collectorRevision: active.servingPackage.collectorRevision, replicaGcStatus: 'disabled-supabase' };
+        const { generation, collectorRevision } = driverAuditDeliveryIdentity(active);
+        check(!publishDeliverySlot || active.lightView, 'A verified delivery date index is required');
+        return { status: 'checked', dataStore: 'supabase', executionHost, activeGeneration: generation,
+          collectorRevision, replicaGcStatus: 'disabled-supabase' };
       }); },
       async close() { if (!closed) { closed = true; await lock.release(); } },
     });

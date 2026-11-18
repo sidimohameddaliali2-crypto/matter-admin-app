@@ -22,9 +22,10 @@ export async function readRetainedDriverAuditFile(repository, name, maxBytes) {
 export function createDriverAuditLightEvidence({ archive } = {}) {
   const cache = createImmutableEvidenceCache({ maxBytes: 20 * MiB, maxEntries: 24 });
   const repositories = new Map();
+  const origin = (index, entry) => entry.catalog ? entry : index;
   function repository(index) {
     const { catalog, generation, reportHash } = index;
-    if (!hex(catalog?.sha256)) throw Error('The original report catalogue is required');
+    if (!hex(catalog?.sha256) || !hex(generation) || !hex(reportHash)) throw Error('The original report catalogue is required');
     const key = catalog.sha256 + ':' + generation;
     if (!repositories.has(key)) {
       const body = JSON.stringify({ version: 1, catalog, head: {
@@ -52,7 +53,7 @@ export function createDriverAuditLightEvidence({ archive } = {}) {
         throw Error('The original delivery detail reference differs');
       }
       const saved = await memo(ref, 'detail', async () => {
-        const raw = await retained(index, 'assets/' + ref.url.slice('report-data/'.length) + '.gz', 16 * MiB);
+        const raw = await retained(origin(index, entry), 'assets/' + ref.url.slice('report-data/'.length) + '.gz', 16 * MiB);
         const bytes = gunzipSync(raw, { maxOutputLength: 16 * MiB });
         if (sha(bytes) !== ref.sha256) throw Error('The saved delivery detail failed verification');
         return { value: JSON.parse(bytes), bytes: bytes.length };
@@ -60,20 +61,44 @@ export function createDriverAuditLightEvidence({ archive } = {}) {
       return saved;
     },
     async history(index, entry) {
-      const key = entry.row.key;
-      const read = (file, maxBytes) => retained(index, file, maxBytes);
-      const { staff, source } = entry.history ?? {};
-      const staffRows = await readRows(staff, key, read);
-      const sourceRows = source?.sha256 === staff?.sha256 ? staffRows : await readRows(source, key, read);
-      const seen = new Set(staffRows.map(row => sha(JSON.stringify(row))));
-      return { staff: staffRows, additionalSource: sourceRows.filter(row => !seen.has(sha(JSON.stringify(row)))) };
+      const key = entry.row.key, owner = origin(index, entry);
+      if (!entry.retainedHistory?.length) {
+        const read = (file, limit) => retained(owner, file, limit);
+        const { staff, source } = entry.history ?? {};
+        const staffRows = await readRows(staff, key, read);
+        const sourceRows = source?.sha256 === staff?.sha256 ? staffRows : await readRows(source, key, read);
+        const seen = new Set(staffRows.map(row => sha(JSON.stringify(row))));
+        return { staff: staffRows, additionalSource: sourceRows.filter(row => !seen.has(sha(JSON.stringify(row)))) };
+      }
+      const staff = [], source = [], seenStaff = new Set(), seenSource = new Set(), loaded = new Map();
+      async function append(owner, ref, output, seen) {
+        if (!ref) return;
+        if (!loaded.has(ref.sha256)) {
+          loaded.set(ref.sha256, await readRows(ref, key, (file, limit) => retained(owner, file, limit)));
+        }
+        for (const row of loaded.get(ref.sha256)) {
+          const identity = sha(JSON.stringify(row));
+          if (!seen.has(identity)) {
+            seen.add(identity);
+            output.push(row);
+          }
+        }
+      }
+      for (const version of [...(entry.retainedHistory ?? [])].reverse()) {
+        await append(version, version.history.staff, staff, seenStaff);
+        await append(version, version.history.source, source, seenSource);
+      }
+      await append(owner, entry.history?.staff, staff, seenStaff);
+      await append(owner, entry.history?.source, source, seenSource);
+      return { staff, additionalSource: source.filter(row => !seenStaff.has(sha(JSON.stringify(row)))) };
     },
     async gps(index, entry, actor, vehicle) {
       const row = entry.gpsRow, key = row.key;
+      const { reportHash } = origin(index, entry);
       const { streams, projections } = entry.gpsFiles;
       const selected = { version: 1, asOf: entry.gpsAsOf, records: entry.gps ? { [key]: entry.gps } : {},
         streamFiles: streams };
-      const snapshotFor = async () => ({ snapshotHash: index.reportHash, rows: [row] });
+      const snapshotFor = async () => ({ snapshotHash: reportHash, rows: [row] });
       const reader = createPreviewGps({ snapshotFor, index: selected,
         readStream(name) {
           return memo(streams[name], 'stream', async ref => {
@@ -92,7 +117,7 @@ export function createDriverAuditLightEvidence({ archive } = {}) {
           return evidence;
         },
       });
-      const query = new URLSearchParams({ record: key, snapshot: index.reportHash });
+      const query = new URLSearchParams({ record: key, snapshot: reportHash });
       if (vehicle) query.set('vehicle', vehicle);
       const value = await reader.read(query, actor);
       return { ...value, sharedHouseholdStop: entry.policy?.sharedHouseholdStop ?? null, roadDisplayAvailable: false };
@@ -100,7 +125,7 @@ export function createDriverAuditLightEvidence({ archive } = {}) {
     async photo(index, entry) {
       const expected = entry.photo?.sha256;
       if (!hex(expected)) throw unavailable('No verified photo is saved for this delivery');
-      const pinned = await repository(index);
+      const owner = origin(index, entry), pinned = await repository(owner);
       return memo({ sha256: expected }, 'photo', async () => {
         let bytes;
         for (const domain of ['objects', 'legacyObjects']) {
@@ -109,7 +134,7 @@ export function createDriverAuditLightEvidence({ archive } = {}) {
         }
         if (!bytes) {
           try {
-            bytes = gunzipSync(await retained(index, 'photos/' + expected + '.gz', 9 * MiB),
+            bytes = gunzipSync(await retained(owner, 'photos/' + expected + '.gz', 9 * MiB),
               { maxOutputLength: 8 * MiB });
           } catch (error) {
             if (error.code === 'ENOENT') throw unavailable('The saved original photo is currently unavailable');

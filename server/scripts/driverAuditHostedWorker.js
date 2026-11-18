@@ -22,6 +22,9 @@ const integer = value => Number.isSafeInteger(value) && value >= 0;
 const iso = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 const check = condition => { if (!condition) throw Error('The hosted report worker is held.'); };
 const workerScript = fileURLToPath(new URL('driverAuditOffHostWorker.js', import.meta.url));
+const scopedFixtureTests = ['driverAuditDeliveryChanges', 'driverAuditDeliveryCaseProjection',
+  'driverAuditDeliveryView', 'driverAuditSupabaseReplica', 'driverAuditOffHostWorker', 'driverAuditLightReader']
+  .map(name => fileURLToPath(new URL('../services/' + name + '.test.js', import.meta.url)));
 
 export function hostedDriverAuditWorkerSettings(env, mode, runtime = process) {
   const releaseSha = env.DRIVER_AUDIT_WORKER_RELEASE_SHA, bootstrapSha256 = env.DRIVER_AUDIT_WORKER_BOOTSTRAP_SHA256;
@@ -44,7 +47,8 @@ export function requireHostedDriverAuditQualification(receipt, binding, now = Da
     && commit(receipt.releaseSha) && ['bootstrapSha256', 'sourceConfigSha256', 'syncSha256', 'pinsSha256', 'activationSha256',
       'fixtureSha256'].every(key => digest(receipt[key]))
     && receipt.nodeVersion === nodeVersion && Object.entries(binding).every(([key, value]) => receipt[key] === value)
-    && iso(receipt.qualifiedAt) && Date.parse(receipt.qualifiedAt) <= now && digest(receipt.builderCandidateManifestSha256));
+    && iso(receipt.qualifiedAt) && Date.parse(receipt.qualifiedAt) <= now && digest(receipt.builderCandidateManifestSha256)
+    && receipt.deliveryScopeFixtureVerified === true);
   const measured = receipt.measurements;
   for (const reads of [measured?.coldArchiveReads, measured?.warmArchiveReads])
     check(integer(reads?.requests) && integer(reads?.bytes));
@@ -117,10 +121,10 @@ export async function allowEncryptedCacheSave(env, bundle, checkpoint) {
   } finally { await file.close(); }
 }
 
-function runWorker({ root, syncFile, sourceFile }, mode, signal) {
+function runPrivateChild(args, root, signal) {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [workerScript, '--config', syncFile, '--source', sourceFile, mode], {
+    const child = spawn(process.execPath, args, {
       cwd: root, env: { HOME: root, LANG: 'C', TZ: 'UTC' }, stdio: 'ignore',
     });
     let killTimer;
@@ -139,6 +143,10 @@ function runWorker({ root, syncFile, sourceFile }, mode, signal) {
       else reject(Error('The pinned report worker did not finish.'));
     });
   });
+}
+
+function runWorker({ root, syncFile, sourceFile }, mode, signal) {
+  return runPrivateChild([workerScript, '--config', syncFile, '--source', sourceFile, mode], root, signal);
 }
 
 async function replayChild({ phase, input, directory, signal, readRoots, archiveCacheDirectory, mode = 'source', readArchive }) {
@@ -161,6 +169,7 @@ async function replayChild({ phase, input, directory, signal, readRoots, archive
 async function qualifyWorker(context, configuration, binding, signal) {
   const { root, sync, source } = configuration;
   check(await linuxMemoryAvailable() >= priorSourcePeak + memorySafetyReserve);
+  await runPrivateChild(['--test', ...scopedFixtureTests], root, signal);
   const before = validateDriverAuditSourceTransferUsage(await context.readTransferUsage());
   await runWorker(configuration, '--check', signal);
   const directory = await fs.mkdtemp(path.join(root, 'qualification-'));
@@ -224,6 +233,7 @@ async function qualifyWorker(context, configuration, binding, signal) {
       await fs.access(`/proc/${built.pid}/stat`);
       const receipt = { version: 1, kind: qualificationKind, verified: true, platform: 'linux', ...binding,
         qualifiedAt: new Date().toISOString(), builderCandidateManifestSha256: built.result.candidateManifestSha256,
+        deliveryScopeFixtureVerified: true,
         measurements: { coldArchiveReads: cold.result.archiveReads, warmArchiveReads: warm.result.archiveReads,
           sourcePeakBytes: Math.max(cold.result.peakRssBytes, warm.result.peakRssBytes), builderPeakBytes: built.result.peakRssBytes,
           memoryAvailableWithBuilderBytes, fixtureArchiveBytes: saved.objectBytes, builderArchiveBytes: downloaded },
@@ -259,7 +269,7 @@ async function main(args, env = process.env) {
     const source = await readDriverAuditSourceConfig(sourceFile);
     check(preflightInput.root === root && syncFile === path.join(root, 'sync.json')
       && sourceFile === path.join(root, 'collector', verified.sourceManifestSha256, 'source.json')
-      && source.configSha256 === preflightInput.sourceConfigSha256 && sync.lightReader === true
+      && source.configSha256 === preflightInput.sourceConfigSha256 && sync.lightReader === true && sync.incrementalDeliveries === true
       && verified.hostedSlotClaimsConfigured === true && verified.photoRecoveryStore === 'supabase'
       && source.environment.MATTER_SUPABASE_SECRET === settings.supabaseSecret && digest(fixtureSha256));
     const configuration = { root, syncFile, sourceFile, sync, source };

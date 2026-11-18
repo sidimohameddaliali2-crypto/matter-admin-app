@@ -4,7 +4,9 @@ import { createServer } from 'node:http';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { createDriverAuditIntegration } from './driverAuditIntegration.js';
+import { createDriverAuditDeliveryView } from './driverAuditDeliveryView.js';
 import { createDriverAuditLightArchive, stageDriverAuditLightView } from './driverAuditLightArchive.js';
+import { createDriverAuditLightReader } from './driverAuditLightReader.js';
 import { archiveBytes, archiveCatalog } from '../vendor/driver-audits/integration/cloud/repository.mjs';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
@@ -17,7 +19,7 @@ const reviewer = { id: 'matter:fixture-staff', role: 'reviewer', email: 'reviewe
 const viewer = { ...reviewer, role: 'viewer' };
 const csrf = 'a'.repeat(64);
 
-async function fixture() {
+async function fixture({ deliveryReview = true, extraIssue = false } = {}) {
   const blobs = new Map(), reads = [], writes = [];
   const archive = {
     async readObject(key, { maxBytes }) {
@@ -48,6 +50,7 @@ async function fixture() {
     };
   };
   const old = makeCase(olderDay, 0);
+  if (extraIssue) old.issues.push({ id: 'removed:' + old.row.key, deliveryId: old.row.key, title: 'Prior finding' });
   const rawPhoto = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwcB/UtqpEwAAAAASUVORK5CYII=', 'base64');
   old.photo.sha256 = sha(rawPhoto);
   const saved = { key: old.row.key, result: 'retained', source: { recorded: true } };
@@ -65,7 +68,7 @@ async function fixture() {
   const projection = { days: new Map([[olderDay, [old]], [day, newest]]),
     context: { generation: head.generation, reportHash: head.reportHash, cutoff: head.visibleCutoffAt,
       records: 46, history: { staffRows: 1 }, refs: { catalog },
-      review: { snapshotHash: head.reportHash, deliveryReview: true }, reviewResolved: true,
+      review: { snapshotHash: head.reportHash, deliveryReview }, reviewResolved: true,
       gpsStreamRefs: {}, gpsEvidenceRefs: {}, gpsMetadata: {}, extraSourceHistoryCases: { [extraRecord]: history(extra) } } };
   head.lightView = await stageDriverAuditLightView({ projection, head, archive });
   return { archive, blobs, reads, writes, head, projection, old, saved, extraRecord, rawPhoto };
@@ -191,4 +194,76 @@ test('the existing report route opens with exact old date evidence and staff rev
   assert.equal(openedDb, 0);
   assert.equal(legacyPolls, 0);
   assert.equal((await request('case', { record, generation: sha('retired') })).status, 409);
+});
+
+test('a changed delivery exposes original snapshot replies and keeps a removed finding read-only', async t => {
+  const f = await fixture({ deliveryReview: false, extraIssue: true });
+  const prior = { ...f.head, sourceRevision: 1, sourceBodySha256: sha('base publication') };
+  let active = prior, state = { body: null, revision: 0 };
+  const reader = createDriverAuditLightReader({ store: { head: async () => active }, archive: f.archive,
+    rpcForResponseLimit: () => async (name, args) => {
+      assert.equal(args.p_key, 'preview-gps-map-20261106:review-journal');
+      if (name === 'matter_hosted_state_read') return { revision: state.revision, body_text: state.body };
+      assert.equal(name, 'matter_hosted_state_cas');
+      assert.equal(args.p_expected, state.revision);
+      state = { body: args.p_body_text, revision: state.revision + 1 };
+      return { revision: state.revision, body_text: state.body, body_sha256: sha(state.body),
+        event_text: args.p_event_text, replayed: false };
+    },
+  });
+  const server = createServer((req, res) => reader.handle(req, res, new URL(req.url, 'http://fixture.invalid'),
+    { actor: reviewer, csrf }, { csrfMatches: (left, right) => left === right }).catch(error => {
+    res.writeHead(error.status ?? 500).end();
+  }));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const record = f.old.row.key, [sameIssue, removedIssue] = f.old.issues;
+  const request = (route, fields = {}, options = {}, generation = active.deliveryView?.ref.sha256 ?? active.generation) =>
+    fetch(`http://127.0.0.1:${server.address().port}/api/reporting/light/${route}?${new URLSearchParams({
+      generation, record, ...fields,
+    })}`, options);
+  const save = (issueId, snapshotHash, eventId, generation) => request('reviews', { issueId }, {
+    method: 'POST', headers: { 'content-type': 'application/json', 'x-reporting-token': csrf },
+    body: JSON.stringify({ issueId, snapshotHash, eventId, expectedRevision: 0,
+      status: 'investigating', response: 'Fictional retained response', responsiblePerson: '', followUpDate: '' }),
+  }, generation);
+  const eventIds = ['11111111-2222-4333-8444-555555555555', '22222222-2222-4333-8444-555555555555',
+    '33333333-2222-4333-8444-555555555555'];
+  assert.equal((await save(sameIssue.id, prior.reportHash, eventIds[0])).status, 200);
+  assert.equal((await save(removedIssue.id, prior.reportHash, eventIds[1])).status, 200);
+  const savedBefore = state.body, originalEvents = JSON.parse(savedBefore).records.reportingReviews;
+  assert.equal(originalEvents[0].data.reviewScope, 'snapshot');
+
+  const pages = createDriverAuditDeliveryView({ archive: f.archive });
+  const earlier = await pages.record(prior, record), nextSnapshot = sha('new review snapshot');
+  const result = await pages.stage({ head: prior, collectorRevision: 2, sourceBodySha256: sha('collector'),
+    visibleCutoffAt: '2026-11-18T08:00:00.000Z', changes: [{ key: record, sourceHash: sha('changed case'), entry: {
+      ...earlier, history: { staff: null, source: null }, summary: { ...earlier.summary, status: 'failed' },
+      reportHash: nextSnapshot, review: { snapshotHash: nextSnapshot, deliveryReview: false }, issues: [sameIssue],
+    } }],
+  });
+  active = { ...prior, sourceRevision: 2, sourceBodySha256: sha('updated publication'), deliveryView: result.deliveryView };
+  assert.equal(await reader.prewarm(), true);
+  const options = await (await request('case')).json();
+  assert.deepEqual(options.issues, [{ id: sameIssue.id, label: null },
+    { id: removedIssue.id, label: removedIssue.title, archived: true }]);
+  const continuing = await (await request('reviews', { issueId: sameIssue.id })).json();
+  assert.equal(continuing.snapshotHash, nextSnapshot);
+  assert.equal(continuing.revision, 0);
+  assert.deepEqual(continuing.history, []);
+  assert.deepEqual(continuing.archivedHistory, [originalEvents[0]]);
+  const removed = await (await request('reviews', { issueId: removedIssue.id })).json();
+  assert.equal(removed.historicalOnly, true);
+  assert.deepEqual(removed.archivedHistory, [originalEvents[1]]);
+  assert.equal((await save(removedIssue.id, nextSnapshot, eventIds[2])).status, 409);
+  assert.equal((await save(removedIssue.id, prior.reportHash, eventIds[2], prior.generation)).status, 409);
+  assert.equal(state.body, savedBefore);
+  assert.deepEqual(await (await request('history')).json(), { staff: [f.saved], additionalSource: [] });
+  const before = await request('photo', {}, {}, prior.generation), after = await request('photo');
+  assert.equal(after.headers.get('x-report-image-sha256'), before.headers.get('x-report-image-sha256'));
+  assert.deepEqual(Buffer.from(await before.arrayBuffer()), Buffer.from(await after.arrayBuffer()));
+  assert.equal((await save(sameIssue.id, nextSnapshot, eventIds[2])).status, 200);
+  const events = JSON.parse(state.body).records.reportingReviews;
+  assert.deepEqual(events.slice(0, 2), originalEvents);
+  assert.equal(events[2].data.snapshotHash, nextSnapshot);
 });

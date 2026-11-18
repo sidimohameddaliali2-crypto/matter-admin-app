@@ -1,4 +1,5 @@
 import {createHash} from 'node:crypto';
+import {driverAuditDeliveryIdentity,isDriverAuditDeliveryHead} from './driverAuditDeliveryHead.js';
 
 const states=new Set(['checking','pending','ready','failed','capacity-blocked','budget-deferred']);
 const capacityReasons=new Set(['build-disk','replica-storage','import-transfer']);
@@ -81,8 +82,9 @@ export function createDriverAuditSupabaseWorkerStatusStore({state,clock=Date.now
   requireStatus(value?.version===1&&hash(value.generation)&&value.servingPackage?.version===1
    &&value.servingPackage.dataStore==='supabase'&&positive(value.servingPackage.collectorRevision)
    &&(value.visibleCutoffAt===null||timestamp(value.visibleCutoffAt)));
-  return {generation:value.generation,revision:result.revision,bodySha256:digest(result.body),
-   collectorRevision:value.servingPackage.collectorRevision,visibleCutoffAt:value.visibleCutoffAt};
+  requireStatus(!Object.hasOwn(value,'deliveryView')||value.lightView&&isDriverAuditDeliveryHead(value.deliveryView)
+   &&value.deliveryView.collectorRevision>=value.servingPackage.collectorRevision);
+  return {...driverAuditDeliveryIdentity(value),revision:result.revision,bodySha256:digest(result.body)};
  }
  const matches=(value,head)=>value.activeGeneration===head.generation&&value.servingHeadRevision===head.revision
   &&value.servingHeadBodySha256===head.bodySha256&&value.collectorRevision===head.collectorRevision

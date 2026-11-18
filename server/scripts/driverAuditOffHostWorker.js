@@ -47,7 +47,9 @@ async function main(args) {
     return entries[0];
   });
   if (mode === '--check') await checkDriverAuditSource(source);
-  const armedAt = mode === undefined || mode === '--once'
+  const scheduled = mode === undefined || mode === '--once';
+  if (scheduled && config.incrementalDeliveries !== true) throw Error('Delivery-scoped publishing is required for scheduled reports');
+  const armedAt = scheduled
     ? await readScheduleEnrollment(config.root, sha256(configBytes), source.configSha256) : undefined;
   return runDriverAuditSupabaseSync({ config, file, mode, armedAt, sourceConfigSha256: source.configSha256, env: {
     ...env, DRIVER_AUDIT_SUPABASE_SECRET: env.MATTER_SUPABASE_SECRET,

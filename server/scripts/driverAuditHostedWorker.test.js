@@ -48,6 +48,7 @@ function qualification() {
     day: { period: day, usedBytes, reservedBytes: 0, limitBytes: 512 * MiB }, activeReservations: 0, uncertainReservations: 0 });
   return { version: 1, kind: 'driver-report-hosted-linux-qualification-v1', verified: true, platform: 'linux', ...binding,
     qualifiedAt: '2026-11-18T00:00:00.000Z', builderCandidateManifestSha256: '2'.repeat(64),
+    deliveryScopeFixtureVerified: true,
     measurements: { coldArchiveReads: { requests: 5, bytes: 10 }, warmArchiveReads: { requests: 1, bytes: 2 },
       sourcePeakBytes: MiB, builderPeakBytes: MiB, memoryAvailableWithBuilderBytes: 900 * MiB,
       fixtureArchiveBytes: 1, builderArchiveBytes: 0 },
@@ -59,7 +60,8 @@ test('held and stale qualification receipts cannot authorize source work', () =>
   assert.deepEqual(requireHostedDriverAuditQualification(qualification(), binding, now), qualification());
   for (const mutate of [receipt => { receipt.verified = false; }, receipt => { receipt.sourceConfigSha256 = '0'.repeat(64); },
     receipt => { receipt.qualifiedAt = '2026-11-20T00:00:00.000Z'; }, receipt => { receipt.measurements.warmArchiveReads.requests = 5; },
-    receipt => { receipt.measurements.memoryAvailableWithBuilderBytes = 1; }, receipt => { receipt.transferUsage.after.day.usedBytes = 0; }]) {
+    receipt => { receipt.measurements.memoryAvailableWithBuilderBytes = 1; }, receipt => { receipt.transferUsage.after.day.usedBytes = 0; },
+    receipt => { delete receipt.deliveryScopeFixtureVerified; }]) {
     const receipt = qualification(); mutate(receipt);
     assert.throws(() => requireHostedDriverAuditQualification(receipt, binding, now));
   }

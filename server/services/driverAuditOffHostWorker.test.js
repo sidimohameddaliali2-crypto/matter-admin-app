@@ -12,7 +12,8 @@ const runner = new URL('./driverAuditSupabaseSync.js', import.meta.url).href;
 const sourceModule = new URL('./driverAuditSource.js', import.meta.url).href;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 
-async function fixture(t, { failure = false, exerciseCollection = false, historyFailure = false, omitHistory = false } = {}) {
+async function fixture(t, { failure = false, exerciseCollection = false, historyFailure = false, omitHistory = false,
+  incrementalDeliveries = true } = {}) {
   const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'driver-audit-offhost-cli-')));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   async function write(file, bytes) {
@@ -44,7 +45,7 @@ async function fixture(t, { failure = false, exerciseCollection = false, history
     manifestSha256: sha(manifest), nodeVersion: process.version, nodeExecutable: await fs.realpath(process.execPath),
     environment: { path: environmentFile, sha256: sha(environment) }, gatewayCredential: null }));
   await write(sourceFile, source);
-  const syncFile = path.join(root, 'sync.json'), sync = Buffer.from(JSON.stringify({ version: 1, root }));
+  const syncFile = path.join(root, 'sync.json'), sync = Buffer.from(JSON.stringify({ version: 1, root, incrementalDeliveries }));
   await write(syncFile, sync);
   const enrolled = { version: 1, syncSha256: sha(sync), sourceSha256: sha(source),
     armedAt: new Date(Date.now() - 1000).toISOString() };
@@ -103,6 +104,15 @@ test('off-host --once rejects absent, different and future enrollment before the
     const result = await f.run('--once');
     assert.equal(result.code, 1); assert.equal(result.stdout, ''); assert.match(result.stderr, /worker is held/);
   }
+});
+
+test('an enrolled off-host schedule cannot fall back to the full report builder', async t => {
+  const f = await fixture(t, { incrementalDeliveries: false });
+  await f.write(f.enrollmentFile, JSON.stringify(f.enrolled));
+  const result = await f.run('--once');
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /worker is held/);
 });
 
 test('a genuine once-run rejection exits nonzero without printing private causes or a success', async t => {

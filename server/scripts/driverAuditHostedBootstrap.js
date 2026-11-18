@@ -128,6 +128,7 @@ export async function preflightDriverAuditHostedBootstrap(input) {
   const sync = parse(syncFile.body);
   need(sync.version === 1 && sync.root === root && sync.codeRoot === path.join(root, 'builder') && sync.baselineRoot === path.join(root, 'baseline')
     && (sync.hostedSlotClaims === undefined || typeof sync.hostedSlotClaims === 'boolean')
+    && (sync.incrementalDeliveries === undefined || typeof sync.incrementalDeliveries === 'boolean')
     && sync.builderSha256 === expected.builderSha256
     && sync.rendererBuild?.path === path.join(root, 'baseline/build.private.json') && sync.rendererBuild.sha256 === expected.rendererSha256
     && sync.journals?.path === path.join(root, 'validation-journals.private.json') && sync.journals.sha256 === expected.journalsSha256);

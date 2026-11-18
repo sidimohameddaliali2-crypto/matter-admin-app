@@ -7,7 +7,7 @@ export const driverAuditLightHtml = `<!doctype html>
 <title>Driver Reports</title><link rel="stylesheet" href="${base}reader.css">
 <script defer src="${base}reader.js"></script></head>
 <body><main>
-<header><h1>Driver Reports</h1><a href="/api/reporting/view?screen=reports&amp;view=1&amp;tab=mirror&amp;fullArchive=1" target="_blank" rel="noopener">Full report tools</a></header>
+<header><h1>Driver Reports</h1><a id="full-tools" href="/api/reporting/view?screen=reports&amp;view=1&amp;tab=mirror&amp;fullArchive=1" target="_blank" rel="noopener">Full report tools</a></header>
 <p id="cutoff"></p>
 <div class="filters"><label>Report date <select id="day"></select></label>
 <label>Driver <select id="driver"></select></label></div>
@@ -179,8 +179,10 @@ function runDriverAuditLightPage() {
       return;
     }
     const choices = make('select'), label = make('label', 'Review case'), content = make('div');
-    choices.append(...details.issues.map((item, position) =>
-      option(item.id, item.label || (details.issues.length === 1 ? 'Delivery review' : 'Case ' + (position + 1)))));
+    choices.append(...details.issues.map((item, position) => {
+      const label = item.label || (details.issues.length === 1 ? 'Delivery review' : 'Case ' + (position + 1));
+      return option(item.id, item.archived ? label + ' (previous evidence)' : label);
+    }));
     label.append(choices);
     body.append(label, content);
     let request = 0;
@@ -192,14 +194,17 @@ function runDriverAuditLightPage() {
         const result = await call('reviews', scoped);
         if (id !== request) return;
         content.replaceChildren();
-        for (const event of result.history) {
+        function reviewArticle(event) {
           const article = make('article');
           article.append(make('strong', event.data.authorName), make('p', event.created_at + ' · ' + title(event.data.status)),
             make('p', event.data.response), savedBody('Saved review details', event));
-          content.append(article);
+          return article;
         }
-        if (result.history.length === 0) content.append(make('p', 'No reviews have been saved for this case.'));
-        if (!report.canReview) return;
+        content.append(...result.history.map(reviewArticle));
+        if (result.archivedHistory?.length) content.append(make('h3', 'Reviews on previous evidence'),
+          ...result.archivedHistory.map(reviewArticle));
+        if (!result.history.length && !result.archivedHistory?.length) content.append(make('p', 'No reviews have been saved for this case.'));
+        if (!report.canReview || result.historicalOnly) return;
         const draftKey = params.record + ':' + issueId;
         const draft = drafts.get(draftKey);
         const form = make('form'), response = make('textarea'), findingStatus = make('select');
@@ -231,7 +236,7 @@ function runDriverAuditLightPage() {
         form.addEventListener('submit', async event => {
           event.preventDefault();
           const fields = readForm();
-          const input = { ...fields, issueId, snapshotHash: report.reportHash, expectedRevision: result.revision };
+          const input = { ...fields, issueId, snapshotHash: result.snapshotHash, expectedRevision: result.revision };
           const fingerprint = JSON.stringify(input);
           if (submitted?.fingerprint !== fingerprint) submitted = { fingerprint, eventId: crypto.randomUUID() };
           drafts.set(draftKey, { ...fields, submitted });
@@ -335,6 +340,7 @@ function runDriverAuditLightPage() {
   void (async () => {
     try {
       report = await call('dates');
+      if (report.archiveReadOnly) byId('full-tools').textContent = 'Saved report archive';
       if (report.visibleCutoffAt) {
         const format = new Intl.DateTimeFormat('en-GB', { dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Dubai' });
         byId('cutoff').textContent = (report.stale ? 'Last verified evidence through ' : 'Evidence checked through ')

@@ -59,12 +59,19 @@ export function createDriverAuditLightReviews({ rpcForResponseLimit, resolveIssu
   }
   const reviews = snapshotFor => createHostedReviews({ stateStore, snapshotFor, key, ...(clock ? { clock } : {}) });
   return Object.freeze({
-    async readCase({ snapshotHash, issueId, recordKey } = {}, actor) {
+    async readCase({ snapshotHash, issueId, recordKey, archived = [], historicalOnly = false } = {}, actor) {
       if (!text(actor?.id, 2048) || !['owner', 'reviewer', 'viewer'].includes(actor.role)) throw denied();
-      const { snapshot, issue } = await context(snapshotHash, issueId, recordKey);
-      const state = await reviews(async () => snapshot).read(actor);
-      const history = reviewEvents(state).filter(event => reviewMatches(event, issue, snapshot));
-      return { snapshotHash, issueId, recordKey, revision: history.length, history };
+      const active = historicalOnly ? null : await context(snapshotHash, issueId, recordKey);
+      const past = archived.flatMap(({ review, issues }) => issues.filter(issue =>
+        issue.id === issueId && issue.deliveryId === recordKey).map(issue => ({ issue, review })));
+      if (historicalOnly && !past.length) throw invalid();
+      const state = await reviews(async () => active?.snapshot).read(actor), history = [], archivedHistory = [];
+      for (const event of reviewEvents(state)) {
+        if (active && reviewMatches(event, active.issue, active.snapshot)) history.push(event);
+        else if (past.some(({ issue, review }) => reviewMatches(event, issue, review))) archivedHistory.push(event);
+      }
+      return { snapshotHash, issueId, recordKey, revision: history.length, history,
+        ...(archivedHistory.length || historicalOnly ? { archivedHistory } : {}), ...(historicalOnly ? { historicalOnly } : {}) };
     },
     async save(input, actor, { recordKey } = {}) {
       // recordKey selects the immutable context only; the unchanged canonical
