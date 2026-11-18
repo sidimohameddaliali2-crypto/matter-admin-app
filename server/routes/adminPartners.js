@@ -25,6 +25,9 @@ import { partnerReportScope } from '../services/partnerReportScope.js';
 import { partnerUnitPrice } from '../services/partnerOrderValidation.js';
 import { emitPartnerKitchenChange } from '../services/partnerKitchenOrders.js';
 
+const partnerContactProjection = req => ['admin', 'super_admin'].includes(req.user?.role)
+  ? '+financeContact +ownerContact' : '-financeContact -ownerContact';
+
 const adminOrKitchen = authorize(['admin', 'super_admin', 'kitchen']);
 
 const router = express.Router();
@@ -571,7 +574,7 @@ router.get('/', async (req, res) => {
     const q = {};
     if (search) { const re = new RegExp(search, 'i'); q.$or = [{ businessName: re }, { email: re }, { contactName: re }]; }
     const total = await Partner.countDocuments(q);
-    const partners = await Partner.find(q).sort({ createdAt: -1 }).skip((Number(page) - 1) * Number(limit)).limit(Number(limit));
+    const partners = await Partner.find(q).select(partnerContactProjection(req)).sort({ createdAt: -1 }).skip((Number(page) - 1) * Number(limit)).limit(Number(limit));
     res.json({ success: true, data: partners, total, page: Number(page), totalPages: Math.ceil(total / Number(limit)) });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -612,7 +615,7 @@ router.post('/', admin, async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const partner = await Partner.findById(req.params.id);
+    const partner = await Partner.findById(req.params.id).select(partnerContactProjection(req));
     if (!partner) return res.status(404).json({ success: false, message: 'Partner not found' });
     res.json({ success: true, data: partner });
   } catch (err) {
@@ -636,7 +639,8 @@ router.patch('/:id', admin, async (req, res) => {
         if (contact[field] !== undefined) updates[`${role}.${field}`] = contact[field];
       }
     }
-    const partner = await Partner.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true, runValidators: true });
+    const partner = await Partner.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true, runValidators: true })
+      .select('+financeContact +ownerContact');
     if (!partner) return res.status(404).json({ success: false, message: 'Partner not found' });
     res.json({ success: true, data: partner });
   } catch (err) {

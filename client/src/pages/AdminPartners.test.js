@@ -11,11 +11,18 @@ jest.mock('jspdf-autotable', () => ({}));
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
 const legacy = {_id: 'partner', businessName: 'Fixture Cafe', businessType: 'cafe', contactName: 'Login Contact', email: 'login@example.com', phone: '+971 50 111 1111', isActive: true};
-let container, root;
+let container, root, storedPartner;
+const clone = value => JSON.parse(JSON.stringify(value));
 beforeEach(async () => {
   jest.clearAllMocks();
-  api.get.mockImplementation(async path => ({data: {data: path === '/admin/partners' ? [legacy] : []}}));
-  api.patch.mockImplementation(async (path, payload) => ({data: {data: {...legacy, ...payload}}}));
+  storedPartner = clone(legacy);
+  api.get.mockImplementation(async path => ({data: {data: path === '/admin/partners' ? [clone(storedPartner)] : []}}));
+  api.patch.mockImplementation(async (path, payload) => {
+    const changedContacts = Object.fromEntries(['pointOfContact', 'financeContact', 'ownerContact']
+      .filter(role => payload[role]).map(role => [role, {...storedPartner[role], ...payload[role]}]));
+    storedPartner = {...storedPartner, ...payload, ...changedContacts};
+    return {data: {data: clone(storedPartner)}};
+  });
   api.post.mockImplementation(async (path, payload) => ({data: {data: {...legacy, ...payload, _id: 'new-partner'}}}));
   container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
   await act(async () => root.render(<AdminPartners />));
@@ -44,7 +51,7 @@ test('admin can save, view, reopen and clear optional partner contacts on a lega
   expect(formDetails.querySelector('summary').textContent.trim()).toBe('Details');
   await act(async () => formDetails.querySelector('summary').click());
   expect(formDetails.open).toBe(true);
-  expect(container.querySelectorAll('fieldset')).toHaveLength(3);
+  expect(container.querySelectorAll('fieldset')).toHaveLength(4);
   const values = {
     pointOfContact: {fullName: 'Service Person', email: 'service@example.com', phone: '+971 50 222 2222'},
     financeContact: {fullName: 'Finance Person', email: 'finance@example.com', phone: '+971 50 333 3333'},
@@ -61,8 +68,8 @@ test('admin can save, view, reopen and clear optional partner contacts on a lega
   await click('Edit');
   expect(container.querySelector('#financeContact-email').value).toBe('finance@example.com');
   await setInput('#financeContact-email', ''); await submit();
-  expect(api.patch.mock.calls[1][1].financeContact).toEqual({...values.financeContact, email: ''});
-  expect(api.patch.mock.calls[1][1].ownerContact).toEqual(values.ownerContact);
+  expect(api.patch.mock.calls[1][1].financeContact).toEqual({email: ''});
+  expect(api.patch.mock.calls[1][1]).not.toHaveProperty('ownerContact');
   expect(container.querySelector('[aria-label="Partner contacts"]').textContent).not.toContain('finance@example.com');
   expect(container.textContent).toContain('Login Contact');
 });
@@ -71,9 +78,9 @@ test('creating a partner permits all three optional contacts to be blank', async
   await click('Add partner');
   const form = container.querySelector('form');
   expect(form.textContent).not.toContain('Menu Selection Partner');
-  expect(form.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
-  expect(form.querySelectorAll('fieldset input')).toHaveLength(9);
-  for (const input of form.querySelectorAll('fieldset input')) expect(input.required).toBe(false);
+  expect(form.querySelector('[name="menuSelectionEnabled"]')).toBeTruthy();
+  expect(form.querySelectorAll('fieldset input:not([type="checkbox"])')).toHaveLength(9);
+  for (const input of form.querySelectorAll('fieldset input:not([type="checkbox"])')) expect(input.required).toBe(false);
   await setInput('[name="businessName"]', 'New Cafe');
   await setInput('[name="contactName"]', 'Login Person');
   await setInput('[name="email"]', 'new@example.com');
@@ -86,8 +93,9 @@ test('creating a partner permits all three optional contacts to be blank', async
   }));
 });
 
-test('editing contact details does not send the retired switch or overwrite saved macro settings', async () => {
+test('unchanged customer defaults are retained, and admins can edit them inside Details', async () => {
   const existing = {...legacy, menuSelectionEnabled: true, presetMacros: {C: 120, P: 90, F: 40}};
+  storedPartner = clone(existing);
   api.get.mockImplementation(async path => ({data: {data: path === '/admin/partners' ? [existing] : []}}));
   await act(async () => root.unmount());
   root = createRoot(container);
@@ -96,10 +104,49 @@ test('editing contact details does not send the retired switch or overwrite save
   await click('Edit');
   const form = container.querySelector('form');
   expect(form.textContent).not.toContain('Menu Selection Partner');
-  expect(form.textContent).not.toContain('Carbs (C)');
-  expect(form.textContent).not.toContain('Protein (P)');
-  expect(form.textContent).not.toContain('Fat (F)');
+  expect(form.textContent).toContain('Customer Menu Selection defaults');
+  expect(form.textContent).toContain('Carbs (C)');
+  expect(form.querySelector('details [name="menuSelectionEnabled"]').checked).toBe(true);
   await submit();
   expect(api.patch.mock.calls[0][1]).not.toHaveProperty('menuSelectionEnabled');
   expect(api.patch.mock.calls[0][1]).not.toHaveProperty('presetMacros');
+  await click('Edit');
+  await setInput('#presetMacros-P', '100');
+  await submit();
+  expect(api.patch.mock.calls[1][1].presetMacros).toEqual({C: 120, P: 100, F: 40});
+  await click('Edit');
+  await act(async () => container.querySelector('[name="menuSelectionEnabled"]').click());
+  await submit();
+  expect(api.patch.mock.calls[2][1].menuSelectionEnabled).toBe(false);
+});
+
+test('closed Details and single-field edits preserve contacts changed by another admin', async () => {
+  storedPartner.financeContact = {fullName: 'Finance Person', email: 'old@example.com', phone: '111'};
+  await act(async () => root.unmount()); root = createRoot(container);
+  await act(async () => root.render(<AdminPartners />));
+  await click('Edit');
+  expect(container.querySelector('form details').open).toBe(false);
+  await setInput('[name="businessName"]', 'Renamed Cafe');
+  storedPartner.financeContact.email = 'new@example.com'; // Another admin saves after this modal opened.
+  await submit();
+  for (const role of ['pointOfContact', 'financeContact', 'ownerContact']) expect(api.patch.mock.calls[0][1]).not.toHaveProperty(role);
+  expect(storedPartner.financeContact.email).toBe('new@example.com');
+  await click('Edit');
+  await act(async () => container.querySelector('form summary').click());
+  await setInput('#financeContact-phone', '222');
+  storedPartner.financeContact.email = 'latest@example.com';
+  await submit();
+  expect(api.patch.mock.calls[1][1].financeContact).toEqual({phone: '222'});
+  expect(storedPartner.financeContact).toEqual({fullName: 'Finance Person', email: 'latest@example.com', phone: '222'});
+});
+
+test('new partner customer defaults are configurable before creation', async () => {
+  await click('Add partner');
+  await act(async () => container.querySelector('form summary').click());
+  await act(async () => container.querySelector('[name="menuSelectionEnabled"]').click());
+  await setInput('#presetMacros-C', '150');
+  await setInput('#presetMacros-P', '90');
+  await setInput('#presetMacros-F', '50');
+  await submit();
+  expect(api.post.mock.calls[0][1]).toEqual(expect.objectContaining({menuSelectionEnabled: true, presetMacros: {C: 150, P: 90, F: 50}}));
 });

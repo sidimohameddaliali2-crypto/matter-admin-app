@@ -57,10 +57,11 @@ test('invalid optional contact email is a validation error on creation', async t
 
 test('partial contact edits retain sibling fields, other roles and the login identity', async t => {
   let saved;
-  t.mock.method(Partner, 'findByIdAndUpdate', async (id, update, options) => {
+  t.mock.method(Partner, 'findByIdAndUpdate', (id, update, options) => ({select: async projection => {
+    assert.equal(projection, '+financeContact +ownerContact');
     saved = update.$set; assert.equal(options.runValidators, true); assert.equal(options.new, true);
     return {_id: id, ...base(), ...contacts()};
-  });
+  }}));
   const res = response();
   await handler('patch', '/:id')({params: {id: 'partner'}, body: {
     financeContact: {phone: '+971 50 555 5555', password: 'ignored'}, email: 'ignored@example.com', password: 'ignored'
@@ -71,7 +72,7 @@ test('partial contact edits retain sibling fields, other roles and the login ide
 
 test('optional contact fields can be cleared, while malformed contact payloads are rejected', async t => {
   let saved;
-  const update = t.mock.method(Partner, 'findByIdAndUpdate', async (id, fields) => {saved = fields.$set; return {_id: id};});
+  const update = t.mock.method(Partner, 'findByIdAndUpdate', (id, fields) => ({select: async () => {saved = fields.$set; return {_id: id};}}));
   const res = response();
   await handler('patch', '/:id')({params: {id: 'partner'}, body: {ownerContact: {fullName: '', email: '', phone: ''}}}, res);
   assert.equal(res.statusCode, 200);
@@ -82,4 +83,50 @@ test('optional contact fields can be cleared, while malformed contact payloads a
     assert.equal(invalid.statusCode, 400);
   }
   assert.equal(update.mock.callCount(), 1);
+});
+
+test('null contact roles are rejected on creation before they can block later dotted updates', async t => {
+  mockCreate(t); t.mock.method(console, 'error', () => {});
+  for (const role of Object.keys(contacts())) {
+    const res = response();
+    await handler('post', '/')({body: {...base(), [role]: null}, user: {_id: '507f1f77bcf86cd799439011'}}, res);
+    assert.equal(res.statusCode, 400, role);
+    assert.match(res.body.message, /Contact must be an object/);
+  }
+});
+
+test('finance and owner contacts are excluded from partner queries by default', () => {
+  assert.equal(Partner.schema.path('financeContact').options.select, false);
+  assert.equal(Partner.schema.path('ownerContact').options.select, false);
+});
+
+for (const role of ['kitchen', 'admin', 'super_admin']) test(`${role} partner list and detail enforce contact visibility`, async t => {
+  const stored = {...base(), ...contacts(), _id: 'partner'}; delete stored.password;
+  const query = many => {
+    let projection = '';
+    return {
+      select(value) {projection = value; return this;}, sort() {return this;}, skip() {return this;}, limit() {return this;},
+      then(resolve, reject) {
+        const visible = {...stored};
+        // Model select:false behavior, with explicit admin-only opt-in.
+        for (const field of ['financeContact', 'ownerContact']) if (!projection.split(' ').includes('+' + field)) delete visible[field];
+        return Promise.resolve(many ? [visible] : visible).then(resolve, reject);
+      }
+    };
+  };
+  t.mock.method(Partner, 'countDocuments', async () => 1);
+  t.mock.method(Partner, 'find', () => query(true));
+  t.mock.method(Partner, 'findById', () => query(false));
+  for (const path of ['/', '/:id']) {
+    const res = response();
+    await handler('get', path)({query: {}, params: {id: 'partner'}, user: {role}}, res);
+    assert.equal(res.statusCode, 200);
+    const partner = path === '/' ? res.body.data[0] : res.body.data;
+    assert.deepEqual(partner.pointOfContact, contacts().pointOfContact);
+    assert.equal(partner.businessName, base().businessName);
+    for (const field of ['financeContact', 'ownerContact']) {
+      if (role === 'kitchen') assert.equal(partner[field], undefined);
+      else assert.deepEqual(partner[field], contacts()[field]);
+    }
+  }
 });

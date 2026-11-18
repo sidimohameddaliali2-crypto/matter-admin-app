@@ -28,9 +28,10 @@ const partnerSchema = new mongoose.Schema({
   password: { type: String, required: true, select: false },
   phone: { type: String, default: '' },
   // Optional business contacts, separate from the partner login identity.
-  pointOfContact: { type: partnerContactSchema, default: undefined },
-  financeContact: { type: partnerContactSchema, default: undefined },
-  ownerContact: { type: partnerContactSchema, default: undefined },
+  pointOfContact: { type: partnerContactSchema, default: undefined, validate: { validator: value => value !== null, message: 'Contact must be an object; leave its fields blank to clear it' } },
+  // Finance/owner details are admin-only, including populated partner records.
+  financeContact: { type: partnerContactSchema, default: undefined, select: false, validate: { validator: value => value !== null, message: 'Contact must be an object; leave its fields blank to clear it' } },
+  ownerContact: { type: partnerContactSchema, default: undefined, select: false, validate: { validator: value => value !== null, message: 'Contact must be an object; leave its fields blank to clear it' } },
   address: { type: String, default: '' },
   minimumOrder: { type: Number, default: 0, min: 0 },
   defaultDeliveryTime: { type: String, default: null },

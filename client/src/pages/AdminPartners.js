@@ -79,12 +79,15 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
     ? {
         businessName: initial.businessName, businessType: initial.businessType, contactName: initial.contactName,
         phone: initial.phone || '', address: initial.address || '', minimumOrder: initial.minimumOrder ?? 0,
+        menuSelectionEnabled: !!initial.menuSelectionEnabled,
+        presetMacros: {C: initial.presetMacros?.C ?? 0, P: initial.presetMacros?.P ?? 0, F: initial.presetMacros?.F ?? 0},
         profilePicture: initial.profilePicture || '', accountCategory: initial.accountCategory || 'partner',
         ...partnerContactFields(initial)
       }
     : {
         businessName: '', businessType: 'cafe', contactName: '', email: '', password: '', phone: '', address: '', minimumOrder: 0,
         profilePicture: '', accountCategory: 'partner',
+        menuSelectionEnabled: false, presetMacros: {C: 0, P: 0, F: 0},
         ...partnerContactFields()
       }
   );
@@ -116,7 +119,20 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
   const submit = async (e) => {
     e.preventDefault(); setSaving(true); setError('');
     try {
-      const payload = { ...form };
+      const {menuSelectionEnabled, presetMacros, ...payload} = form;
+      if (!isEdit || menuSelectionEnabled !== !!initial.menuSelectionEnabled) payload.menuSelectionEnabled = menuSelectionEnabled;
+      if (!isEdit || ['C', 'P', 'F'].some(key => Number(presetMacros[key]) !== Number(initial.presetMacros?.[key] ?? 0))) {
+        payload.presetMacros = Object.fromEntries(['C', 'P', 'F'].map(key => [key, Number(presetMacros[key]) || 0]));
+      }
+      // A closed Details panel must not resend stale contact values. Explicit
+      // empty strings still clear individual fields without replacing siblings.
+      if (isEdit) for (const [role] of PARTNER_CONTACT_ROLES) {
+        const changes = Object.fromEntries(['fullName', 'email', 'phone']
+          .filter(field => form[role][field] !== (initial[role]?.[field] || ''))
+          .map(field => [field, form[role][field]]));
+        if (Object.keys(changes).length) payload[role] = changes;
+        else delete payload[role];
+      }
       const res = isEdit
         ? await api.patch(`/admin/partners/${initial._id}`, payload)
         : await api.post('/admin/partners', payload);
@@ -210,6 +226,24 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
                   </div>
                 </fieldset>
               ))}
+              <fieldset className="col-span-2 border border-[#e3d9ca] rounded-2xl p-3.5">
+                <legend className="px-1 text-sm font-bold text-[#0b1a3f]">Customer Menu Selection defaults</legend>
+                <label className="flex items-start gap-2 text-sm text-[#0b1a3f]">
+                  <input type="checkbox" name="menuSelectionEnabled" checked={form.menuSelectionEnabled}
+                    onChange={e => {const checked = e.target.checked; setForm(p => ({...p, menuSelectionEnabled: checked}));}}
+                    className="mt-0.5 accent-[#3f8500]" />
+                  Apply defaults to linked customers
+                </label>
+                <p className="text-xs text-[#6b7894] mt-2">Newly linked customers inherit unlimited meals and these preset macros. All partners can order published daily dishes independently of this setting.</p>
+                {form.menuSelectionEnabled && <div className="grid grid-cols-3 gap-3 mt-3">
+                  {[['C', 'Carbs (C)'], ['P', 'Protein (P)'], ['F', 'Fat (F)']].map(([key, label]) => <div key={key}>
+                    <label htmlFor={`presetMacros-${key}`} className="block text-xs text-[#6b7894] mb-1">{label}</label>
+                    <input id={`presetMacros-${key}`} type="number" min="0" value={form.presetMacros[key]}
+                      onChange={e => {const value = e.target.value; setForm(p => ({...p, presetMacros: {...p.presetMacros, [key]: value}}));}}
+                      className={inputCls} />
+                  </div>)}
+                </div>}
+              </fieldset>
             </div>
           </details>
           <div className="col-span-2">
