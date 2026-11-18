@@ -126,6 +126,22 @@ test('checking an authenticated bundle is offline and rejects mismatched objects
   await assert.rejects(f.run('check', { backend: undefined }), /inventory|object/i);
 });
 
+test('a listed report date needs its original bundled pages before anything can be staged', async t => {
+  const f = await fixture(t);
+  const index = JSON.parse(f.contents.stagedIndex);
+  const missing = { sha256: sha('missing date pages'), size: 24 };
+  const root = gzipSync(json({ version: 1, generation: f.candidate.generation, reportHash: f.candidate.reportHash,
+    catalog: { sha256: sha('catalog') }, visibleCutoffAt: date, history: { staffRows: 0 }, review: { snapshotHash: f.candidate.reportHash },
+    records: 0, days: [{ day: date.slice(0, 10), records: 0, extraCases: 0, fingerprint: missing.sha256, ref: missing }] }));
+  const lightView = { sha256: sha(root), size: root.length };
+  f.contents.objects = new Map([[lightView.sha256 + '.gz', root]]);
+  f.contents.candidate = json({ ...f.candidate, lightView });
+  f.contents.stagedIndex = json({ ...index, lightView, objectBytes: root.length, archives: [{ key: lightView.sha256 + '.gz', bytes: root.length }] });
+  await assert.rejects(f.run('stage'), /bundle/i);
+  assert.deepEqual(f.writes, []);
+  assert.deepEqual(f.reads, []);
+});
+
 test('the CLI authenticates a pinned private bundle without using a Supabase credential', async t => {
   const f = await fixture(t);
   const stageRoot = path.join(f.root, 'sealed-input'), objectRoot = path.join(stageRoot, 'objects');

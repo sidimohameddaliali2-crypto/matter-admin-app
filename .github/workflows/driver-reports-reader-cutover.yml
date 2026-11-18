@@ -1,0 +1,145 @@
+name: Driver Reports reader cutover
+
+on:
+  schedule:
+    - cron: '25 0 19 11 *'
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Check the selected reader or switch it after the same production checks
+        type: choice
+        default: check
+        options:
+          - check
+          - switch
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  reader:
+    if: >-
+      github.repository == 'sidimohameddaliali2-crypto/matter-admin-app' &&
+      github.ref == 'refs/heads/main' &&
+      github.sha == vars.DRIVER_AUDIT_CUTOVER_RELEASE_SHA &&
+      vars.DRIVER_AUDIT_CUTOVER_ENABLED == '1' &&
+      vars.DRIVER_AUDIT_CUTOVER_NOT_BEFORE != '' &&
+      vars.DRIVER_AUDIT_CUTOVER_PREVIOUS_SHA != '' &&
+      vars.DRIVER_AUDIT_CUTOVER_HEAD_SHA256 != '' &&
+      vars.DRIVER_AUDIT_CUTOVER_GENERATION != ''
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Prepare the exact app reader operator
+        id: reader
+        shell: bash
+        env:
+          READER_OPERATION: ${{ github.event_name == 'schedule' && 'switch' || inputs.operation }}
+          READER_EVENT_SCHEDULE: ${{ github.event.schedule }}
+          READER_RELEASE_SHA: ${{ vars.DRIVER_AUDIT_CUTOVER_RELEASE_SHA }}
+          READER_NOT_BEFORE: ${{ vars.DRIVER_AUDIT_CUTOVER_NOT_BEFORE }}
+          READER_PREVIOUS_SHA: ${{ vars.DRIVER_AUDIT_CUTOVER_PREVIOUS_SHA }}
+          READER_HEAD_SHA: ${{ vars.DRIVER_AUDIT_CUTOVER_HEAD_SHA256 }}
+          READER_GENERATION: ${{ vars.DRIVER_AUDIT_CUTOVER_GENERATION }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse --verify HEAD)" = "$GITHUB_SHA"
+          node <<'NODE'
+          const fs = require('node:fs'), crypto = require('node:crypto'), zlib = require('node:zlib');
+          const env = process.env;
+          const from = Date.parse(env.READER_NOT_BEFORE), now = Date.now(), day = 86400 * 1000;
+          const commit = value => /^[a-f0-9]{40}$/.test(value || '');
+          const digest = value => /^[a-f0-9]{64}$/.test(value || '');
+          if (env.GITHUB_REPOSITORY !== 'sidimohameddaliali2-crypto/matter-admin-app' || env.GITHUB_REF !== 'refs/heads/main'
+              || !commit(env.GITHUB_SHA) || env.READER_RELEASE_SHA !== env.GITHUB_SHA || !commit(env.READER_PREVIOUS_SHA)
+              || env.READER_PREVIOUS_SHA === env.GITHUB_SHA || !digest(env.READER_HEAD_SHA) || !digest(env.READER_GENERATION)
+              || !['check', 'switch'].includes(env.READER_OPERATION)
+              || !(env.GITHUB_EVENT_NAME === 'workflow_dispatch' || env.GITHUB_EVENT_NAME === 'schedule'
+                && env.READER_EVENT_SCHEDULE === '25 0 19 11 *' && env.READER_OPERATION === 'switch')
+              || !Number.isFinite(from) || from % day !== 0 || new Date(from).toISOString() !== env.READER_NOT_BEFORE
+              || now < from || now >= from + day) throw Error('The exact one-time report cutover pins are required');
+          const operator = fs.readFileSync('.github/scripts/driver-audit-supabase-app-release.mjs');
+          if (operator.length < 1 || operator.length > 192 * 1024) throw Error('The reviewed report operator exceeds its bound');
+          const sha256 = crypto.createHash('sha256').update(operator).digest('hex');
+          const request = Buffer.from(JSON.stringify({ version: 1, expectedOldSha: env.READER_PREVIOUS_SHA,
+            selectedSha: env.GITHUB_SHA, reportHeadSha256: env.READER_HEAD_SHA, generation: env.READER_GENERATION })).toString('base64');
+          const compressed = zlib.gzipSync(operator).toString('base64');
+          console.log('::add-mask::' + request);
+          console.log('::add-mask::' + compressed);
+          fs.appendFileSync(env.GITHUB_OUTPUT, 'operator=' + compressed + '\nsha256=' + sha256 + '\nrequest=' + request
+            + '\napply=' + (env.READER_OPERATION === 'switch' ? '1' : '0') + '\n');
+          NODE
+
+      - name: Check and switch only the selected reader
+        uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17 # v1.2.0
+        env:
+          DRIVER_AUDIT_APP_PATH: ${{ secrets.DO_APP_PATH }}
+          READER_OPERATOR_GZIP: ${{ steps.reader.outputs.operator }}
+          READER_OPERATOR_SHA: ${{ steps.reader.outputs.sha256 }}
+          READER_REQUEST: ${{ steps.reader.outputs.request }}
+          READER_APPLY: ${{ steps.reader.outputs.apply }}
+          READER_NOT_BEFORE: ${{ vars.DRIVER_AUDIT_CUTOVER_NOT_BEFORE }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          command_timeout: 30m
+          envs: DRIVER_AUDIT_APP_PATH,READER_OPERATOR_GZIP,READER_OPERATOR_SHA,READER_REQUEST,READER_APPLY,READER_NOT_BEFORE
+          script: |
+            set -eu
+            /usr/bin/node --input-type=module <<'NODE'
+            import { createHash } from 'node:crypto';
+            import { gunzipSync } from 'node:zlib';
+            const env = process.env, day = 86400 * 1000;
+            const check = condition => { if (!condition) throw Error('The selected report release stopped'); };
+            const assertWindow = () => {
+              const from = Date.parse(env.READER_NOT_BEFORE), now = Date.now();
+              check(Number.isFinite(from) && from % day === 0 && new Date(from).toISOString() === env.READER_NOT_BEFORE
+                && now >= from && now < from + day);
+            };
+            try {
+              assertWindow();
+              check(/^[a-f0-9]{64}$/.test(env.READER_OPERATOR_SHA || '') && ['0', '1'].includes(env.READER_APPLY)
+                && env.DRIVER_AUDIT_APP_PATH?.startsWith('/') && env.READER_REQUEST?.length <= 4096
+                && env.READER_OPERATOR_GZIP?.length <= 320 * 1024);
+              const raw = Buffer.from(env.READER_OPERATOR_GZIP, 'base64'), encoded = Buffer.from(env.READER_REQUEST, 'base64');
+              check(raw.toString('base64') === env.READER_OPERATOR_GZIP && encoded.toString('base64') === env.READER_REQUEST);
+              const bytes = gunzipSync(raw, { maxOutputLength: 192 * 1024 });
+              check(createHash('sha256').update(bytes).digest('hex') === env.READER_OPERATOR_SHA);
+              const operator = await import('data:text/javascript;base64,' + bytes.toString('base64'));
+              const request = operator.validateAppReaderReleaseRequest(JSON.parse(encoded));
+              const appRoot = env.DRIVER_AUDIT_APP_PATH;
+              const matches = result => result?.generation === request.generation && result.reportHeadSha256 === request.reportHeadSha256;
+              const prior = await operator.releaseSupabaseAppReader({ appRoot, request, apply: false });
+              check(matches(prior) && prior.status === 'supabase-app-reader-checked' && prior.activationPerformed === false
+                && prior.applicationCommit === request.expectedOldSha && prior.selectedCommit === request.selectedSha
+                && prior.prewarmed === true && prior.lightweight === true && prior.namedEvidenceVerified === true);
+              if (env.READER_APPLY === '1') {
+                assertWindow();
+                const result = await operator.releaseSupabaseAppReader({ appRoot, request, apply: true });
+                check(matches(result) && result.status === 'supabase-app-reader-released'
+                  && result.previousCommit === request.expectedOldSha && result.applicationCommit === request.selectedSha
+                  && result.apiProcessRestartVerified === true && result.workersStarted === false && result.routingChanged === false
+                  && result.dependenciesReinstalled === false && result.websiteRebuilt === false
+                  && result.authenticatedGenerationAcceptancePending === true && result.authenticatedBrowserAcceptancePending === true);
+                console.log(JSON.stringify({ status: 'supabase-app-reader-released', staffVerificationPending: true }));
+              } else console.log(JSON.stringify({ status: 'supabase-app-reader-checked' }));
+            } catch (error) {
+              const capacity = error.code === 'APP_READER_COLD_BUDGET';
+              const recovery = error.code === 'APP_READER_RECOVERY_REQUIRED' || error.code === 'APP_READER_ROLLBACK_PENDING';
+              console.log(JSON.stringify({ status: 'supabase-app-reader-stopped',
+                reason: capacity ? 'cold-transfer-budget' : recovery ? 'private-release-recovery' : 'private-release-guard' }));
+              process.exitCode = 1;
+            }
+            NODE

@@ -140,7 +140,12 @@ async function validateContents(contents, releaseSha) {
     return [body];
   } } });
   const direct = await offline.index(candidate);
-  check(direct.history?.staffRows >= 0 && direct.records >= 0, 'Invalid bundled evidence');
+  const savedKeys = [];
+  for (const date of direct.days) {
+    const day = await offline.directory(candidate, date.day);
+    for (const recordKey of day.keys) savedKeys.push(recordKey);
+  }
+  await offline.verify(candidate, savedKeys);
   return { proof, candidate, index, from, objects: contents.objects };
 }
 
