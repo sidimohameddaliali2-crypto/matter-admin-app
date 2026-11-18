@@ -119,7 +119,7 @@ function requireBuildSpace(bytes, { compact, inProgress = false }) {
 
 // The injectable backend is a testable service boundary, never a CLI/env hook.
 // The public runner below always opens the explicitly selected Sidi backend.
-export async function createDriverAuditSupabaseSync({ config, file, backend, collectSource, signal, clock = Date.now } = {}) {
+export async function createDriverAuditSupabaseSync({ config, file, backend, collectSource, armedAt, signal, clock = Date.now } = {}) {
   config = structuredClone(config);
   const pins = await checkedConfiguration({ config, file });
   const { root, baselineRoot, codeRoot, builderSha256, rendererBuild, journals } = config;
@@ -133,6 +133,9 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
     && typeof clock === 'function', 'The qualified Sidi Supabase backend and managed cache are required');
   check(collectSource === undefined || executionHost === 'off-host' && typeof collectSource === 'function',
     'Managed source checks require the off-host worker');
+  const firstEligibleAt = armedAt === undefined ? -Infinity : Date.parse(armedAt);
+  check(armedAt === undefined || executionHost === 'off-host' && iso(armedAt) === armedAt && firstEligibleAt <= clock(),
+    'Invalid off-host schedule enrollment');
   signal?.throwIfAborted();
   for (const directory of [work, cache, path.join(root, 'archive-receipts')]) await privateDirectory(directory);
   const lock = await acquireWorkerLock(path.join(path.dirname(root), 'sync-worker.lock'));
@@ -367,7 +370,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
       const { dueAt, nextAt } = reportSchedule(clock());
       const saved = await readHeartbeat() ?? { status: 'pending', pending: true };
       // Catch up at most the latest elapsed slot for this Dubai day.
-      if (dueAt !== null && dueAt > (Date.parse(saved.lastScheduledAt) || -Infinity)) {
+      if (dueAt !== null && dueAt >= firstEligibleAt && dueAt > (Date.parse(saved.lastScheduledAt) || -Infinity)) {
         try {
           if (executionHost === 'off-host') {
             check(collectSource, 'The off-host source checker is required');
@@ -409,13 +412,13 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
   } catch (error) { await lock.release(); throw error; }
 }
 
-export async function runDriverAuditSupabaseSync({ config, file, mode, collectSource, env = process.env } = {}) {
+export async function runDriverAuditSupabaseSync({ config, file, mode, collectSource, armedAt, env = process.env } = {}) {
   const executionHost = env.DRIVER_AUDIT_EXECUTION_HOST;
   check(['sidi', 'off-host'].includes(executionHost) && (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase'
     && env.DRIVER_AUDIT_IMPORT_ENABLED === '0'
     && (env.DRIVER_AUDIT_ENABLED === '1' || mode === '--seed-only' && env.DRIVER_AUDIT_ENABLED === '0')
     && [undefined, '--check', '--seed-only'].includes(mode)
-    && (executionHost !== 'off-host' || mode !== undefined || typeof collectSource === 'function'),
+    && (executionHost !== 'off-host' || mode !== undefined || typeof collectSource === 'function' && iso(armedAt) === armedAt),
   'Explicit managed Supabase sync with import disabled is required');
   const stop = new AbortController();
   const onStop = () => { if (!stop.signal.aborted) stop.abort(Error('Sidi audit sync stopped')); };
@@ -426,7 +429,7 @@ export async function runDriverAuditSupabaseSync({ config, file, mode, collectSo
     const cache = path.join(config.root, 'work', 'archive-cache'); await privateDirectory(cache);
     stop.signal.throwIfAborted();
     const backend = await createDriverAuditSupabaseAppBackend({ env: { ...env, MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: cache } });
-    worker = await createDriverAuditSupabaseSync({ config, file, backend, collectSource, signal: stop.signal });
+    worker = await createDriverAuditSupabaseSync({ config, file, backend, collectSource, armedAt, signal: stop.signal });
     if (mode === '--check' || mode === '--seed-only') {
       const result = await (mode === '--check' ? worker.check() : worker.seed());
       console.info(JSON.stringify({ status: result.status, dataStore: 'supabase', executionHost,

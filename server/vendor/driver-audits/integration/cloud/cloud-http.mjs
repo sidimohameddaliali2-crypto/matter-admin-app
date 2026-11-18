@@ -103,6 +103,9 @@ export function createCloudHttp({auth,service,origin,renderer,login,requestCode,
    if(fontRoute.test(url.pathname)&&typeof requestService.fontAsset==='function'){phase='font';const value=requestService.fontAsset(url.pathname);return await send(200,value.bytes,value.mime);}
    if(url.pathname==='/api/reporting/status'){phase='status';const status=await requestService.status(actor);return await send(200,{...status,token:session.csrf});}
    if(url.pathname==='/api/reporting/reviews'){phase='reviews';return await send(200,{state:await requestService.reviews(actor)});}
+   if(url.pathname==='/api/reporting/history-archive'&&typeof requestService.sourceHistory==='function'){
+    phase='source-history';return await send(200,await requestService.sourceHistory(url.searchParams),'text/html; charset=utf-8');
+   }
    if(url.pathname==='/api/reporting/delivery-identities'){phase='identities';return await send(200,await requestService.identities(actor));}
    if(url.pathname==='/api/reporting/road-evidence'&&typeof requestService.roadEvidence==='function'){phase='gps';return await send(200,await requestService.roadEvidence(url.searchParams,actor));}
    if(url.pathname==='/api/reporting/gps-evidence'&&typeof requestService.gpsEvidence==='function'){phase='gps';return await send(200,await requestService.gpsEvidence(url.searchParams,actor));}

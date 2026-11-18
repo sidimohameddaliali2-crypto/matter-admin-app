@@ -102,7 +102,7 @@ async function packageFiles(directory, revision) {
     restore: { version: 1, archive: 'matter-report-archive', verified: true, ...binding } } };
 }
 
-async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource } = {}) {
+async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource, armedAt } = {}) {
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'driver-audit-supabase-sync-')));
   let worker;
   t.after(async () => { try { await worker?.close(); } finally { await fs.rm(temporary, { recursive: true, force: true }); } });
@@ -165,7 +165,7 @@ async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource
     loseNextAck() { lostAck = true; }, corruptUploads() { corrupt = true; }, onNextCas(callback) { afterCas = callback; } };
   f.reopen = async (signalOverride = signal) => {
     await worker?.close();
-    f.worker = worker = await createDriverAuditSupabaseSync({ config, file, backend, collectSource, signal: signalOverride, clock });
+    f.worker = worker = await createDriverAuditSupabaseSync({ config, file, backend, collectSource, armedAt, signal: signalOverride, clock });
   };
   await f.reopen();
   return f;
@@ -345,6 +345,30 @@ test('the off-host worker collects before building and retains unchanged noon ev
   assert.deepEqual(slots, [morning, noon]);
   assert.deepEqual(f.states.get('app-sidi-report-head'), head);
   assert.equal(f.uploads.length, uploads);
+});
+
+test('a new enrollment skips elapsed slots and catches up the next day after restart', async t => {
+  let now = Date.parse('2026-11-18T10:00:00Z');
+  const morning = Date.parse('2026-11-19T06:30:00Z');
+  const slots = [];
+  const f = await fixture(t, { clock: () => now, executionHost: 'off-host', armedAt: new Date(now).toISOString(),
+    async collectSource({ dueAt, onAdmission }) {
+      await onAdmission();
+      slots.push(dueAt);
+    } });
+  await f.worker.seed();
+  const initialCalls = f.calls.length;
+  await f.worker.scheduledTick();
+  const status = path.join(f.config.root, 'sync-status.private.json');
+  assert.equal(JSON.parse(await fs.readFile(status)).lastScheduledAt, null);
+  assert.equal(f.calls.length, initialCalls);
+  await f.reopen();
+  now = morning + 2 * 60_000;
+  await f.worker.scheduledTick();
+  await f.reopen();
+  await f.worker.scheduledTick();
+  assert.deepEqual(slots, [morning]);
+  assert.equal(JSON.parse(await fs.readFile(status)).lastScheduledAt, new Date(morning).toISOString());
 });
 
 test('restarting before off-host source admission keeps the same slot available', async t => {

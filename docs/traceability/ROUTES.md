@@ -534,14 +534,15 @@ Path literals and patterns below come from raw handlers, including delegated rep
 - `^\/report-data\/(detail|history|query|archive|snapshot)-[a-f0-9]{64}\.json$` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:87](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L87)
 - `/api/reporting/status` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:104](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L104)
 - `/api/reporting/reviews` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:105](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L105)
-- `/api/reporting/delivery-identities` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:106](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L106)
-- `/api/reporting/road-evidence` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:107](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L107)
-- `/api/reporting/gps-evidence` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:108](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L108)
-- `/api/reporting/evidence-overlay` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:109](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L109)
-- `/api/reporting/completed` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:114](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L114)
-- `/api/reporting/photo-proposals` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:115](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L115)
-- `/api/reporting/photo` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:116](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L116)
-- `/api/reporting/photo/image` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:116](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L116)
+- `/api/reporting/history-archive` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:106](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L106)
+- `/api/reporting/delivery-identities` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:109](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L109)
+- `/api/reporting/road-evidence` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:110](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L110)
+- `/api/reporting/gps-evidence` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:111](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L111)
+- `/api/reporting/evidence-overlay` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:112](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L112)
+- `/api/reporting/completed` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:117](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L117)
+- `/api/reporting/photo-proposals` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:118](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L118)
+- `/api/reporting/photo` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:119](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L119)
+- `/api/reporting/photo/image` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:119](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L119)
 
 ## Socket event declarations
 

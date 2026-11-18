@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import fs from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { checkDriverAuditSource } from './driverAuditSource.js';
 import { readDriverAuditSourceConfig, readPrivateDriverAuditSource, runDriverAuditSourceChild } from '../services/driverAuditSource.js';
 import { runDriverAuditSupabaseSync } from '../services/driverAuditSupabaseSync.js';
@@ -9,6 +10,17 @@ const requiredPaths = ['/api/collector?task=delivery', '/api/morning-gps', '/api
 const optionalPaths = ['/api/collector?task=photo-backlog', '/api/collector?task=photo-grade'];
 const complete = new Set(['complete', 'not-due']);
 const acceptedOptional = new Set([...complete, 'disabled', 'budget-exhausted', 'deferred']);
+const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+
+async function readScheduleEnrollment(root, syncSha256, sourceSha256) {
+  const record = JSON.parse(await readPrivateDriverAuditSource(path.join(root, 'launch-verified.private.json'), 32 * 1024));
+  const time = Date.parse(record.armedAt);
+  if (record.version !== 1 || record.syncSha256 !== syncSha256 || record.sourceSha256 !== sourceSha256
+    || !Number.isFinite(time) || time > Date.now() || new Date(time).toISOString() !== record.armedAt) {
+    throw Error('Verified enrollment for the exact off-host schedule configuration is required');
+  }
+  return record.armedAt;
+}
 
 async function main(args) {
   const [configFlag, file, sourceFlag, sourceFile, mode] = args;
@@ -16,7 +28,8 @@ async function main(args) {
     || !path.isAbsolute(sourceFile || '') || args.length > 5 || ![undefined, '--check', '--seed-only'].includes(mode)) {
     throw Error('Use an exact private off-host sync and source configuration');
   }
-  const config = JSON.parse(await readPrivateDriverAuditSource(file, 1024 * 1024));
+  const configBytes = await readPrivateDriverAuditSource(file, 1024 * 1024);
+  const config = JSON.parse(configBytes);
   const source = await readDriverAuditSourceConfig(sourceFile);
   const env = source.environment;
   if (source.executionHost !== 'off-host' || source.dataStore !== 'supabase' || config.root !== path.dirname(file)
@@ -33,7 +46,8 @@ async function main(args) {
     return entries[0];
   });
   if (mode === '--check') await checkDriverAuditSource(source);
-  return runDriverAuditSupabaseSync({ config, file, mode, env: {
+  const armedAt = mode === undefined ? await readScheduleEnrollment(config.root, sha256(configBytes), source.configSha256) : undefined;
+  return runDriverAuditSupabaseSync({ config, file, mode, armedAt, env: {
     ...env, DRIVER_AUDIT_SUPABASE_SECRET: env.MATTER_SUPABASE_SECRET,
     DRIVER_AUDIT_ENABLED: mode === '--seed-only' ? '0' : '1', DRIVER_AUDIT_IMPORT_ENABLED: '0',
   }, async collectSource({ signal, onAdmission }) {

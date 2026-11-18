@@ -11,6 +11,7 @@ import {connectPreviewOrderTiming} from './preview-order-timing.mjs';
 import {connectPreviewCorrections} from './preview-corrections.mjs';
 import {createPreviewRoads} from './preview-roads.mjs';
 import {createPreviewReadView} from './preview-read-view.mjs';
+import {createPreviewSourceHistory,previewSourceHistoryLink} from './preview-source-history.mjs';
 import {previewArchiveTransport} from './preview-archive-cache.mjs';
 import {extractPreviewFonts} from './preview-fonts.mjs';
 import {addDriverAuditSyncStatus} from './driver-audit-status.mjs';
@@ -57,9 +58,17 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
  const access=createHostedAccess({rpc}),auth=authOverride||createHostedAuth({supabaseUrl:'https://trhhjfgfmxofxhnzocks.supabase.co',publishableKey,cookieKey,membership:access.membership,sessionActive:access.sessionActive,cookieName:'__Host-matter_preview'});
  const login=createPasswordLogin({supabaseUrl:'https://trhhjfgfmxofxhnzocks.supabase.co',publishableKey,allowedEmail,additionalAllowedEmails,throttle:createLoginThrottle({stateStore:state})});
  const readView=JSON.parse(gunzipSync(read('preview-read-view.private.json.gz')));
+ const sourceHistory=staffIntegration&&packageOverride?.staffSnapshot===true&&packageOverride.directSnapshot!==true
+  ?createPreviewSourceHistory({sourceManifest:publication.privateRelease?.currentHead?.manifest,staffManifest:readView.browser,
+   rows:readView.gpsRows,readStaffBrowser:()=>read('browser-data.private.json.gz'),async readRetained(file,maxBytes){
+    try{return await repository.readFile('state',file,{maxBytes});}
+    catch(error){if(error.code!=='ENOENT')throw error;return repository.readFile('archive',file,{maxBytes});}
+   }})
+  :undefined;
  let report;const reviews=createHostedReviews({stateStore:state,snapshotFor:hash=>report.snapshotFor(hash)}),identities=createHostedIdentities({stateStore:{read:async()=>identity,compareAndSwap:async()=>{throw Object.assign(Error('Preview is read-only for identities'),{status:403});}},config:JSON.parse(identity.body).config,rows:async()=>(await report.gpsSnapshotFor(head.reportHash)).rows});
  report=createCloudReportService({repository,reviewStore:reviews,identityStore:identities,evidenceCache:createImmutableEvidenceCache({maxBytes:96*1024*1024,maxEntries:96}),photoBindingRegistry:has('preview-photo-bindings.private.json')?json('preview-photo-bindings.private.json'):null,deferredPhotoProgress:staffIntegration&&remoteReadsBudgeted});
  report=createPreviewReadView({service:report,repository,read,readAsync,view:readView,gpsIndex:index,has});
+ if(sourceHistory)report.sourceHistory=sourceHistory;
  if(staffIntegration&&remoteReadsBudgeted){
   const proposalPage=report.photoProposals;
   // Each page verifies its own cases. A staff request never downloads the image archive to count other cases.
@@ -122,7 +131,8 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
  return createCloudHttp({auth,service:report,origin,login,loginPage:passwordLoginHtml,compressPreviewReads:true,frozenEvidenceOverlay:staffIntegration,localFontAssets:staffIntegration,staffReportFrame,afterResponse,onAuthenticatedRequest,isRetiredAuditGeneration,mapsEnabled:maps.enabled===true,readerBudget:local||remoteReadsBudgeted?undefined:createReaderBudgetPool({stateStore:rawState}),renderer:async(_actor,_service,url,framed)=>{
   if(!html){let source=fonts.html.replace(build.snapshot.path,'report-data/snapshot-'+build.snapshot.sha256+'.json');source=cloudHtml({html:initializeReportTab(source),priorManifest:build.snapshot,head:{...head,manifest:await report.browserManifest()},generation:head.manifest.sha256,publicPathPrefix});html=addCasePrefetch(addBrowserReadCache(addBrowserRequestQueue(addPrivateEvidenceCache(source.replace('</head>','<script>window.__matterPrivatePreview=true;window.__matterGpsPreview=true;window.__matterAutomaticPreview='+JSON.stringify(automaticRefresh||automaticFeed)+';</script></head>')))));html=addPreviewStartup(addStatusFlight(html),{...(await report.browserManifest()),generation:head.manifest.sha256,publicPathPrefix});}
   const document=(framed?html.replace('<head>','<head>'+frameHead):html).replace('</head>',selectionStyle+'</head>');
-  const page=prioritizePreviewStartup(addPreviewPhotoPrime(document,photoHints,url));
+  let page=prioritizePreviewStartup(addPreviewPhotoPrime(document,photoHints,url));
+  if(framed&&sourceHistory)page=page.replace(/<body\b[^>]*>/i,body=>body+previewSourceHistoryLink);
   return auditSyncStatus?addDriverAuditSyncStatus(page,framed?null:await syncStatus()):page;
  }});
 }
