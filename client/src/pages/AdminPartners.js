@@ -37,6 +37,10 @@ const marginColor = (m) => (m >= 50 ? '#3f8500' : m >= 35 ? '#0b1a3f' : '#ff3b00
 const MEAL_TYPES = ['breakfast', 'oats', 'wraps-buns', 'snack', 'bowl', 'main'];
 const MEAL_TYPE_LABEL = { breakfast: 'Breakfast of the day', oats: 'Oats', 'wraps-buns': 'Wraps/Buns', snack: 'Snack', bowl: 'Bowl', main: 'Main' };
 const TYPE_BADGE = { cafe: '#fff2d9', gym: '#e3edff', restaurant: '#e3f3d9', other: '#f1ebe2' };
+const PARTNER_CONTACT_ROLES = [['pointOfContact', 'Point of Contact'], ['financeContact', 'Finance Contact'], ['ownerContact', 'Owner']];
+const partnerContactFields = partner => Object.fromEntries(PARTNER_CONTACT_ROLES.map(([key]) => [key, {
+  fullName: partner?.[key]?.fullName || '', email: partner?.[key]?.email || '', phone: partner?.[key]?.phone || ''
+}]));
 const WASTE_REASONS = ['over-order', 'spoilage', 'returns', 'prep-error'];
 
 const AB = { fontFamily: "'Archivo Black', sans-serif" };
@@ -77,11 +81,13 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
         phone: initial.phone || '', address: initial.address || '', minimumOrder: initial.minimumOrder ?? 0,
         menuSelectionEnabled: !!initial.menuSelectionEnabled,
         presetMacros: { C: initial.presetMacros?.C ?? 0, P: initial.presetMacros?.P ?? 0, F: initial.presetMacros?.F ?? 0 },
-        profilePicture: initial.profilePicture || '', accountCategory: initial.accountCategory || 'partner'
+        profilePicture: initial.profilePicture || '', accountCategory: initial.accountCategory || 'partner',
+        ...partnerContactFields(initial)
       }
     : {
         businessName: '', businessType: 'cafe', contactName: '', email: '', password: '', phone: '', address: '', minimumOrder: 0,
-        menuSelectionEnabled: false, presetMacros: { C: 0, P: 0, F: 0 }, profilePicture: '', accountCategory: 'partner'
+        menuSelectionEnabled: false, presetMacros: { C: 0, P: 0, F: 0 }, profilePicture: '', accountCategory: 'partner',
+        ...partnerContactFields()
       }
   );
   const [saving, setSaving] = useState(false);
@@ -89,6 +95,11 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
   const [uploadingPicture, setUploadingPicture] = useState(false);
 
   const set = (e) => { const { name, value } = e.target; setForm((p) => ({ ...p, [name]: value })); setError(''); };
+  const setContact = (role, field) => (e) => {
+    const value = e.target.value;
+    setForm(p => ({ ...p, [role]: { ...p[role], [field]: value } }));
+    setError('');
+  };
   const setMacro = (key) => (e) => { const value = e.target.value; setForm((p) => ({ ...p, presetMacros: { ...p.presetMacros, [key]: value } })); };
 
   const uploadPicture = async (e) => {
@@ -177,6 +188,25 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
             <input name="phone" value={form.phone} onChange={set} className={inputCls} placeholder="+971 50 000 0000" /></div>
           <div><label className="block text-sm font-medium text-[#0b1a3f] mb-1">Address</label>
             <input name="address" value={form.address} onChange={set} className={inputCls} placeholder="Dubai, UAE" /></div>
+          {PARTNER_CONTACT_ROLES.map(([role, title]) => (
+            <fieldset key={role} className="col-span-2 border border-[#e3d9ca] rounded-2xl p-3.5">
+              <legend className="px-1 text-sm font-bold text-[#0b1a3f]">{title} <span className="font-normal text-[#6b7894]">(optional)</span></legend>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="sm:col-span-2">
+                  <label htmlFor={`${role}-fullName`} className="block text-xs font-medium text-[#6b7894] mb-1">Full name</label>
+                  <input id={`${role}-fullName`} name={`${role}.fullName`} value={form[role].fullName} onChange={setContact(role, 'fullName')} className={inputCls} autoComplete="off" />
+                </div>
+                <div>
+                  <label htmlFor={`${role}-email`} className="block text-xs font-medium text-[#6b7894] mb-1">Email</label>
+                  <input id={`${role}-email`} name={`${role}.email`} type="email" value={form[role].email} onChange={setContact(role, 'email')} className={inputCls} autoComplete="off" />
+                </div>
+                <div>
+                  <label htmlFor={`${role}-phone`} className="block text-xs font-medium text-[#6b7894] mb-1">Phone</label>
+                  <input id={`${role}-phone`} name={`${role}.phone`} type="tel" value={form[role].phone} onChange={setContact(role, 'phone')} className={inputCls} autoComplete="off" placeholder="+971 50 000 0000" />
+                </div>
+              </div>
+            </fieldset>
+          ))}
           <div className="col-span-2">
             <label className="block text-sm font-medium text-[#0b1a3f] mb-1">Minimum Order (AED)</label>
             <input name="minimumOrder" type="number" min="0" step="0.01" value={form.minimumOrder} onChange={set} className={inputCls} placeholder="0" />
@@ -751,6 +781,21 @@ const AdminPartners = () => {
                           <div className="text-[13px] font-bold mt-0.5 truncate">{sel.phone || '—'}</div>
                         </div>
                       </div>
+
+                      <section aria-label="Partner contacts" className="mt-4 space-y-2">
+                        {PARTNER_CONTACT_ROLES.map(([role, title]) => {
+                          const contact = sel[role];
+                          const filled = contact && [contact.fullName, contact.email, contact.phone].some(Boolean);
+                          return <div key={role} className="bg-[#f1ebe2] rounded-2xl px-3 py-2.5">
+                            <h4 className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#6b7894]">{title}</h4>
+                            {filled ? <div className="text-[13px] mt-1 space-y-0.5 break-words">
+                              {contact.fullName && <p className="font-bold">{contact.fullName}</p>}
+                              {contact.email && <p>{contact.email}</p>}
+                              {contact.phone && <p>{contact.phone}</p>}
+                            </div> : <p className="text-xs text-[#6b7894] mt-1">Not provided</p>}
+                          </div>;
+                        })}
+                      </section>
 
                       {!isKitchen && (
                         <div className="flex gap-2 mt-3">

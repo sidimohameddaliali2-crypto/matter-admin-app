@@ -592,7 +592,10 @@ router.post('/', admin, async (req, res) => {
       menuSelectionEnabled: !!menuSelectionEnabled,
       presetMacros: presetMacros || undefined,
       accountCategory: ['retail','member','partner'].includes(req.body.accountCategory) ? req.body.accountCategory : 'partner',
-      profilePicture: profilePicture || ''
+      profilePicture: profilePicture || '',
+      pointOfContact: req.body.pointOfContact,
+      financeContact: req.body.financeContact,
+      ownerContact: req.body.ownerContact
     });
     partner.password = undefined;
     // New partner should already have every master-menu item, not just
@@ -602,7 +605,8 @@ router.post('/', admin, async (req, res) => {
     res.status(201).json({ success: true, data: partner });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    const invalid = ['ValidationError', 'CastError'].includes(err.name);
+    res.status(invalid ? 400 : 500).json({ success: false, message: invalid ? err.message : 'Server error' });
   }
 });
 
@@ -621,6 +625,17 @@ router.patch('/:id', admin, async (req, res) => {
     const allowed = ['businessName', 'businessType', 'contactName', 'phone', 'address', 'isActive', 'minimumOrder', 'menuSelectionEnabled', 'presetMacros', 'profilePicture', 'accountCategory'];
     const updates = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
+    for (const role of ['pointOfContact', 'financeContact', 'ownerContact']) {
+      const contact = req.body[role];
+      if (contact === undefined) continue;
+      if (!contact || typeof contact !== 'object' || Array.isArray(contact)) {
+        return res.status(400).json({ success: false, message: `${role} must contain contact fields` });
+      }
+      // Updating one contact field must retain the other saved contact details.
+      for (const field of ['fullName', 'email', 'phone']) {
+        if (contact[field] !== undefined) updates[`${role}.${field}`] = contact[field];
+      }
+    }
     const partner = await Partner.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true, runValidators: true });
     if (!partner) return res.status(404).json({ success: false, message: 'Partner not found' });
     res.json({ success: true, data: partner });
