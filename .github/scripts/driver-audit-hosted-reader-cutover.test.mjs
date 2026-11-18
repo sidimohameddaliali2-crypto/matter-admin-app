@@ -24,11 +24,43 @@ function driver(marker, spaces) {
     .split('\n').map(line => line.slice(spaces)).join('\n');
 }
 
-function run(code, now, env, inputType = 'module') {
+function run(code, now, env, inputType = 'module', cwd = new URL('../../', import.meta.url)) {
   const child = spawnSync(process.execPath, ['--input-type=' + inputType, '--eval', `Date.now = () => ${now};\n` + code],
-    { cwd: new URL('../../', import.meta.url), env, encoding: 'utf8', timeout: 10_000 });
+    { cwd, env, encoding: 'utf8', timeout: 10_000 });
   assert.equal(child.error, undefined);
   return child;
+}
+
+async function gitFixture(t) {
+  const root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'hosted-reader-cutover-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const git = (...args) => {
+    const child = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Cutover Fixture', '-c', 'user.email=cutover@example.invalid',
+      '-c', 'commit.gpgSign=false', ...args], { cwd: root, encoding: 'utf8', timeout: 10_000 });
+    assert.equal(child.status, 0, child.stderr);
+    return child.stdout.trim();
+  };
+  const scripts = path.join(root, '.github', 'scripts'), operator = path.join(scripts, 'driver-audit-supabase-app-release.mjs');
+  await fs.mkdir(scripts, { recursive: true });
+  await fs.writeFile(operator, '// Fixture base');
+  git('init', '-b', 'main');
+  git('add', '.');
+  git('commit', '-m', 'Original app');
+  const previousSha = git('rev-parse', 'HEAD');
+  git('checkout', '-b', 'reviewed-reader');
+  const reviewedOperator = Buffer.from('// Fixture reviewed operator');
+  await fs.writeFile(operator, reviewedOperator);
+  git('commit', '-am', 'Reviewed reader');
+  const releaseSha = git('rev-parse', 'HEAD');
+  git('checkout', 'main');
+  git('merge', '--no-ff', '-m', 'Ordinary reviewed merge', 'reviewed-reader');
+  const eventSha = git('rev-parse', 'HEAD');
+  git('checkout', '-b', 'unrelated', previousSha);
+  await fs.writeFile(operator, '// Fixture unrelated');
+  git('commit', '-am', 'Unrelated branch');
+  const unrelatedSha = git('rev-parse', 'HEAD');
+  git('checkout', '--detach', releaseSha);
+  return { root, previousSha, releaseSha, eventSha, unrelatedSha, reviewedOperator, git };
 }
 
 test('the dedicated production workflow is calendar-limited, manual or scheduled, and read-only in GitHub', () => {
@@ -40,38 +72,44 @@ test('the dedicated production workflow is calendar-limited, manual or scheduled
   assert.match(source, /environment: production\n/);
   assert.match(source, /github\.repository == 'sidimohameddaliali2-crypto\/matter-admin-app'/);
   assert.match(source, /github\.ref == 'refs\/heads\/main'/);
-  assert.match(source, /github\.sha == vars\.DRIVER_AUDIT_CUTOVER_RELEASE_SHA/);
+  assert.match(source, /vars\.DRIVER_AUDIT_CUTOVER_RELEASE_SHA != ''/);
   assert.match(source, /vars\.DRIVER_AUDIT_CUTOVER_ENABLED == '1'/);
   assert.match(source, /actions\/checkout@[0-9a-f]{40}\b/);
   assert.match(source, /appleboy\/ssh-action@[0-9a-f]{40}\b/);
+  assert.match(source, /ref: \$\{\{ vars\.DRIVER_AUDIT_CUTOVER_RELEASE_SHA \}\}\n          fetch-depth: 0/);
   assert.match(source, /persist-credentials: false/);
   assert.doesNotMatch(source, /(?:run_build|npm ci|npm run build|worker --once|git push|gh workflow enable)/);
 });
 
-test('the actual runner driver rejects shifted dates and missing pins before transport preparation', async t => {
-  const root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'hosted-reader-cutover-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
+test('the actual runner rejects unrelated code and invalid pins before preparing the reviewed ancestor', async t => {
+  const { root, previousSha, releaseSha, eventSha, unrelatedSha, reviewedOperator, git } = await gitFixture(t);
+  assert.notEqual(eventSha, releaseSha);
   const GITHUB_OUTPUT = path.join(root, 'output'), code = driver('Prepare the exact app reader operator', 10);
-  const env = { GITHUB_OUTPUT, GITHUB_REPOSITORY: repo, GITHUB_REF: 'refs/heads/main', GITHUB_SHA: appSha,
-    GITHUB_EVENT_NAME: 'workflow_dispatch', READER_OPERATION: 'check', READER_RELEASE_SHA: appSha,
-    READER_PREVIOUS_SHA: oldSha, READER_HEAD_SHA: headSha, READER_GENERATION: generation, READER_NOT_BEFORE: date };
+  const env = { GITHUB_OUTPUT, GITHUB_REPOSITORY: repo, GITHUB_REF: 'refs/heads/main', GITHUB_SHA: eventSha,
+    GITHUB_EVENT_NAME: 'workflow_dispatch', READER_OPERATION: 'check', READER_RELEASE_SHA: releaseSha,
+    READER_PREVIOUS_SHA: previousSha, READER_HEAD_SHA: headSha, READER_GENERATION: generation, READER_NOT_BEFORE: date };
   for (const [now, overrides] of [[dateMs - 1, {}], [dateMs + 24 * 60 * minute, {}], [dateMs + minute, { READER_NOT_BEFORE: 'bad' }],
-    [dateMs + minute, { READER_PREVIOUS_SHA: appSha }], [dateMs + minute, { READER_OPERATION: 'deploy' }],
-    [dateMs + minute, { READER_HEAD_SHA: '' }], [dateMs + minute, { GITHUB_REF: 'refs/heads/elsewhere' }]]) {
-    assert.notEqual(run(code, now, { ...env, ...overrides }, 'commonjs').status, 0);
+    [dateMs + minute, { READER_PREVIOUS_SHA: releaseSha }], [dateMs + minute, { READER_OPERATION: 'deploy' }],
+    [dateMs + minute, { READER_HEAD_SHA: '' }], [dateMs + minute, { GITHUB_REF: 'refs/heads/elsewhere' }],
+    [dateMs + minute, { GITHUB_SHA: unrelatedSha }]]) {
+    assert.notEqual(run(code, now, { ...env, ...overrides }, 'commonjs', root).status, 0);
     await assert.rejects(fs.readFile(GITHUB_OUTPUT), { code: 'ENOENT' });
   }
-  const checked = run(code, dateMs + minute, env, 'commonjs');
+  git('checkout', '--detach', eventSha);
+  assert.notEqual(run(code, dateMs + minute, env, 'commonjs', root).status, 0);
+  await assert.rejects(fs.readFile(GITHUB_OUTPUT), { code: 'ENOENT' });
+  git('checkout', '--detach', releaseSha);
+  const checked = run(code, dateMs + minute, env, 'commonjs', root);
   assert.equal(checked.status, 0, checked.stderr);
   const entries = Object.fromEntries((await fs.readFile(GITHUB_OUTPUT, 'utf8')).trim().split('\n').map(line => {
     const split = line.indexOf('='); return [line.slice(0, split), line.slice(split + 1)];
   }));
-  assert.match(entries.sha256, /^[a-f0-9]{64}$/);
+  assert.equal(entries.sha256, sha(reviewedOperator));
   assert.equal(entries.apply, '0');
-  assert.deepEqual(JSON.parse(Buffer.from(entries.request, 'base64')), { version: 1, expectedOldSha: oldSha, selectedSha: appSha,
+  assert.deepEqual(JSON.parse(Buffer.from(entries.request, 'base64')), { version: 1, expectedOldSha: previousSha, selectedSha: releaseSha,
     reportHeadSha256: headSha, generation });
   const scheduled = run(code, dateMs + minute, { ...env, GITHUB_EVENT_NAME: 'schedule', READER_OPERATION: 'switch',
-    READER_EVENT_SCHEDULE: '25 0 19 11 *' }, 'commonjs');
+    READER_EVENT_SCHEDULE: '25 0 19 11 *' }, 'commonjs', root);
   assert.equal(scheduled.status, 0, scheduled.stderr);
   assert.match(await fs.readFile(GITHUB_OUTPUT, 'utf8'), /\napply=1\n$/);
 });
