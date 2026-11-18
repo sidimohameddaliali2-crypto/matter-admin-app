@@ -216,6 +216,8 @@ test('a photo receipt alone updates its exact delivery once and scope expiry kee
   assert.deepEqual((await plan(noon)).selected.map(candidate => candidate.key), [row.key]);
   photo.sha256 = captured.sha256;
   assert.deepEqual((await plan(noon)).selected, []);
+  photo.sha256 = digest('a different already verified photo');
+  assert.deepEqual((await plan(noon)).selected, []);
   photo.sha256 = null;
   photo.proofTimestamp = '2026-11-17T20:00:00.000Z';
   assert.deepEqual((await plan(noon)).selected, []);

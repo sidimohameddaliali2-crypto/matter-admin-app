@@ -307,7 +307,7 @@ export async function planDriverAuditDeliveryChanges({ scheduledAt, head, pages,
     if (prior === candidate.sourceHash && !gpsChanged && capture) {
       const saved = (await pages.record(head, key)).photo;
       newPhoto = typeof saved?.sourceUrl === 'string' && sha(saved.sourceUrl) === capture.urlSha256
-        && saved.proofTimestamp === capture.proofTimestamp && saved.sha256 !== capture.sha256;
+        && saved.proofTimestamp === capture.proofTimestamp && !hex(saved.sha256);
     }
     if (prior === candidate.sourceHash && !gpsChanged && !newPhoto) {
       if (!gpsBasisKnown && candidate.gpsHash != null) heldGpsCount++;
