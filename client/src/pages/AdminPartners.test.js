@@ -34,7 +34,16 @@ const submit = async () => act(async () => container.querySelector('form').dispa
 
 test('admin can save, view, reopen and clear optional partner contacts on a legacy profile', async () => {
   expect(container.querySelector('[aria-label="Partner contacts"]').textContent).toContain('Not provided');
+  const profileDetails = container.querySelector('details[aria-label="Partner contact details"]');
+  expect(profileDetails.open).toBe(false);
+  await act(async () => profileDetails.querySelector('summary').click());
+  expect(profileDetails.open).toBe(true);
   await click('Edit');
+  const formDetails = container.querySelector('form details');
+  expect(formDetails.open).toBe(false);
+  expect(formDetails.querySelector('summary').textContent.trim()).toBe('Details');
+  await act(async () => formDetails.querySelector('summary').click());
+  expect(formDetails.open).toBe(true);
   expect(container.querySelectorAll('fieldset')).toHaveLength(3);
   const values = {
     pointOfContact: {fullName: 'Service Person', email: 'service@example.com', phone: '+971 50 222 2222'},
@@ -61,6 +70,8 @@ test('admin can save, view, reopen and clear optional partner contacts on a lega
 test('creating a partner permits all three optional contacts to be blank', async () => {
   await click('Add partner');
   const form = container.querySelector('form');
+  expect(form.textContent).not.toContain('Menu Selection Partner');
+  expect(form.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
   expect(form.querySelectorAll('fieldset input')).toHaveLength(9);
   for (const input of form.querySelectorAll('fieldset input')) expect(input.required).toBe(false);
   await setInput('[name="businessName"]', 'New Cafe');
@@ -73,4 +84,22 @@ test('creating a partner permits all three optional contacts to be blank', async
     financeContact: {fullName: '', email: '', phone: ''},
     ownerContact: {fullName: '', email: '', phone: ''}
   }));
+});
+
+test('editing contact details does not send the retired switch or overwrite saved macro settings', async () => {
+  const existing = {...legacy, menuSelectionEnabled: true, presetMacros: {C: 120, P: 90, F: 40}};
+  api.get.mockImplementation(async path => ({data: {data: path === '/admin/partners' ? [existing] : []}}));
+  await act(async () => root.unmount());
+  root = createRoot(container);
+  await act(async () => root.render(<AdminPartners />));
+  expect(container.textContent).not.toContain(' · Menu Selection');
+  await click('Edit');
+  const form = container.querySelector('form');
+  expect(form.textContent).not.toContain('Menu Selection Partner');
+  expect(form.textContent).not.toContain('Carbs (C)');
+  expect(form.textContent).not.toContain('Protein (P)');
+  expect(form.textContent).not.toContain('Fat (F)');
+  await submit();
+  expect(api.patch.mock.calls[0][1]).not.toHaveProperty('menuSelectionEnabled');
+  expect(api.patch.mock.calls[0][1]).not.toHaveProperty('presetMacros');
 });
