@@ -9,6 +9,7 @@ import { archiveBytes, archiveCatalog } from '../vendor/driver-audits/integratio
 import { prepareRemotePreviewPackage } from '../vendor/driver-audits/integration/cloud/remote-preview-package.mjs';
 import { acquireWorkerLock } from '../vendor/driver-audits/integration/hosted/worker-lock.mjs';
 import { createDriverAuditSupabaseSync, runDriverAuditSupabaseSync } from './driverAuditSupabaseSync.js';
+import { readDriverAuditFileSyncStatus } from './driverAuditSyncStatus.js';
 
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const at = '2026-11-12T00:00:00.000Z';
@@ -101,7 +102,7 @@ async function packageFiles(directory, revision) {
     restore: { version: 1, archive: 'matter-report-archive', verified: true, ...binding } } };
 }
 
-async function fixture(t, { signal } = {}) {
+async function fixture(t, { signal, clock } = {}) {
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'driver-audit-supabase-sync-')));
   let worker;
   t.after(async () => { try { await worker?.close(); } finally { await fs.rm(temporary, { recursive: true, force: true }); } });
@@ -162,8 +163,20 @@ async function fixture(t, { signal } = {}) {
     readTransferUsage: async () => ({}), archiveReadBudget: { reserve: async () => ({ allowed: true }), settle: async () => ({ settled: true }) } };
   const f = { root, file, config, backend, states, objects, calls, uploads, initial, next, receipts,
     loseNextAck() { lostAck = true; }, corruptUploads() { corrupt = true; }, onNextCas(callback) { afterCas = callback; } };
-  f.worker = worker = await createDriverAuditSupabaseSync({ config, file, backend, signal });
+  f.reopen = async (signalOverride = signal) => {
+    await worker?.close();
+    f.worker = worker = await createDriverAuditSupabaseSync({ config, file, backend, signal: signalOverride, clock });
+  };
+  await f.reopen();
   return f;
+}
+
+async function saveFixtureCollector(f, revision) {
+  const next = await packageFiles(path.join(f.root, 'late-fixture-' + revision), revision);
+  const body = JSON.stringify(next.publication);
+  f.states.set('collector-state', { revision, body });
+  f.receipts.set(revision, { ...f.receipts.get(43), revision, body_text: body,
+    body_sha256: sha(body), event_id: 'collector-' + revision });
 }
 
 test('seed verifies original saved receipts and bytes without live acquisition or business writers', async t => {
@@ -263,6 +276,113 @@ test('an identical saved source performs no build, archive upload or publication
   assert.equal(f.uploads.length, uploads);
   assert.equal(f.calls.filter(call => call.name.endsWith('_cas')).length, cas);
   assert.equal(await fs.readFile(path.join(f.root, 'work', 'fixture-builds.private.txt'), 'utf8'), 'built\n');
+});
+
+test('10:30 Dubai builds once and an unchanged noon check survives restart without a second publication', async t => {
+  const main = Date.parse('2026-11-18T06:30:00Z'), noon = Date.parse('2026-11-18T08:00:00Z');
+  let now = main - 1;
+  const f = await fixture(t, { clock: () => now });
+  await f.worker.seed();
+  const initialCalls = f.calls.length;
+  assert.equal(await f.worker.scheduledTick(), main);
+  assert.equal(f.calls.length, initialCalls);
+
+  now = main;
+  await f.worker.scheduledTick();
+  const head = f.states.get('app-sidi-report-head'), calls = f.calls.length, uploads = f.uploads.length;
+  const file = path.join(f.root, 'sync-status.private.json');
+  const generation = JSON.parse(head.body).generation;
+  assert.equal(JSON.parse(head.body).servingPackage.collectorRevision, 43);
+
+  now = noon - 1;
+  await f.reopen();
+  assert.equal(await f.worker.scheduledTick(), noon);
+  assert.equal(f.calls.length, calls);
+  const status = await readDriverAuditFileSyncStatus(file, generation, () => now);
+  assert.equal(status.status, 'ready');
+  assert.equal(status.checkedAt, new Date(main).toISOString());
+  assert.equal(status.latestCaptureAt, at);
+
+  // A later collector receipt alone does not change the evidence basis.
+  f.states.set('collector-state', { ...f.states.get('collector-state'), revision: 44 });
+  now = noon;
+  await f.worker.scheduledTick();
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.equal(f.uploads.length, uploads);
+  assert.equal(await fs.readFile(path.join(f.root, 'work', 'fixture-builds.private.txt'), 'utf8'), 'built\n');
+  assert.equal(JSON.parse(await fs.readFile(file, 'utf8')).lastScheduledAt, new Date(noon).toISOString());
+
+  now = Date.parse('2026-11-18T20:00:00Z'); // Dubai midnight
+  const afterNoonCalls = f.calls.length;
+  await f.reopen();
+  await f.worker.scheduledTick();
+  assert.equal(f.calls.length, afterNoonCalls);
+});
+
+test('noon publishes changed evidence saved after the morning report once', async t => {
+  let now = Date.parse('2026-11-18T06:30:00Z');
+  const f = await fixture(t, { clock: () => now });
+  await f.worker.seed();
+  await f.worker.scheduledTick();
+  const morning = JSON.parse(f.states.get('app-sidi-report-head').body);
+
+  await saveFixtureCollector(f, 44);
+  now = Date.parse('2026-11-18T07:59:00Z');
+  await f.worker.scheduledTick();
+  assert.equal(JSON.parse(f.states.get('app-sidi-report-head').body).generation, morning.generation);
+
+  now += 60_000;
+  await f.worker.scheduledTick();
+  const head = f.states.get('app-sidi-report-head'), published = JSON.parse(head.body);
+  assert.equal(published.servingPackage.collectorRevision, 44);
+  assert.equal(published.previous.generation, morning.generation);
+  const calls = f.calls.length;
+  now += 60_000;
+  await f.reopen();
+  await f.worker.scheduledTick();
+  assert.equal(f.calls.length, calls);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+});
+
+test('a stop after noon publication does not start another noon build after restart', async t => {
+  let now = Date.parse('2026-11-18T06:30:00Z');
+  const controller = new AbortController(), f = await fixture(t, { clock: () => now, signal: controller.signal });
+  await f.worker.seed();
+  await f.worker.scheduledTick();
+
+  await saveFixtureCollector(f, 44);
+  now = Date.parse('2026-11-18T08:00:00Z');
+  f.onNextCas(() => controller.abort(Error('Worker stopped after publication')));
+  await assert.rejects(f.worker.scheduledTick(), /stopped after publication/);
+  const head = f.states.get('app-sidi-report-head');
+  assert.equal(JSON.parse(head.body).servingPackage.collectorRevision, 44);
+
+  await saveFixtureCollector(f, 45);
+  now += 60_000;
+  await f.reopen(null);
+  const calls = f.calls.length;
+  await f.worker.scheduledTick();
+  assert.equal(f.calls.length, calls);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+});
+
+test('a failed 10:30 check retains the report and retries at noon without polling the source in between', async t => {
+  let now = Date.parse('2026-11-18T06:30:00Z');
+  const f = await fixture(t, { clock: () => now });
+  await f.worker.seed();
+  const head = f.states.get('app-sidi-report-head'), source = f.states.get('collector-state');
+  f.states.delete('collector-state');
+  await assert.rejects(f.worker.scheduledTick());
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.equal(JSON.parse(await fs.readFile(path.join(f.root, 'sync-status.private.json'), 'utf8')).status, 'failed');
+  f.states.set('collector-state', source);
+  const calls = f.calls.length;
+  now = Date.parse('2026-11-18T07:00:00Z');
+  await f.worker.scheduledTick();
+  assert.equal(f.calls.length, calls);
+  now = Date.parse('2026-11-18T08:00:00Z');
+  await f.worker.scheduledTick();
+  assert.equal(JSON.parse(f.states.get('app-sidi-report-head').body).servingPackage.collectorRevision, 43);
 });
 
 test('a failed full-byte readback preserves the old report and private failure status', async t => {
