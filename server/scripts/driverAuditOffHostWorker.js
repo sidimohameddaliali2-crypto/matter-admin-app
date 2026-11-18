@@ -36,10 +36,11 @@ async function main(args) {
   return runDriverAuditSupabaseSync({ config, file, mode, env: {
     ...env, DRIVER_AUDIT_SUPABASE_SECRET: env.MATTER_SUPABASE_SECRET,
     DRIVER_AUDIT_ENABLED: mode === '--seed-only' ? '0' : '1', DRIVER_AUDIT_IMPORT_ENABLED: '0',
-  }, async collectSource({ signal }) {
+  }, async collectSource({ signal, onAdmission }) {
     for (const entrypoint of entrypoints) {
       signal?.throwIfAborted();
-      const result = await runDriverAuditSourceChild(source, entrypoint, { signal });
+      const result = await runDriverAuditSourceChild(source, entrypoint, { signal,
+        onAdmission: entrypoint === entrypoints[0] ? onAdmission : undefined });
       const allowed = requiredPaths.includes(entrypoint.path) ? complete : acceptedOptional;
       if (!allowed.has(result.status)) throw Error('The off-host source check did not finish');
     }

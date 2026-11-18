@@ -369,9 +369,11 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
           if (executionHost === 'off-host') {
             check(collectSource, 'The off-host source checker is required');
             await unchangedInputs();
-            await writeHeartbeat({ ...saved, status: 'checking', pending: true, errorCode: null,
-              lastScheduledAt: new Date(dueAt).toISOString() }, clock(), nextAt);
-            await collectSource({ dueAt, signal });
+            await collectSource({ dueAt, signal, async onAdmission() {
+              signal?.throwIfAborted();
+              await writeHeartbeat({ ...saved, status: 'checking', pending: true, errorCode: null,
+                lastScheduledAt: new Date(dueAt).toISOString() }, clock(), nextAt);
+            } });
           }
           await tick({ scheduledAt: dueAt });
         }

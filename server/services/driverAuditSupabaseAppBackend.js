@@ -6,7 +6,7 @@ import { createDriverAuditFixedHostBudgetFactory } from './driverAuditFixedHostB
 import { createDriverAuditPollProgress } from './driverAuditPollProgress.js';
 import { createDriverAuditReadCache } from './driverAuditReadCache.js';
 import { createDriverAuditCollectorReadCache } from './driverAuditCollectorReadCache.js';
-import { createDriverAuditSpacesArchive } from './driverAuditSpacesArchive.js';
+import { createDriverAuditLinkedPhotoReader, createDriverAuditSpacesArchive } from './driverAuditSpacesArchive.js';
 import { createDriverAuditSupabaseArchive } from './driverAuditSupabaseArchive.js';
 import { createDriverAuditSupabaseTransfer } from './driverAuditSupabaseTransfer.js';
 import { readDriverAuditFileSyncStatus } from './driverAuditSyncStatus.js';
@@ -43,7 +43,8 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
   const rpc = rpcForResponseLimit(70 * 1024 ** 2);
   const original = createSupabaseArchiveTransport({ secret, drainAcknowledgements: true,
     fetchImpl: transfer.wrapFetch({ maxResponseBytes: 16 * 1024 ** 2 }) });
-  const uploads = photoStore || createDriverAuditSpacesArchive({ env });
+  const uploads = photoStore || (executionHost === 'off-host'
+    ? createDriverAuditLinkedPhotoReader({ env, fetchImpl }) : createDriverAuditSpacesArchive({ env }));
   const recoveryDirectory = env.DRIVER_AUDIT_PHOTO_RECOVERY_DIRECTORY;
   const photoRecovery = recoveryDirectory === undefined ? undefined : createDriverAuditPhotoRecovery(recoveryDirectory);
   check(executionHost !== 'off-host' || photoRecovery, 'Off-host reporting requires its private photo recovery directory');

@@ -3,12 +3,36 @@ import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import test from 'node:test';
 import { S3Client } from '@aws-sdk/client-s3';
-import { createDriverAuditSpacesArchive, driverAuditSpacesArchivePrefix,
+import { createDriverAuditLinkedPhotoReader, createDriverAuditSpacesArchive, driverAuditSpacesArchivePrefix,
   validateDriverAuditSpacesArchiveReference } from './driverAuditSpacesArchive.js';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const env = { SPACES_KEY: 'fictional-key', SPACES_SECRET: 'fictional-secret',
   SPACES_BUCKET: 'fictional-archive', SPACES_ENDPOINT: 'nyc3.digitaloceanspaces.com', SPACES_REGION: 'nyc3' };
+
+test('a linked delivery photo can be verified with its original URL and no storage credentials', async () => {
+  const { SPACES_KEY, SPACES_SECRET, ...location } = env;
+  const bytes = Buffer.from('fictional original delivered photo');
+  const calls = [];
+  let body = bytes;
+  const reader = createDriverAuditLinkedPhotoReader({ env: location, async fetchImpl(url, options) {
+    calls.push({ url, method: options.method, redirect: options.redirect, headers: options.headers });
+    return new Response(body, { headers: { etag: '"fictional-etag"' } });
+  } });
+  const candidate = { key: 'photos/fixture.jpg', sha256: hash(bytes), size: bytes.length };
+  const reference = await reader.verifyExistingPhoto(candidate);
+  assert.equal(reference.identitySha256, createDriverAuditSpacesArchive({ env }).identitySha256);
+  assert.deepEqual(await reader.readExistingPhoto(reference), bytes);
+  assert.deepEqual(calls, Array.from({ length: 2 }, () => ({
+    url: 'https://fictional-archive.nyc3.cdn.digitaloceanspaces.com/photos/fixture.jpg',
+    method: 'GET', redirect: 'error', headers: undefined,
+  })));
+  await assert.rejects(reader.verifyExistingPhoto({ ...candidate, key: 'photos/../other.jpg' }), /identity/);
+  assert.equal(calls.length, 2);
+  body = Buffer.alloc(bytes.length);
+  await assert.rejects(reader.readExistingPhoto(reference), /bytes differ/);
+});
+
 const failure = (name, status) => Object.assign(Error(name), { name, $metadata: { httpStatusCode: status } });
 const privateAcl = { Owner: { ID: 'fictional-owner' }, Grants: [
   { Grantee: { Type: 'CanonicalUser', ID: 'fictional-owner' }, Permission: 'FULL_CONTROL' },

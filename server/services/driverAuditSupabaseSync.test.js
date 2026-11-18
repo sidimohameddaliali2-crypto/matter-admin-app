@@ -323,7 +323,8 @@ test('the off-host worker collects before building and retains unchanged noon ev
   const morning = Date.parse('2026-11-18T06:30:00Z'), noon = Date.parse('2026-11-18T08:00:00Z');
   let now = morning - 1;
   const slots = [];
-  const f = await fixture(t, { clock: () => now, executionHost: 'off-host', async collectSource({ dueAt }) {
+  const f = await fixture(t, { clock: () => now, executionHost: 'off-host', async collectSource({ dueAt, onAdmission }) {
+    await onAdmission();
     slots.push(dueAt);
     if (dueAt === morning) f.states.set('collector-state', { revision: 43, body: JSON.stringify(f.next.publication) });
   } });
@@ -344,6 +345,31 @@ test('the off-host worker collects before building and retains unchanged noon ev
   assert.deepEqual(slots, [morning, noon]);
   assert.deepEqual(f.states.get('app-sidi-report-head'), head);
   assert.equal(f.uploads.length, uploads);
+});
+
+test('restarting before off-host source admission keeps the same slot available', async t => {
+  const morning = Date.parse('2026-11-18T06:30:00Z');
+  const first = new AbortController();
+  let waiting, admitted = 0;
+  const startedWaiting = new Promise(resolve => { waiting = resolve; });
+  const f = await fixture(t, { signal: first.signal, clock: () => morning, executionHost: 'off-host',
+    async collectSource({ signal, onAdmission }) {
+      if (signal === first.signal) {
+        waiting();
+        await new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+      }
+      await onAdmission();
+      admitted++;
+    } });
+  await f.worker.seed();
+  const stopping = f.worker.scheduledTick();
+  await startedWaiting;
+  first.abort(Error('Stopped before admission'));
+  await assert.rejects(stopping, /Stopped before admission/);
+  await f.reopen(new AbortController().signal);
+  await f.worker.scheduledTick();
+  assert.equal(admitted, 1);
+  assert.equal(JSON.parse(f.states.get('app-sidi-report-head').body).servingPackage.collectorRevision, 43);
 });
 
 test('noon publishes changed evidence saved after the morning report once', async t => {

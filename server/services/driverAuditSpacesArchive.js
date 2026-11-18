@@ -63,17 +63,68 @@ function existingPhotoKey(key) {
     && !key.split('/').some(part => part === '.' || part === '..');
 }
 
-function configuration(env) {
+function configuration(env, credentialsRequired = true) {
   const endpointText = env.SPACES_ENDPOINT || 'nyc3.digitaloceanspaces.com';
   const match = /^(?:https:\/\/)?([a-z][a-z0-9-]{1,19})\.digitaloceanspaces\.com\/?$/.exec(endpointText);
   const bucket = env.SPACES_BUCKET, region = env.SPACES_REGION || match?.[1];
   if (!match || region !== match[1] || typeof bucket !== 'string'
       || !/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/.test(bucket) || /^\d+\.\d+\.\d+\.\d+$/.test(bucket)
-      || typeof env.SPACES_KEY !== 'string' || !env.SPACES_KEY.trim()
-      || typeof env.SPACES_SECRET !== 'string' || !env.SPACES_SECRET.trim()) {
+      || credentialsRequired && (typeof env.SPACES_KEY !== 'string' || !env.SPACES_KEY.trim()
+        || typeof env.SPACES_SECRET !== 'string' || !env.SPACES_SECRET.trim())) {
     throw Error('Native Spaces archive configuration is invalid');
   }
   return { endpoint: `https://${match[1]}.digitaloceanspaces.com`, bucket, region };
+}
+
+function archiveIdentity({ endpoint, bucket }) {
+  return digest(JSON.stringify({ version: 1, provider: 'spaces', endpoint, bucket, prefix: driverAuditSpacesArchivePrefix }));
+}
+
+export function createDriverAuditLinkedPhotoReader({ env = process.env, fetchImpl = fetch } = {}) {
+  const location = configuration(env, false);
+  const identitySha256 = archiveIdentity(location);
+  const origin = `https://${location.bucket}.${location.region}.cdn.digitaloceanspaces.com`;
+
+  async function fetchPhoto({ key, size, sha256, etag }, signal) {
+    if (!existingPhotoKey(key) || !hashPattern.test(sha256) || !Number.isSafeInteger(size) || size < 1 || size > maximumBytes) {
+      throw Error('Invalid linked photo identity');
+    }
+    const deadline = AbortSignal.timeout(15_000);
+    const response = await fetchImpl(origin + '/' + key, { method: 'GET', redirect: 'error',
+      signal: signal ? AbortSignal.any([signal, deadline]) : deadline });
+    const actualEtag = response.headers.get('etag');
+    const declared = response.headers.get('content-length');
+    if (!response.ok || response.redirected || !response.body || !etagPattern.test(actualEtag)
+      || etag && actualEtag !== etag || declared !== null && Number(declared) !== size) {
+      await response.body?.cancel();
+      throw Error('Original linked photo is unavailable or changed');
+    }
+    const parts = [];
+    let received = 0;
+    for await (const chunk of response.body) {
+      received += chunk.byteLength;
+      if (received > size) throw Error('Original linked photo exceeds its bound');
+      parts.push(Buffer.from(chunk));
+    }
+    const bytes = Buffer.concat(parts, received);
+    if (received !== size || digest(bytes) !== sha256) throw Error('Original linked photo bytes differ');
+    return { bytes, etag: actualEtag };
+  }
+
+  return Object.freeze({ identitySha256,
+    async verifyExistingPhoto(candidate, { signal } = {}) {
+      const { etag } = await fetchPhoto(candidate, signal);
+      return validateDriverAuditSpacesArchiveReference({ version: 1, provider: 'spaces', identitySha256,
+        kind: 'existing-photo-v1', key: candidate.key, size: candidate.size, sha256: candidate.sha256, etag, versionId: null });
+    },
+    async readExistingPhoto(reference, { maxBytes = maximumBytes, signal } = {}) {
+      const checked = validateDriverAuditSpacesArchiveReference(reference, { identitySha256 });
+      if (checked.kind !== 'existing-photo-v1' || !Number.isSafeInteger(maxBytes) || maxBytes < checked.size || maxBytes > maximumBytes) {
+        throw Error('Original linked photo exceeds the requested bound');
+      }
+      return (await fetchPhoto(checked, signal)).bytes;
+    },
+  });
 }
 
 // Always observe an already-created promise, including a synchronous abort in
@@ -147,8 +198,7 @@ export function createDriverAuditSpacesArchive({ env = process.env, client, anon
       || (lookupExistingPhoto !== undefined && typeof lookupExistingPhoto !== 'function')) {
     throw Error('Native Spaces archive configuration is invalid');
   }
-  const identitySha256 = digest(JSON.stringify({ version: 1, provider: 'spaces', endpoint, bucket,
-    prefix: driverAuditSpacesArchivePrefix }));
+  const identitySha256 = archiveIdentity({ endpoint, bucket });
   const transport = client || new S3Client({ endpoint, region, forcePathStyle: false, maxAttempts: 2,
     credentials: { accessKeyId: env.SPACES_KEY, secretAccessKey: env.SPACES_SECRET },
     requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED' });

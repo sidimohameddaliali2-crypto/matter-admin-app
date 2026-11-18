@@ -14,7 +14,7 @@ export function createDriverAuditSupabaseArchive({ archive, rpc, photoStore, pho
   check(typeof archive?.readObject === 'function' && typeof archive?.putVerifiedObject === 'function'
     && typeof archive?.assertPrivate === 'function' && typeof rpc === 'function'
     && typeof photoStore?.verifyExistingPhoto === 'function' && typeof photoStore?.readExistingPhoto === 'function'
-    && typeof photoStore?.assertExistingPhotoRetention === 'function'
+    && (photoRecovery || typeof photoStore?.assertExistingPhotoRetention === 'function')
     && /^[a-f0-9]{64}$/.test(photoStore.identitySha256 || ''), 'Supabase photo archive dependencies are required');
   check(!photoRecovery || ['assertReady', 'preserve', 'read'].every(name => typeof photoRecovery[name] === 'function'),
     'The private photo recovery store is invalid');
