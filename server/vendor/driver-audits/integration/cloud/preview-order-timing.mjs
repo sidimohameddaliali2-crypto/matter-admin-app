@@ -12,7 +12,8 @@ export function connectPreviewOrderTiming(service,view,index,{households,decisio
  // A verified index file can still contain an earlier order's projection.
  // Attach context only when every identity matches the full current source row.
  function gpsSummary(row){
-  const source=row&&byKey.get(row.key),value=row&&index.records[row.key]?.evidenceResult;
+  const source=row&&byKey.get(row.key),entry=row&&index.records[row.key];
+  const value=entry?.evidenceSummary??entry?.evidenceResult;
   if(!source?.delivery||!row.delivery||!value||value.recordKey!==row.key||value.assessmentHash!==source.assessmentHash||value.assessmentHash!==row.assessmentHash||value.deliverySourceSha256!==source.delivery.source_sha256||value.deliverySourceSha256!==row.delivery.source_sha256||value.deliveryDigest!==createHash('sha256').update(JSON.stringify(source.delivery)).digest('hex'))return null;
   // Report rows may omit fields; each supplied field must match the full source.
   if(Object.entries(row.delivery).some(([key,field])=>JSON.stringify(field)!==JSON.stringify(source.delivery[key])))return null;

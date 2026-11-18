@@ -10,6 +10,7 @@ import { createDriverAuditSpacesArchive } from './driverAuditSpacesArchive.js';
 import { createDriverAuditSupabaseArchive } from './driverAuditSupabaseArchive.js';
 import { createDriverAuditSupabaseTransfer } from './driverAuditSupabaseTransfer.js';
 import { readDriverAuditFileSyncStatus } from './driverAuditSyncStatus.js';
+import { createDriverAuditPhotoRecovery } from './driverAuditPhotoRecovery.js';
 
 const check = (condition, message) => { if (!condition) throw Error(message); };
 
@@ -42,7 +43,11 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
   const original = createSupabaseArchiveTransport({ secret, drainAcknowledgements: true,
     fetchImpl: transfer.wrapFetch({ maxResponseBytes: 16 * 1024 ** 2 }) });
   const uploads = photoStore || createDriverAuditSpacesArchive({ env });
-  const photoArchive = createDriverAuditSupabaseArchive({ archive: original, rpc, photoStore: uploads, env });
+  const recoveryDirectory = env.DRIVER_AUDIT_PHOTO_RECOVERY_DIRECTORY;
+  const photoRecovery = recoveryDirectory === undefined ? undefined : createDriverAuditPhotoRecovery(recoveryDirectory);
+  check(!photoRecovery || recoveryDirectory !== cacheDirectory && !recoveryDirectory.startsWith(cacheDirectory + path.sep),
+    'Original photo recovery must be outside the disposable archive cache');
+  const photoArchive = createDriverAuditSupabaseArchive({ archive: original, rpc, photoStore: uploads, photoRecovery, env });
   const progressRpc = (name, args) => {
     check(['matter_hosted_state_read', 'matter_hosted_native_progress_cas'].includes(name),
       'Unexpected Sidi polling progress operation');

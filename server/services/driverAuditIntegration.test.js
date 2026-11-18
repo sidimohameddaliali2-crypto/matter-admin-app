@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {createHash} from 'node:crypto';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import {gzipSync} from 'node:zlib';
 import {createDriverAuditIntegration} from './driverAuditIntegration.js';
 import {createCloudHttp} from '../vendor/driver-audits/integration/cloud/cloud-http.mjs';
@@ -35,6 +38,24 @@ test('startup preloads the direct report once and still denies unsigned requests
   writeHead(value){status=value;},end(){},
  },()=>assert.fail('Expected the audit handler'));
  assert.equal(status,401);
+});
+
+test('the existing app can select Supabase serving without selecting a reporting worker or MongoDB',async t=>{
+ const cache=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'driver-audit-app-reader-')));
+ t.after(()=>fs.rm(cache,{recursive:true,force:true}));
+ const env={DRIVER_AUDIT_ENABLED:'1',DRIVER_AUDIT_IMPORT_ENABLED:'0',DRIVER_AUDIT_ORIGIN:'https://app.example.invalid',
+  DRIVER_AUDIT_SERVING_STORE:'supabase',DRIVER_AUDIT_DATA_STORE:'mongo',DRIVER_AUDIT_SUPABASE_SECRET:'fictional-fixture',
+  MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY:cache,SPACES_BUCKET:'fixture-photos',SPACES_ENDPOINT:'fra1.digitaloceanspaces.com',
+  SPACES_KEY:'fixture-key',SPACES_SECRET:'fixture-secret'};
+ let active=null;
+ const coordinator=async()=>assert.fail('This fixture only prewarms the app');
+ coordinator.status=()=>({active});
+ coordinator.poll=async()=>{active={generation:'a'.repeat(64)};};
+ const handler=createDriverAuditIntegration({env,db:()=>assert.fail('Supabase report serving must not open MongoDB'),
+  dependencies:{auth:{authenticate:async()=>assert.fail('This fixture only prewarms the app')},createCoordinator:()=>coordinator}});
+ assert.equal(await handler.prewarm(),true);
+ assert.equal(env.DRIVER_AUDIT_EXECUTION_HOST,undefined);
+ assert.equal(env.DRIVER_AUDIT_DATA_STORE,'mongo');
 });
 
 test('the API document and exact evidence aliases reach the canonical audit handler after authorization',async()=>{

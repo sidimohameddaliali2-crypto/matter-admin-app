@@ -14,6 +14,7 @@ import {createPreviewReadView} from './preview-read-view.mjs';
 import {previewArchiveTransport} from './preview-archive-cache.mjs';
 import {extractPreviewFonts} from './preview-fonts.mjs';
 import {addDriverAuditSyncStatus} from './driver-audit-status.mjs';
+import {decodeGpsEvidenceFile,decodePackedGpsAvailability,gpsAvailabilityFile,packedGpsAvailabilityFile} from './remote-preview-package.mjs';
 import fs from 'node:fs';import path from 'node:path';import {gunzipSync} from 'node:zlib';import {createHash} from 'node:crypto';
 import {createHostedIdentities} from './hosted-identities.mjs';
 import {createImmutableEvidenceCache} from './immutable-evidence-cache.mjs';
@@ -64,9 +65,22 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
   // Each page verifies its own cases. A staff request never downloads the image archive to count other cases.
   report.photoProposals=(params,actor)=>proposalPage(params,actor,{includeProgress:false});
  }
- if(Object.hasOwn(manifest,'corrections.private.json'))report=connectPreviewCorrections(report,readView,{...json('corrections.private.json'),...(Object.hasOwn(manifest,'release-gps-availability.private.json')?{gpsAvailability:json('release-gps-availability.private.json')}:{})});
+ if(has('corrections.private.json')){
+  const gpsAvailability=has(packedGpsAvailabilityFile)?decodePackedGpsAvailability(read(packedGpsAvailabilityFile)):
+   has(gpsAvailabilityFile)?json(gpsAvailabilityFile):undefined;
+  report=connectPreviewCorrections(report,readView,{...json('corrections.private.json'),...(gpsAvailability?{gpsAvailability}:{})});
+ }
  report=connectPreviewOrderTiming(report,readView,index,{frozen:true,households:createHouseholdStore(state),decisions:Object.hasOwn(manifest,'case-decisions.private.json')?json('case-decisions.private.json'):undefined});
- const streams=new Map();const gps=createPreviewGps({snapshotFor:report.gpsSnapshotFor,index,readStream:async key=>{const file=index.streamFiles[key];if(!file)throw Error('GPS stream unavailable');if(!streams.has(key)){streams.set(key,JSON.parse(gunzipSync(await readAsync(file))));while(streams.size>8)streams.delete(streams.keys().next().value);}return streams.get(key);}});
+ const projections=createImmutableEvidenceCache({maxBytes:24*1024*1024,maxEntries:4});
+ const streams=new Map();const gps=createPreviewGps({snapshotFor:report.gpsSnapshotFor,index,readStream:async key=>{const file=index.streamFiles[key];if(!file)throw Error('GPS stream unavailable');if(!streams.has(key)){streams.set(key,JSON.parse(gunzipSync(await readAsync(file))));while(streams.size>8)streams.delete(streams.keys().next().value);}return streams.get(key);},async readProjection(file,key){
+  const records=await projections.getOrLoad(file,async()=>{
+   const {records,bytes}=decodeGpsEvidenceFile(await readAsync(file));
+   return {value:records,bytes};
+  });
+  const projection=records.get(key);
+  if(!projection)throw Error('GPS evidence missing from its verified file');
+  return projection;
+ }});
  const build=json('build.private.json');
  let renderer=read('renderer.private.html').toString();
  if(staffIntegration&&staffRenderer?.templateSnapshotSha256===build.snapshot.sha256){

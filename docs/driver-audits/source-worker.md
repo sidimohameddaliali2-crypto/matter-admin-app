@@ -1,14 +1,28 @@
 # Driver Reports source worker
 
-Use this guide to stage, qualify, operate and recover the Sidi source worker. Start with the [maintenance map](maintenance-map.md) for component and source ownership, staff routes, upstream inputs, storage, configuration and tests.
+Start with the [maintenance map](maintenance-map.md) for component and source ownership, staff routes, upstream inputs, storage, configuration and tests. Use the in-app reader and separate worker path for the current rollout.
 
-**Selected direction: keep Supabase; the Sidi execution handoff is pending.** Collection and generation move to Sidi's server while existing reporting data and reviews remain in Supabase. Read actual status from the running processes and private release record. Merged code, staged inputs, fixture parity or a heartbeat do not establish live data flow. Keep exact deployed identities in the owner-private release record so a documentation deployment cannot be mistaken for a switchover. The native MongoDB material below is a separate, parked migration path.
+The selected rollout uses Sidi’s existing staff page, the existing Supabase data and reviews, and a separate report worker. Production acceptance remains pending. Check the running processes and private release record for exact deployed identities.
 
-The Sidi source worker runs the recovered collector, morning GPS and private-validation handlers in a separate PM2 process named `matter-driver-audit-source`. The existing report builder remains `matter-driver-audit-sync`. Both preserve the recovered collection, grading and publication rules. The default storage remains the existing Supabase authority. Native mode moves reporting state and evidence into Sidi's existing MongoDB after a verified handoff.
+Keep the recovered collector, builder, credentials, saved checkpoints and evidence receipts owner-private, with directory mode `0700` and file mode `0600`. The repository contains the application integration and worker controls. Private source exports and production data have separate release identities.
 
-The source runtime and credentials live under `server/.private/driver-audit-source/<manifest SHA-256>/`. Keep this directory owner-only, with directory mode `0700` and file mode `0600`. The application repository contains the supervisor and its tests. The recovered source, source environment, saved checkpoints and evidence receipts stay private.
+## In-app reader and separate worker
+
+Set `DRIVER_AUDIT_SERVING_STORE=supabase` with `DRIVER_AUDIT_IMPORT_ENABLED=0` on the existing web app after the verified Supabase serving package is ready. The Driver Reports navigation uses its existing staff session at `/api/driver-audits/session` and reads `/api/reporting/*` through the same app. Use the existing private archive and verified cache settings. Keep the source and generation processes on their separate worker. The normal app release must preserve the installed dependencies, client build, staff permissions and business health.
+
+Before selecting a package, verify its Supabase collector receipt, archived bytes, current and previous reports, GPS and photographs, and original review journals. Keep the full builder outputs in the private recovery archive. Serving packages may compress GPS availability and load full per-record GPS evidence on demand. Compare the decoded evidence with the builder output and exercise review save and reload with an isolated journal before live acceptance.
+
+The separate worker owns the [two Dubai slots](#daily-report-checks), a persistent private cache, and collection and build health. At noon, compare all saved evidence before publishing. A delivery poll that advances only bookkeeping `updatedAt` clocks keeps the original capture and its evidence clock. Verify a genuine result or photo change still retains the new original evidence. Keep the overnight GPS producer running on its own schedule.
+
+Sidi’s [delivery API](../../server/routes/externalDeliveryApi.js) supplies `proof.photoUrl` and its proof timestamp. Keep that URL and its delivery binding. On the separate worker set `DRIVER_AUDIT_PHOTO_RECOVERY_DIRECTORY` to the existing owner-private recovery directory on persistent storage, outside the cache. Read the existing upload and verify its byte hash and size against the delivery evidence. Save and read back one original per hash before admitting its Supabase reference. Repeat checks reuse that file. The app reads the original upload, while the verified recovery file can restore a missing original. This path uses the existing read-only photo access and recovery bytes as its retention proof.
+
+The app and worker have separate disks. Use a private cache per machine. Keep the publication clock and health from the off-host worker's verified receipts. The original collector receipt in Supabase must bind the exact candidate source basis and cutoff. A locally replayed collector revision establishes parity and remains a rehearsal result until the worker saves evidence through the canonical collector.
+
+Before enabling the reader, stage the immutable chunks, verify the archived package and original photo retention, and qualify the separate worker with the real publisher and the old report-writer admission controls. Keep the last verified current and previous packages available throughout. Record the first production read and reload in the staff app, the first scheduled publication and the unchanged noon outcome in the private acceptance record.
 
 ## Sidi execution with the existing Supabase store
+
+This section describes the on-server rollout controls. They put the recovered source in `matter-driver-audit-source`, the builder in `matter-driver-audit-sync`, and their private runtime under `server/.private/driver-audit-source/<manifest SHA-256>/`. Use these controls only for an on-server rollout.
 
 Keep `DRIVER_AUDIT_DATA_STORE` unset or `supabase`. Opt in to the qualified Sidi execution path with `DRIVER_AUDIT_EXECUTION_HOST=sidi` in both the app and pinned source environment. The private manifest must declare `managedSourceExecutionHost: "sidi"` and `managedSourceExecutionAdmission: "fixed-host-v1"`, with its complete backend/progress/cache implementation. The injected backend remains truthfully `kind: "supabase"`; native import profiles and MongoDB authority are not prerequisites. Unmarked Supabase retains the old execution behavior.
 

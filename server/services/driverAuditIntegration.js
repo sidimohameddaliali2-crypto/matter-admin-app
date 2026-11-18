@@ -35,8 +35,14 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    const verified=req&&verifiedRequests.get(req);
    return verified&&verified.cookie===cookie?verified.session:auth.authenticate(cookie);
   }};
-  const backend=dependencies.backend||(env.DRIVER_AUDIT_DATA_STORE||env.DRIVER_AUDIT_EXECUTION_HOST
-   ?await createDriverAuditDataBackend({db:env.DRIVER_AUDIT_EXECUTION_HOST==='sidi'?undefined:db(),env}):null);
+  const supabaseReader=env.DRIVER_AUDIT_SERVING_STORE==='supabase';
+  if(env.DRIVER_AUDIT_SERVING_STORE!==undefined&&(!supabaseReader||env.DRIVER_AUDIT_IMPORT_ENABLED!=='0'))
+   throw Error('Explicit Supabase report serving requires the legacy importer disabled');
+  // This selection applies only to staff routes. The scheduled worker owns a
+  // separate environment and the business app keeps its operational store.
+  const backendEnv=supabaseReader?{...env,DRIVER_AUDIT_EXECUTION_HOST:'sidi',DRIVER_AUDIT_DATA_STORE:'supabase'}:env;
+  const backend=dependencies.backend||(backendEnv.DRIVER_AUDIT_DATA_STORE||backendEnv.DRIVER_AUDIT_EXECUTION_HOST
+   ?await createDriverAuditDataBackend({db:backendEnv.DRIVER_AUDIT_EXECUTION_HOST==='sidi'?undefined:db(),env:backendEnv}):null);
   const state=dependencies.state||createCloudState({rpc:backend?.rpc||createHostedRpc({secret:env.DRIVER_AUDIT_SUPABASE_SECRET})});
   const rawArchive=dependencies.archive||backend?.archive||createSupabaseArchiveTransport({secret:env.DRIVER_AUDIT_SUPABASE_SECRET});
   const supabaseHost=backend?.kind==='supabase'&&backend.executionHost==='sidi';

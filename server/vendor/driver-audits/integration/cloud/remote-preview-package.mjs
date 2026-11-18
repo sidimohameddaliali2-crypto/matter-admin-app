@@ -1,19 +1,37 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
-import {gunzipSync,brotliDecompressSync} from 'node:zlib';
+import {gzipSync,gunzipSync,brotliDecompressSync} from 'node:zlib';
 import {readManifestBytes} from './repository.mjs';
+import {gpsEvidenceSummary} from '../private-gps/evidence-result.mjs';
 
 const sha=b=>createHash('sha256').update(b).digest('hex');
 const hex=s=>typeof s==='string'&&/^[a-f0-9]{64}$/.test(s);
 const safeName=s=>typeof s==='string'&&s.length<=240&&/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(s)&&s!=='.'&&s!=='..';
 const CORE=['publication.private.json','identities.private.json','maps.private.json','gps-index.private.json.gz','preview-read-view.private.json.gz','renderer.private.html','build.private.json','browser-data.private.json.gz'];
-const OPTIONAL=['browser-data.private.br','corrections.private.json','release-gps-availability.private.json','case-decisions.private.json','photo-prime.private.json','preview-photo-bindings.private.json'];
+export const gpsAvailabilityFile='release-gps-availability.private.json';
+export const packedGpsAvailabilityFile=gpsAvailabilityFile+'.gz';
+const OPTIONAL=['browser-data.private.br','corrections.private.json',gpsAvailabilityFile,packedGpsAvailabilityFile,'case-decisions.private.json','photo-prime.private.json','preview-photo-bindings.private.json'];
 const CHUNK=8*1024*1024,MAX_FILE=128*1024*1024,MAX_CORE_FILE=64*1024*1024,MAX_CORE_BYTES=64*1024*1024,MAX_DESCRIPTOR=8*1024*1024,CACHE_BYTES=16*1024*1024;
 // The verified November audit has an 11 MB compressed / 149 MB decoded GPS
 // index. Keep transfer/storage bounds unchanged and bound only this decoder.
 const MAX_GPS_DECODED=256*1024*1024;
+const MAX_SOURCE_GPS_DECODED=512*1024*1024;
+const gpsIndexFile='gps-index.private.json.gz';
+const evidenceName=/^gps-evidence-[a-f0-9]{64}\.private\.json\.gz$/;
 function fail(message){throw Error(message);}
+export function decodePackedGpsAvailability(bytes){
+ return json(gunzipSync(bytes,{maxOutputLength:MAX_CORE_FILE}),'GPS availability');
+}
+export function decodeGpsEvidenceFile(bytes){
+ const plain=gunzipSync(bytes,{maxOutputLength:CHUNK});
+ const entries=json(plain,'GPS evidence');
+ if(!Array.isArray(entries)||entries.some(entry=>!Array.isArray(entry)||entry.length!==2||
+  typeof entry[0]!=='string'||entry[1]?.recordKey!==entry[0]))fail('GPS evidence identity differs');
+ const records=new Map(entries);
+ if(records.size!==entries.length)fail('Duplicate GPS evidence record');
+ return {records,bytes:plain.length};
+}
 function checkTransfer(requiredBytes,availableBytes){
  if(requiredBytes<=availableBytes)return;
  throw Object.assign(Error('Remote preview package exceeds upload cap'),{
@@ -22,6 +40,35 @@ function checkTransfer(requiredBytes,availableBytes){
 }
 function json(bytes,label){try{return JSON.parse(bytes);}catch{fail('Invalid '+label);}}
 function readLocal(root,name,manifest){if(!safeName(name)||!hex(manifest[name]))fail('Invalid package filename or digest');const bytes=fs.readFileSync(path.join(root,name));if(sha(bytes)!==manifest[name])fail('Preview package source hash mismatch');return bytes;}
+function bufferMetadata(bytes){return {size:bytes.length,sha256:sha(bytes),bytes};}
+function splitGpsIndex(plain,local){
+ const index=json(plain,'GPS index');
+ if(!index.records||typeof index.records!=='object'||Array.isArray(index.records))fail('Invalid GPS index records');
+ let group=[],size=2;
+ function finish(){
+  if(!group.length)return;
+  const packed=bufferMetadata(gzipSync(Buffer.from('['+group.map(row=>row.serialized).join(',')+']'),{level:6}));
+  const name='gps-evidence-'+packed.sha256+'.private.json.gz';
+  if(local.has(name))fail('Duplicate GPS evidence file');
+  local.set(name,packed);
+  for(const {record} of group)record.evidenceFile=name;
+  group=[];size=2;
+ }
+ for(const [key,record] of Object.entries(index.records)){
+  const value=record.evidenceResult;
+  if(value===undefined)continue;
+  if(value?.recordKey!==key||!hex(value.deliveryDigest))fail('Invalid GPS projection binding');
+  const serialized=JSON.stringify([key,value]),bytes=Buffer.byteLength(serialized);
+  if(bytes+2>CHUNK)fail('GPS evidence record exceeds file bound');
+  if(size+bytes+(group.length?1:0)>CHUNK)finish();
+  size+=bytes+(group.length?1:0);
+  group.push({record,serialized});
+  record.evidenceSummary={...gpsEvidenceSummary(value),deliveryDigest:value.deliveryDigest};
+  delete record.evidenceResult;
+ }
+ finish();
+ local.set(gpsIndexFile,bufferMetadata(gzipSync(Buffer.from(JSON.stringify(index)),{level:6})));
+}
 async function scanFile(file,{chunks=false}={}){const stat=fs.statSync(file);if(!stat.isFile()||stat.size>MAX_FILE)fail('Preview package file exceeds limit');const whole=createHash('sha256'),parts=[];let pending=Buffer.alloc(0);for await(const data of fs.createReadStream(file)){whole.update(data);if(chunks){pending=pending.length?Buffer.concat([pending,data]):data;while(pending.length>=CHUNK){const bytes=pending.subarray(0,CHUNK);parts.push({offset:parts.reduce((n,x)=>n+x.size,0),size:bytes.length,sha256:sha(bytes)});pending=pending.subarray(CHUNK);}}}if(chunks&&pending.length)parts.push({offset:parts.reduce((n,x)=>n+x.size,0),size:pending.length,sha256:sha(pending)});return {size:stat.size,sha256:whole.digest('hex'),chunks:parts};}
 function readRange(file,offset,size){const fd=fs.openSync(file,'r');try{const bytes=Buffer.alloc(size);let read=0;while(read<size){const n=fs.readSync(fd,bytes,read,size-read,offset+read);if(!n)fail('Preview package file changed during upload');read+=n;}return bytes;}finally{fs.closeSync(fd);}}
 function validRef(ref){return !!ref&&ref.version===1&&typeof ref.domain==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/.test(ref.domain)&&safeName(ref.path)&&ref.kind==='immutable-evidence'&&Number.isSafeInteger(ref.size)&&ref.size>=0&&ref.size<=MAX_FILE&&hex(ref.sha256)&&Array.isArray(ref.chunks);}
@@ -34,8 +81,14 @@ function verifyGeneration(files,refs,reportHash,generation){
  const browserGz=files.get('browser-data.private.json.gz');
  if(sha(gunzipSync(browserGz,{maxOutputLength:MAX_FILE}))!==browserRef.sha256)fail('Preview browser payload mismatch');
  if(files.has('browser-data.private.br')&&sha(brotliDecompressSync(files.get('browser-data.private.br'),{maxOutputLength:MAX_FILE}))!==browserRef.sha256)fail('Preview Brotli payload mismatch');
- const gps=json(gunzipSync(files.get('gps-index.private.json.gz'),{maxOutputLength:MAX_GPS_DECODED}),'GPS index');
+ const gps=json(gunzipSync(files.get(gpsIndexFile),{maxOutputLength:MAX_GPS_DECODED}),'GPS index');
+ if(files.has(packedGpsAvailabilityFile))decodePackedGpsAvailability(files.get(packedGpsAvailabilityFile));
  const wanted=new Set([...Object.values(view.deferredQueryFiles||{}),...Object.values(gps.streamFiles||{})]);
+ for(const record of Object.values(gps.records||{}))if(record.evidenceFile!==undefined){
+  if(!evidenceName.test(record.evidenceFile)||record.evidenceResult!==undefined||!record.evidenceSummary)
+   fail('Invalid GPS evidence file binding');
+  wanted.add(record.evidenceFile);
+ }
  for(const name of wanted)if(!safeName(name)||!refs.has(name))fail('Preview package deferred file is absent');
  return wanted;
 }
@@ -55,9 +108,29 @@ function inspectPackage({privateRoot,maxBytes,validation,includeRetained=true}={
    const digest=name.slice(8,-12);if(actual!==digest)fail('Retained archive object hash mismatch');if(includeRetained)uploadBytes+=meta.size;
   }
  }
- const core=new Map();let preloadBytes=0;for(const name of CORE) {if(!local.has(name))fail('Required preview runtime file missing');const meta=local.get(name);if(meta.size>MAX_CORE_FILE||(preloadBytes+=meta.size)>MAX_CORE_BYTES)fail('Preview runtime core exceeds preload limit');core.set(name,readLocal(root,name,manifest));}
- for(const name of OPTIONAL)if(local.has(name)){const meta=local.get(name);if(meta.size>MAX_CORE_FILE||(preloadBytes+=meta.size)>MAX_CORE_BYTES)fail('Preview runtime core exceeds preload limit');core.set(name,readLocal(root,name,manifest));}
- const files=new Map();for(const name of CORE)files.set(name,local.get(name));for(const name of OPTIONAL)if(local.has(name))files.set(name,local.get(name));
+ for(const name of CORE)if(!local.has(name))fail('Required preview runtime file missing');
+ if(local.has(gpsAvailabilityFile)&&local.has(packedGpsAvailabilityFile))fail('Ambiguous GPS availability representation');
+ const runtimeNames=()=>[...CORE,...OPTIONAL.filter(name=>local.has(name))];
+ const rawAvailability=local.get(gpsAvailabilityFile);
+ if(!includeRetained&&rawAvailability?.size<=MAX_CORE_FILE
+  &&runtimeNames().reduce((sum,name)=>sum+local.get(name).size,0)>MAX_CORE_BYTES){
+  // Keep the validated source file and its manifest intact. Compress only
+  // the serving copy, which is fetched and cached by its own byte hash.
+  const bytes=gzipSync(readLocal(root,gpsAvailabilityFile,manifest),{level:6});
+  local.delete(gpsAvailabilityFile);
+  local.set(packedGpsAvailabilityFile,bufferMetadata(bytes));
+ }
+ if(!includeRetained){
+  const plain=gunzipSync(readLocal(root,gpsIndexFile,manifest),{maxOutputLength:MAX_SOURCE_GPS_DECODED});
+  if(plain.length>MAX_GPS_DECODED)splitGpsIndex(plain,local);
+ }
+ const files=new Map(),core=new Map();let preloadBytes=0;
+ for(const name of runtimeNames()){
+  const meta=local.get(name);
+  if(meta.size>MAX_CORE_FILE||(preloadBytes+=meta.size)>MAX_CORE_BYTES)fail('Preview runtime core exceeds preload limit');
+  files.set(name,meta);
+  core.set(name,meta.bytes??readLocal(root,name,manifest));
+ }
  const publication=json(core.get('publication.private.json'),'publication'),reportHash=publication?.head?.reportHash,generation=publication?.head?.manifest?.sha256;
  if(!hex(reportHash)||!hex(generation))fail('Invalid preview generation identity');
  const fileRefs=new Map();for(const name of local.keys())fileRefs.set(name,null);
@@ -97,7 +170,7 @@ export function checkVerifiedAuditPackageTransfer({privateRoot,maxBytes,validati
 export async function planRemotePreviewPackage(args={}){
  const plan=inspectPackage(args);
  checkTransfer(plan.uploadBytes,plan.maxBytes);
- const refs={};for(const [name,meta]of plan.files){const scan=await scanFile(meta.file,{chunks:true});if(scan.sha256!==meta.sha256||scan.size!==meta.size)fail('Preview package changed during planning');refs[name]=fileRef(name,meta,scan.chunks);}
+ const refs={};for(const [name,meta]of plan.files){const scan=meta.bytes?scanBuffer(meta.bytes):await scanFile(meta.file,{chunks:true});if(scan.sha256!==meta.sha256||scan.size!==meta.size)fail('Preview package changed during planning');refs[name]=fileRef(name,meta,scan.chunks);}
  const descriptorBytes=Buffer.from(JSON.stringify(descriptorFor(plan,refs)));if(descriptorBytes.length>MAX_DESCRIPTOR)fail('Preview package descriptor exceeds limit');const totalBytes=plan.uploadBytes+[...plan.files.values()].reduce((n,m)=>n+m.size,0)+descriptorBytes.length;checkTransfer(totalBytes,plan.maxBytes);return {sourceManifestSha256:plan.manifestSha256,reportHash:plan.reportHash,generation:plan.generation,totalBytes,files:[...plan.files].map(([name,meta])=>({name,sha256:meta.sha256,size:meta.size})),retainedObjects:[...plan.local].filter(([name])=>/^archive-[a-f0-9]{64}\.private\.bin$/.test(name)).map(([name,meta])=>({key:name.slice(8,-12)+'.gz',sha256:name.slice(8,-12),size:meta.size}))};
 }
 export async function prepareRemotePreviewPackage({privateRoot,transport,maxBytes,validation,runBatch,includeRetained=true}={}){
@@ -107,7 +180,15 @@ export async function prepareRemotePreviewPackage({privateRoot,transport,maxByte
  else exactDirectTransfer(plan);
  const runtimeOps=[],refs={};
  // Hash each local file in bounded chunks; retain only chunk metadata until upload.
- for(const [name,meta]of plan.files){const scan=await scanFile(meta.file,{chunks:true});if(scan.sha256!==meta.sha256||scan.size!==meta.size)fail('Preview package changed during preparation');refs[name]=fileRef(name,meta,scan.chunks);for(const chunk of scan.chunks)runtimeOps.push({key:chunk.sha256+'.gz',file:meta.file,offset:chunk.offset,size:chunk.size,sha256:chunk.sha256});}
+ for(const [name,meta]of plan.files){
+  const scan=meta.bytes?scanBuffer(meta.bytes):await scanFile(meta.file,{chunks:true});
+  if(scan.sha256!==meta.sha256||scan.size!==meta.size)fail('Preview package changed during preparation');
+  refs[name]=fileRef(name,meta,scan.chunks);
+  for(const chunk of scan.chunks){
+   const input=meta.bytes?{bytes:meta.bytes.subarray(chunk.offset,chunk.offset+chunk.size)}:{file:meta.file,offset:chunk.offset};
+   runtimeOps.push({key:chunk.sha256+'.gz',size:chunk.size,sha256:chunk.sha256,...input});
+  }
+ }
  const descriptor=descriptorFor(plan,refs);
  const descriptorBytes=Buffer.from(JSON.stringify(descriptor));if(descriptorBytes.length>MAX_DESCRIPTOR)fail('Preview package descriptor exceeds limit');
  const descriptorScan=scanBuffer(descriptorBytes),descriptorRef=fileRef('descriptor.json',{size:descriptorBytes.length,sha256:descriptorScan.sha256},descriptorScan.chunks);descriptorRef.domain='previewPackage';
@@ -129,6 +210,7 @@ export async function loadRemotePreviewPackage({descriptor,transport,parallelCor
  const body=await readManifestBytes(transport,descriptor,{maxBytes:MAX_DESCRIPTOR});if(sha(body)!==descriptor.sha256)fail('Remote preview descriptor hash mismatch');
  const value=json(body,'remote preview descriptor');if(value.version!==1||!hex(value.sourceManifestSha256)||!hex(value.reportHash)||!hex(value.generation)||!value.files||typeof value.files!=='object'||Array.isArray(value.files))fail('Invalid remote preview descriptor');
  const refs=new Map();for(const [name,ref]of Object.entries(value.files)){if(!safeName(name)||!validRef(ref)||ref.domain!=='previewRuntime'||ref.path!==name||refs.has(name))fail('Invalid remote preview file reference');refs.set(name,ref);}
+ if(refs.has(gpsAvailabilityFile)&&refs.has(packedGpsAvailabilityFile))fail('Ambiguous GPS availability representation');
  for(const name of CORE)if(!refs.has(name))fail('Remote preview core file missing');
  const cache=new Map();let used=0;
  async function readVerified(name){const ref=refs.get(name);if(!ref)fail('Remote preview file unavailable');const bytes=await readManifestBytes(transport,ref,{maxBytes:MAX_FILE});if(sha(bytes)!==ref.sha256)fail('Remote preview file hash mismatch');return bytes;}
