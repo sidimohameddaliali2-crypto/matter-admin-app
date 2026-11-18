@@ -8,6 +8,7 @@ import { spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
+import { createServer } from 'node:http';
 
 const exec = promisify(execFile);
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -25,6 +26,21 @@ test('the manual request accepts only the exact reviewed commits and report iden
     { ...request, expectedOldSha: request.selectedSha }, { ...request, generation: null }]) {
     assert.throws(() => implementation.validateAppReaderReleaseRequest(bad));
   }
+});
+
+test('after restart, the signed-out report check preserves the configured public Host on loopback', async t => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    requests.push([req.url, req.headers.host]);
+    if (req.url === '/api/health') return res.end(JSON.stringify({ database: 'connected' }));
+    res.statusCode = req.headers.host === 'reports.example.invalid' ? 401 : 403;
+    res.end('Sign in');
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  await implementation.verifyAppReaderHealth({ origin: 'https://reports.example.invalid', port: server.address().port });
+  assert.deepEqual(requests.map(([route]) => route), ['/api/health', '/api/reporting/status']);
+  assert.deepEqual(requests[1], ['/api/reporting/status', 'reports.example.invalid']);
 });
 
 async function fixture(t) {
@@ -331,6 +347,174 @@ test('actual host memory admission preserves the measured two-generation 2304 Mi
   assert.equal(implementation.requireAppReaderMemory(required), true);
   for (const available of [required - 1, 2036 * 1024 ** 2, 1280 * 1024 ** 2, null, NaN, Infinity])
     assert.throws(() => implementation.requireAppReaderMemory(available));
+});
+
+test('light reader startup admits only the verified index and bounded pointer request within the standard allowance', async t => {
+  assert.equal(typeof implementation.planLightAppReaderStartup, 'function');
+  const cacheDirectory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'light-reader-budget-')));
+  t.after(() => fs.rm(cacheDirectory, { recursive: true, force: true }));
+  const bytes = gzipSync(Buffer.from('{"tiny":"index"}'));
+  const lightView = { sha256: sha(bytes), size: bytes.length };
+  const usage = { day: { limitBytes: 512 * 1024 ** 2, usedBytes: 0, reservedBytes: 0 },
+    month: { limitBytes: 8 * 1024 ** 3, usedBytes: 0, reservedBytes: 0 } };
+  const cold = await implementation.planLightAppReaderStartup({ lightView, cacheDirectory, usage });
+  assert.equal(cold.remoteBytesRequired, bytes.length);
+  assert(cold.requiredBytes >= 2 * 1024 ** 2 + bytes.length);
+  await fs.writeFile(path.join(cacheDirectory, lightView.sha256 + '.gz'), bytes, { mode: 0o600 });
+  const warm = await implementation.planLightAppReaderStartup({ lightView, cacheDirectory, usage });
+  assert.equal(warm.remoteBytesRequired, 0);
+  assert.equal(warm.requiredBytes, 2 * 1024 ** 2);
+  const nearlyFull = structuredClone(usage);
+  nearlyFull.day.usedBytes = nearlyFull.day.limitBytes - warm.requiredBytes + 1;
+  await assert.rejects(implementation.planLightAppReaderStartup({ lightView, cacheDirectory, usage: nearlyFull }),
+    error => error.code === 'APP_READER_COLD_BUDGET');
+  await fs.writeFile(path.join(cacheDirectory, lightView.sha256 + '.gz'), 'corrupt');
+  assert.equal((await implementation.planLightAppReaderStartup({ lightView, cacheDirectory, usage })).remoteBytesRequired, bytes.length);
+});
+
+test('a selected light release persists the explicit selector and requires a light preflight proof', async t => {
+  const f = await fixture(t); await f.git('checkout', '--detach', f.selected);
+  const services = ['Archive', 'Evidence', 'Page', 'Reader', 'Projection', 'Reviews', 'Build', 'Policy'];
+  for (const name of services) await f.write('server/services/driverAuditLight' + name + '.js', '// Reviewed light reader\n');
+  for (const suffix of ['.js', '.test.js']) await f.write('server/scripts/driverAuditHostedBootstrap' + suffix, '// Offline staged metadata\n');
+  await f.write('server/services/driverAuditHostedSlots.js', '// Durable hosted slots\n');
+  await f.git('add', ...services.map(name => 'server/services/driverAuditLight' + name + '.js'),
+    'server/scripts/driverAuditHostedBootstrap.js', 'server/scripts/driverAuditHostedBootstrap.test.js', 'server/services/driverAuditHostedSlots.js');
+  await f.git('commit', '-m', 'Reviewed light reader'); f.request.selectedSha = await f.git('rev-parse', 'HEAD');
+  await f.git('checkout', '--detach', f.old);
+  const preflight = f.dependencies.preflight;
+  await assert.rejects(implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, dependencies: f.dependencies }),
+    /Selected report preflight was not verified/);
+  assert.equal(f.restarts, 0);
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'server/.env.local')), f.beforeEnv);
+  f.dependencies.preflight = async input => {
+    assert.equal(input.env.DRIVER_AUDIT_LIGHT_READER, '1');
+    return { ...await preflight(input), lightweight: true };
+  };
+  await implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, dependencies: f.dependencies });
+  assert.match(await fs.readFile(path.join(f.root, 'server/.env.local'), 'utf8'), /DRIVER_AUDIT_LIGHT_READER="1"/);
+});
+
+async function lightPreflightFixture(t) {
+  const [{ createDriverAuditLightArchive, stageDriverAuditLightView }, { createDriverAuditIntegration },
+    { archiveBytes, archiveCatalog }, { compareUploadLocation }] = await Promise.all([
+    import('../../server/services/driverAuditLightArchive.js'), import('../../server/services/driverAuditIntegration.js'),
+    import('../../server/vendor/driver-audits/integration/cloud/repository.mjs'),
+    import('../../server/vendor/driver-audits/app/src/content/dashboard/upload-location.mjs'),
+  ]);
+  const cacheDirectory = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'reader-light-preflight-')));
+  t.after(() => fs.rm(cacheDirectory, { recursive: true, force: true }));
+  const blobs = new Map(), reads = [], rpcReads = [], routes = [];
+  const archive = {
+    async readObject(key, { maxBytes }) {
+      reads.push(key); assert(blobs.has(key), 'Only staged light/evidence objects may be read');
+      const bytes = blobs.get(key); assert(bytes.length <= maxBytes); return [bytes];
+    },
+    async putVerifiedObject(key, bytes) {
+      assert.equal(key, sha(bytes) + '.gz'); blobs.set(key, Buffer.from(bytes));
+      return { verified: true, key, sha256: sha(bytes) };
+    },
+  };
+  const head = { generation: request.generation, reportHash: sha('original snapshot'),
+    sourceBodySha256: request.reportHeadSha256, visibleCutoffAt: '2026-11-18T07:00:00.000Z' };
+  const photo = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwcB/UtqpEwAAAAASUVORK5CYII=', 'base64');
+  const key = '2025-11-05/old-delivery', delivery = { id: 'old-delivery', upload: '2025-11-05T06:00:00.000Z' };
+  const assessmentHash = sha('original assessment'), deliveryDigest = sha(JSON.stringify(delivery));
+  const uploadLocation = compareUploadLocation({ upload: delivery.upload });
+  const gps = { result: { binding: { assessmentHash, deliveryDigest }, vehicle: 'original-vehicle', gps: { streams: [] } },
+    context: {}, evidenceResult: { recordKey: key, versionId: sha('original GPS'), assessmentHash, deliveryDigest, uploadLocation } };
+  const historyBytes = Buffer.from(JSON.stringify({ rows: [{ key, result: 'retained original' }] }));
+  const historySha = sha(historyBytes), historyUrl = 'report-data/history-' + historySha + '.json';
+  const refs = [await archiveBytes(archive, gzipSync(historyBytes), { domain: 'state', path: 'assets/' + historyUrl.slice(12) + '.gz' }),
+    await archiveBytes(archive, photo, { domain: 'objects', path: sha(photo) })];
+  const catalog = await archiveCatalog(archive, refs);
+  const entry = { row: { key }, summary: { key, driverId: 'original-driver' },
+    gpsRow: { key, date: '2025-11-05', assessmentHash, delivery }, gps, photo: { sha256: sha(photo) },
+    history: { staff: { url: historyUrl, sha256: historySha, count: 1 }, source: null },
+    reviewRow: { key, findings: [] }, issues: [{ id: 'original-issue', deliveryId: key,
+      evidence: { source_sha256: sha('original source'), rule_version: 'original-rule' } }] };
+  const current = { ...structuredClone(entry), row: { key: '2026-11-18/current-delivery' },
+    summary: { key: '2026-11-18/current-delivery', driverId: 'original-driver' } };
+  // No new GPS/photo/review result is fabricated for the current date. The
+  // deterministic samples deliberately exercise the retained historical case.
+  current.gps = null; current.photo.sha256 = null; current.issues = [];
+  current.gpsRow = { ...current.gpsRow, key: current.row.key, date: '2026-11-18' };
+  current.reviewRow = { key: current.row.key, findings: [] };
+  current.history = { staff: null, source: null };
+  head.lightView = await stageDriverAuditLightView({ head, archive, projection: {
+    days: new Map([['2025-11-05', [entry]], ['2026-11-18', [current]]]),
+    context: { generation: head.generation, reportHash: head.reportHash, cutoff: head.visibleCutoffAt,
+      records: 2, history: { staffRows: 1 }, review: { snapshotHash: head.reportHash, deliveryReview: true },
+      reviewResolved: true, refs: { catalog }, gpsStreamRefs: {}, gpsEvidenceRefs: {}, gpsMetadata: {},
+      extraSourceHistoryCases: {}, extraStaffHistoryCases: {} },
+  } });
+  const replica = { head: async () => head };
+  const usage = { day: { limitBytes: 512 * 1024 ** 2, usedBytes: 0, reservedBytes: 0 },
+    month: { limitBytes: 8 * 1024 ** 3, usedBytes: 0, reservedBytes: 0 } };
+  const backend = { kind: 'supabase', executionHost: 'sidi', archive,
+    rpc: async () => assert.fail('Unbounded or unrelated RPC is forbidden'),
+    rpcForResponseLimit: limit => async (name, args) => {
+      rpcReads.push({ name, key: args.p_key, limit });
+      assert.equal(name, 'matter_hosted_state_read'); assert.equal(args.p_key, 'preview-gps-map-20261106:review-journal');
+      return { body_text: null, revision: 0 };
+    },
+    archiveReadBudget: { reserve: async () => ({ allowed: true }), settle: async () => ({ settled: true }) },
+    readTransferUsage: async () => usage,
+  };
+  reads.length = 0;
+  return { head, backend, replica, cacheDirectory, usage, blobs, reads, rpcReads, routes, entry,
+    env: { DRIVER_AUDIT_ENABLED: '1', DRIVER_AUDIT_IMPORT_ENABLED: '0', DRIVER_AUDIT_SERVING_STORE: 'supabase',
+      DRIVER_AUDIT_LIGHT_READER: '1', DRIVER_AUDIT_ORIGIN: 'https://matterapp.online' },
+    expected: request, signal: new AbortController().signal, createDriverAuditLightArchive,
+    createDriverAuditIntegration(options) {
+      const actual = createDriverAuditIntegration({ ...options, dependencies: { ...options.dependencies, store: replica,
+        createCoordinator: () => ({ status: () => ({}), poll: () => assert.fail('The full CORE must not load') }) } });
+      const handler = (req, res, next) => { routes.push(new URL(req.url, 'https://matterapp.online').pathname); return actual(req, res, next); };
+      handler.prewarm = actual.prewarm;
+      return handler;
+    },
+  };
+}
+
+test('light release preflight exercises the actual staff routes, named hashes and archived date without any full CORE', async t => {
+  assert.equal(typeof implementation.preflightLightAppReader, 'function');
+  const f = await lightPreflightFixture(t);
+  const result = await implementation.preflightLightAppReader(f);
+  assert.equal(result.lightweight, true); assert.equal(result.namedEvidenceVerified, true);
+  for (const endpoint of ['dates', 'deliveries', 'gps', 'photo', 'history', 'reviews'])
+    assert(f.routes.includes('/api/reporting/light/' + endpoint));
+  assert(f.reads.length > 0); assert(f.rpcReads.length > 0);
+  assert(f.rpcReads.every(row => row.limit === 512 * 1024));
+});
+
+test('light preflight refuses a missing index before any remote archive or route read', async t => {
+  const f = await lightPreflightFixture(t); delete f.head.lightView;
+  await assert.rejects(implementation.preflightLightAppReader(f), /requires its lightweight index/);
+  assert.deepEqual(f.reads, []); assert.deepEqual(f.routes, []);
+});
+
+test('light preflight refuses a changed named photo and leaves its original source bytes intact', async t => {
+  const f = await lightPreflightFixture(t), original = f.createDriverAuditIntegration;
+  f.createDriverAuditIntegration = options => {
+    const real = original(options);
+    const handler = (req, res, next) => {
+      if (req.url.startsWith('/api/reporting/light/photo?')) {
+        res.writeHead(200, { 'Cache-Control': 'private, no-store', 'X-Report-Image-Sha256': f.entry.photo.sha256 });
+        return res.end('different photo');
+      }
+      return real(req, res, next);
+    };
+    handler.prewarm = real.prewarm; return handler;
+  };
+  await assert.rejects(implementation.preflightLightAppReader(f), /original photo bytes differ/);
+});
+
+test('light preflight rejects an advanced serving head rather than releasing a stale selected generation', async t => {
+  const f = await lightPreflightFixture(t); let calls = 0;
+  f.replica.head = async () => ({ ...f.head, sourceBodySha256: ++calls === 1 ? f.head.sourceBodySha256 : sha('a newer actual head') });
+  await assert.rejects(implementation.preflightLightAppReader(f), /advanced during lightweight preflight/);
+  assert.equal(calls, 2);
+  assert(f.routes.includes('/api/reporting/light/reviews'));
 });
 
 test('changed settings during preflight are preserved and stop the release', async t => {

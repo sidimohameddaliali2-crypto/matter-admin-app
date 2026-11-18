@@ -11,7 +11,7 @@ import { createDriverAuditSupabaseArchive } from './driverAuditSupabaseArchive.j
 import { createDriverAuditSupabaseTransfer } from './driverAuditSupabaseTransfer.js';
 import { createDriverAuditSupabaseWorkerStatusStore, driverAuditSupabaseWorkerStatusKey,
   readDriverAuditFileSyncStatus } from './driverAuditSyncStatus.js';
-import { createDriverAuditPhotoRecovery } from './driverAuditPhotoRecovery.js';
+import { createDriverAuditPhotoRecovery, createDriverAuditSupabasePhotoRecovery } from './driverAuditPhotoRecovery.js';
 import { createCloudState } from '../vendor/driver-audits/integration/cloud/cloud-state.mjs';
 
 const check = (condition, message) => { if (!condition) throw Error(message); };
@@ -29,6 +29,13 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
   const executionHost = env.DRIVER_AUDIT_EXECUTION_HOST;
   check(['sidi', 'off-host'].includes(executionHost)
     && (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase', 'Explicit managed Supabase execution is required');
+  const recoveryDirectory = env.DRIVER_AUDIT_PHOTO_RECOVERY_DIRECTORY;
+  const recoveryStore = env.DRIVER_AUDIT_PHOTO_RECOVERY_STORE;
+  check(recoveryStore === undefined || recoveryStore === 'supabase', 'An explicit supported photo recovery store is required');
+  check(recoveryStore === undefined || executionHost === 'off-host' && recoveryDirectory === undefined,
+    'Durable Supabase photo recovery is off-host only and excludes a local directory');
+  check(executionHost !== 'off-host' || recoveryStore === 'supabase' || recoveryDirectory !== undefined,
+    'Off-host reporting requires explicit private photo recovery');
   const secret = env.DRIVER_AUDIT_SUPABASE_SECRET || env.MATTER_SUPABASE_SECRET;
   const cacheDirectory = env.MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY;
   check(typeof cacheDirectory === 'string' && path.isAbsolute(cacheDirectory)
@@ -47,10 +54,9 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
     fetchImpl: (url, options, maxResponseBytes) => transfer.wrapFetch({ maxResponseBytes })(url, options) });
   const uploads = photoStore || (executionHost === 'off-host'
     ? createDriverAuditLinkedPhotoReader({ env, fetchImpl }) : createDriverAuditSpacesArchive({ env }));
-  const recoveryDirectory = env.DRIVER_AUDIT_PHOTO_RECOVERY_DIRECTORY;
-  const photoRecovery = recoveryDirectory === undefined ? undefined : createDriverAuditPhotoRecovery(recoveryDirectory);
-  check(executionHost !== 'off-host' || photoRecovery, 'Off-host reporting requires its private photo recovery directory');
-  check(!photoRecovery || recoveryDirectory !== cacheDirectory && !recoveryDirectory.startsWith(cacheDirectory + path.sep),
+  const photoRecovery = recoveryStore === 'supabase' ? createDriverAuditSupabasePhotoRecovery({ archive: original })
+    : recoveryDirectory === undefined ? undefined : createDriverAuditPhotoRecovery(recoveryDirectory);
+  check(recoveryDirectory === undefined || recoveryDirectory !== cacheDirectory && !recoveryDirectory.startsWith(cacheDirectory + path.sep),
     'Original photo recovery must be outside the disposable archive cache');
   const photoArchive = createDriverAuditSupabaseArchive({ archive: original, rpc: rpcForResponseLimit(16 * 1024),
     photoStore: uploads, photoRecovery, env });

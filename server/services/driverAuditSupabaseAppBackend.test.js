@@ -63,7 +63,7 @@ async function fixture(t) {
     async readExistingPhoto() { photoReads++; return bytes; },
   };
   const open = () => createDriverAuditSupabaseAppBackend({ env, fetchImpl, photoStore, cacheFreeBytes: async () => 4 * 1024 ** 3 });
-  return { env, calls, objects, aliases, sharedState, open, offline: () => { offline = true; }, photoReads: () => photoReads,
+  return { env, calls, objects, aliases, sharedState, photoStore, open, offline: () => { offline = true; }, photoReads: () => photoReads,
     collectorFullReads: () => collectorFullReads };
 }
 
@@ -155,6 +155,67 @@ test('a new photo admits only a reference and persists across backend reload', a
   assert.deepEqual(Buffer.concat(await reloaded.archive.readObject(key)), bytes);
   assert.ok(f.photoReads() >= 2);
   assert.equal(f.calls.some(call => call.path.includes('/storage/')), false);
+});
+
+test('off-host durable photo recovery reuses original raw objects and copies only a currently admitted missing photo', async t => {
+  const f = await fixture(t);
+  f.env.DRIVER_AUDIT_EXECUTION_HOST = 'off-host';
+  f.env.DRIVER_AUDIT_PHOTO_RECOVERY_STORE = 'supabase';
+  const backend = await f.open();
+  backend.archive.offerSourcePhotoCandidate({ sha256: hash(bytes), size: bytes.length,
+    url: 'https://fixture-photos.fra1.cdn.digitaloceanspaces.com/photos/fixture.jpg' });
+  assert.equal((await backend.archive.putVerifiedObject(key, bytes)).reusedExistingPhoto, true);
+  assert.equal(f.calls.filter(call => call.method === 'POST' && call.path.includes('/storage/')).length, 0,
+    'Existing exact historical raw objects must be reused');
+  assert.equal(f.objects.size, 1); assert.equal(f.aliases.size, 1);
+  assert(f.calls.some(call => call.path.endsWith('_egress_reserve')), 'Recovery must pass through the existing HTTP meter');
+
+  const missing = await fixture(t);
+  missing.env.DRIVER_AUDIT_EXECUTION_HOST = 'off-host';
+  missing.env.DRIVER_AUDIT_PHOTO_RECOVERY_STORE = 'supabase';
+  missing.objects.clear();
+  const source = await missing.open();
+  source.archive.offerSourcePhotoCandidate({ sha256: hash(bytes), size: bytes.length,
+    url: 'https://fixture-photos.fra1.cdn.digitaloceanspaces.com/photos/fixture.jpg' });
+  await source.archive.putVerifiedObject(key, bytes);
+  assert.deepEqual(missing.objects.get(key), bytes);
+  assert.equal(missing.calls.filter(call => call.method === 'POST' && call.path.includes('/storage/')).length, 1);
+  const before = missing.calls.length, restored = await missing.open();
+  await restored.archive.putVerifiedObject(key, bytes);
+  assert.equal(missing.calls.slice(before).filter(call => call.method === 'POST' && call.path.includes('/storage/')).length, 0);
+  await fs.rm(path.join(missing.env.MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY, key), { force: true });
+  missing.photoStore.readExistingPhoto = async () => { throw Object.assign(Error('Original link no longer available'), { name: 'NoSuchKey' }); };
+  const recoveryOnly = await missing.open();
+  assert.deepEqual(Buffer.concat(await recoveryOnly.archive.readObject(key, { maxBytes: bytes.length })), bytes,
+    'A later runner recovers the exact admitted photo even after its original upload link is unavailable');
+  assert.equal(missing.calls.filter(call => call.method === 'POST' && call.path.includes('/storage/')).length, 1);
+});
+
+test('the existing off-host private directory strategy keeps its original bytes and does not add archive copies', async t => {
+  const f = await fixture(t), recovery = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'original-photo-directory-')));
+  t.after(() => fs.rm(recovery, { recursive: true, force: true }));
+  f.env.DRIVER_AUDIT_EXECUTION_HOST = 'off-host';
+  f.env.DRIVER_AUDIT_PHOTO_RECOVERY_DIRECTORY = recovery;
+  f.objects.clear();
+  const backend = await f.open();
+  backend.archive.offerSourcePhotoCandidate({ sha256: hash(bytes), size: bytes.length,
+    url: 'https://fixture-photos.fra1.cdn.digitaloceanspaces.com/photos/fixture.jpg' });
+  await backend.archive.putVerifiedObject(key, bytes);
+  assert.deepEqual(await fs.readFile(path.join(recovery, hash(bytes))), bytes);
+  assert.equal(f.objects.size, 0);
+  assert.equal(f.calls.some(call => call.path.includes('/storage/')), false);
+});
+
+test('durable photo recovery is explicit, off-host only and mutually exclusive with a local directory', async t => {
+  for (const changes of [
+    { DRIVER_AUDIT_PHOTO_RECOVERY_STORE: 'supabase' },
+    { DRIVER_AUDIT_EXECUTION_HOST: 'off-host', DRIVER_AUDIT_PHOTO_RECOVERY_STORE: 'other' },
+    { DRIVER_AUDIT_EXECUTION_HOST: 'off-host', DRIVER_AUDIT_PHOTO_RECOVERY_STORE: 'supabase', DRIVER_AUDIT_PHOTO_RECOVERY_DIRECTORY: '/not-used' },
+  ]) {
+    const f = await fixture(t); Object.assign(f.env, changes);
+    await assert.rejects(f.open());
+    assert.deepEqual(f.calls, [], 'An invalid strategy must not make RPC or storage requests');
+  }
 });
 
 test('poll progress uses additive bounded metadata RPCs and leaves the original state RPC available', async t => {

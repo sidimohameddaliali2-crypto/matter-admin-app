@@ -94,6 +94,6 @@
     "integration/cloud/photo-grader.mjs": "406130e8cead14bf7fb360545f7d978cfc917f23abd99561a4135a2475ed0d5d",
     "integration/hosted/automatic-photo-review.mjs": "db6ee65487f3679e85072afd1d6a5459c2d9a568786c63fe63196fce0501aa2f",
     "integration/cloud/photo-unavailable.mjs": "8646a437e2bcd4484f4d98e90df6ef8ad45bd81c708665bf62a5e72a73f35a45",
-    "integration/cloud/preview-source-history.mjs": "5215acc66b663f0e99b5fa7cead7215c97556dac7d836d8418e2e23392e145cf"
+    "integration/cloud/preview-source-history.mjs": "e16e5cebb4dba9dcba6f8d0477231cdd47f8941db5d28224b40fe81df1a94e9b"
   }
 }
