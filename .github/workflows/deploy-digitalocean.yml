@@ -9,6 +9,8 @@ on:
         default: deploy
         options:
           - deploy
+          - deploy-supabase-reader
+          - check-supabase-reader
           - audit-preflight
           - audit-seed-enable
           - audit-sync-start
@@ -54,6 +56,15 @@ on:
         type: string
       expected_sha:
         description: Exact reviewed application commit for audit operations
+        type: string
+      app_reader_previous_sha:
+        description: Exact currently deployed app commit for the report-only release
+        type: string
+      app_reader_head_sha256:
+        description: Exact verified Supabase serving-head body SHA-256
+        type: string
+      app_reader_generation:
+        description: Exact verified Supabase report generation
         type: string
       audit_manifest_sha256:
         description: SHA-256 of the approved private audit handoff
@@ -154,6 +165,9 @@ jobs:
           SOURCE_PROOF_SHA: ${{ inputs.audit_source_proof_sha256 }}
           SOURCE_QUALIFICATION_SHA: ${{ inputs.audit_source_qualification_sha256 }}
           REPORTING_SECRET: ${{ inputs.operation != 'audit-rollback' && secrets.DRIVER_AUDIT_SUPABASE_SECRET || '' }}
+          READER_PREVIOUS_SHA: ${{ inputs.app_reader_previous_sha }}
+          READER_HEAD_SHA: ${{ inputs.app_reader_head_sha256 }}
+          READER_GENERATION: ${{ inputs.app_reader_generation }}
         run: |
           set -euo pipefail
           if [[ ! "$EXPECTED_SHA" =~ ^[a-f0-9]{40}$ || "$EXPECTED_SHA" != "$GITHUB_SHA" ]]; then
@@ -169,6 +183,12 @@ jobs:
             exit 1
           fi
           case "$OPERATION" in
+            deploy-supabase-reader|check-supabase-reader)
+              if [[ ! "$READER_PREVIOUS_SHA" =~ ^[a-f0-9]{40}$ || "$READER_PREVIOUS_SHA" = "$GITHUB_SHA" || ! "$READER_HEAD_SHA" =~ ^[a-f0-9]{64}$ || ! "$READER_GENERATION" =~ ^[a-f0-9]{64}$ ]]; then
+                echo "The old app and exact verified Supabase report identities are required."
+                exit 1
+              fi
+              exit 0 ;;
             audit-source-host-check) exit 0 ;;
             audit-source-*)
               if [[ ! "$SOURCE_MANIFEST" =~ ^[a-f0-9]{64}$ ]]; then
@@ -386,6 +406,60 @@ jobs:
               node .github/scripts/website-release.mjs publish "$DO_APP_PATH" "$website_incoming/build" "$WEBSITE_RELEASE_ID" https://matterapp.online
             fi
 
+      - name: Prepare the reviewed report-only operator
+        if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'deploy-supabase-reader' || inputs.operation == 'check-supabase-reader')
+        id: reader
+        shell: bash
+        env:
+          READER_PREVIOUS_SHA: ${{ inputs.app_reader_previous_sha }}
+          READER_HEAD_SHA: ${{ inputs.app_reader_head_sha256 }}
+          READER_GENERATION: ${{ inputs.app_reader_generation }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs=require('fs'),crypto=require('crypto'),zlib=require('zlib');
+          const bytes=fs.readFileSync('.github/scripts/driver-audit-supabase-app-release.mjs');
+          if(bytes.length>192*1024)throw Error('The reviewed reader operator exceeds its bound');
+          const sha=crypto.createHash('sha256').update(bytes).digest('hex');
+          const request={version:1,expectedOldSha:process.env.READER_PREVIOUS_SHA,selectedSha:process.env.GITHUB_SHA,
+            reportHeadSha256:process.env.READER_HEAD_SHA,generation:process.env.READER_GENERATION};
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,'operator='+zlib.gzipSync(bytes).toString('base64')+'\nsha256='+sha+'\nrequest='+Buffer.from(JSON.stringify(request)).toString('base64')+'\n');
+          NODE
+
+      - name: Release only the verified Supabase report reader
+        if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'deploy-supabase-reader' || inputs.operation == 'check-supabase-reader')
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DRIVER_AUDIT_APP_PATH: ${{ secrets.DO_APP_PATH }}
+          READER_OPERATOR_GZIP: ${{ steps.reader.outputs.operator }}
+          READER_OPERATOR_SHA: ${{ steps.reader.outputs.sha256 }}
+          READER_REQUEST: ${{ steps.reader.outputs.request }}
+          READER_APPLY: ${{ inputs.operation == 'deploy-supabase-reader' && '1' || '0' }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          envs: DRIVER_AUDIT_APP_PATH,READER_OPERATOR_GZIP,READER_OPERATOR_SHA,READER_REQUEST,READER_APPLY
+          script: |
+            set -eu
+            /usr/bin/node --input-type=module <<'NODE'
+            import {gunzipSync} from 'node:zlib';import {createHash} from 'node:crypto';
+            try {
+              const bytes=gunzipSync(Buffer.from(process.env.READER_OPERATOR_GZIP,'base64'),{maxOutputLength:192*1024});
+              if(!/^[a-f0-9]{64}$/.test(process.env.READER_OPERATOR_SHA||'')||createHash('sha256').update(bytes).digest('hex')!==process.env.READER_OPERATOR_SHA)throw Error('Operator identity differs');
+              const operator=await import('data:text/javascript;base64,'+bytes.toString('base64'));
+              const request=operator.validateAppReaderReleaseRequest(JSON.parse(Buffer.from(process.env.READER_REQUEST,'base64')));
+              if(!['0','1'].includes(process.env.READER_APPLY||''))throw Error('Invalid reviewed reader operation');
+              console.log(JSON.stringify(await operator.releaseSupabaseAppReader({appRoot:process.env.DRIVER_AUDIT_APP_PATH,request,apply:process.env.READER_APPLY==='1'})));
+            } catch(error) {
+              const budget=error.code==='APP_READER_COLD_BUDGET';
+              console.log(JSON.stringify({status:'supabase-app-reader-stopped',reason:budget?'cold-transfer-budget':'private-release-guard',
+                ...(budget?{requiredBytes:error.requiredBytes,availableBytes:error.availableBytes}:{})}));
+              process.exitCode=1;
+            }
+            NODE
+
       - name: Prepare private source transfer
         id: source-transfer
         if: github.event_name == 'workflow_dispatch' && inputs.operation == 'audit-source-stage'
@@ -472,7 +546,7 @@ jobs:
           strip_components: 1
 
       - name: Run reviewed driver audit operation
-        if: github.event_name == 'workflow_dispatch' && inputs.operation != 'deploy'
+        if: github.event_name == 'workflow_dispatch' && inputs.operation != 'deploy' && inputs.operation != 'deploy-supabase-reader' && inputs.operation != 'check-supabase-reader'
         uses: appleboy/ssh-action@v1.2.0
         env:
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
