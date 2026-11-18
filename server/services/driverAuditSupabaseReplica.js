@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { loadRemotePreviewPackage } from '../vendor/driver-audits/integration/cloud/remote-preview-package.mjs';
 import { readManifestBytes } from '../vendor/driver-audits/integration/cloud/repository.mjs';
+import { createDriverAuditLightArchive, isDriverAuditLightReference } from './driverAuditLightArchive.js';
 
 export const driverAuditSupabaseReportHeadKey = 'app-sidi-report-head';
 
@@ -47,13 +48,14 @@ function manifest(ref, domain, name, maximum) {
 
 function pointer(value, { previous = true, identity = false } = {}) {
   check(fields(value, ['version', 'generation', 'reportHash', 'descriptor', 'servingPackage',
-    'closureReceipt', 'restore', 'visibleCutoffAt'], ['publishedAt', ...(previous ? ['previous'] : []),
+    'closureReceipt', 'restore', 'visibleCutoffAt'], ['publishedAt', 'lightView', ...(previous ? ['previous'] : []),
     ...(identity ? ['sourceRevision', 'sourceBodySha256'] : [])]), 'Invalid Supabase serving pointer metadata');
   check(value.version === 1 && hex(value.generation) && hex(value.reportHash)
     && (value.visibleCutoffAt === null || timestamp(value.visibleCutoffAt))
     && (!Object.hasOwn(value, 'publishedAt') || timestamp(value.publishedAt)), 'Invalid Supabase serving pointer identity');
   manifest(value.descriptor, 'previewPackage', 'descriptor.json', chunkLimit);
   check(value.descriptor.size > 0, 'An exact Supabase serving descriptor is required');
+  check(!Object.hasOwn(value, 'lightView') || isDriverAuditLightReference(value.lightView), 'Invalid indexed report reference');
   const source = value.servingPackage;
   check(fields(source, ['version', 'dataStore', 'collectorRevision', 'sourceBasis', 'manifestSha256'])
     && source.version === 1 && source.dataStore === 'supabase' && positive(source.collectorRevision)
@@ -110,12 +112,17 @@ function previousSnapshot(actual) {
   return retained;
 }
 
-function samePackage(left, right) {
+function sameCorePackage(left, right) {
   return left.generation === right.generation && left.reportHash === right.reportHash
     && left.descriptor.sha256 === right.descriptor.sha256
     && ['version', 'dataStore', 'collectorRevision', 'sourceBasis', 'manifestSha256']
       .every(key => left.servingPackage[key] === right.servingPackage[key])
     && left.visibleCutoffAt === right.visibleCutoffAt;
+}
+
+function samePackage(left, right) {
+  return sameCorePackage(left, right) && left.lightView?.sha256 === right.lightView?.sha256
+    && left.lightView?.size === right.lightView?.size;
 }
 
 export async function verifyDriverAuditSupabaseServingPackage({ head, archive } = {}) {
@@ -138,7 +145,8 @@ export async function verifyDriverAuditSupabaseServingPackage({ head, archive } 
     total += ref.size;
     check(total <= packageLimit, 'Supabase serving package exceeds its byte bound');
   }
-  const loaded = await loadRemotePreviewPackage({ descriptor: head.descriptor, transport: archive });
+  const loaded = await loadRemotePreviewPackage({ descriptor: head.descriptor, transport: archive,
+    parallelCoreReads: Boolean(head.lightView) });
   // The existing package loader verifies browser/generation and requires every
   // deferred-query/GPS reference to be declared. Read ALL declarations here,
   // including optional files, without retaining their bodies in another map.
@@ -148,6 +156,10 @@ export async function verifyDriverAuditSupabaseServingPackage({ head, archive } 
   check(observedAt === null ? head.visibleCutoffAt === null : timestamp(observedAt)
     && head.visibleCutoffAt !== null && Date.parse(observedAt) === Date.parse(head.visibleCutoffAt),
   'Supabase serving package source cutoff differs');
+  if (head.lightView) {
+    const { view } = loaded.takeVerifiedRuntime();
+    await createDriverAuditLightArchive({ archive }).verify(head, view.gpsRows.map(row => row.key));
+  }
   return { descriptor, totalBytes: total };
 }
 
@@ -207,7 +219,8 @@ export function createDriverAuditSupabaseReplica({ state, archive } = {}) {
         check(candidate.servingPackage.collectorRevision >= before.servingPackage.collectorRevision,
           'Supabase serving collector revision moved backwards');
         if (candidate.servingPackage.collectorRevision === before.servingPackage.collectorRevision) {
-          check(samePackage(candidate, before), 'Supabase serving collector revision package conflict');
+          check(samePackage(candidate, before) || !before.lightView && candidate.lightView && sameCorePackage(candidate, before),
+            'Supabase serving collector revision package conflict');
         }
       }
       await verifiedPackage(candidate);
@@ -215,7 +228,9 @@ export function createDriverAuditSupabaseReplica({ state, archive } = {}) {
       const fresh = parsedRow(await readRow());
       expectedState(fresh, expectedIdentity);
       if (before && samePackage(candidate, before)) return { status: 'unchanged', head: fresh };
-      const next = { ...candidate, previous: before ? previousSnapshot(before) : candidate.previous ?? null };
+      const next = { ...candidate,
+        previous: before ? sameCorePackage(candidate, before) ? before.previous ?? null : previousSnapshot(before)
+          : candidate.previous ?? null };
       const body = JSON.stringify(next);
       check(Buffer.byteLength(body) <= pointerLimit, 'Supabase serving pointer exceeds its metadata bound');
       const revision = before?.sourceRevision ?? 0;

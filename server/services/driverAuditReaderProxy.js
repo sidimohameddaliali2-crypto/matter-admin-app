@@ -10,6 +10,7 @@ const localHost = '127.0.0.1';
 const excludedHeaders = new Set(['connection', 'proxy-connection', 'keep-alive', 'te', 'trailer',
   'transfer-encoding', 'upgrade', 'proxy-authenticate', 'proxy-authorization', readerActorHeader, readerIngressHeader]);
 const settings = ['JWT_SECRET', 'DRIVER_AUDIT_ORIGIN', 'DRIVER_AUDIT_SUPABASE_SECRET',
+  'DRIVER_AUDIT_LIGHT_READER',
   'DRIVER_AUDIT_STAFF_RENDERER_DIR', 'DRIVER_AUDIT_STAFF_RENDERER_SHA256', 'DRIVER_AUDIT_RELEASE_SHA',
   'MATTER_SUPABASE_SECRET', 'MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY',
   'SPACES_ENDPOINT', 'SPACES_BUCKET', 'SPACES_REGION', 'SPACES_KEY', 'SPACES_SECRET'];

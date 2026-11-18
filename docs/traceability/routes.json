@@ -172,7 +172,7 @@
     "server/routes/yellowblock.js": "7369950e2f9b35759a4bd71678566c3e6b9bb9c2c2109020f2bf8967d03259e4",
     "server/server.js": "f125cf3304a8d7b213ba5d1ab95ed3dffcfabd8b7c3128eb14f31fb1f8342391",
     "server/services/customerServiceAdminMount.js": "ecb83e0ab51bd9ea272ba45bfb7c00409130c845b8003b0ae5bba540cba00b51",
-    "server/services/driverAuditIntegration.js": "c9d7ec29145c294437c5d42a99ee40eda2eaf3a317cfb1ab457e050c07e290d4",
+    "server/services/driverAuditIntegration.js": "dcc64feabf28de2b6e6b7608e528bb59e1baf7d43c0417b7066684753941937e",
     "server/vendor/driver-audits/integration/cloud/cloud-http.mjs": "b4daaedf7f9b2a8df9ea5fa9660b98f8291e880723843730e8d1f22b0f69017a"
   },
   "schemaVersion": 1,
@@ -12080,51 +12080,51 @@
   "rawDispatch": [
     {
       "pathLiteral": "/api/reporting",
-      "source": "server/services/driverAuditIntegration.js:20"
+      "source": "server/services/driverAuditIntegration.js:21"
     },
     {
       "pathPattern": "^\\/api\\/reporting(\\/report-data\\/(?:detail|history|query|archive|snapshot)-[a-f0-9]{64}\\.json|\\/report-assets\\/font-[a-f0-9]{64}\\.(?:woff2?|ttf|otf))$",
-      "source": "server/services/driverAuditIntegration.js:23"
+      "source": "server/services/driverAuditIntegration.js:24"
     },
     {
       "pathLiteral": "/api/driver-audits/session",
-      "source": "server/services/driverAuditIntegration.js:25"
+      "source": "server/services/driverAuditIntegration.js:26"
     },
     {
       "pathLiteral": "/api/session",
-      "source": "server/services/driverAuditIntegration.js:25"
+      "source": "server/services/driverAuditIntegration.js:26"
     },
     {
       "pathLiteral": "/api/session/refresh",
-      "source": "server/services/driverAuditIntegration.js:25"
+      "source": "server/services/driverAuditIntegration.js:26"
     },
     {
       "pathLiteral": "/api/reporting/",
-      "source": "server/services/driverAuditIntegration.js:25"
+      "source": "server/services/driverAuditIntegration.js:26"
     },
     {
       "pathLiteral": "/report-data/",
-      "source": "server/services/driverAuditIntegration.js:25"
+      "source": "server/services/driverAuditIntegration.js:26"
     },
     {
       "pathLiteral": "/report-assets/",
-      "source": "server/services/driverAuditIntegration.js:25"
+      "source": "server/services/driverAuditIntegration.js:26"
     },
     {
       "pathLiteral": "/api/driver-audits/session",
-      "source": "server/services/driverAuditIntegration.js:133"
+      "source": "server/services/driverAuditIntegration.js:142"
     },
     {
       "pathLiteral": "/api/session/refresh",
-      "source": "server/services/driverAuditIntegration.js:151"
+      "source": "server/services/driverAuditIntegration.js:160"
     },
     {
       "pathLiteral": "/api/session",
-      "source": "server/services/driverAuditIntegration.js:155"
+      "source": "server/services/driverAuditIntegration.js:164"
     },
     {
       "pathLiteral": "/api/reporting/status",
-      "source": "server/services/driverAuditIntegration.js:162"
+      "source": "server/services/driverAuditIntegration.js:180"
     },
     {
       "pathPattern": "^\\/report-assets\\/font-[a-f0-9]{64}\\.(woff2?|ttf|otf)$",

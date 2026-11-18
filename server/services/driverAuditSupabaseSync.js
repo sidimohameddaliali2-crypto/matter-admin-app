@@ -6,6 +6,8 @@ import { pathToFileURL } from 'node:url';
 import { getBusinessDayBounds } from '../utils/businessDate.js';
 import { createDriverAuditSupabaseAppBackend } from './driverAuditSupabaseAppBackend.js';
 import { createDriverAuditSupabaseReplica, verifyDriverAuditSupabaseServingPackage } from './driverAuditSupabaseReplica.js';
+import { buildDriverAuditLightView } from './driverAuditLightBuild.js';
+import { createDriverAuditHostedSlots } from './driverAuditHostedSlots.js';
 import { writeDriverAuditSourceState } from './driverAuditSource.js';
 import { withDriverAuditHeavyWork } from './driverAuditHeavyWork.js';
 import { saveDriverAuditBuildRecipe } from './driverAuditBuildRecipe.js';
@@ -77,6 +79,8 @@ async function optionalJson(file, maximum) {
 
 async function checkedConfiguration({ config, file }) {
   check(config?.version === 1 && path.isAbsolute(config.root || '') && path.resolve(config.root) === config.root
+    && (config.lightReader === undefined || typeof config.lightReader === 'boolean')
+    && (config.hostedSlotClaims === undefined || typeof config.hostedSlotClaims === 'boolean')
     && file === path.join(config.root, 'sync.json') && config.baselineRoot === path.join(config.root, 'baseline')
     && config.codeRoot === path.join(config.root, 'builder') && hex(config.builderSha256)
     && config.rendererBuild?.path === path.join(config.baselineRoot, 'build.private.json') && hex(config.rendererBuild.sha256)
@@ -106,6 +110,7 @@ function seedPointer(seed, root) {
       sourceBasis: seed.sourceBasis, manifestSha256: seed.manifestSha256 },
     visibleCutoffAt: seed.visibleCutoffAt, closureReceipt: seed.closureReceipt, restore: seed.restore,
     previous: seed.pointer.previous ?? null,
+    ...(seed.pointer.lightView ? { lightView: seed.pointer.lightView } : {}),
   };
 }
 
@@ -138,6 +143,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
   const firstEligibleAt = armedAt === undefined ? -Infinity : Date.parse(armedAt);
   check(armedAt === undefined || executionHost === 'off-host' && iso(armedAt) === armedAt && firstEligibleAt <= clock(),
     'Invalid off-host schedule enrollment');
+  check(!config.hostedSlotClaims || executionHost === 'off-host', 'Durable cloud slots require the off-host worker');
   signal?.throwIfAborted();
   for (const directory of [work, cache, path.join(root, 'archive-receipts')]) await privateDirectory(directory);
   const lock = await acquireWorkerLock(path.join(path.dirname(root), 'sync-worker.lock'));
@@ -159,9 +165,30 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
     const state = createCloudState({ rpc: controlRpc }), remote = backend.archive;
     const replica = createDriverAuditSupabaseReplica({ state, archive: remote });
     const workerStatus = executionHost === 'off-host' ? createDriverAuditSupabaseWorkerStatusStore({ state, clock }) : null;
+    const hostedSlots = config.hostedSlotClaims ? createDriverAuditHostedSlots({ state, clock }) : null;
     const budgetOverride = backend.archiveReadBudget;
     const archive = createBudgetedAuditArchive({ rpc: controlRpc, state, remote,
       receiptRoot: path.join(root, 'archive-receipts'), budgetOverride });
+    async function withLightView(head, previous, bundleRoot) {
+      if (config.lightReader !== true || head.lightView) return head;
+      const lightArchive = {
+        async readObject(key, options) {
+          signal?.throwIfAborted();
+          check(/^[a-f0-9]{64}\.gz$/.test(key), 'Invalid report index object key');
+          try { return [await privateBytes(path.join(bundleRoot, key), options.maxBytes)]; }
+          catch (error) {
+            if (error.code !== 'ENOENT') throw error;
+            return archive.readBounded(key, options);
+          }
+        },
+        async putVerifiedObject(key, bytes) {
+          signal?.throwIfAborted();
+          await archive.verify(key, bytes.length, () => bytes);
+          return { key, sha256: sha(bytes), verified: true };
+        },
+      };
+      return { ...head, lightView: await buildDriverAuditLightView({ head, previous, archive: lightArchive, reviewState }) };
+    }
     const boundedState = responseLimit => createBudgetedAuditState({
       state: createCloudState({ rpc: backend.rpcForResponseLimit(responseLimit) }), budgetState: state, responseLimit, budgetOverride,
     });
@@ -300,7 +327,8 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
         }
         signal?.throwIfAborted();
         await unchangedInputs();
-        const result = await replica.activate({ expected, head: expected ? { ...head, previous: null } : head });
+        const selected = await withLightView(head, expected, seed.bundleRoot);
+        const result = await replica.activate({ expected, head: expected ? { ...selected, previous: null } : selected });
         await status({ status: 'pending', pending: true, errorCode: null, latestCaptureAt: null,
           visibleCutoffAt: result.head.visibleCutoffAt });
         return result;
@@ -350,7 +378,9 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
             check(currentSource.revision >= candidate.collectorRevision, 'The original collector source moved backwards');
             await unchangedInputs();
             const expected = await replica.head();
-            const result = await replica.activate({ expected, head: seedPointer(prepared, root) });
+            const selected = await withLightView(seedPointer(prepared, root), expected, prepared.bundleRoot);
+            await unchangedInputs();
+            const result = await replica.activate({ expected, head: selected });
             published = result.status === 'published';
           },
           status: async value => { checkedHead = await status(value, { head: decisionHead }); }, preferLatestEvidence: scheduledAt !== null,
@@ -419,19 +449,26 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
       const due = dueAt !== null && dueAt >= firstEligibleAt && dueAt > (Date.parse(saved.lastScheduledAt) || -Infinity);
       if (due) {
         let failure, published = false, checkedHead;
+        const alreadyClaimed = Error('A hosted worker already claimed this report slot');
         try {
           if (executionHost === 'off-host') {
             check(collectSource, 'The off-host source checker is required');
             await unchangedInputs();
+            let admitted = false;
             await collectSource({ dueAt, signal, async onAdmission() {
               signal?.throwIfAborted();
+              if (hostedSlots && !await hostedSlots.claim({ scheduledAt: new Date(dueAt).toISOString(),
+                enrolledAt: armedAt, syncConfigSha256: pins.configSha256, sourceConfigSha256 })) throw alreadyClaimed;
+              admitted = true;
               await writeHeartbeat({ ...saved, status: 'checking', pending: true, errorCode: null,
                 lastScheduledAt: new Date(dueAt).toISOString() }, clock(), nextAt);
             } });
+            check(!hostedSlots || admitted, 'The hosted source did not confirm its durable slot');
           }
           ({ published, checkedHead } = await tick({ scheduledAt: dueAt }));
         }
         catch (error) {
+          if (error === alreadyClaimed) return { status: 'not-due', scheduledAt: null, nextCheckAt: new Date(nextAt).toISOString() };
           signal?.throwIfAborted();
           const prior = await readHeartbeat() ?? saved;
           await writeHeartbeat({ ...prior, ...describeDriverAuditSyncFailure(error), pending: true,

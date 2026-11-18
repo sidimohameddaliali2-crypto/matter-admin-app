@@ -16,7 +16,7 @@ const escaped = value => String(value ?? '').replace(/[&<>"']/g, character =>
 
 // The original browser snapshot can be much larger than its case index. Hash
 // the full decoded stream, but retain only the object at the index path.
-async function historyIndex(bytes, manifest) {
+export async function historyIndex(bytes, manifest) {
   const hash = createHash('sha256');
   const stack = [];
   const parts = [];
@@ -72,7 +72,7 @@ async function historyIndex(bytes, manifest) {
   return new Map(Object.entries(cases));
 }
 
-async function readRows(ref, key, readRetained) {
+export async function readRows(ref, key, readRetained) {
   if (!ref) return [];
   if (!validDigest(ref.sha256) || ref.url !== 'report-data/history-' + ref.sha256 + '.json'
     || !Number.isSafeInteger(ref.count) || ref.count < 0) throw Error('Invalid history case reference');

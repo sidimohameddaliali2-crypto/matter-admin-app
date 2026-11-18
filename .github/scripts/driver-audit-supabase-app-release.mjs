@@ -6,7 +6,7 @@ import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { gunzipSync } from 'node:zlib';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -21,11 +21,14 @@ const signature = s => [s.dev, s.ino, s.uid, s.gid, s.mode, s.nlink, s.size, s.m
 const safeRelative = name => typeof name === 'string' && name.length <= 400 && !name.includes('\\')
   && name.split('/').every(part => /^[A-Za-z0-9_.-]+$/.test(part) && !['.', '..'].includes(part));
 const appServices = new Set(['driverAuditCollectorReadCache', 'driverAuditDataBackend', 'driverAuditDirectImport',
+  'driverAuditLightArchive', 'driverAuditLightEvidence', 'driverAuditLightPage', 'driverAuditLightReader',
+  'driverAuditLightProjection', 'driverAuditLightReviews', 'driverAuditLightBuild', 'driverAuditLightPolicy',
+  'driverAuditHostedCache', 'driverAuditHostedSlots',
   'driverAuditHttp', 'driverAuditIntegration', 'driverAuditReaderProxy', 'driverAuditPhotoRecovery', 'driverAuditPollProgress', 'driverAuditSource',
   'driverAuditSourceDeployment', 'driverAuditSourceQualification', 'driverAuditSourceStage', 'driverAuditSpacesArchive',
   'driverAuditSupabaseAppBackend', 'driverAuditSupabaseAppProgress', 'driverAuditSupabaseArchive', 'driverAuditSupabaseReplica',
   'driverAuditSupabaseSync', 'driverAuditSupabaseTransfer', 'driverAuditSync', 'driverAuditSyncStatus']);
-const appScripts = new Set(['driverAuditHttp', 'driverAuditReaderChild', 'driverAuditOffHostWorker', 'driverAuditQualificationChild', 'driverAuditSource',
+const appScripts = new Set(['driverAuditHostedBootstrap', 'driverAuditHttp', 'driverAuditReaderChild', 'driverAuditOffHostWorker', 'driverAuditQualificationChild', 'driverAuditSource',
   'driverAuditSourceDeploy', 'driverAuditSourceQualify', 'driverAuditSourceStage', 'driverAuditSync']);
 const vendorFiles = new Set(['integration/cloud/automatic-hosted-preview.mjs', 'integration/cloud/preview-gps.mjs', 'integration/cloud/preview-order-timing.mjs',
   'integration/cloud/preview-runtime.mjs', 'integration/cloud/remote-preview-package.mjs',
@@ -35,7 +38,7 @@ function allowedChange(name) {
   if (!safeRelative(name)) return false;
   if (/^server\/services\/driverAudit[A-Za-z0-9]+\.test\.js$/.test(name)) return true;
   const service = /^server\/services\/(.+?)(?:\.test)?\.js$/.exec(name);
-  const script = /^server\/scripts\/(.+)\.js$/.exec(name);
+  const script = /^server\/scripts\/(.+?)(?:\.test)?\.js$/.exec(name);
   return service ? appServices.has(service[1]) : script ? appScripts.has(script[1])
     : name.startsWith('server/vendor/driver-audits/') ? vendorFiles.has(name.slice('server/vendor/driver-audits/'.length))
       : name === 'AGENTS.md' || name === 'server/server.js' || name === 'server/migrations/20261117103823_driver_audit_app_poll_progress.sql'
@@ -189,23 +192,24 @@ async function defaultProcesses() {
   const rows = JSON.parse(stdout); check(Array.isArray(rows)); return rows;
 }
 async function defaultRestart() { await exec('pm2', ['restart', 'matter-delivery-api'], { timeout: 30000, maxBuffer: 2 * 1024 ** 2 }); }
-async function defaultHealth({ origin }) {
+export async function verifyAppReaderHealth({ origin, port = 5000 }) {
   let last;
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
-      const response = await fetch('http://127.0.0.1:5000/api/health', { signal: AbortSignal.timeout(3000) });
+      const response = await fetch('http://127.0.0.1:' + port + '/api/health', { signal: AbortSignal.timeout(3000) });
       check(response.ok && (await response.json()).database === 'connected', 'Business API health is unavailable');
-      const denied = await fetch('http://127.0.0.1:5000/api/reporting/status', {
-        headers: { host: new URL(origin).host }, signal: AbortSignal.timeout(5000) });
+      const denied = await loopbackReportRequest(port, origin, '/api/reporting/status', AbortSignal.timeout(5000));
       check(denied.status === 401, 'Signed-out report access must be denied');
+      await denied.body?.cancel();
       return;
     } catch (error) { last = error; await new Promise(resolve => setTimeout(resolve, 500)); }
   }
   throw last;
 }
-function settings(bytes, cache) {
+function settings(bytes, cache, lightweight = false) {
   const values = { DRIVER_AUDIT_ENABLED: '1', DRIVER_AUDIT_IMPORT_ENABLED: '0', DRIVER_AUDIT_SERVING_STORE: 'supabase',
     DRIVER_AUDIT_REPLICA_GC_ENABLED: '0', MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: cache };
+  if (lightweight) values.DRIVER_AUDIT_LIGHT_READER = '1';
   let text = bytes.toString('utf8'); check(Buffer.from(text).equals(bytes), 'Invalid environment encoding');
   for (const [key, value] of Object.entries(values)) {
     const regex = new RegExp('^(?:export[ \\t]+)?' + key + '[ \\t]*=.*$', 'gm');
@@ -254,6 +258,125 @@ export async function planAppReaderTransfer({ descriptor, cacheDirectory, usage,
   return { remoteBytesRequired, availableTransferBytes, coldLoads, requiredBytes };
 }
 
+export async function planLightAppReaderStartup({ lightView, cacheDirectory, usage }) {
+  check(lightView && digest(lightView.sha256) && Number.isSafeInteger(lightView.size)
+    && lightView.size > 0 && lightView.size <= 2 * 1024 ** 2, 'The selected lightweight index is required');
+  const cached = await read(path.join(cacheDirectory, lightView.sha256 + '.gz'), lightView.size,
+    { privateMode: true, optional: true }).catch(() => null);
+  const remoteBytesRequired = cached?.sha256 === lightView.sha256 && cached.bytes.length === lightView.size ? 0 : lightView.size;
+  const availableTransferBytes = Math.min(...[usage?.month, usage?.day].map(period => {
+    check(period && ['limitBytes', 'usedBytes', 'reservedBytes'].every(key => Number.isSafeInteger(period[key]) && period[key] >= 0));
+    return period.limitBytes - period.usedBytes - period.reservedBytes;
+  }));
+  // The actual child health route prewarms, then rereads the 768 KiB bounded
+  // pointer for exact readiness. Preserve the existing 2 MiB startup reserve;
+  // a cold index has its own ordinary admission in addition to those reads.
+  const requiredBytes = 2 * 1024 ** 2 + (remoteBytesRequired ? remoteBytesRequired + 128 * 1024 : 0);
+  if (availableTransferBytes < requiredBytes) throw Object.assign(
+    Error('The remaining standard transfer allowance cannot admit lightweight reader startup'),
+    { code: 'APP_READER_COLD_BUDGET', requiredBytes, availableBytes: availableTransferBytes });
+  return { remoteBytesRequired, availableTransferBytes, coldLoads: remoteBytesRequired ? 1 : 0, requiredBytes };
+}
+
+async function loopbackReportRequest(port, origin, pathname, signal, cookie) {
+  const stop = AbortSignal.any([signal, AbortSignal.timeout(30000)]);
+  // fetch may replace a supplied Host header with its loopback destination.
+  // Keep the real configured-origin check in the actual staff middleware.
+  return new Promise((resolve, reject) => {
+    const request = httpRequest({ hostname: '127.0.0.1', port, path: pathname, method: 'GET', signal: stop,
+      headers: { host: new URL(origin).host, ...(cookie ? { cookie } : {}) } }, response => {
+      const chunks = []; let size = 0;
+      response.on('data', chunk => {
+        if ((size += chunk.length) > 16 * 1024 ** 2) { response.destroy(Error('The saved preflight response exceeds its bound')); return; }
+        chunks.push(chunk);
+      });
+      response.once('error', reject);
+      response.once('end', () => {
+        try { resolve(new Response(Buffer.concat(chunks, size), { status: response.statusCode, headers: response.headers })); }
+        catch (error) { reject(error); }
+      });
+    });
+    request.once('error', reject); request.end();
+  });
+}
+
+function preflightRoute(server, env, pathname, signal, authenticated = true) {
+  return loopbackReportRequest(server.address().port, env.DRIVER_AUDIT_ORIGIN, pathname, signal,
+    authenticated ? 'private-release-preflight' : undefined);
+}
+
+export async function preflightLightAppReader({ backend, replica, head, env, expected, cacheDirectory, signal,
+  createDriverAuditLightArchive, createDriverAuditIntegration }) {
+  check(head?.sourceBodySha256 === expected.reportHeadSha256 && head.generation === expected.generation
+    && head.lightView, 'The exact selected report requires its lightweight index');
+  await planLightAppReaderStartup({ lightView: head.lightView, cacheDirectory, usage: await backend.readTransferUsage() });
+  const pages = createDriverAuditLightArchive({ archive: backend.archive });
+  const index = await pages.index(head), keys = index.samples;
+  check(keys && ['gps', 'photo', 'review'].every(name => typeof keys[name] === 'string'
+    && keys[name].length <= 300 && /^\d{4}-\d{2}-\d{2}\//.test(keys[name])),
+  'Named original lightweight GPS, photo and review samples are required');
+  const [gps, photo, review] = await Promise.all(['gps', 'photo', 'review'].map(name => pages.record(head, keys[name])));
+  check(digest(gps.gpsRow?.assessmentHash) && digest(photo.photo?.sha256)
+    && review.review?.snapshotHash === head.reportHash && review.issues?.[0]?.id,
+  'Named lightweight evidence identities differ');
+  const oldest = index.days.at(-1);
+  check(oldest && index.days.length > 1, 'An archived service date is required');
+  const directory = await pages.directory(head, oldest.day), oldKey = directory.keys[0];
+  check(oldKey || directory.extraCases?.[0]?.[0], 'The archived service date has no saved case');
+  const oldEntry = oldKey ? await pages.record(head, oldKey) : await pages.additionalHistory(head, directory.extraCases[0][0]);
+  const session = { actor: { id: 'private-release-preflight', email: 'preflight@example.invalid', role: 'viewer' }, csrf: '0'.repeat(64) };
+  const integration = createDriverAuditIntegration({ env, db: () => { throw Error('Light report preflight must not open MongoDB'); },
+    dependencies: { backend, auth: {
+      authenticate: async cookie => { if (cookie !== 'private-release-preflight') throw Object.assign(Error('Sign in'), { status: 401 }); return session; },
+      csrfMatches: () => false,
+    } } });
+  check(await integration.prewarm(), 'The selected lightweight report could not prewarm');
+  const server = createServer((req, res) => integration(req, res, () => { res.writeHead(404); res.end(); }));
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const get = async (name, query = {}, authenticated = true) => {
+      const response = await preflightRoute(server, env, '/api/reporting/light/' + name
+        + '?' + new URLSearchParams({ generation: head.generation, ...query }), signal, authenticated);
+      if (!authenticated) { check(response.status === 401, 'Signed-out lightweight report access must be denied'); await response.body?.cancel(); return; }
+      const directives = (response.headers.get('cache-control') ?? '').split(',').map(value => value.trim().toLowerCase());
+      check(response.ok && directives.includes('private') && directives.includes('no-store'), 'The authenticated lightweight report is unavailable');
+      const bytes = Buffer.from(await response.arrayBuffer()); check(bytes.length > 0 && bytes.length <= 16 * 1024 ** 2);
+      return { value: name === 'photo' ? null : JSON.parse(bytes), bytes, response };
+    };
+    const dates = (await get('dates')).value;
+    check(dates.generation === head.generation && dates.reportHash === head.reportHash && dates.records === index.records
+      && same(dates.history, index.history) && same(dates.days, index.days.map(({ day, records, extraCases }) => ({ day, records, extraCases })))
+      && dates.stale === false, 'Lightweight saved dates or counts differ');
+    const deliveries = (await get('deliveries', { day: keys.gps.slice(0, 10) })).value;
+    check(deliveries.day === keys.gps.slice(0, 10) && Array.isArray(deliveries.rows), 'The lightweight delivery page differs');
+    const evidence = (await get('gps', { record: keys.gps })).value;
+    check(evidence.recordKey === keys.gps && evidence.snapshotHash === head.reportHash
+      && evidence.assessmentHash === gps.gpsRow.assessmentHash && evidence.status === 'ready'
+      && digest((gps.gps.evidenceSummary ?? gps.gps.evidenceResult)?.versionId)
+      && evidence.gpsEvidence?.versionId === (gps.gps.evidenceSummary ?? gps.gps.evidenceResult).versionId,
+    'The lightweight original GPS evidence differs');
+    const image = await get('photo', { record: keys.photo });
+    check(sha(image.bytes) === photo.photo.sha256 && image.response.headers.get('x-report-image-sha256') === photo.photo.sha256,
+      'The lightweight original photo bytes differ');
+    const historical = (await get(oldKey ? 'history' : 'source-history', { record: oldKey ?? directory.extraCases[0][0] })).value;
+    check(Array.isArray(historical.staff) && Array.isArray(historical.additionalSource)
+      && historical.staff.length === (oldEntry.history?.staff?.count ?? 0)
+      && [...historical.staff, ...historical.additionalSource].every(row => row.key === (oldKey ?? directory.extraCases[0][0])),
+    'Archived lightweight history differs');
+    const journal = (await get('reviews', { record: keys.review, issueId: review.issues[0].id })).value;
+    check(journal.snapshotHash === head.reportHash && journal.issueId === review.issues[0].id && journal.recordKey === keys.review
+      && Array.isArray(journal.history) && journal.revision === journal.history.length,
+    'The lightweight original review history differs');
+    await get('dates', {}, false);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+  const fresh = await replica.head();
+  check(fresh?.sourceBodySha256 === head.sourceBodySha256 && fresh.lightView?.sha256 === head.lightView.sha256,
+    'Supabase report advanced during lightweight preflight');
+  const plan = await planLightAppReaderStartup({ lightView: head.lightView, cacheDirectory, usage: await backend.readTransferUsage() });
+  return { reportHeadSha256: head.sourceBodySha256, generation: head.generation, prewarmed: true,
+    namedEvidenceVerified: true, lightweight: true, ...plan };
+}
+
 export function verifyAppReaderHistoryLanding({ status, cacheControl, body }) {
   const directives = typeof cacheControl === 'string' ? cacheControl.split(',').map(value => value.trim().toLowerCase()) : [];
   check(status === 200 && directives.includes('private') && directives.includes('no-store') && !directives.includes('public')
@@ -286,6 +409,11 @@ export async function preflightAppReader({ selectedRoot, env, expected, cacheDir
   const head = await replica.head();
   check(head?.sourceBodySha256 === expected.reportHeadSha256 && head.generation === expected.generation,
     'The selected Supabase report does not match');
+  if (env.DRIVER_AUDIT_LIGHT_READER === '1') {
+    const { createDriverAuditLightArchive } = await load('services/driverAuditLightArchive.js');
+    return preflightLightAppReader({ backend, replica, head, env, expected, cacheDirectory, signal,
+      createDriverAuditLightArchive, createDriverAuditIntegration });
+  }
   const descriptor = JSON.parse(await readManifestBytes(backend.archive, head.descriptor, { maxBytes: 8 * 1024 ** 2 }));
   check(descriptor.sourceManifestSha256 === head.servingPackage.manifestSha256
     && descriptor.generation === head.generation && descriptor.reportHash === head.reportHash, 'Selected report descriptor differs');
@@ -315,8 +443,7 @@ export async function preflightAppReader({ selectedRoot, env, expected, cacheDir
   try {
     for (const [route, key] of [['gps-evidence', gps.key], ['photo/image', photo[0]]]) {
       const query = new URLSearchParams({ record: key, snapshot: head.reportHash });
-      const response = await fetch('http://127.0.0.1:' + server.address().port + '/api/reporting/' + route + '?' + query,
-        { headers: { host: new URL(env.DRIVER_AUDIT_ORIGIN).host, cookie: 'private-release-preflight' }, signal: AbortSignal.any([signal, AbortSignal.timeout(30000)]) });
+      const response = await preflightRoute(server, env, '/api/reporting/' + route + '?' + query, signal);
       check(response.ok, 'Named saved report evidence is unavailable');
       const bytes = Buffer.from(await response.arrayBuffer());
       check(bytes.length > 0 && bytes.length <= 16 * 1024 ** 2);
@@ -328,8 +455,7 @@ export async function preflightAppReader({ selectedRoot, env, expected, cacheDir
         'Named GPS record differs');
       }
     }
-    const history = await fetch('http://127.0.0.1:' + server.address().port + '/api/reporting/history-archive',
-      { headers: { host: new URL(env.DRIVER_AUDIT_ORIGIN).host, cookie: 'private-release-preflight' }, signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]) });
+    const history = await preflightRoute(server, env, '/api/reporting/history-archive', signal);
     verifyAppReaderHistoryLanding({ status: history.status, cacheControl: history.headers.get('cache-control'), body: await history.text() });
   } finally { await new Promise(resolve => server.close(resolve)); }
   const fresh = await replica.head();
@@ -399,7 +525,7 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
     const memory = /\bMemAvailable:\s+(\d+) kB/.exec(await fs.readFile('/proc/meminfo', 'utf8'));
     requireAppReaderMemory(memory ? Number(memory[1]) * 1024 : null);
   };
-  const health = dependencies.verifyHealth ?? defaultHealth, preflight = dependencies.preflight
+  const health = dependencies.verifyHealth ?? verifyAppReaderHealth, preflight = dependencies.preflight
     ?? (async input => {
       await memoryGate();
       const { signal, ...payload } = input;
@@ -469,6 +595,8 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
     }
     const names = (await gitText(appRoot, ['diff', '--name-only', '--no-renames', request.expectedOldSha, request.selectedSha])).split('\n');
     check(names.length > 0 && names.every(allowedChange), 'The selected release changes unrelated app paths');
+    const lightweight = (await gitText(appRoot, ['ls-tree', '--name-only', request.selectedSha,
+      '--', 'server/services/driverAuditLightReader.js'])) === 'server/services/driverAuditLightReader.js';
     const initialRows = await processes(), initialApi = apiIdentity(initialRows, { online: !previous });
     beforeRegistration = registration(initialRows, appRoot, { online: !previous });
     const npmBefore = dependencies.inspectProcesses ? null : await systemNpmIdentity();
@@ -502,7 +630,7 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
       await directory(config.root, { privateMode: true });
       cacheDirectory = path.join(config.root, 'work/archive-cache'); await directory(cacheDirectory, { privateMode: true });
     }
-    nextEnv = settings(originalEnv.bytes, cacheDirectory);
+    nextEnv = settings(originalEnv.bytes, cacheDirectory, lightweight);
     check(actualEnv.sha256 === originalEnv.sha256 || previous && actualEnv.sha256 === sha(nextEnv),
       'The existing environment is outside the recorded old and new settings');
     changedCode = actualCommit === request.selectedSha; changedEnv = actualEnv.sha256 !== originalEnv.sha256;
@@ -528,7 +656,8 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
       freshApiIdentity(savedApiIdentity(processProof.before), processProof.after);
     }
     const selectedEnv = { ...env, DRIVER_AUDIT_ENABLED: '1', DRIVER_AUDIT_IMPORT_ENABLED: '0',
-      DRIVER_AUDIT_SERVING_STORE: 'supabase', DRIVER_AUDIT_REPLICA_GC_ENABLED: '0', MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: cacheDirectory };
+      DRIVER_AUDIT_SERVING_STORE: 'supabase', DRIVER_AUDIT_REPLICA_GC_ENABLED: '0', MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: cacheDirectory,
+      DRIVER_AUDIT_LIGHT_READER: lightweight ? '1' : '0' };
     const recheck = async () => {
       check(await gitText(appRoot, ['rev-parse', 'HEAD']) === (changedCode ? request.selectedSha : request.expectedOldSha)
         && !(await gitText(appRoot, ['diff', '--name-only', 'HEAD'])), 'The reviewed app code changed');
@@ -563,8 +692,9 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
       proof = await preflight({ selectedRoot: staged, env: selectedEnv, expected: request, cacheDirectory, signal: stop.signal });
       check(proof?.prewarmed === true && proof.namedEvidenceVerified === true && proof.generation === request.generation
         && proof.reportHeadSha256 === request.reportHeadSha256
+        && (!lightweight || proof.lightweight === true)
         && Object.keys(proof).every(key => ['generation', 'reportHeadSha256', 'prewarmed', 'namedEvidenceVerified',
-          'remoteBytesRequired', 'availableTransferBytes', 'coldLoads', 'requiredBytes'].includes(key)),
+          'remoteBytesRequired', 'availableTransferBytes', 'coldLoads', 'requiredBytes', 'lightweight'].includes(key)),
       'Selected report preflight was not verified');
       // No durable mutation intent can coexist with its abandoned large
       // preflight tree after a hard kill at the app cutover boundary.
