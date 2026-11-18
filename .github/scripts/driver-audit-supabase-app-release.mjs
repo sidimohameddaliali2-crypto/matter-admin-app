@@ -28,7 +28,9 @@ const appServices = new Set(['driverAuditCollectorReadCache', 'driverAuditDataBa
   'driverAuditSourceDeployment', 'driverAuditSourceQualification', 'driverAuditSourceStage', 'driverAuditSpacesArchive',
   'driverAuditSupabaseAppBackend', 'driverAuditSupabaseAppProgress', 'driverAuditSupabaseArchive', 'driverAuditSupabaseReplica',
   'driverAuditSupabaseSync', 'driverAuditSupabaseTransfer', 'driverAuditSync', 'driverAuditSyncStatus']);
-const appScripts = new Set(['driverAuditHostedBootstrap', 'driverAuditHttp', 'driverAuditReaderChild', 'driverAuditOffHostWorker', 'driverAuditQualificationChild', 'driverAuditSource',
+const appScripts = new Set(['driverAuditHostedBootstrap', 'driverAuditHostedIndexBundle', 'driverAuditHostedIndexStage',
+  'driverAuditHostedWorker', 'driverAuditHostedWorkerBootstrap', 'driverAuditHttp', 'driverAuditReaderChild',
+  'driverAuditOffHostWorker', 'driverAuditQualificationChild', 'driverAuditSource',
   'driverAuditSourceDeploy', 'driverAuditSourceQualify', 'driverAuditSourceStage', 'driverAuditSync']);
 const vendorFiles = new Set(['integration/cloud/automatic-hosted-preview.mjs', 'integration/cloud/preview-gps.mjs', 'integration/cloud/preview-order-timing.mjs',
   'integration/cloud/preview-runtime.mjs', 'integration/cloud/remote-preview-package.mjs',
@@ -45,7 +47,8 @@ function allowedChange(name) {
         || /^docs\/driver-audits\/[A-Za-z0-9-]+\.md$/.test(name)
         || ['docs/traceability/ROUTES.md', 'docs/traceability/routes.json'].includes(name)
         || /^\.github\/scripts\/driver-audit-[A-Za-z0-9.-]+\.mjs$/.test(name)
-        || ['.github/workflows/driver-audit-native-handoff.yml', '.github/workflows/deploy-digitalocean.yml'].includes(name);
+        || ['.github/workflows/driver-audit-native-handoff.yml', '.github/workflows/deploy-digitalocean.yml',
+          '.github/workflows/driver-reports-worker.yml', '.github/workflows/driver-reports-reader-cutover.yml'].includes(name);
 }
 
 export function validateAppReaderReleaseRequest(value) {
