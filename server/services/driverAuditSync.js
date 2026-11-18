@@ -22,7 +22,7 @@ export function savedAuditTransferBlock(receipt,{sourceBasis,baselineManifestSha
  return {kind:capacity.kind,availableBytes:capacity.availableBytes,requiredBytes:capacity.requiredBytes};
 }
 
-export async function runDriverAuditSyncTick({readSource,readHead,getCandidate,build,apply,status,maintain,onMaintenanceError}){
+export async function runDriverAuditSyncTick({readSource,readHead,getCandidate,build,apply,status,maintain,onMaintenanceError,preferLatestEvidence=false}){
  let active=await readHead(), latest;
  const update=async(state,pending,errorCode=null,capacity=null)=>status({
   status:state,pending,errorCode,capacity,latestCaptureAt:latest?.observedAt??null,visibleCutoffAt:active?.visibleCutoffAt??null,
@@ -48,7 +48,7 @@ export async function runDriverAuditSyncTick({readSource,readHead,getCandidate,b
    return candidate;
   };
   let candidate;
-  if(hasAhead(prior,active)){
+  if(hasAhead(prior,active)&&(!preferLatestEvidence||prior.sourceBasis===latest.basis)){
    try{candidate=await applyCandidate(prior);}
    catch(error){
     if(error.code!=='AUDIT_CAPACITY'||error.capacity?.kind!=='import-transfer'||

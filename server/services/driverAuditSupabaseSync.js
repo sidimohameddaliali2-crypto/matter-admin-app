@@ -3,8 +3,10 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { pathToFileURL } from 'node:url';
+import { getBusinessDayBounds } from '../utils/businessDate.js';
 import { createDriverAuditSupabaseAppBackend } from './driverAuditSupabaseAppBackend.js';
 import { createDriverAuditSupabaseReplica, verifyDriverAuditSupabaseServingPackage } from './driverAuditSupabaseReplica.js';
+import { writeDriverAuditSourceState } from './driverAuditSource.js';
 import { withDriverAuditHeavyWork } from './driverAuditHeavyWork.js';
 import { saveDriverAuditBuildRecipe } from './driverAuditBuildRecipe.js';
 import { describeDriverAuditSyncFailure, runDriverAuditSyncTick, savedAuditTransferBlock } from './driverAuditSync.js';
@@ -14,8 +16,10 @@ import { createBudgetedAuditArchive, createBudgetedAuditState } from '../vendor/
 import { prepareDirectAuditBundle, privateAuditWrite, verifyAuditBuilder } from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
 import { checkVerifiedAuditPackageTransfer } from '../vendor/driver-audits/integration/cloud/remote-preview-package.mjs';
 
-const interval = 60_000;
-const budgetRetry = 5 * interval;
+const minute = 60_000;
+const idleHeartbeatInterval = 5 * minute;
+const mainCheckOffset = (10 * 60 + 30) * minute;
+const noonCheckOffset = 12 * 60 * minute;
 const packageLimit = 128 * 1024 ** 2;
 const chunkLimit = 8 * 1024 ** 2;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -25,6 +29,15 @@ const check = (condition, message) => { if (!condition) throw Error(message); };
 const iso = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : null;
 const inside = (root, target) => path.isAbsolute(target || '') && target === path.resolve(target)
   && target.startsWith(root + path.sep);
+
+function reportSchedule(now) {
+  const { startOfDay, endOfDayExclusive } = getBusinessDayBounds(now);
+  const main = startOfDay.getTime() + mainCheckOffset;
+  const noon = startOfDay.getTime() + noonCheckOffset;
+  if (now < main) return { dueAt: null, nextAt: main };
+  if (now < noon) return { dueAt: main, nextAt: noon };
+  return { dueAt: noon, nextAt: endOfDayExclusive.getTime() + mainCheckOffset };
+}
 
 async function privateDirectory(directory) {
   check(path.isAbsolute(directory || '') && path.resolve(directory) === directory, 'An absolute private sync directory is required');
@@ -57,8 +70,8 @@ async function privateBytes(file, maximum = 16 * 1024 ** 2) {
 }
 
 async function privateJson(file, maximum) { return JSON.parse(await privateBytes(file, maximum)); }
-async function optionalJson(file) {
-  try { return await privateJson(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+async function optionalJson(file, maximum) {
+  try { return await privateJson(file, maximum); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
 async function checkedConfiguration({ config, file }) {
@@ -148,7 +161,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, sig
       baselineManifestSha256: pins.baselineManifestSha256 };
     let pinned, closed = false;
     const heartbeat = path.join(root, 'sync-status.private.json');
-    let next = clock() + interval;
+    const readHeartbeat = () => optionalJson(heartbeat, 64 * 1024);
     const freeBytes = async directory => { const disk = await fs.statfs(directory); return disk.bavail * disk.bsize; };
     const transferBlockFile = path.join(work, 'transfer-block.private.json');
     const transferPolicy = { version: 1, maxBytes: packageLimit, builderSha256,
@@ -167,11 +180,17 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, sig
       return receipt;
     }
 
+    function writeHeartbeat(value, now, nextAt) {
+      return writeDriverAuditSourceState(heartbeat, { version: 1, dataStore: 'supabase', executionHost: 'sidi',
+        capacity: null, ...value, replicaGcStatus: 'disabled-supabase',
+        heartbeatAt: new Date(now).toISOString(), nextCheckAt: new Date(nextAt).toISOString() });
+    }
+
     async function status(value) {
       const active = await replica.head();
-      await privateAuditWrite(heartbeat, JSON.stringify({ version: 1, dataStore: 'supabase', executionHost: 'sidi',
-        capacity: null, ...value, replicaGcStatus: 'disabled-supabase', activeGeneration: active?.generation ?? null,
-        checkedAt: new Date(clock()).toISOString(), nextCheckAt: new Date(next).toISOString() }));
+      const prior = await readHeartbeat(), now = clock();
+      await writeHeartbeat({ lastScheduledAt: prior?.lastScheduledAt ?? null, ...value,
+        activeGeneration: active?.generation ?? null, checkedAt: new Date(now).toISOString() }, now, reportSchedule(now).nextAt);
     }
 
     const builder = createAutomaticRelease({ root: work, baselineRoot, pinnedDirectSync: true, loadSource: async () => pinned,
@@ -217,7 +236,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, sig
       await unchangedInputs();
       const result = await withDriverAuditHeavyWork({ root: path.resolve(root, '../../driver-audit-heavy-work'), owner: 'sync', signal,
         async onWaiting() {
-          const prior = await optionalJson(heartbeat);
+          const prior = await readHeartbeat();
           await status({ status: 'pending', pending: true, errorCode: null, admission: 'waiting',
             latestCaptureAt: prior?.latestCaptureAt ?? null, visibleCutoffAt: prior?.visibleCutoffAt ?? null });
         } }, async () => { await unchangedInputs(); return operation(); });
@@ -270,10 +289,9 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, sig
       });
     }
 
-    async function tick() {
-      next = clock() + interval;
+    async function tick({ scheduledAt = null } = {}) {
       try {
-        return await underAdmission(() => runDriverAuditSyncTick({
+        const sync = () => runDriverAuditSyncTick({
           async readSource() {
             signal?.throwIfAborted();
             pinned = await loadSource();
@@ -315,19 +333,52 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, sig
             const expected = await replica.head();
             await replica.activate({ expected, head: seedPointer(prepared, root) });
           },
-          status,
-        }));
+          status, preferLatestEvidence: scheduledAt !== null,
+        });
+        return await underAdmission(async () => {
+          if (scheduledAt !== null) {
+            const prior = await readHeartbeat(), now = clock();
+            // Record the slot before any source work. A held worker waiting
+            // for admission cannot consume the slot by starting and stopping.
+            await writeHeartbeat({ ...prior, status: 'pending', pending: true, admission: 'running', errorCode: null, capacity: null,
+              lastScheduledAt: new Date(scheduledAt).toISOString() }, now, reportSchedule(now).nextAt);
+          }
+          return sync();
+        });
       } catch (error) {
-        if (error.code === 'AUDIT_BUDGET' || error.code === 'AUDIT_TRANSFER_LIMIT') next = clock() + budgetRetry;
-        const active = await replica.head().catch(() => null), prior = await optionalJson(heartbeat).catch(() => null);
+        const active = await replica.head().catch(() => null), prior = await readHeartbeat().catch(() => null);
         await status({ ...describeDriverAuditSyncFailure(error), pending: true,
           latestCaptureAt: prior?.latestCaptureAt ?? null, visibleCutoffAt: active?.visibleCutoffAt ?? null }).catch(() => {});
         throw error;
       }
     }
 
-    return Object.freeze({ seed, tick,
-      nextCheckAt: () => next,
+    async function scheduledTick() {
+      check(!closed, 'The Sidi audit sync has closed');
+      signal?.throwIfAborted();
+      const { dueAt, nextAt } = reportSchedule(clock());
+      const saved = await readHeartbeat() ?? { status: 'pending', pending: true };
+      // Catch up at most the latest elapsed slot for this Dubai day.
+      if (dueAt !== null && dueAt > (Date.parse(saved.lastScheduledAt) || -Infinity)) {
+        try { await tick({ scheduledAt: dueAt }); }
+        catch (error) {
+          signal?.throwIfAborted();
+          const prior = await readHeartbeat() ?? saved;
+          await writeHeartbeat({ ...prior, ...describeDriverAuditSyncFailure(error), pending: true,
+            lastScheduledAt: new Date(dueAt).toISOString() }, clock(), nextAt);
+          throw error;
+        }
+      } else {
+        // An idle heartbeat neither reads Supabase nor advances evidence clocks.
+        // Any persisted admission belongs to a previous process, not this idle one.
+        delete saved.admission;
+        if (saved.status === 'checking') Object.assign(saved, { status: 'pending', pending: true });
+        await writeHeartbeat(saved, clock(), nextAt);
+      }
+      return Math.min(nextAt, clock() + idleHeartbeatInterval);
+    }
+
+    return Object.freeze({ seed, tick, scheduledTick,
       async check() { return underAdmission(async () => {
         const active = await replica.head();
         check(active, 'A verified Supabase audit seed is required');
@@ -361,7 +412,9 @@ export async function runDriverAuditSupabaseSync({ config, file, mode, env = pro
       return result;
     }
     while (!stop.signal.aborted) {
-      try { await worker.tick(); }
+      const now = Date.now();
+      let wakeAt = Math.min(reportSchedule(now).nextAt, now + idleHeartbeatInterval);
+      try { wakeAt = await worker.scheduledTick(); }
       catch (error) {
         if (stop.signal.aborted) break;
         console.error('Driver Reports retained the last verified report. See private sync status.');
@@ -369,7 +422,7 @@ export async function runDriverAuditSupabaseSync({ config, file, mode, env = pro
       if (stop.signal.aborted) break;
       await new Promise(resolve => {
         const done = () => { clearTimeout(timer); stop.signal.removeEventListener('abort', done); resolve(); };
-        const timer = setTimeout(done, Math.max(0, worker.nextCheckAt() - Date.now()));
+        const timer = setTimeout(done, Math.max(0, wakeAt - Date.now()));
         stop.signal.addEventListener('abort', done, { once: true });
         if (stop.signal.aborted) done();
       });

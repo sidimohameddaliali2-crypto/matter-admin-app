@@ -58,6 +58,12 @@ test('retry applies an already verified candidate before rebuilding from the new
  assert.deepEqual(events.filter(([type])=>type!=='status'),[['apply',2]]);
 });
 
+test('a scheduled check publishes the latest changed basis instead of an older unpublished candidate',async()=>{
+ const {deps,events}=fixture({initial:source(3,'c'),pinned:candidate(2,'b')});
+ await runDriverAuditSyncTick({...deps,preferLatestEvidence:true});
+ assert.deepEqual(events.filter(([type])=>type!=='status'),[['build',3],['apply',3]]);
+});
+
 test('an oversized pinned candidate yields to newer evidence',async()=>{
  const {deps,events}=fixture({initial:source(3,'c'),pinned:candidate(2,'b')});
  const apply=deps.apply;
