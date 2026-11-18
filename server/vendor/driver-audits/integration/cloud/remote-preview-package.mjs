@@ -82,7 +82,7 @@ function verifyGeneration(files,refs,reportHash,generation){
  if(sha(gunzipSync(browserGz,{maxOutputLength:MAX_FILE}))!==browserRef.sha256)fail('Preview browser payload mismatch');
  if(files.has('browser-data.private.br')&&sha(brotliDecompressSync(files.get('browser-data.private.br'),{maxOutputLength:MAX_FILE}))!==browserRef.sha256)fail('Preview Brotli payload mismatch');
  const gps=json(gunzipSync(files.get(gpsIndexFile),{maxOutputLength:MAX_GPS_DECODED}),'GPS index');
- if(files.has(packedGpsAvailabilityFile))decodePackedGpsAvailability(files.get(packedGpsAvailabilityFile));
+ const availability=files.has(packedGpsAvailabilityFile)?decodePackedGpsAvailability(files.get(packedGpsAvailabilityFile)):undefined;
  const wanted=new Set([...Object.values(view.deferredQueryFiles||{}),...Object.values(gps.streamFiles||{})]);
  for(const record of Object.values(gps.records||{}))if(record.evidenceFile!==undefined){
   if(!evidenceName.test(record.evidenceFile)||record.evidenceResult!==undefined||!record.evidenceSummary)
@@ -90,7 +90,7 @@ function verifyGeneration(files,refs,reportHash,generation){
   wanted.add(record.evidenceFile);
  }
  for(const name of wanted)if(!safeName(name)||!refs.has(name))fail('Preview package deferred file is absent');
- return wanted;
+ return {wanted,runtime:{publication:pub,view,gps,availability}};
 }
 
 // Prepare an immutable private archive package from a fully validated local candidate.
@@ -134,7 +134,7 @@ function inspectPackage({privateRoot,maxBytes,validation,includeRetained=true}={
  const publication=json(core.get('publication.private.json'),'publication'),reportHash=publication?.head?.reportHash,generation=publication?.head?.manifest?.sha256;
  if(!hex(reportHash)||!hex(generation))fail('Invalid preview generation identity');
  const fileRefs=new Map();for(const name of local.keys())fileRefs.set(name,null);
- const wanted=verifyGeneration(core,fileRefs,reportHash,generation);
+ const {wanted}=verifyGeneration(core,fileRefs,reportHash,generation);
  for(const name of wanted)if(!files.has(name)){if(!local.has(name))fail('Preview package file missing');files.set(name,local.get(name));}
  for(const [name,meta]of files){uploadBytes+=meta.size;}
  return {root,local,files,core,manifestSha256,reportHash,generation,uploadBytes,maxBytes};
@@ -225,7 +225,10 @@ export async function loadRemotePreviewPackage({descriptor,transport,parallelCor
   const bodies=await Promise.all(batch.map(readVerified));
   for(const [index,name]of batch.entries())cache.set(name,bodies[index]);
  }
- const wanted=verifyGeneration(cache,refs,value.reportHash,value.generation);for(const name of wanted)if(!refs.has(name))fail('Remote preview deferred file missing');
+ let {runtime:preparedRuntime}=verifyGeneration(cache,refs,value.reportHash,value.generation);
+ if(!parallelCoreReads)preparedRuntime=null;
  const asyncCache=new Map();
- return {descriptor:value,generation:value.generation,reportHash:value.reportHash,coreBytes,manifest:Object.fromEntries([...refs].map(([name,ref])=>[name,ref.sha256])),has:name=>refs.has(name),read(name){if(!cache.has(name))fail('Preview file is not in synchronous runtime core');return Buffer.from(cache.get(name));},async readAsync(name){if(!refs.has(name))fail('Remote preview file unavailable');if(cache.has(name))return Buffer.from(cache.get(name));let entry=asyncCache.get(name);if(entry){const bytes=await entry.promise;if(entry.bytes){asyncCache.delete(name);asyncCache.set(name,entry);}return Buffer.from(bytes);}entry={bytes:0,promise:null};entry.promise=readVerified(name).then(bytes=>{if(bytes.length<=CACHE_BYTES){entry.bytes=bytes.length;while(used+bytes.length>CACHE_BYTES){const first=[...asyncCache].find(([key,item])=>key!==name&&item.bytes>0);if(!first)break;asyncCache.delete(first[0]);used-=first[1].bytes;}if(used+bytes.length<=CACHE_BYTES)used+=bytes.length;else entry.bytes=0;}if(!entry.bytes)asyncCache.delete(name);return bytes;}).catch(e=>{asyncCache.delete(name);throw e;});asyncCache.set(name,entry);return Buffer.from(await entry.promise);}};
+ // Transfer the already verified decoded data to the staff renderer once.
+ // Archive bytes and the manifest stay available for older callers.
+ return {descriptor:value,generation:value.generation,reportHash:value.reportHash,coreBytes,manifest:Object.fromEntries([...refs].map(([name,ref])=>[name,ref.sha256])),has:name=>refs.has(name),takeVerifiedRuntime(){const runtime=preparedRuntime;preparedRuntime=null;return runtime;},read(name){if(!cache.has(name))fail('Preview file is not in synchronous runtime core');return Buffer.from(cache.get(name));},async readAsync(name){if(!refs.has(name))fail('Remote preview file unavailable');if(cache.has(name))return Buffer.from(cache.get(name));let entry=asyncCache.get(name);if(entry){const bytes=await entry.promise;if(entry.bytes){asyncCache.delete(name);asyncCache.set(name,entry);}return Buffer.from(bytes);}entry={bytes:0,promise:null};entry.promise=readVerified(name).then(bytes=>{if(bytes.length<=CACHE_BYTES){entry.bytes=bytes.length;while(used+bytes.length>CACHE_BYTES){const first=[...asyncCache].find(([key,item])=>key!==name&&item.bytes>0);if(!first)break;asyncCache.delete(first[0]);used-=first[1].bytes;}if(used+bytes.length<=CACHE_BYTES)used+=bytes.length;else entry.bytes=0;}if(!entry.bytes)asyncCache.delete(name);return bytes;}).catch(e=>{asyncCache.delete(name);throw e;});asyncCache.set(name,entry);return Buffer.from(await entry.promise);}};
 }

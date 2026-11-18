@@ -170,9 +170,9 @@
     "server/routes/webhooks.js": "191a71d5d7831f089fa05421449614342048f1c9e5728ce2869b002a9003a3a1",
     "server/routes/xero.js": "72264b338337eab6945a892300c7424e77f4b4539a0264794471b48fd0d7e5cc",
     "server/routes/yellowblock.js": "7369950e2f9b35759a4bd71678566c3e6b9bb9c2c2109020f2bf8967d03259e4",
-    "server/server.js": "c6d428a7ed9949cbee59e4fa39e61606ab1e0b3ba406171d1765373ea42c928a",
+    "server/server.js": "f125cf3304a8d7b213ba5d1ab95ed3dffcfabd8b7c3128eb14f31fb1f8342391",
     "server/services/customerServiceAdminMount.js": "ecb83e0ab51bd9ea272ba45bfb7c00409130c845b8003b0ae5bba540cba00b51",
-    "server/services/driverAuditIntegration.js": "c378bf851abf9ec5f2d0586b618b6967ac5856d6befc772ad4c9003f70f53803",
+    "server/services/driverAuditIntegration.js": "c9d7ec29145c294437c5d42a99ee40eda2eaf3a317cfb1ab457e050c07e290d4",
     "server/vendor/driver-audits/integration/cloud/cloud-http.mjs": "b4daaedf7f9b2a8df9ea5fa9660b98f8291e880723843730e8d1f22b0f69017a"
   },
   "schemaVersion": 1,
@@ -11262,7 +11262,7 @@
     {
       "id": "089abcb7620e7ade",
       "method": "GET",
-      "source": "server/server.js:274",
+      "source": "server/server.js:279",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11290,7 +11290,7 @@
     {
       "id": "c29a469271fd28ce",
       "method": "HEAD",
-      "source": "server/server.js:283",
+      "source": "server/server.js:288",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11313,7 +11313,7 @@
     {
       "id": "6d60c150d6a24c0b",
       "method": "GET",
-      "source": "server/server.js:288",
+      "source": "server/server.js:293",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -11338,7 +11338,7 @@
     {
       "id": "eafb4524ecc7b522",
       "method": "GET",
-      "source": "server/server.js:297",
+      "source": "server/server.js:302",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -11365,7 +11365,7 @@
     {
       "id": "710f3d0488501add",
       "method": "GET",
-      "source": "server/server.js:317",
+      "source": "server/server.js:322",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -12116,15 +12116,15 @@
     },
     {
       "pathLiteral": "/api/session/refresh",
-      "source": "server/services/driverAuditIntegration.js:148"
+      "source": "server/services/driverAuditIntegration.js:151"
     },
     {
       "pathLiteral": "/api/session",
-      "source": "server/services/driverAuditIntegration.js:152"
+      "source": "server/services/driverAuditIntegration.js:155"
     },
     {
       "pathLiteral": "/api/reporting/status",
-      "source": "server/services/driverAuditIntegration.js:159"
+      "source": "server/services/driverAuditIntegration.js:162"
     },
     {
       "pathPattern": "^\\/report-assets\\/font-[a-f0-9]{64}\\.(woff2?|ttf|otf)$",
@@ -12235,12 +12235,12 @@
     {
       "event": "connection",
       "direction": "on",
-      "source": "server/server.js:306"
+      "source": "server/server.js:311"
     },
     {
       "event": "disconnect",
       "direction": "on",
-      "source": "server/server.js:311"
+      "source": "server/server.js:316"
     },
     {
       "event": "driver:join",

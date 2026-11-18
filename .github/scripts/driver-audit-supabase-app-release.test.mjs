@@ -63,8 +63,9 @@ async function fixture(t) {
   await write('client/node_modules/unchanged/index.js', 'do not rebuild\n');
   const beforeEnv = await fs.readFile(path.join(root, 'server/.env.local'));
   let pid = 123, restarts = 0, failHealth = false;
-  const rows = () => [{ name: 'matter-delivery-api', pid,
-    pm2_env: { status: 'online', pm_cwd: root, pm_exec_path: '/usr/bin/npm', args: ['start', '--prefix', 'server'] } },
+  const rows = () => [{ name: 'matter-delivery-api', pid, pm_id: 7,
+    pm2_env: { status: 'online', pm_cwd: root, pm_exec_path: '/usr/bin/npm', args: ['start', '--prefix', 'server'],
+      pm_uptime: 1000 + restarts, restart_time: restarts } },
   { name: 'matter-driver-audit-sync', pid: 0, pm2_env: { status: 'stopped' } }];
   const f = { root, write, git, old, selected, beforeEnv, rows, get restarts() { return restarts; },
     request: { ...request, expectedOldSha: old, selectedSha: selected }, failNextHealth() { failHealth = true; } };
@@ -146,6 +147,142 @@ test('a completed environment promotion with lost acknowledgement restores exact
   assert.deepEqual(await fs.readFile(envFile), f.beforeEnv);
 });
 
+test('a foreign environment edit at temporary creation is preserved instead of promoted over', async t => {
+  const f = await fixture(t), open = fs.open, envFile = path.join(f.root, 'server/.env.local');
+  let reached = false;
+  fs.open = async function (name, ...args) {
+    const file = await open(name, ...args);
+    if (!reached && String(name).includes('reader-release-') && args[0] === 'wx'
+      && await fs.realpath(path.dirname(String(name))) === path.join(f.root, 'server')) {
+      reached = true; await fs.appendFile(envFile, 'FOREIGN_DURING_PROMOTION=keep\n');
+    }
+    return file;
+  };
+  try { await assert.rejects(implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, dependencies: f.dependencies })); }
+  finally { fs.open = open; }
+  assert(reached); assert.match(await fs.readFile(envFile, 'utf8'), /FOREIGN_DURING_PROMOTION=keep/);
+});
+
+test('rollback preserves a foreign environment edit made while its private temporary file is created', async t => {
+  const f = await fixture(t), open = fs.open, envFile = path.join(f.root, 'server/.env.local');
+  let promotions = 0, reached = false; f.failNextHealth();
+  fs.open = async function (name, ...args) {
+    const file = await open(name, ...args);
+    if (String(name).includes('reader-release-') && args[0] === 'wx'
+      && await fs.realpath(path.dirname(String(name))) === path.join(f.root, 'server') && ++promotions === 2) {
+      reached = true; await fs.appendFile(envFile, 'FOREIGN_DURING_ROLLBACK=keep\n');
+    }
+    return file;
+  };
+  try { await assert.rejects(implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, dependencies: f.dependencies }),
+    error => error.code === 'APP_READER_ROLLBACK_PENDING'); }
+  finally { fs.open = open; }
+  assert(reached); assert.match(await fs.readFile(envFile, 'utf8'), /FOREIGN_DURING_ROLLBACK=keep/);
+  assert.equal(f.restarts, 1);
+});
+
+test('a restart acknowledgement with an unchanged API identity cannot claim release', async t => {
+  const f = await fixture(t); f.dependencies.restart = async () => {};
+  await assert.rejects(implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, dependencies: f.dependencies }));
+  assert.equal(await f.git('rev-parse', 'HEAD'), f.old);
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'server/.env.local')), f.beforeEnv);
+});
+
+async function interruptedRelease(t, pair = 'new-new') {
+  const f = await fixture(t), privateRoot = path.join(f.root, 'server/.private');
+  await fs.mkdir(privateRoot, { mode: 0o700 });
+  const rowsFile = path.join(privateRoot, 'process-fixture.json'), marker = path.join(privateRoot, 'crash-marker');
+  await fs.writeFile(rowsFile, JSON.stringify(f.rows()), { mode: 0o600 });
+  const runner = path.join(privateRoot, 'kill-runner.mjs');
+  await fs.writeFile(runner, `
+    import fs from 'node:fs/promises';
+    import {releaseSupabaseAppReader} from ${JSON.stringify(new URL('./driver-audit-supabase-app-release.mjs', import.meta.url).href)};
+    let input='';for await(const part of process.stdin)input+=part;
+    const c=JSON.parse(input), hold=async()=>{await fs.writeFile(c.marker,'admitted');await new Promise(()=>setInterval(()=>{},1000));};
+    const rows=async()=>JSON.parse(await fs.readFile(c.rowsFile));
+    if(c.pair==='new-old'){
+      const open=fs.open;
+      fs.open=async function(name,...args){const file=await open(name,...args);
+        if(String(name).includes('reader-release-')&&args[0]==='wx'&&await fs.realpath(String(name).slice(0,String(name).lastIndexOf('/')))===c.root+'/server')await hold();
+        return file;};
+    }
+    await releaseSupabaseAppReader({appRoot:c.root,request:c.request,dependencies:{inspectProcesses:rows,
+      preflight:async()=>({generation:c.request.generation,reportHeadSha256:c.request.reportHeadSha256,prewarmed:true,namedEvidenceVerified:true}),
+      restart:hold,verifyHealth:async()=>{}}});
+  `, { mode: 0o600 });
+  const child = spawn(process.execPath, [runner], { stdio: ['pipe', 'pipe', 'pipe'] });
+  let stderr = ''; child.stderr.on('data', bytes => { stderr += bytes; }); child.stdout.resume();
+  const closed = new Promise(resolve => child.once('close', (code, signal) => resolve({ code, signal })));
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  child.stdin.end(JSON.stringify({ root: f.root, request: f.request, rowsFile, marker, pair }));
+  for (let n = 0; n < 400 && !(await fs.stat(marker).catch(() => null)); n++) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.equal(await fs.readFile(marker, 'utf8').catch(() => stderr), 'admitted');
+  child.kill('SIGKILL'); assert.equal((await closed).signal, 'SIGKILL');
+  assert.equal(await f.git('rev-parse', 'HEAD'), f.selected);
+  const proof = async ({ expected }) => ({ generation: expected.generation, reportHeadSha256: expected.reportHeadSha256,
+    namedEvidenceVerified: true, prewarmed: true });
+  f.dependencies.preflight = proof;
+  return f;
+}
+
+test('a real SIGKILL after code or environment promotion resumes from the original durable intent', async t => {
+  for (const pair of ['new-old', 'new-new', 'old-new', 'old-old']) {
+    const f = await interruptedRelease(t, pair === 'new-old' ? pair : 'new-new');
+    if (pair.startsWith('old-')) await f.git('checkout', '--detach', f.old);
+    if (pair === 'old-old') await fs.writeFile(path.join(f.root, 'server/.env.local'), f.beforeEnv, { mode: 0o600 });
+    const result = await implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, dependencies: f.dependencies });
+    assert.equal(result.status, 'supabase-app-reader-released'); assert.equal(f.restarts, 1);
+    assert.equal(result.apiProcessRestartVerified, true);
+    assert.equal(result.authenticatedGenerationAcceptancePending, true);
+    assert.match(await fs.readFile(path.join(f.root, 'server/.env.local'), 'utf8'), /DRIVER_AUDIT_SERVING_STORE="supabase"/);
+  }
+});
+
+test('recorded recovery refuses changed business code, dependencies, or process registration before package reads', async t => {
+  for (const kind of ['code', 'dependencies', 'registration']) {
+    const f = await interruptedRelease(t);
+    if (kind === 'code') await f.write('server/routes/events.js', '// Preserve a new business edit\n');
+    if (kind === 'dependencies') await f.write('server/node_modules/unchanged/index.js', '// Preserve changed dependencies\n');
+    if (kind === 'registration') f.dependencies.inspectProcesses = async () => f.rows().map(row => row.name === 'matter-delivery-api'
+      ? { ...row, pm2_env: { ...row.pm2_env, args: ['other-entrypoint'] } } : row);
+    f.dependencies.preflight = async () => assert.fail('Foreign recovery inputs must stop before a package read');
+    await assert.rejects(implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, dependencies: f.dependencies }));
+    assert.equal(f.restarts, 0); assert.equal(await f.git('rev-parse', 'HEAD'), f.selected);
+  }
+});
+
+test('check-only preserves an interrupted app and a resumed release preserves foreign changes', async t => {
+  const f = await interruptedRelease(t), before = await fs.readFile(path.join(f.root, 'server/.env.local'));
+  await assert.rejects(implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, apply: false, dependencies: f.dependencies }));
+  assert.equal(f.restarts, 0); assert.equal(await f.git('rev-parse', 'HEAD'), f.selected);
+  assert.deepEqual(await fs.readFile(path.join(f.root, 'server/.env.local')), before);
+  await fs.appendFile(path.join(f.root, 'server/.env.local'), 'FOREIGN_AFTER_CRASH=keep\n');
+  await assert.rejects(implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, dependencies: f.dependencies }));
+  assert.equal(f.restarts, 0); assert.match(await fs.readFile(path.join(f.root, 'server/.env.local'), 'utf8'), /FOREIGN_AFTER_CRASH=keep/);
+});
+
+test('a completed exact release retry verifies the existing process without another package read or restart', async t => {
+  const f = await fixture(t);
+  const original = await implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, dependencies: f.dependencies });
+  f.dependencies.preflight = async () => assert.fail('An exact completed retry must not read the package again');
+  const resumed = await implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, dependencies: f.dependencies });
+  assert.deepEqual(resumed, original); assert.equal(f.restarts, 1);
+});
+
+test('only the reviewed report proxy entrypoints extend the existing release path allowlist', async t => {
+  const f = await fixture(t); await f.git('checkout', '--detach', f.selected);
+  await f.write('server/server.js', '// Reviewed report proxy registration\n');
+  await f.write('server/services/driverAuditReaderProxy.js', '// Reviewed report proxy\n');
+  await f.write('server/scripts/driverAuditReaderChild.js', '// Reviewed report child\n');
+  await f.write('server/vendor/driver-audits/integration/cloud/automatic-hosted-preview.mjs', '// Exact prepared descriptor readiness\n');
+  await f.git('add', 'server/server.js', 'server/services/driverAuditReaderProxy.js', 'server/scripts/driverAuditReaderChild.js',
+    'server/vendor/driver-audits/integration/cloud/automatic-hosted-preview.mjs');
+  await f.git('commit', '-m', 'Reviewed report isolation');
+  f.request.selectedSha = await f.git('rev-parse', 'HEAD'); await f.git('checkout', '--detach', f.old);
+  const result = await implementation.releaseSupabaseAppReader({ appRoot: f.root, request: f.request, dependencies: f.dependencies });
+  assert.equal(result.status, 'supabase-app-reader-released');
+});
+
 test('a foreign environment edit after a lost acknowledgement is preserved for review', async t => {
   const f = await fixture(t), rename = fs.rename, envFile = path.join(f.root, 'server/.env.local');
   let reached = false;
@@ -187,6 +324,13 @@ test('the actual private history header is accepted while missing privacy direct
   for (const bad of [{ ...response, status: 401 }, { ...response, cacheControl: 'private' },
     { ...response, cacheControl: 'public, no-store' }, { ...response, body: 'Other page' }])
     assert.throws(() => implementation.verifyAppReaderHistoryLanding(bad));
+});
+
+test('actual host memory admission preserves the measured two-generation 2304 MiB envelope', () => {
+  const required = 2304 * 1024 ** 2;
+  assert.equal(implementation.requireAppReaderMemory(required), true);
+  for (const available of [required - 1, 2036 * 1024 ** 2, 1280 * 1024 ** 2, null, NaN, Infinity])
+    assert.throws(() => implementation.requireAppReaderMemory(available));
 });
 
 test('changed settings during preflight are preserved and stop the release', async t => {

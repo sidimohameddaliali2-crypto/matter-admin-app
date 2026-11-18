@@ -21,13 +21,13 @@ const signature = s => [s.dev, s.ino, s.uid, s.gid, s.mode, s.nlink, s.size, s.m
 const safeRelative = name => typeof name === 'string' && name.length <= 400 && !name.includes('\\')
   && name.split('/').every(part => /^[A-Za-z0-9_.-]+$/.test(part) && !['.', '..'].includes(part));
 const appServices = new Set(['driverAuditCollectorReadCache', 'driverAuditDataBackend', 'driverAuditDirectImport',
-  'driverAuditHttp', 'driverAuditIntegration', 'driverAuditPhotoRecovery', 'driverAuditPollProgress', 'driverAuditSource',
+  'driverAuditHttp', 'driverAuditIntegration', 'driverAuditReaderProxy', 'driverAuditPhotoRecovery', 'driverAuditPollProgress', 'driverAuditSource',
   'driverAuditSourceDeployment', 'driverAuditSourceQualification', 'driverAuditSourceStage', 'driverAuditSpacesArchive',
   'driverAuditSupabaseAppBackend', 'driverAuditSupabaseAppProgress', 'driverAuditSupabaseArchive', 'driverAuditSupabaseReplica',
   'driverAuditSupabaseSync', 'driverAuditSupabaseTransfer', 'driverAuditSync', 'driverAuditSyncStatus']);
-const appScripts = new Set(['driverAuditHttp', 'driverAuditOffHostWorker', 'driverAuditQualificationChild', 'driverAuditSource',
+const appScripts = new Set(['driverAuditHttp', 'driverAuditReaderChild', 'driverAuditOffHostWorker', 'driverAuditQualificationChild', 'driverAuditSource',
   'driverAuditSourceDeploy', 'driverAuditSourceQualify', 'driverAuditSourceStage', 'driverAuditSync']);
-const vendorFiles = new Set(['integration/cloud/preview-gps.mjs', 'integration/cloud/preview-order-timing.mjs',
+const vendorFiles = new Set(['integration/cloud/automatic-hosted-preview.mjs', 'integration/cloud/preview-gps.mjs', 'integration/cloud/preview-order-timing.mjs',
   'integration/cloud/preview-runtime.mjs', 'integration/cloud/remote-preview-package.mjs',
   'integration/cloud/cloud-http.mjs', 'integration/cloud/preview-source-history.mjs',
   'integration/hosted/supabase-archive.mjs', 'runtime-manifest.json']);
@@ -38,7 +38,7 @@ function allowedChange(name) {
   const script = /^server\/scripts\/(.+)\.js$/.exec(name);
   return service ? appServices.has(service[1]) : script ? appScripts.has(script[1])
     : name.startsWith('server/vendor/driver-audits/') ? vendorFiles.has(name.slice('server/vendor/driver-audits/'.length))
-      : name === 'AGENTS.md' || name === 'server/migrations/20261117103823_driver_audit_app_poll_progress.sql'
+      : name === 'AGENTS.md' || name === 'server/server.js' || name === 'server/migrations/20261117103823_driver_audit_app_poll_progress.sql'
         || /^docs\/driver-audits\/[A-Za-z0-9-]+\.md$/.test(name)
         || ['docs/traceability/ROUTES.md', 'docs/traceability/routes.json'].includes(name)
         || /^\.github\/scripts\/driver-audit-[A-Za-z0-9.-]+\.mjs$/.test(name)
@@ -84,19 +84,23 @@ async function read(name, maximum = 1024 * 1024, { privateMode = false, optional
     return { bytes, sha256: sha(bytes), signature: signature(info), mode: info.mode & 0o777 };
   } finally { await handle.close(); }
 }
-async function atomic(name, bytes, mode = 0o600) {
+async function atomic(name, bytes, mode = 0o600, expectedSha256) {
   const parentName = path.dirname(name), info = await directory(parentName);
   const parent = await fs.open(parentName, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
   const identity = value => [value.dev, value.ino, value.uid, value.gid, value.mode].join(':');
   const recheck = async () => check(identity(await parent.stat()) === identity(info)
     && identity(await directory(parentName)) === identity(info), 'The release directory changed');
   const base = process.platform === 'linux' ? '/proc/self/fd/' + parent.fd : parentName;
-  const temporary = path.join(base, '.reader-release-' + randomUUID() + '.tmp');
+  // A killed environment promotion may leave a private temporary file. Keep
+  // it inside the existing ignored environment namespace, never as new code.
+  const temporary = path.join(base, '.env.reader-release-' + randomUUID() + '.tmp');
   try {
     await recheck();
     const file = await fs.open(temporary, 'wx', mode);
     try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
     await recheck();
+    if (expectedSha256 !== undefined) check((await read(name, 256 * 1024, { privateMode: true })).sha256 === expectedSha256,
+      'The environment changed before promotion');
     await fs.rename(temporary, path.join(base, path.basename(name)));
     await parent.sync(); await recheck();
   } finally { try { await fs.rm(temporary, { force: true }); } finally { await parent.close(); } }
@@ -141,8 +145,30 @@ function registration(rows, root, { online = true } = {}) {
     && same(env.args, ['start', '--prefix', 'server']), 'The existing API registration differs');
   const held = rows.filter(row => ['matter-driver-audit-source', 'matter-driver-audit-sync', 'matter-driver-reports-api'].includes(row.name));
   check(held.every(row => row.pid === 0 && row.pm2_env?.status === 'stopped'), 'Report workers must remain held');
-  return { api: { name: api.name, cwd: env.pm_cwd, script: env.pm_exec_path, args: env.args },
+  return { api: { name: api.name, pmId: api.pm_id, cwd: env.pm_cwd, script: env.pm_exec_path, args: env.args },
     others: rows.filter(row => row.name !== api.name).map(row => [row.name, row.pid, row.pm2_env?.status, row.pm2_env?.pm_cwd, row.pm2_env?.pm_exec_path]).sort() };
+}
+function apiIdentity(rows, { online = true } = {}) {
+  const entries = rows.filter(row => row.name === 'matter-delivery-api');
+  check(entries.length === 1, 'One existing API process identity is required');
+  const row = entries[0], env = row.pm2_env;
+  check(Number.isSafeInteger(row.pm_id) && row.pm_id >= 0 && Number.isSafeInteger(row.pid) && row.pid >= 0
+    && Number.isSafeInteger(env?.pm_uptime) && env.pm_uptime > 0
+    && Number.isSafeInteger(env.restart_time) && env.restart_time >= 0
+    && (online ? row.pid > 0 && env.status === 'online' : ['online', 'stopped', 'errored'].includes(env.status)),
+  'The existing API process identity is unavailable');
+  return { pmId: row.pm_id, pid: row.pid, startedAt: env.pm_uptime, restartCount: env.restart_time };
+}
+function freshApiIdentity(before, after) {
+  check(after.pmId === before.pmId && after.pid > 0 && after.pid !== before.pid
+    && after.startedAt > before.startedAt && after.restartCount > before.restartCount,
+  'The API restart did not produce a fresh process identity');
+}
+function savedApiIdentity(value) {
+  check(value && same(Object.keys(value).sort(), ['pmId', 'pid', 'startedAt', 'restartCount'].sort())
+    && Object.values(value).every(number => Number.isSafeInteger(number) && number >= 0)
+    && value.startedAt > 0, 'A saved API process identity differs');
+  return value;
 }
 async function systemNpmIdentity() {
   const filename = await fs.realpath('/usr/bin/npm');
@@ -232,6 +258,14 @@ export function verifyAppReaderHistoryLanding({ status, cacheControl, body }) {
   const directives = typeof cacheControl === 'string' ? cacheControl.split(',').map(value => value.trim().toLowerCase()) : [];
   check(status === 200 && directives.includes('private') && directives.includes('no-store') && !directives.includes('public')
     && typeof body === 'string' && body.includes('Saved source assessments'), 'The authenticated source-history landing page differs');
+  return true;
+}
+
+export function requireAppReaderMemory(availableBytes) {
+  // Local genuine current/previous/history rehearsal peaked at 2036 MiB RSS.
+  // Keep room above that measured envelope; actual host admission is separate.
+  check(Number.isSafeInteger(availableBytes) && availableBytes >= 2304 * 1024 ** 2,
+    'The existing app must retain the measured two-generation reader memory envelope');
   return true;
 }
 
@@ -360,11 +394,14 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
   check(typeof apply === 'boolean' && path.isAbsolute(appRoot ?? '') && path.resolve(appRoot) === appRoot);
   await directory(appRoot); await directory(path.join(appRoot, 'server'));
   const processes = dependencies.inspectProcesses ?? defaultProcesses, restart = dependencies.restart ?? defaultRestart;
+  const memoryGate = async () => {
+    if (dependencies.preflight) return; // The explicit local fixture boundary.
+    const memory = /\bMemAvailable:\s+(\d+) kB/.exec(await fs.readFile('/proc/meminfo', 'utf8'));
+    requireAppReaderMemory(memory ? Number(memory[1]) * 1024 : null);
+  };
   const health = dependencies.verifyHealth ?? defaultHealth, preflight = dependencies.preflight
     ?? (async input => {
-      const memory = /\bMemAvailable:\s+(\d+) kB/.exec(await fs.readFile('/proc/meminfo', 'utf8'));
-      check(memory && Number(memory[1]) * 1024 >= 1280 * 1024 ** 2,
-        'The existing app must retain enough memory for the bounded reader preflight');
+      await memoryGate();
       const { signal, ...payload } = input;
       return runAppReaderPreflightChild(payload, { signal });
     });
@@ -380,18 +417,25 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
   const controls = path.join(privateRoot, 'driver-report-app-reader-releases');
   const identity = sha(JSON.stringify(request)), receiptRoot = path.join(controls, identity);
   let lock, changedCode = false, changedEnv = false, codeAttempted = false, envAttempted = false;
-  let envFile, originalEnv, nextEnv, beforeRegistration, staged, outcome, failure;
+  let envFile, originalEnv, nextEnv, beforeRegistration, staged, outcome, failure, intentBytes, processProof;
+  const releasedOutcome = () => ({ version: 1, status: 'supabase-app-reader-released', previousCommit: request.expectedOldSha,
+    applicationCommit: request.selectedSha, reportHeadSha256: request.reportHeadSha256, generation: request.generation,
+    dependenciesReinstalled: false, websiteRebuilt: false, workersStarted: false, routingChanged: false,
+    apiProcessRestartVerified: true, authenticatedGenerationAcceptancePending: true, authenticatedBrowserAcceptancePending: true });
+  const proofFile = identity => path.join(receiptRoot, 'process-' + sha(JSON.stringify(identity)) + '.private.json');
   const rollback = async () => {
-    check(same(registration(await processes(), appRoot, { online: false }), beforeRegistration), 'Rollback process identity changed');
+    const beforeRows = await processes(), beforeRestart = apiIdentity(beforeRows, { online: false });
+    check(same(registration(beforeRows, appRoot, { online: false }), beforeRegistration), 'Rollback process identity changed');
     const actualCommit = await gitText(appRoot, ['rev-parse', 'HEAD']);
     check([request.expectedOldSha, request.selectedSha].includes(actualCommit)
       && !(await gitText(appRoot, ['diff', '--name-only', 'HEAD'])), 'Rollback preserves unexpected code changes');
     const actualEnv = await read(envFile, 256 * 1024, { privateMode: true });
     check(actualEnv.sha256 === originalEnv.sha256 || envAttempted && actualEnv.sha256 === sha(nextEnv),
       'Rollback preserves changed settings');
-    if (actualEnv.sha256 !== originalEnv.sha256) await atomic(envFile, originalEnv.bytes);
+    if (actualEnv.sha256 !== originalEnv.sha256) await atomic(envFile, originalEnv.bytes, 0o600, actualEnv.sha256);
     if (actualCommit !== request.expectedOldSha) await git(appRoot, ['checkout', '--detach', '--no-overwrite-ignore', request.expectedOldSha]);
     await restart(); await health({ origin: 'https://matterapp.online' });
+    freshApiIdentity(beforeRestart, apiIdentity(await processes()));
     await atomic(path.join(receiptRoot, 'state.private.json'), Buffer.from(JSON.stringify({ version: 1, status: 'rolled-back', request })));
   };
   try {
@@ -403,8 +447,13 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
     lock = new DatabaseSync(lockFile);
     lock.exec('PRAGMA busy_timeout=0; BEGIN EXCLUSIVE;');
     stop.signal.throwIfAborted();
+    const savedIntent = await read(path.join(receiptRoot, 'intent.private.json'), 64 * 1024, { privateMode: true, optional: true });
+    const previous = savedIntent ? JSON.parse(savedIntent.bytes) : null;
+    if (previous) check(previous.version === 2 && same(previous.request, request)
+      && digest(previous.environmentBeforeSha256) && digest(previous.environmentAfterSha256), 'The saved release intent differs');
+    const actualCommit = await gitText(appRoot, ['rev-parse', 'HEAD']);
     check(await gitText(appRoot, ['rev-parse', '--show-toplevel']) === appRoot
-      && await gitText(appRoot, ['rev-parse', 'HEAD']) === request.expectedOldSha, 'The existing app commit differs');
+      && (actualCommit === request.expectedOldSha || previous && actualCommit === request.selectedSha), 'The existing app commit differs');
     check(!(await gitText(appRoot, ['diff', '--name-only', 'HEAD'])), 'Existing tracked app files changed');
     check((await gitText(appRoot, ['ls-files', '-v'])).split('\n').every(line => line.startsWith('H ')),
       'Git index flags cannot hide existing app changes');
@@ -420,18 +469,22 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
     }
     const names = (await gitText(appRoot, ['diff', '--name-only', '--no-renames', request.expectedOldSha, request.selectedSha])).split('\n');
     check(names.length > 0 && names.every(allowedChange), 'The selected release changes unrelated app paths');
-    beforeRegistration = registration(await processes(), appRoot);
+    const initialRows = await processes(), initialApi = apiIdentity(initialRows, { online: !previous });
+    beforeRegistration = registration(initialRows, appRoot, { online: !previous });
     const npmBefore = dependencies.inspectProcesses ? null : await systemNpmIdentity();
     const dependency = path.join(appRoot, 'server/node_modules'), clientBuild = path.join(appRoot, 'client/build');
     await directory(dependency); await directory(clientBuild);
     const dependenciesBefore = await inventory(dependency), websiteBefore = await inventory(clientBuild, { contents: true });
-    envFile = path.join(appRoot, 'server/.env.local'); originalEnv = await read(envFile, 256 * 1024, { privateMode: true });
+    envFile = path.join(appRoot, 'server/.env.local');
+    const actualEnv = await read(envFile, 256 * 1024, { privateMode: true });
+    originalEnv = previous ? await read(path.join(receiptRoot, 'environment-before.private.bin'), 256 * 1024, { privateMode: true }) : actualEnv;
+    if (previous) check(originalEnv.sha256 === previous.environmentBeforeSha256, 'The original environment backup differs');
     const baseEnv = await read(path.join(appRoot, 'server/.env'), 256 * 1024, { privateMode: true, optional: true });
     const dotenv = createRequire(path.join(appRoot, 'server/package.json'))('dotenv');
     const env = { ...(baseEnv ? dotenv.parse(baseEnv.bytes) : {}), ...dotenv.parse(originalEnv.bytes) };
     check(env.DRIVER_AUDIT_ORIGIN === 'https://matterapp.online', 'The existing staff report origin is required');
     const sync = (await processes()).find(row => row.name === 'matter-driver-audit-sync');
-    let cacheDirectory;
+    let cacheDirectory, syncConfig, syncConfigSha256 = null;
     if (dependencies.preflight) {
       cacheDirectory = path.join(receiptRoot, 'fixture-cache'); await privateDirectory(cacheDirectory);
     } else {
@@ -442,26 +495,40 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
         && typeof args[1] === 'string' && path.isAbsolute(args[1]) && path.resolve(args[1]) === args[1]
         && /^server\/\.private\/driver-audits\/[a-f0-9]{64}\/sync\.json$/.test(path.relative(appRoot, args[1])),
       'The stopped sync configuration must identify its existing cache');
-      const config = JSON.parse((await read(args[1], 1024 * 1024, { privateMode: true })).bytes);
+      syncConfig = args[1];
+      const configBytes = await read(syncConfig, 1024 * 1024, { privateMode: true }); syncConfigSha256 = configBytes.sha256;
+      const config = JSON.parse(configBytes.bytes);
       check(config.root === path.dirname(args[1]));
       await directory(config.root, { privateMode: true });
       cacheDirectory = path.join(config.root, 'work/archive-cache'); await directory(cacheDirectory, { privateMode: true });
     }
     nextEnv = settings(originalEnv.bytes, cacheDirectory);
+    check(actualEnv.sha256 === originalEnv.sha256 || previous && actualEnv.sha256 === sha(nextEnv),
+      'The existing environment is outside the recorded old and new settings');
+    changedCode = actualCommit === request.selectedSha; changedEnv = actualEnv.sha256 !== originalEnv.sha256;
+    const intent = { version: 2, request, environmentBeforeSha256: originalEnv.sha256,
+      environmentAfterSha256: sha(nextEnv), cacheDirectory, baseEnvironmentSha256: baseEnv?.sha256 ?? null,
+      processRegistration: beforeRegistration, apiBeforeRestart: previous ? savedApiIdentity(previous.apiBeforeRestart) : initialApi,
+      systemNpmIdentity: npmBefore, dependenciesSha256: dependenciesBefore, websiteSha256: websiteBefore,
+      untracked, preservedEvent: event ? { sha256: event.sha256, signature: event.signature } : null, syncConfigSha256 };
+    intentBytes = Buffer.from(JSON.stringify(intent));
+    if (previous) check(savedIntent.sha256 === sha(intentBytes)
+      && initialApi.pmId === previous.apiBeforeRestart.pmId, 'The original release inputs changed since its intent');
+    if (!apply && (changedCode || changedEnv)) throw Object.assign(Error('The interrupted release requires its guarded recovery operation'),
+      { code: 'APP_READER_RECOVERY_REQUIRED' });
+    const completed = await read(path.join(receiptRoot, 'completed.private.json'), 64 * 1024, { privateMode: true, optional: true });
+    if (completed) check(previous && same(JSON.parse(completed.bytes), releasedOutcome()), 'The saved release completion differs');
+    const currentProof = previous && changedCode && actualEnv.sha256 === sha(nextEnv) && initialApi.pid > 0
+      ? await read(proofFile(initialApi), 16 * 1024, { privateMode: true, optional: true }) : null;
+    if (currentProof) {
+      processProof = JSON.parse(currentProof.bytes);
+      check(same(Object.keys(processProof).sort(), ['version', 'intentSha256', 'before', 'after'].sort())
+        && processProof.version === 1 && processProof.intentSha256 === sha(intentBytes)
+        && same(savedApiIdentity(processProof.after), initialApi), 'The saved API restart proof differs');
+      freshApiIdentity(savedApiIdentity(processProof.before), processProof.after);
+    }
     const selectedEnv = { ...env, DRIVER_AUDIT_ENABLED: '1', DRIVER_AUDIT_IMPORT_ENABLED: '0',
       DRIVER_AUDIT_SERVING_STORE: 'supabase', DRIVER_AUDIT_REPLICA_GC_ENABLED: '0', MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: cacheDirectory };
-    const disk = await fs.statfs(receiptRoot);
-    check(disk.bavail * disk.bsize >= 64 * 1024 ** 2, 'The existing app needs room for its bounded temporary code preflight');
-    check(!(await fs.readdir(receiptRoot)).some(name => name.startsWith('preflight-')),
-      'An interrupted temporary code preflight requires private review');
-    staged = await fs.mkdtemp(path.join(receiptRoot, 'preflight-'));
-    await stageServer(appRoot, request.selectedSha, staged);
-    const proof = await preflight({ selectedRoot: staged, env: selectedEnv, expected: request, cacheDirectory, signal: stop.signal });
-    check(proof?.prewarmed === true && proof.namedEvidenceVerified === true && proof.generation === request.generation
-      && proof.reportHeadSha256 === request.reportHeadSha256
-      && Object.keys(proof).every(key => ['generation', 'reportHeadSha256', 'prewarmed', 'namedEvidenceVerified',
-        'remoteBytesRequired', 'availableTransferBytes', 'coldLoads', 'requiredBytes'].includes(key)),
-    'Selected report preflight was not verified');
     const recheck = async () => {
       check(await gitText(appRoot, ['rev-parse', 'HEAD']) === (changedCode ? request.selectedSha : request.expectedOldSha)
         && !(await gitText(appRoot, ['diff', '--name-only', 'HEAD'])), 'The reviewed app code changed');
@@ -470,12 +537,39 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
       check((await read(envFile, 256 * 1024, { privateMode: true })).sha256 === (changedEnv ? sha(nextEnv) : originalEnv.sha256), 'Report settings changed');
       check((await read(path.join(appRoot, 'server/.env'), 256 * 1024, { privateMode: true, optional: true }))?.sha256 === baseEnv?.sha256,
         'The existing business environment changed');
-      check(same(registration(await processes(), appRoot), beforeRegistration), 'A protected process registration changed');
+      check(same(registration(await processes(), appRoot, { online: !previous || !!processProof }), beforeRegistration), 'A protected process registration changed');
       if (npmBefore) check(await systemNpmIdentity() === npmBefore, 'The existing system NPM wrapper changed');
       check(await inventory(dependency) === dependenciesBefore && await inventory(clientBuild, { contents: true }) === websiteBefore,
         'Existing dependencies or website bytes changed');
       if (event) { const current = await read(path.join(appRoot, untracked), 512 * 1024); check(current.sha256 === event.sha256 && current.signature === event.signature, 'The preserved business file changed'); }
+      if (syncConfig) check((await read(syncConfig, 1024 * 1024, { privateMode: true })).sha256 === syncConfigSha256,
+        'The original stopped sync configuration changed');
+      if (savedIntent) check((await read(path.join(receiptRoot, 'intent.private.json'), 64 * 1024, { privateMode: true })).sha256 === savedIntent.sha256
+        && (await read(path.join(receiptRoot, 'environment-before.private.bin'), 256 * 1024, { privateMode: true })).sha256 === originalEnv.sha256,
+      'The original private recovery evidence changed');
     };
+    await recheck(); stop.signal.throwIfAborted();
+    // Only a completely admitted recorded state can be recovered. Foreign
+    // input drift above must leave the app untouched for private review.
+    if (previous && apply) { codeAttempted = changedCode; envAttempted = changedEnv; }
+    let proof;
+    if (!currentProof) {
+      const disk = await fs.statfs(receiptRoot);
+      check(disk.bavail * disk.bsize >= 64 * 1024 ** 2, 'The existing app needs room for its bounded temporary code preflight');
+      check(!(await fs.readdir(receiptRoot)).some(name => name.startsWith('preflight-')),
+        'An interrupted temporary code preflight requires private review');
+      staged = await fs.mkdtemp(path.join(receiptRoot, 'preflight-'));
+      await stageServer(appRoot, request.selectedSha, staged);
+      proof = await preflight({ selectedRoot: staged, env: selectedEnv, expected: request, cacheDirectory, signal: stop.signal });
+      check(proof?.prewarmed === true && proof.namedEvidenceVerified === true && proof.generation === request.generation
+        && proof.reportHeadSha256 === request.reportHeadSha256
+        && Object.keys(proof).every(key => ['generation', 'reportHeadSha256', 'prewarmed', 'namedEvidenceVerified',
+          'remoteBytesRequired', 'availableTransferBytes', 'coldLoads', 'requiredBytes'].includes(key)),
+      'Selected report preflight was not verified');
+      // No durable mutation intent can coexist with its abandoned large
+      // preflight tree after a hard kill at the app cutover boundary.
+      await fs.rm(staged, { recursive: true, force: true }); staged = null;
+    }
     await recheck(); stop.signal.throwIfAborted();
     if (!apply) {
       outcome = { version: 1, status: 'supabase-app-reader-checked', applicationCommit: request.expectedOldSha,
@@ -483,21 +577,29 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
         activationPerformed: false, ...proof };
     } else {
       await immutable(path.join(receiptRoot, 'environment-before.private.bin'), originalEnv.bytes);
-      const intent = { version: 1, request, environmentBeforeSha256: originalEnv.sha256,
-        environmentAfterSha256: sha(nextEnv), cacheDirectory };
-      await immutable(path.join(receiptRoot, 'intent.private.json'), Buffer.from(JSON.stringify(intent)));
-      codeAttempted = true;
-      await git(appRoot, ['checkout', '--detach', '--no-overwrite-ignore', request.selectedSha]); changedCode = true;
-      check(await gitText(appRoot, ['rev-parse', 'HEAD']) === request.selectedSha);
+      await immutable(path.join(receiptRoot, 'intent.private.json'), intentBytes);
       await recheck(); stop.signal.throwIfAborted();
-      envAttempted = true;
-      await atomic(envFile, nextEnv); changedEnv = true;
-      await restart(); await health({ origin: env.DRIVER_AUDIT_ORIGIN });
+      if (!currentProof) {
+        await memoryGate(); stop.signal.throwIfAborted();
+        if (!changedCode) {
+          codeAttempted = true;
+          await git(appRoot, ['checkout', '--detach', '--no-overwrite-ignore', request.selectedSha]); changedCode = true;
+        }
+        check(await gitText(appRoot, ['rev-parse', 'HEAD']) === request.selectedSha);
+        await recheck(); stop.signal.throwIfAborted();
+        if (!changedEnv) {
+          envAttempted = true;
+          await atomic(envFile, nextEnv, 0o600, originalEnv.sha256); changedEnv = true;
+        }
+        const before = apiIdentity(await processes(), { online: false });
+        stop.signal.throwIfAborted();
+        await restart(); await health({ origin: env.DRIVER_AUDIT_ORIGIN });
+        const after = apiIdentity(await processes()); freshApiIdentity(before, after);
+        processProof = { version: 1, intentSha256: sha(intentBytes), before, after };
+      } else await health({ origin: env.DRIVER_AUDIT_ORIGIN });
       await recheck(); stop.signal.throwIfAborted();
-      outcome = { version: 1, status: 'supabase-app-reader-released', previousCommit: request.expectedOldSha,
-        applicationCommit: request.selectedSha, reportHeadSha256: request.reportHeadSha256, generation: request.generation,
-        dependenciesReinstalled: false, websiteRebuilt: false, workersStarted: false, routingChanged: false,
-        authenticatedBrowserAcceptancePending: true };
+      check(same(apiIdentity(await processes()), processProof.after), 'The verified API process changed');
+      outcome = releasedOutcome();
     }
   } catch (cause) {
     failure = cause;
@@ -507,7 +609,11 @@ export async function releaseSupabaseAppReader({ appRoot, request, apply = true,
       if (!failure && stop.signal.aborted) failure = stop.signal.reason;
       if (!failure) {
         try {
-          if (apply) await immutable(path.join(receiptRoot, 'completed.private.json'), Buffer.from(JSON.stringify(outcome)));
+          if (apply) {
+            await immutable(proofFile(processProof.after), Buffer.from(JSON.stringify(processProof)));
+            await immutable(path.join(receiptRoot, 'completed.private.json'), Buffer.from(JSON.stringify(outcome)));
+            check(same(apiIdentity(await processes()), processProof.after), 'The verified API process changed before completion');
+          }
           else await atomic(path.join(receiptRoot, 'preflight.private.json'), Buffer.from(JSON.stringify(outcome)));
           if (stop.signal.aborted) failure = stop.signal.reason;
         } catch (error) { failure = error; }

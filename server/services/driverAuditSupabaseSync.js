@@ -9,6 +9,7 @@ import { createDriverAuditSupabaseReplica, verifyDriverAuditSupabaseServingPacka
 import { writeDriverAuditSourceState } from './driverAuditSource.js';
 import { withDriverAuditHeavyWork } from './driverAuditHeavyWork.js';
 import { saveDriverAuditBuildRecipe } from './driverAuditBuildRecipe.js';
+import { createDriverAuditSupabaseWorkerStatusStore } from './driverAuditSyncStatus.js';
 import { describeDriverAuditSyncFailure, runDriverAuditSyncTick, savedAuditTransferBlock } from './driverAuditSync.js';
 import { acquireWorkerLock } from '../vendor/driver-audits/integration/hosted/worker-lock.mjs';
 import { createCloudState } from '../vendor/driver-audits/integration/cloud/cloud-state.mjs';
@@ -119,7 +120,7 @@ function requireBuildSpace(bytes, { compact, inProgress = false }) {
 
 // The injectable backend is a testable service boundary, never a CLI/env hook.
 // The public runner below always opens the explicitly selected Sidi backend.
-export async function createDriverAuditSupabaseSync({ config, file, backend, collectSource, armedAt, signal, clock = Date.now } = {}) {
+export async function createDriverAuditSupabaseSync({ config, file, backend, collectSource, armedAt, sourceConfigSha256, signal, clock = Date.now } = {}) {
   config = structuredClone(config);
   const pins = await checkedConfiguration({ config, file });
   const { root, baselineRoot, codeRoot, builderSha256, rendererBuild, journals } = config;
@@ -133,6 +134,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
     && typeof clock === 'function', 'The qualified Sidi Supabase backend and managed cache are required');
   check(collectSource === undefined || executionHost === 'off-host' && typeof collectSource === 'function',
     'Managed source checks require the off-host worker');
+  check(sourceConfigSha256 === undefined || hex(sourceConfigSha256), 'The exact off-host source configuration is required');
   const firstEligibleAt = armedAt === undefined ? -Infinity : Date.parse(armedAt);
   check(armedAt === undefined || executionHost === 'off-host' && iso(armedAt) === armedAt && firstEligibleAt <= clock(),
     'Invalid off-host schedule enrollment');
@@ -156,6 +158,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
     const controlRpc = backend.rpcForResponseLimit(768 * 1024);
     const state = createCloudState({ rpc: controlRpc }), remote = backend.archive;
     const replica = createDriverAuditSupabaseReplica({ state, archive: remote });
+    const workerStatus = executionHost === 'off-host' ? createDriverAuditSupabaseWorkerStatusStore({ state, clock }) : null;
     const budgetOverride = backend.archiveReadBudget;
     const archive = createBudgetedAuditArchive({ rpc: controlRpc, state, remote,
       receiptRoot: path.join(root, 'archive-receipts'), budgetOverride });
@@ -195,11 +198,15 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
         heartbeatAt: new Date(now).toISOString(), nextCheckAt: new Date(nextAt).toISOString() });
     }
 
-    async function status(value) {
-      const active = await replica.head();
+    async function status(value, { head } = {}) {
+      const observed = await replica.head(), active = head === undefined ? observed : head;
+      if (head && observed?.sourceBodySha256 !== head.sourceBodySha256 && ['ready', 'pending'].includes(value.status)) {
+        value = { ...value, status: 'pending', pending: true };
+      }
       const prior = await readHeartbeat(), now = clock();
       await writeHeartbeat({ lastScheduledAt: prior?.lastScheduledAt ?? null, ...value,
         activeGeneration: active?.generation ?? null, checkedAt: new Date(now).toISOString() }, now, reportSchedule(now).nextAt);
+      return active;
     }
 
     const builder = createAutomaticRelease({ root: work, baselineRoot, pinnedDirectSync: true, loadSource: async () => pinned,
@@ -302,6 +309,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
 
     async function tick({ scheduledAt = null } = {}) {
       try {
+        let published = false, checkedHead, decisionHead;
         const sync = () => runDriverAuditSyncTick({
           async readSource() {
             signal?.throwIfAborted();
@@ -309,7 +317,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
             return { revision: pinned.savedState.revision, basis: automaticReleaseBasis(pinned.publication),
               observedAt: iso(pinned.publication.head.source?.observedAt) };
           },
-          readHead: () => replica.head(), getCandidate: current,
+          async readHead() { decisionHead = await replica.head(); return decisionHead; }, getCandidate: current,
           async build(latest) {
             const prior = await current(), block = await optionalJson(transferBlockFile);
             const capacity = savedAuditTransferBlock(block, { sourceBasis: latest.basis,
@@ -342,9 +350,10 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
             check(currentSource.revision >= candidate.collectorRevision, 'The original collector source moved backwards');
             await unchangedInputs();
             const expected = await replica.head();
-            await replica.activate({ expected, head: seedPointer(prepared, root) });
+            const result = await replica.activate({ expected, head: seedPointer(prepared, root) });
+            published = result.status === 'published';
           },
-          status, preferLatestEvidence: scheduledAt !== null,
+          status: async value => { checkedHead = await status(value, { head: decisionHead }); }, preferLatestEvidence: scheduledAt !== null,
         });
         return await underAdmission(async () => {
           if (scheduledAt !== null) {
@@ -354,7 +363,8 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
             await writeHeartbeat({ ...prior, status: 'pending', pending: true, admission: 'running', errorCode: null, capacity: null,
               lastScheduledAt: new Date(scheduledAt).toISOString() }, now, reportSchedule(now).nextAt);
           }
-          return sync();
+          await sync();
+          return { published, checkedHead };
         });
       } catch (error) {
         const active = await replica.head().catch(() => null), prior = await readHeartbeat().catch(() => null);
@@ -364,13 +374,51 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
       }
     }
 
-    async function scheduledTick() {
+    async function flushWorkerStatus() {
+      const saved = await readHeartbeat(), pending = saved?.pendingWorkerStatus;
+      if (!pending) return null;
+      check(workerStatus && pending.syncConfigSha256 === pins.configSha256
+        && pending.sourceConfigSha256 === sourceConfigSha256, 'The retained worker outcome configuration differs');
+      const receipt = await workerStatus.write(pending);
+      check(receipt.verified === true || receipt.superseded === true, 'The terminal worker outcome was not confirmed');
+      const current = await readHeartbeat();
+      check(isDeepStrictEqual(current?.pendingWorkerStatus, pending), 'The retained worker outcome changed during delivery');
+      delete current.pendingWorkerStatus;
+      await writeHeartbeat(current, clock(), Date.parse(current.nextCheckAt));
+      return receipt.superseded === true ? 'superseded' : 'recorded';
+    }
+
+    async function recordWorkerStatus({ dueAt, nextAt, published, checkedHead, failure }) {
+      if (!workerStatus) return;
+      const saved = await readHeartbeat(), head = failure ? await replica.head() : checkedHead;
+      check(head, 'A real serving head is required for the terminal worker outcome');
+      const failed = failure ? describeDriverAuditSyncFailure(failure) : null;
+      const pendingWorkerStatus = {
+        version: 1, kind: 'supabase-report-worker-slot-status', executionHost: 'off-host',
+        syncConfigSha256: pins.configSha256, sourceConfigSha256,
+        scheduledAt: new Date(dueAt).toISOString(), nextCheckAt: new Date(nextAt).toISOString(), checkedAt: new Date(clock()).toISOString(),
+        outcome: failure ? 'failed' : published ? 'published' : 'unchanged', status: failed?.status ?? saved?.status,
+        activeGeneration: head.generation, servingHeadRevision: head.sourceRevision, servingHeadBodySha256: head.sourceBodySha256,
+        collectorRevision: head.servingPackage.collectorRevision, visibleCutoffAt: head.visibleCutoffAt,
+        latestCaptureAt: saved?.latestCaptureAt ?? null, errorCode: failed?.errorCode ?? null,
+      };
+      // Save the exact terminal payload before its one metadata CAS. A lost
+      // bridge/ACK retries this payload, never the source or paid work.
+      await writeHeartbeat({ ...saved, pendingWorkerStatus }, clock(), nextAt);
+      return flushWorkerStatus();
+    }
+
+    async function runDueSlot() {
       check(!closed, 'The Sidi audit sync has closed');
+      check(executionHost !== 'off-host' || hex(sourceConfigSha256), 'The exact off-host source configuration is required');
       signal?.throwIfAborted();
+      const recovered = await flushWorkerStatus();
       const { dueAt, nextAt } = reportSchedule(clock());
       const saved = await readHeartbeat() ?? { status: 'pending', pending: true };
       // Catch up at most the latest elapsed slot for this Dubai day.
-      if (dueAt !== null && dueAt >= firstEligibleAt && dueAt > (Date.parse(saved.lastScheduledAt) || -Infinity)) {
+      const due = dueAt !== null && dueAt >= firstEligibleAt && dueAt > (Date.parse(saved.lastScheduledAt) || -Infinity);
+      if (due) {
+        let failure, published = false, checkedHead;
         try {
           if (executionHost === 'off-host') {
             check(collectSource, 'The off-host source checker is required');
@@ -381,15 +429,18 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
                 lastScheduledAt: new Date(dueAt).toISOString() }, clock(), nextAt);
             } });
           }
-          await tick({ scheduledAt: dueAt });
+          ({ published, checkedHead } = await tick({ scheduledAt: dueAt }));
         }
         catch (error) {
           signal?.throwIfAborted();
           const prior = await readHeartbeat() ?? saved;
           await writeHeartbeat({ ...prior, ...describeDriverAuditSyncFailure(error), pending: true,
             lastScheduledAt: new Date(dueAt).toISOString() }, clock(), nextAt);
-          throw error;
+          failure = error;
         }
+        try { await recordWorkerStatus({ dueAt, nextAt, published, checkedHead, failure }); }
+        catch (error) { if (!failure) throw error; }
+        if (failure) throw failure;
       } else {
         // An idle heartbeat neither reads Supabase nor advances evidence clocks.
         // Any persisted admission belongs to a previous process, not this idle one.
@@ -397,10 +448,24 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
         if (saved.status === 'checking') Object.assign(saved, { status: 'pending', pending: true });
         await writeHeartbeat(saved, clock(), nextAt);
       }
-      return Math.min(nextAt, clock() + idleHeartbeatInterval);
+      signal?.throwIfAborted();
+      const result = { status: due ? 'checked' : 'not-due', scheduledAt: due ? new Date(dueAt).toISOString() : null,
+        nextCheckAt: new Date(nextAt).toISOString() };
+      if (recovered) result.workerStatusRecovered = recovered;
+      if (due) {
+        const outcome = await readHeartbeat();
+        check(['ready', 'pending'].includes(outcome?.status) && typeof outcome.pending === 'boolean'
+          && hex(outcome.activeGeneration), 'The scheduled report outcome is unavailable');
+        Object.assign(result, { reportStatus: outcome.status, pending: outcome.pending, activeGeneration: outcome.activeGeneration });
+      }
+      return result;
     }
 
-    return Object.freeze({ seed, tick, scheduledTick,
+    return Object.freeze({ seed, tick, runDueSlot,
+      async scheduledTick() {
+        const result = await runDueSlot();
+        return Math.min(Date.parse(result.nextCheckAt), clock() + idleHeartbeatInterval);
+      },
       async check() { return underAdmission(async () => {
         const active = await replica.head();
         check(active, 'A verified Supabase audit seed is required');
@@ -412,24 +477,26 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, col
   } catch (error) { await lock.release(); throw error; }
 }
 
-export async function runDriverAuditSupabaseSync({ config, file, mode, collectSource, armedAt, env = process.env } = {}) {
+export async function runDriverAuditSupabaseSync({ config, file, mode, collectSource, armedAt, sourceConfigSha256, env = process.env } = {}) {
   const executionHost = env.DRIVER_AUDIT_EXECUTION_HOST;
   check(['sidi', 'off-host'].includes(executionHost) && (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase'
     && env.DRIVER_AUDIT_IMPORT_ENABLED === '0'
     && (env.DRIVER_AUDIT_ENABLED === '1' || mode === '--seed-only' && env.DRIVER_AUDIT_ENABLED === '0')
-    && [undefined, '--check', '--seed-only'].includes(mode)
-    && (executionHost !== 'off-host' || mode !== undefined || typeof collectSource === 'function' && iso(armedAt) === armedAt),
+    && [undefined, '--check', '--seed-only', '--once'].includes(mode)
+    && (mode !== '--once' || executionHost === 'off-host')
+    && (executionHost !== 'off-host' || ['--check', '--seed-only'].includes(mode)
+      || typeof collectSource === 'function' && iso(armedAt) === armedAt && hex(sourceConfigSha256)),
   'Explicit managed Supabase sync with import disabled is required');
   const stop = new AbortController();
   const onStop = () => { if (!stop.signal.aborted) stop.abort(Error('Sidi audit sync stopped')); };
   for (const name of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(name, onStop);
-  let worker;
+  let worker, onceResult;
   try {
     await checkedConfiguration({ config, file });
     const cache = path.join(config.root, 'work', 'archive-cache'); await privateDirectory(cache);
     stop.signal.throwIfAborted();
     const backend = await createDriverAuditSupabaseAppBackend({ env: { ...env, MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: cache } });
-    worker = await createDriverAuditSupabaseSync({ config, file, backend, collectSource, armedAt, signal: stop.signal });
+    worker = await createDriverAuditSupabaseSync({ config, file, backend, collectSource, armedAt, sourceConfigSha256, signal: stop.signal });
     if (mode === '--check' || mode === '--seed-only') {
       const result = await (mode === '--check' ? worker.check() : worker.seed());
       console.info(JSON.stringify({ status: result.status, dataStore: 'supabase', executionHost,
@@ -437,7 +504,8 @@ export async function runDriverAuditSupabaseSync({ config, file, mode, collectSo
       return result;
     }
     if (executionHost === 'off-host') await worker.check();
-    while (!stop.signal.aborted) {
+    if (mode === '--once') onceResult = await worker.runDueSlot();
+    else while (!stop.signal.aborted) {
       const now = Date.now();
       let wakeAt = Math.min(reportSchedule(now).nextAt, now + idleHeartbeatInterval);
       try { wakeAt = await worker.scheduledTick(); }
@@ -454,7 +522,15 @@ export async function runDriverAuditSupabaseSync({ config, file, mode, collectSo
       });
     }
   } finally {
-    try { await worker?.close(); }
+    try {
+      await worker?.close();
+      if (mode === '--once') stop.signal.throwIfAborted();
+    }
     finally { for (const name of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.removeListener(name, onStop); }
+  }
+  if (onceResult) {
+    const result = { ...onceResult, dataStore: 'supabase', executionHost };
+    console.info(JSON.stringify(result));
+    return result;
   }
 }

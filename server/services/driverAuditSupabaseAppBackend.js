@@ -9,8 +9,10 @@ import { createDriverAuditCollectorReadCache } from './driverAuditCollectorReadC
 import { createDriverAuditLinkedPhotoReader, createDriverAuditSpacesArchive } from './driverAuditSpacesArchive.js';
 import { createDriverAuditSupabaseArchive } from './driverAuditSupabaseArchive.js';
 import { createDriverAuditSupabaseTransfer } from './driverAuditSupabaseTransfer.js';
-import { readDriverAuditFileSyncStatus } from './driverAuditSyncStatus.js';
+import { createDriverAuditSupabaseWorkerStatusStore, driverAuditSupabaseWorkerStatusKey,
+  readDriverAuditFileSyncStatus } from './driverAuditSyncStatus.js';
 import { createDriverAuditPhotoRecovery } from './driverAuditPhotoRecovery.js';
+import { createCloudState } from '../vendor/driver-audits/integration/cloud/cloud-state.mjs';
 
 const check = (condition, message) => { if (!condition) throw Error(message); };
 
@@ -57,6 +59,12 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
       'Unexpected Sidi polling progress operation');
     return rpc(name === 'matter_hosted_state_read' ? 'matter_hosted_app_progress_read' : 'matter_hosted_app_progress_cas', args);
   };
+  const remoteStatus = env.DRIVER_AUDIT_SERVING_STORE === 'supabase'
+    ? createDriverAuditSupabaseWorkerStatusStore({ state: createCloudState({ rpc: (name, args) => {
+      check(name === 'matter_hosted_state_read' && [driverAuditSupabaseWorkerStatusKey, 'app-sidi-report-head'].includes(args.p_key),
+        'Unexpected shared report-status read');
+      return rpcForResponseLimit(args.p_key === driverAuditSupabaseWorkerStatusKey ? 16 * 1024 : 768 * 1024)(name, args);
+    } }) }) : null;
   return {
     kind: 'supabase', executionHost, executionAdmission: 'fixed-host-v1',
     transferAccounting: 'supabase-http-bytes-v1',
@@ -68,7 +76,7 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
     createExecutionBudget: createDriverAuditFixedHostBudgetFactory(),
     archiveReadBudget: meteredReader,
     readTransferUsage: transfer.readTransferUsage,
-    readSyncStatus: (generation, clock) => readDriverAuditFileSyncStatus(
-      path.join(path.dirname(path.dirname(cacheDirectory)), 'sync-status.private.json'), generation, clock),
+    readSyncStatus: (generation, clock) => remoteStatus ? remoteStatus.read(generation, clock)
+      : readDriverAuditFileSyncStatus(path.join(path.dirname(path.dirname(cacheDirectory)), 'sync-status.private.json'), generation, clock),
   };
 }

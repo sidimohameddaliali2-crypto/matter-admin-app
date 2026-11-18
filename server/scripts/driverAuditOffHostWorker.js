@@ -6,7 +6,8 @@ import { checkDriverAuditSource } from './driverAuditSource.js';
 import { readDriverAuditSourceConfig, readPrivateDriverAuditSource, runDriverAuditSourceChild } from '../services/driverAuditSource.js';
 import { runDriverAuditSupabaseSync } from '../services/driverAuditSupabaseSync.js';
 
-const requiredPaths = ['/api/collector?task=delivery', '/api/morning-gps', '/api/collector?task=gps-publish'];
+const requiredPaths = ['/api/collector?task=delivery-history', '/api/collector?task=delivery',
+  '/api/morning-gps', '/api/collector?task=gps-publish'];
 const optionalPaths = ['/api/collector?task=photo-backlog', '/api/collector?task=photo-grade'];
 const complete = new Set(['complete', 'not-due']);
 const acceptedOptional = new Set([...complete, 'disabled', 'budget-exhausted', 'deferred']);
@@ -25,7 +26,7 @@ async function readScheduleEnrollment(root, syncSha256, sourceSha256) {
 async function main(args) {
   const [configFlag, file, sourceFlag, sourceFile, mode] = args;
   if (configFlag !== '--config' || sourceFlag !== '--source' || !path.isAbsolute(file || '')
-    || !path.isAbsolute(sourceFile || '') || args.length > 5 || ![undefined, '--check', '--seed-only'].includes(mode)) {
+    || !path.isAbsolute(sourceFile || '') || args.length > 5 || ![undefined, '--check', '--seed-only', '--once'].includes(mode)) {
     throw Error('Use an exact private off-host sync and source configuration');
   }
   const configBytes = await readPrivateDriverAuditSource(file, 1024 * 1024);
@@ -46,8 +47,9 @@ async function main(args) {
     return entries[0];
   });
   if (mode === '--check') await checkDriverAuditSource(source);
-  const armedAt = mode === undefined ? await readScheduleEnrollment(config.root, sha256(configBytes), source.configSha256) : undefined;
-  return runDriverAuditSupabaseSync({ config, file, mode, armedAt, env: {
+  const armedAt = mode === undefined || mode === '--once'
+    ? await readScheduleEnrollment(config.root, sha256(configBytes), source.configSha256) : undefined;
+  return runDriverAuditSupabaseSync({ config, file, mode, armedAt, sourceConfigSha256: source.configSha256, env: {
     ...env, DRIVER_AUDIT_SUPABASE_SECRET: env.MATTER_SUPABASE_SECRET,
     DRIVER_AUDIT_ENABLED: mode === '--seed-only' ? '0' : '1', DRIVER_AUDIT_IMPORT_ENABLED: '0',
   }, async collectSource({ signal, onAdmission }) {

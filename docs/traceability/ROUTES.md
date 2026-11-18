@@ -421,11 +421,11 @@ Read [interpretation and operations](README.md) alongside this map. Machine-read
 | GET | `/api/external/drivers/locations/history` | See area meaning in README and direct calls in this row. | Inputs query.date, query.dateFrom, query.dateTo, query.driverId, query.limit, query.page, query.vehicleNo / Returns data, message, pagination, range, success / Calls VehicleLocationHistory.countDocuments, VehicleLocationHistory.find, captureMetadata | apiKeyAuth | 400, 500 | [server/routes/externalDriverLocationApi.js:30](../../server/routes/externalDriverLocationApi.js#L30) |
 | GET | `/api/external/drivers/locations/capture-status` | See area meaning in README and direct calls in this row. | Inputs query.date / Returns data, message, range, success / Calls VehicleLocationCaptureBatch.find | apiKeyAuth | 400, 500 | [server/routes/externalDriverLocationApi.js:89](../../server/routes/externalDriverLocationApi.js#L89) |
 | GET | `/api/external/drivers/locations` | Every tracked vehicle's live GPS location, with the driver it's mapped to (if any). Vehicles with no current fix have lat/lng null rather than being dropped, so a consumer can tell "no driver assigned" apart from "assigned but not reporting a location." | Returns data, fetchedAt, message, success / Calls User.find, driverMappings, truckoomApiService.getFleetStatus | apiKeyAuth | 502 | [server/routes/externalDriverLocationApi.js:125](../../server/routes/externalDriverLocationApi.js#L125) |
-| GET | `/api/health` | See area meaning in README and direct calls in this row. | Returns database, message, success, timestamp | createRequestTrace({ resolveRoute: resolveTraceRoute }) → driverAuditIntegration → cors(corsOptions) → compression() → express.json({ limit: '10mb' }) → express.urlencoded({ extended: true }) → mcpOAuth.router | 200 | [server/server.js:274](../../server/server.js#L274) |
-| HEAD | `/api/health` | See area meaning in README and direct calls in this row. |  | createRequestTrace({ resolveRoute: resolveTraceRoute }) → driverAuditIntegration → cors(corsOptions) → compression() → express.json({ limit: '10mb' }) → express.urlencoded({ extended: true }) → mcpOAuth.router | 200 | [server/server.js:283](../../server/server.js#L283) |
-| GET | `/api/test` | See area meaning in README and direct calls in this row. | Returns message, success, timestamp | createRequestTrace({ resolveRoute: resolveTraceRoute }) → driverAuditIntegration → cors(corsOptions) → compression() → express.json({ limit: '10mb' }) → express.urlencoded({ extended: true }) → mcpOAuth.router | Default or delegated | [server/server.js:288](../../server/server.js#L288) |
-| GET | `/api/users/drivers/test` | See area meaning in README and direct calls in this row. | Returns message, success, timestamp | createRequestTrace({ resolveRoute: resolveTraceRoute }) → driverAuditIntegration → cors(corsOptions) → compression() → express.json({ limit: '10mb' }) → express.urlencoded({ extended: true }) → driverRoutes → userRoutes → mcpOAuth.router | Default or delegated | [server/server.js:297](../../server/server.js#L297) |
-| GET | `/*` | See area meaning in README and direct calls in this row. |  | createRequestTrace({ resolveRoute: resolveTraceRoute }) → driverAuditIntegration → cors(corsOptions) → compression() → express.json({ limit: '10mb' }) → express.urlencoded({ extended: true }) → mcpOAuth.router | 500 | [server/server.js:317](../../server/server.js#L317) |
+| GET | `/api/health` | See area meaning in README and direct calls in this row. | Returns database, message, success, timestamp | createRequestTrace({ resolveRoute: resolveTraceRoute }) → driverAuditIntegration → cors(corsOptions) → compression() → express.json({ limit: '10mb' }) → express.urlencoded({ extended: true }) → mcpOAuth.router | 200 | [server/server.js:279](../../server/server.js#L279) |
+| HEAD | `/api/health` | See area meaning in README and direct calls in this row. |  | createRequestTrace({ resolveRoute: resolveTraceRoute }) → driverAuditIntegration → cors(corsOptions) → compression() → express.json({ limit: '10mb' }) → express.urlencoded({ extended: true }) → mcpOAuth.router | 200 | [server/server.js:288](../../server/server.js#L288) |
+| GET | `/api/test` | See area meaning in README and direct calls in this row. | Returns message, success, timestamp | createRequestTrace({ resolveRoute: resolveTraceRoute }) → driverAuditIntegration → cors(corsOptions) → compression() → express.json({ limit: '10mb' }) → express.urlencoded({ extended: true }) → mcpOAuth.router | Default or delegated | [server/server.js:293](../../server/server.js#L293) |
+| GET | `/api/users/drivers/test` | See area meaning in README and direct calls in this row. | Returns message, success, timestamp | createRequestTrace({ resolveRoute: resolveTraceRoute }) → driverAuditIntegration → cors(corsOptions) → compression() → express.json({ limit: '10mb' }) → express.urlencoded({ extended: true }) → driverRoutes → userRoutes → mcpOAuth.router | Default or delegated | [server/server.js:302](../../server/server.js#L302) |
+| GET | `/*` | See area meaning in README and direct calls in this row. |  | createRequestTrace({ resolveRoute: resolveTraceRoute }) → driverAuditIntegration → cors(corsOptions) → compression() → express.json({ limit: '10mb' }) → express.urlencoded({ extended: true }) → mcpOAuth.router | 500 | [server/server.js:322](../../server/server.js#L322) |
 
 ## Browser routes
 
@@ -514,9 +514,9 @@ Path literals and patterns below come from raw handlers, including delegated rep
 - `/report-data/` — [server/services/driverAuditIntegration.js:25](../../server/services/driverAuditIntegration.js#L25)
 - `/report-assets/` — [server/services/driverAuditIntegration.js:25](../../server/services/driverAuditIntegration.js#L25)
 - `/api/driver-audits/session` — [server/services/driverAuditIntegration.js:133](../../server/services/driverAuditIntegration.js#L133)
-- `/api/session/refresh` — [server/services/driverAuditIntegration.js:148](../../server/services/driverAuditIntegration.js#L148)
-- `/api/session` — [server/services/driverAuditIntegration.js:152](../../server/services/driverAuditIntegration.js#L152)
-- `/api/reporting/status` — [server/services/driverAuditIntegration.js:159](../../server/services/driverAuditIntegration.js#L159)
+- `/api/session/refresh` — [server/services/driverAuditIntegration.js:151](../../server/services/driverAuditIntegration.js#L151)
+- `/api/session` — [server/services/driverAuditIntegration.js:155](../../server/services/driverAuditIntegration.js#L155)
+- `/api/reporting/status` — [server/services/driverAuditIntegration.js:162](../../server/services/driverAuditIntegration.js#L162)
 - `^\/report-assets\/font-[a-f0-9]{64}\.(woff2?|ttf|otf)$` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:13](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L13)
 - `/api/session/request-code` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:60](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L60)
 - `/api/session` — [server/vendor/driver-audits/integration/cloud/cloud-http.mjs:61](../../server/vendor/driver-audits/integration/cloud/cloud-http.mjs#L61)
@@ -546,8 +546,8 @@ Path literals and patterns below come from raw handlers, including delegated rep
 
 ## Socket event declarations
 
-- `connection` (on) — [server/server.js:306](../../server/server.js#L306)
-- `disconnect` (on) — [server/server.js:311](../../server/server.js#L311)
+- `connection` (on) — [server/server.js:311](../../server/server.js#L311)
+- `disconnect` (on) — [server/server.js:316](../../server/server.js#L316)
 - `driver:join` (on) — [server/middleware/socketAuth.js:18](../../server/middleware/socketAuth.js#L18)
 - `delivery:created` (emit) — [server/routes/deliveries.js:1695](../../server/routes/deliveries.js#L1695)
 - `delivery:created` (emit) — [server/routes/deliveries.js:1844](../../server/routes/deliveries.js#L1844)

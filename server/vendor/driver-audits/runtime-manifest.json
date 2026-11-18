@@ -1,9 +1,9 @@
 {
   "version": 1,
   "files": {
-    "integration/cloud/preview-runtime.mjs": "42e114b90d90c3a05ca415c094fceffc80b6c9ddc120b8f531e7a03132e66891",
+    "integration/cloud/preview-runtime.mjs": "cf8902052e006e1c6fd07f93d739ea6cb922d9cedd6500749f1ac5f7c9d5ef33",
     "integration/cloud/audit-replica.mjs": "ae7db2f5948958b8d6763bc1f69b5db797354ef82851d4a2b71fe723a182b559",
-    "integration/cloud/automatic-hosted-preview.mjs": "5d2f6b9c73bee499fe15afdd7a0754773566c51b31e3ac88038a6a4836c6a18f",
+    "integration/cloud/automatic-hosted-preview.mjs": "adf81ff209729dd08deaded63554f3440f0d9c0a7d588019415c2475466d00ed",
     "integration/cloud/automatic-preview-publication.mjs": "e3e14f618b792eb74da2b46e0d8d98e532834183a5a1940b4360718aa5121866",
     "integration/cloud/driver-audit-archive.mjs": "dc1ceefb95ad8455e06d8e202752524207f1c1ef6b6102533427cb18786e978d",
     "integration/cloud/budgeted-archive-reader.mjs": "d61e2c7d438653bbc7b2317ecead68b285ae936b0789e3c7dacd538f28703bcd",
@@ -42,7 +42,7 @@
     "integration/cloud/browser-read-cache.mjs": "cb23c233eb95fe6c1768c968afd2aaa705141ecb2b20053a844ff1e20df605d4",
     "integration/cloud/browser-request-queue.mjs": "6f92e97433f5913af3aea1c95f83a5a25cf79bca9ae6684da04268f2756c1919",
     "integration/cloud/initial-report-tab.mjs": "ead760213223e29b6e3de472f43abcd7b43c8b84cce1723f114e00263db013f7",
-    "integration/cloud/remote-preview-package.mjs": "171686d0cecd0875b57327daef50442c7123255d9e376e271dae27267c94bc03",
+    "integration/cloud/remote-preview-package.mjs": "f64e3afd955f0b3b7f18fa1df0a818df3b2e2fb4c896dab8904e457ca388f399",
     "integration/cloud/archive-reservation.mjs": "285a0fb0d23aa02bc30c36ad5201bd8f500974cf78936688f2f5c7ccb1e624bf",
     "integration/cloud/reader-budget.mjs": "85c6d610a9df38093f7867893cf1e24d9ae193f5b253ca08638855e7fe3f3920",
     "integration/cloud/worker-budget.mjs": "7366a1d70fdddec4722a1c097b36c6fc9d8449e7adf157a01576e1914adb66a2",

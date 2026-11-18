@@ -50,14 +50,16 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
  const has=name=>packageOverride?packageOverride.has(name):Object.hasOwn(manifest,name);
  const read=name=>{if(!has(name)||!Object.hasOwn(manifest,name))throw Error('File outside preview manifest');const bytes=packageOverride?packageOverride.read(name):fs.readFileSync(path.join(privateRoot,name));if(!Buffer.isBuffer(bytes)||sha(bytes)!==manifest[name])throw Error('Preview file integrity failure');return bytes;};
  const readAsync=async name=>{if(!has(name)||!Object.hasOwn(manifest,name))throw Error('File outside preview manifest');const bytes=packageOverride?await packageOverride.readAsync(name):read(name);if(!Buffer.isBuffer(bytes)||sha(bytes)!==manifest[name])throw Error('Preview file integrity failure');return bytes;};
- const json=name=>JSON.parse(read(name)),publication=json('publication.private.json'),identity=json('identities.private.json'),index=JSON.parse(gunzipSync(read('gps-index.private.json.gz'))),maps=json('maps.private.json');
+ const prepared=staffIntegration?packageOverride?.takeVerifiedRuntime?.():null;
+ const json=name=>JSON.parse(read(name)),publication=prepared?.publication??json('publication.private.json'),
+  identity=json('identities.private.json'),index=prepared?.gps??JSON.parse(gunzipSync(read('gps-index.private.json.gz'))),maps=json('maps.private.json');
  if(packageOverride&&(packageOverride.generation&&packageOverride.generation!==publication.head.manifest.sha256||packageOverride.reportHash&&packageOverride.reportHash!==publication.head.reportHash))throw Error('Preview package head mismatch');
  const rpc=rpcOverride||createHostedRpc({secret}),rawState=stateOverride||createCloudState({rpc}),state=namespaceState(rawState,reviewNamespace),transport=previewArchiveTransport({remote:transportOverride||createSupabaseArchiveTransport({secret}),has,read,readAsync});
  const pinnedRepository=await createCloudRepository({stateStore:{read:async()=>({revision:publication.revision||0,body:JSON.stringify(publication)})},transport,key:'frozen-preview',cacheBytes:96*1024*1024}).pin();
  const repository=reviewContextOverride?reviewContextOverride(pinnedRepository):pinnedRepository,head=await repository.getHead();
  const access=createHostedAccess({rpc}),auth=authOverride||createHostedAuth({supabaseUrl:'https://trhhjfgfmxofxhnzocks.supabase.co',publishableKey,cookieKey,membership:access.membership,sessionActive:access.sessionActive,cookieName:'__Host-matter_preview'});
  const login=createPasswordLogin({supabaseUrl:'https://trhhjfgfmxofxhnzocks.supabase.co',publishableKey,allowedEmail,additionalAllowedEmails,throttle:createLoginThrottle({stateStore:state})});
- const readView=JSON.parse(gunzipSync(read('preview-read-view.private.json.gz')));
+ const readView=prepared?.view??JSON.parse(gunzipSync(read('preview-read-view.private.json.gz')));
  const sourceHistory=staffIntegration&&packageOverride?.staffSnapshot===true&&packageOverride.directSnapshot!==true
   ?createPreviewSourceHistory({sourceManifest:publication.privateRelease?.currentHead?.manifest,staffManifest:readView.browser,
    rows:readView.gpsRows,readStaffBrowser:()=>read('browser-data.private.json.gz'),async readRetained(file,maxBytes){
@@ -75,7 +77,7 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
   report.photoProposals=(params,actor)=>proposalPage(params,actor,{includeProgress:false});
  }
  if(has('corrections.private.json')){
-  const gpsAvailability=has(packedGpsAvailabilityFile)?decodePackedGpsAvailability(read(packedGpsAvailabilityFile)):
+  const gpsAvailability=has(packedGpsAvailabilityFile)?prepared?.availability??decodePackedGpsAvailability(read(packedGpsAvailabilityFile)):
    has(gpsAvailabilityFile)?json(gpsAvailabilityFile):undefined;
   report=connectPreviewCorrections(report,readView,{...json('corrections.private.json'),...(gpsAvailability?{gpsAvailability}:{})});
  }

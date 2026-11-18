@@ -44,6 +44,7 @@ import { startCustomerTrackerVisitsJob } from './jobs/syncCustomerTrackerVisits.
 import { authenticateSocket, registerStaffSocket } from './middleware/socketAuth.js';
 import {authenticateStaffToken} from './middleware/auth.js';
 import {createDriverAuditIntegration} from './services/driverAuditIntegration.js';
+import {createDriverAuditReaderProxy} from './services/driverAuditReaderProxy.js';
 
 // Initialize Spaces after dotenv loads
 initializeSpaces();
@@ -101,8 +102,12 @@ app.set('io', io);
 // Middleware
 app.use(createRequestTrace({ resolveRoute: resolveTraceRoute }));
 // This handler owns its raw JSON body and existing reporting security headers.
-const driverAuditIntegration = createDriverAuditIntegration({db:()=>mongoose.connection.db,authenticateStaffToken});
+const driverAuditIntegration = process.env.DRIVER_AUDIT_SERVING_STORE === 'supabase'
+  && process.env.DRIVER_AUDIT_ENABLED === '1' && process.env.DRIVER_AUDIT_IMPORT_ENABLED === '0'
+  ? createDriverAuditReaderProxy()
+  : createDriverAuditIntegration({db:()=>mongoose.connection.db,authenticateStaffToken});
 app.use(driverAuditIntegration);
+server.once('close', () => driverAuditIntegration.close?.());
 app.use(cors(corsOptions));
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
