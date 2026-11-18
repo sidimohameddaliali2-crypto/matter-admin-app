@@ -366,6 +366,27 @@ test('a stop after noon publication does not start another noon build after rest
   assert.deepEqual(f.states.get('app-sidi-report-head'), head);
 });
 
+test('an idle restart reports an interrupted check as pending without touching the saved report', async t => {
+  let now = Date.parse('2026-11-18T06:30:00Z');
+  const f = await fixture(t, { clock: () => now });
+  await f.worker.seed();
+  await f.worker.scheduledTick();
+  const file = path.join(f.root, 'sync-status.private.json'), saved = JSON.parse(await fs.readFile(file, 'utf8'));
+  await write(file, { ...saved, status: 'checking', pending: true, admission: 'running' });
+
+  now += 5 * 60_000;
+  await f.reopen();
+  const calls = f.calls.length;
+  await f.worker.scheduledTick();
+  assert.equal(f.calls.length, calls);
+  const status = JSON.parse(await fs.readFile(file, 'utf8'));
+  assert.equal(status.status, 'pending');
+  assert.equal(status.admission, undefined);
+  assert.equal(status.lastScheduledAt, saved.lastScheduledAt);
+  assert.equal(status.checkedAt, saved.checkedAt);
+  assert.equal(status.activeGeneration, saved.activeGeneration);
+});
+
 test('a failed 10:30 check retains the report and retries at noon without polling the source in between', async t => {
   let now = Date.parse('2026-11-18T06:30:00Z');
   const f = await fixture(t, { clock: () => now });

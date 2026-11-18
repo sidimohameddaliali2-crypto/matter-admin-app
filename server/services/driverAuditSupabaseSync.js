@@ -370,6 +370,9 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, sig
         }
       } else {
         // An idle heartbeat neither reads Supabase nor advances evidence clocks.
+        // Any persisted admission belongs to a previous process, not this idle one.
+        delete saved.admission;
+        if (saved.status === 'checking') Object.assign(saved, { status: 'pending', pending: true });
         await writeHeartbeat(saved, clock(), nextAt);
       }
       return Math.min(nextAt, clock() + idleHeartbeatInterval);
