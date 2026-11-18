@@ -119,17 +119,20 @@ function requireBuildSpace(bytes, { compact, inProgress = false }) {
 
 // The injectable backend is a testable service boundary, never a CLI/env hook.
 // The public runner below always opens the explicitly selected Sidi backend.
-export async function createDriverAuditSupabaseSync({ config, file, backend, signal, clock = Date.now } = {}) {
+export async function createDriverAuditSupabaseSync({ config, file, backend, collectSource, signal, clock = Date.now } = {}) {
   config = structuredClone(config);
   const pins = await checkedConfiguration({ config, file });
   const { root, baselineRoot, codeRoot, builderSha256, rendererBuild, journals } = config;
   const work = path.join(root, 'work'), cache = path.join(work, 'archive-cache');
-  check(backend?.kind === 'supabase' && backend.executionHost === 'sidi' && backend.executionAdmission === 'fixed-host-v1'
+  const executionHost = backend?.executionHost;
+  check(backend?.kind === 'supabase' && ['sidi', 'off-host'].includes(executionHost) && backend.executionAdmission === 'fixed-host-v1'
     && backend.transferAccounting === 'supabase-http-bytes-v1' && backend.archive?.managedReadCache === true
     && backend.archiveCacheDirectory === cache && typeof backend.rpc === 'function'
     && typeof backend.rpcForResponseLimit === 'function' && typeof backend.readTransferUsage === 'function'
     && typeof backend.archiveReadBudget?.reserve === 'function' && typeof backend.archiveReadBudget?.settle === 'function'
     && typeof clock === 'function', 'The qualified Sidi Supabase backend and managed cache are required');
+  check(collectSource === undefined || executionHost === 'off-host' && typeof collectSource === 'function',
+    'Managed source checks require the off-host worker');
   signal?.throwIfAborted();
   for (const directory of [work, cache, path.join(root, 'archive-receipts')]) await privateDirectory(directory);
   const lock = await acquireWorkerLock(path.join(path.dirname(root), 'sync-worker.lock'));
@@ -181,8 +184,8 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, sig
     }
 
     function writeHeartbeat(value, now, nextAt) {
-      return writeDriverAuditSourceState(heartbeat, { version: 1, dataStore: 'supabase', executionHost: 'sidi',
-        capacity: null, ...value, replicaGcStatus: 'disabled-supabase',
+      return writeDriverAuditSourceState(heartbeat, { capacity: null, ...value, version: 1, dataStore: 'supabase', executionHost,
+        replicaGcStatus: 'disabled-supabase',
         heartbeatAt: new Date(now).toISOString(), nextCheckAt: new Date(nextAt).toISOString() });
     }
 
@@ -234,7 +237,9 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, sig
 
     const underAdmission = async operation => {
       await unchangedInputs();
-      const result = await withDriverAuditHeavyWork({ root: path.resolve(root, '../../driver-audit-heavy-work'), owner: 'sync', signal,
+      const heavyRoot = executionHost === 'off-host' ? path.join(root, 'driver-audit-heavy-work')
+        : path.resolve(root, '../../driver-audit-heavy-work');
+      const result = await withDriverAuditHeavyWork({ root: heavyRoot, owner: 'sync', signal,
         async onWaiting() {
           const prior = await readHeartbeat();
           await status({ status: 'pending', pending: true, errorCode: null, admission: 'waiting',
@@ -360,7 +365,16 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, sig
       const saved = await readHeartbeat() ?? { status: 'pending', pending: true };
       // Catch up at most the latest elapsed slot for this Dubai day.
       if (dueAt !== null && dueAt > (Date.parse(saved.lastScheduledAt) || -Infinity)) {
-        try { await tick({ scheduledAt: dueAt }); }
+        try {
+          if (executionHost === 'off-host') {
+            check(collectSource, 'The off-host source checker is required');
+            await unchangedInputs();
+            await writeHeartbeat({ ...saved, status: 'checking', pending: true, errorCode: null,
+              lastScheduledAt: new Date(dueAt).toISOString() }, clock(), nextAt);
+            await collectSource({ dueAt, signal });
+          }
+          await tick({ scheduledAt: dueAt });
+        }
         catch (error) {
           signal?.throwIfAborted();
           const prior = await readHeartbeat() ?? saved;
@@ -382,7 +396,7 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, sig
       async check() { return underAdmission(async () => {
         const active = await replica.head();
         check(active, 'A verified Supabase audit seed is required');
-        return { status: 'checked', dataStore: 'supabase', executionHost: 'sidi', activeGeneration: active.generation,
+        return { status: 'checked', dataStore: 'supabase', executionHost, activeGeneration: active.generation,
           collectorRevision: active.servingPackage.collectorRevision, replicaGcStatus: 'disabled-supabase' };
       }); },
       async close() { if (!closed) { closed = true; await lock.release(); } },
@@ -390,11 +404,14 @@ export async function createDriverAuditSupabaseSync({ config, file, backend, sig
   } catch (error) { await lock.release(); throw error; }
 }
 
-export async function runDriverAuditSupabaseSync({ config, file, mode, env = process.env } = {}) {
-  check(env.DRIVER_AUDIT_EXECUTION_HOST === 'sidi' && (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase'
+export async function runDriverAuditSupabaseSync({ config, file, mode, collectSource, env = process.env } = {}) {
+  const executionHost = env.DRIVER_AUDIT_EXECUTION_HOST;
+  check(['sidi', 'off-host'].includes(executionHost) && (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase'
     && env.DRIVER_AUDIT_IMPORT_ENABLED === '0'
     && (env.DRIVER_AUDIT_ENABLED === '1' || mode === '--seed-only' && env.DRIVER_AUDIT_ENABLED === '0')
-    && [undefined, '--check', '--seed-only'].includes(mode), 'Explicit Sidi Supabase sync with import disabled is required');
+    && [undefined, '--check', '--seed-only'].includes(mode)
+    && (executionHost !== 'off-host' || mode !== undefined || typeof collectSource === 'function'),
+  'Explicit managed Supabase sync with import disabled is required');
   const stop = new AbortController();
   const onStop = () => { if (!stop.signal.aborted) stop.abort(Error('Sidi audit sync stopped')); };
   for (const name of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(name, onStop);
@@ -404,13 +421,14 @@ export async function runDriverAuditSupabaseSync({ config, file, mode, env = pro
     const cache = path.join(config.root, 'work', 'archive-cache'); await privateDirectory(cache);
     stop.signal.throwIfAborted();
     const backend = await createDriverAuditSupabaseAppBackend({ env: { ...env, MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY: cache } });
-    worker = await createDriverAuditSupabaseSync({ config, file, backend, signal: stop.signal });
+    worker = await createDriverAuditSupabaseSync({ config, file, backend, collectSource, signal: stop.signal });
     if (mode === '--check' || mode === '--seed-only') {
       const result = await (mode === '--check' ? worker.check() : worker.seed());
-      console.info(JSON.stringify({ status: result.status, dataStore: 'supabase', executionHost: 'sidi',
+      console.info(JSON.stringify({ status: result.status, dataStore: 'supabase', executionHost,
         activeGeneration: result.activeGeneration ?? result.head?.generation ?? null }));
       return result;
     }
+    if (executionHost === 'off-host') await worker.check();
     while (!stop.signal.aborted) {
       const now = Date.now();
       let wakeAt = Math.min(reportSchedule(now).nextAt, now + idleHeartbeatInterval);

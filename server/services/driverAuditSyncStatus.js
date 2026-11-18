@@ -19,7 +19,7 @@ export async function readDriverAuditFileSyncStatus(file,generation,clock=Date.n
 export function driverAuditSyncStatusFor(saved,generation,clock=Date.now){
  if(!saved)return {status:'snapshot',pending:false,latestCaptureAt:null,checkedAt:null};
  const checkedAt=iso(saved.checkedAt);
- const heartbeatAt=saved.dataStore==='supabase'&&saved.executionHost==='sidi'?iso(saved.heartbeatAt):null;
+ const heartbeatAt=saved.dataStore==='supabase'&&['sidi','off-host'].includes(saved.executionHost)?iso(saved.heartbeatAt):null;
  const activityAt=heartbeatAt??checkedAt;
  const age=activityAt?clock()-Date.parse(activityAt):Infinity;
  const current=age>=0&&age<30*60_000;

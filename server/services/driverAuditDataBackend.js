@@ -18,7 +18,7 @@ export const driverAuditLocalReaderBudget = Object.freeze({
 
 export async function createDriverAuditDataBackend({ db, env = process.env, staging = false }) {
   if (env.DRIVER_AUDIT_EXECUTION_HOST !== undefined) {
-    if (env.DRIVER_AUDIT_EXECUTION_HOST !== 'sidi') throw Error('Unknown Driver Reports execution host');
+    if (!['sidi', 'off-host'].includes(env.DRIVER_AUDIT_EXECUTION_HOST)) throw Error('Unknown Driver Reports execution host');
     // Sidi-hosted reporting explicitly keeps the existing Supabase data. An
     // inherited setting from the parked migration must not open MongoDB.
     const selected = { ...env, DRIVER_AUDIT_DATA_STORE: 'supabase' };

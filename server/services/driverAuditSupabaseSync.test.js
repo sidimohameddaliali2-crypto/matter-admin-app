@@ -102,7 +102,7 @@ async function packageFiles(directory, revision) {
     restore: { version: 1, archive: 'matter-report-archive', verified: true, ...binding } } };
 }
 
-async function fixture(t, { signal, clock } = {}) {
+async function fixture(t, { signal, clock, executionHost = 'sidi', collectSource } = {}) {
   const temporary = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'driver-audit-supabase-sync-')));
   let worker;
   t.after(async () => { try { await worker?.close(); } finally { await fs.rm(temporary, { recursive: true, force: true }); } });
@@ -158,14 +158,14 @@ async function fixture(t, { signal, clock } = {}) {
     if (name === 'matter_hosted_archive_release') { const row = reservations.get(args.p_id); row.released = true; return { ...row }; }
     throw Error('Unexpected fixture RPC: ' + name);
   }
-  const backend = { kind: 'supabase', executionHost: 'sidi', executionAdmission: 'fixed-host-v1', transferAccounting: 'supabase-http-bytes-v1',
+  const backend = { kind: 'supabase', executionHost, executionAdmission: 'fixed-host-v1', transferAccounting: 'supabase-http-bytes-v1',
     rpc, rpcForResponseLimit: () => rpc, archive, archiveCacheDirectory: path.join(root, 'work', 'archive-cache'),
     readTransferUsage: async () => ({}), archiveReadBudget: { reserve: async () => ({ allowed: true }), settle: async () => ({ settled: true }) } };
   const f = { root, file, config, backend, states, objects, calls, uploads, initial, next, receipts,
     loseNextAck() { lostAck = true; }, corruptUploads() { corrupt = true; }, onNextCas(callback) { afterCas = callback; } };
   f.reopen = async (signalOverride = signal) => {
     await worker?.close();
-    f.worker = worker = await createDriverAuditSupabaseSync({ config, file, backend, signal: signalOverride, clock });
+    f.worker = worker = await createDriverAuditSupabaseSync({ config, file, backend, collectSource, signal: signalOverride, clock });
   };
   await f.reopen();
   return f;
@@ -317,6 +317,33 @@ test('10:30 Dubai builds once and an unchanged noon check survives restart witho
   await f.reopen();
   await f.worker.scheduledTick();
   assert.equal(f.calls.length, afterNoonCalls);
+});
+
+test('the off-host worker collects before building and retains unchanged noon evidence across restart', async t => {
+  const morning = Date.parse('2026-11-18T06:30:00Z'), noon = Date.parse('2026-11-18T08:00:00Z');
+  let now = morning - 1;
+  const slots = [];
+  const f = await fixture(t, { clock: () => now, executionHost: 'off-host', async collectSource({ dueAt }) {
+    slots.push(dueAt);
+    if (dueAt === morning) f.states.set('collector-state', { revision: 43, body: JSON.stringify(f.next.publication) });
+  } });
+  f.states.set('collector-state', { revision: 42, body: JSON.stringify(f.initial.publication) });
+  await f.worker.seed();
+  const initial = f.calls.length;
+  await f.worker.scheduledTick();
+  assert.equal(f.calls.length, initial);
+  now = morning;
+  await f.worker.scheduledTick();
+  const head = f.states.get('app-sidi-report-head'), uploads = f.uploads.length;
+  assert.equal(JSON.parse(head.body).servingPackage.collectorRevision, 43);
+  now = noon;
+  await f.reopen();
+  await f.worker.scheduledTick();
+  await f.reopen();
+  await f.worker.scheduledTick();
+  assert.deepEqual(slots, [morning, noon]);
+  assert.deepEqual(f.states.get('app-sidi-report-head'), head);
+  assert.equal(f.uploads.length, uploads);
 });
 
 test('noon publishes changed evidence saved after the morning report once', async t => {
@@ -519,6 +546,6 @@ test('runner rejects Mongo and implicit host mode before opening a connection', 
   await assert.rejects(runDriverAuditSupabaseSync({ config: {}, file: '/not-used', env: {} }), /Supabase|Sidi/i);
   const env = { DRIVER_AUDIT_EXECUTION_HOST: 'sidi', DRIVER_AUDIT_DATA_STORE: 'supabase',
     DRIVER_AUDIT_IMPORT_ENABLED: '0', DRIVER_AUDIT_ENABLED: '0' };
-  await assert.rejects(runDriverAuditSupabaseSync({ config: {}, file: '/not-used', env }), /Explicit Sidi Supabase/);
+  await assert.rejects(runDriverAuditSupabaseSync({ config: {}, file: '/not-used', env }), /Explicit managed Supabase/);
   await assert.rejects(runDriverAuditSupabaseSync({ config: {}, file: '/not-used', mode: '--seed-only', env }), /staged.*configuration/);
 });

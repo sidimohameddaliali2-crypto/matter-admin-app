@@ -149,7 +149,7 @@ export const DRIVER_AUDIT_SOURCE_EXECUTION_HOST_ENV = 'DRIVER_AUDIT_EXECUTION_HO
 export function driverAuditSourceExecutionHost(runtime, environment) {
   const host = environment[DRIVER_AUDIT_SOURCE_EXECUTION_HOST_ENV];
   if (host === undefined) return null;
-  requireSource(host === 'sidi' && runtime.managedSourceExecutionHost === 'sidi'
+  requireSource(['sidi', 'off-host'].includes(host) && runtime.managedSourceExecutionHost === host
     && runtime.managedSourceExecutionAdmission === 'fixed-host-v1'
     && ['source/integration/hosted/native-backend.mjs', 'source/integration/hosted/archive-read-cache.mjs',
       'source/integration/cloud/native-poll-progress.mjs'].every(relative => runtime.files.some(file => file.path === relative)),
@@ -161,12 +161,12 @@ export function driverAuditSourceExecutionHost(runtime, environment) {
 
 export function driverAuditSourceUsesAppBackend(config) {
   return (config.dataStore ?? config.environment?.DRIVER_AUDIT_DATA_STORE) === 'mongo'
-    || config.executionHost === 'sidi' || config.environment?.[DRIVER_AUDIT_SOURCE_EXECUTION_HOST_ENV] === 'sidi';
+    || ['sidi', 'off-host'].includes(config.executionHost ?? config.environment?.[DRIVER_AUDIT_SOURCE_EXECUTION_HOST_ENV]);
 }
 
 export function driverAuditSourceBackendEnvironment(config, appEnvironment = process.env) {
   const environment = { ...appEnvironment, ...config.environment };
-  if (config.executionHost === 'sidi' && config.dataStore === 'supabase') {
+  if (['sidi', 'off-host'].includes(config.executionHost) && config.dataStore === 'supabase') {
     const secret = config.environment.MATTER_SUPABASE_SECRET;
     requireSource(typeof secret === 'string' && secret.length > 0 && secret.length <= 8192 && !/[\r\n\0]/.test(secret),
       'The staged Supabase source credential is required.');
@@ -184,8 +184,8 @@ export function requireDriverAuditSourceBackend(config, backend) {
   requireSource(backend?.kind === config.dataStore && typeof backend.rpc === 'function'
     && typeof backend.archive?.readObject === 'function' && typeof backend.archive?.putVerifiedObject === 'function'
     && typeof backend.createExecutionBudget === 'function', 'The app source backend differs from its qualified store.');
-  if (config.executionHost === 'sidi') {
-    requireSource(backend.executionHost === 'sidi' && backend.executionAdmission === 'fixed-host-v1'
+  if (['sidi', 'off-host'].includes(config.executionHost)) {
+    requireSource(backend.executionHost === config.executionHost && backend.executionAdmission === 'fixed-host-v1'
       && backend.archive.managedReadCache === true && backend.archiveCacheDirectory === config.archiveCacheDirectory
       && backend.pollProgress?.version === 1 && typeof backend.pollProgress.read === 'function'
       && typeof backend.pollProgress.compareAndSwap === 'function' && backend.transferAccounting === 'supabase-http-bytes-v1'
@@ -212,6 +212,11 @@ export function driverAuditSourceArchiveCacheDirectory(root, files, environment)
   const supportsCache = files.some(file => file.path === 'source/integration/hosted/archive-read-cache.mjs');
   if (!supportsCache && directory === undefined) return null;
   const privateRoot = path.dirname(path.dirname(root));
+  if (environment[DRIVER_AUDIT_SOURCE_EXECUTION_HOST_ENV] === 'off-host') {
+    requireSource(supportsCache && directory === path.join(privateRoot, 'work', 'archive-cache'),
+      'Use the off-host builder archive cache directory.');
+    return directory;
+  }
   const parts = typeof directory === 'string' && path.isAbsolute(directory)
     ? path.relative(privateRoot, directory).split(path.sep) : [];
   requireSource(supportsCache && parts.length === 4 && parts[0] === 'driver-audits'
@@ -241,7 +246,7 @@ export async function readDriverAuditSourceConfig(file) {
   const archiveCacheDirectory = driverAuditSourceArchiveCacheDirectory(config.root, runtime.files, environment);
   const dataStore = driverAuditSourceDataStore(runtime.files, environment);
   const executionHost = driverAuditSourceExecutionHost(runtime, environment);
-  requireSource(executionHost !== 'sidi' || archiveCacheDirectory, 'Sidi source execution requires its managed archive cache.');
+  requireSource(executionHost === null || archiveCacheDirectory, 'Managed source execution requires its archive cache.');
   // Runtime configuration contains source credentials only. Node loader and
   // process options remain controlled by the app's supervised runner.
   requireSource(!Object.keys(environment).some(key => ['NODE_OPTIONS', 'NODE_PATH', 'PATH', 'HOME', 'LD_PRELOAD', 'DYLD_INSERT_LIBRARIES'].includes(key)),
@@ -854,6 +859,7 @@ export function runDriverAuditSourceChild(config, entrypoint, { probe = false, s
     // Do not inherit app secrets, NODE_OPTIONS or the operator's environment.
     const env = Object.fromEntries(['HOME', 'LANG', 'LC_ALL', 'TZ'].filter(key => process.env[key] !== undefined)
       .map(key => [key, process.env[key]]));
+    if (config.executionHost === 'off-host') env[DRIVER_AUDIT_SOURCE_EXECUTION_HOST_ENV] = 'off-host';
     const child = fork(script, ['--config', config.file, '--child'], {
       cwd: config.runtimeRoot, env, execArgv: ['--max-old-space-size=3072'], stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     });

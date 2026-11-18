@@ -24,8 +24,9 @@ const meteredReader = Object.freeze({
 
 export async function createDriverAuditSupabaseAppBackend({ env = process.env, fetchImpl = fetch,
   photoStore, cacheFreeBytes } = {}) {
-  check(env.DRIVER_AUDIT_EXECUTION_HOST === 'sidi'
-    && (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase', 'Explicit Sidi Supabase execution is required');
+  const executionHost = env.DRIVER_AUDIT_EXECUTION_HOST;
+  check(['sidi', 'off-host'].includes(executionHost)
+    && (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase', 'Explicit managed Supabase execution is required');
   const secret = env.DRIVER_AUDIT_SUPABASE_SECRET || env.MATTER_SUPABASE_SECRET;
   const cacheDirectory = env.MATTER_AUDIT_ARCHIVE_CACHE_DIRECTORY;
   check(typeof cacheDirectory === 'string' && path.isAbsolute(cacheDirectory)
@@ -45,6 +46,7 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
   const uploads = photoStore || createDriverAuditSpacesArchive({ env });
   const recoveryDirectory = env.DRIVER_AUDIT_PHOTO_RECOVERY_DIRECTORY;
   const photoRecovery = recoveryDirectory === undefined ? undefined : createDriverAuditPhotoRecovery(recoveryDirectory);
+  check(executionHost !== 'off-host' || photoRecovery, 'Off-host reporting requires its private photo recovery directory');
   check(!photoRecovery || recoveryDirectory !== cacheDirectory && !recoveryDirectory.startsWith(cacheDirectory + path.sep),
     'Original photo recovery must be outside the disposable archive cache');
   const photoArchive = createDriverAuditSupabaseArchive({ archive: original, rpc, photoStore: uploads, photoRecovery, env });
@@ -54,7 +56,7 @@ export async function createDriverAuditSupabaseAppBackend({ env = process.env, f
     return rpc(name === 'matter_hosted_state_read' ? 'matter_hosted_app_progress_read' : 'matter_hosted_app_progress_cas', args);
   };
   return {
-    kind: 'supabase', executionHost: 'sidi', executionAdmission: 'fixed-host-v1',
+    kind: 'supabase', executionHost, executionAdmission: 'fixed-host-v1',
     transferAccounting: 'supabase-http-bytes-v1',
     rpc, rpcForResponseLimit,
     archive: createDriverAuditReadCache({ archive: photoArchive, cacheDirectory, cacheFreeBytes }),
