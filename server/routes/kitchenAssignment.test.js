@@ -128,14 +128,24 @@ test('Core snack assignment hydrates component tags and preserves saved customer
   t.mock.method(Record, 'findOne', () => query(record));
   t.mock.method(Snack, 'findOne', () => query({ presetsByName: { 'safe bite': { C: 15, P: 10, F: 6 } } }));
   const writes = [];
-  t.mock.method(Record, 'findOneAndUpdate', async (_, update) => { writes.push(...update.$push.selectedMeals.$each); return record; });
+  t.mock.method(Record, 'findOneAndUpdate', async (_, update) => {
+    const appended = update.$push.selectedMeals.$each;
+    writes.push(...appended);
+    record.selectedMeals.push(...appended);
+    return record;
+  });
   const nutrition = { customer_id: 'fixture', customer_email: 'core@example.invalid', subscription_id: 'sub', plan_name: 'Matter Core',
     meal_frequency: 1, breakfast_included: false, snacks_per_day: 2, exclusions: ['All Nuts'], active_delivery_dates: [date], double_delivery_dates: [] };
   const before = JSON.stringify(record);
   const result = await runAssignMatterCoreMeals('menu', date, [{ email: nutrition.customer_email }], { snackOnly: true, matterInputs: [nutrition] });
   assert.equal(result.data.assignedSnacks, 1);
   assert.deepEqual(writes.map(meal => meal.mealName), ['Safe bite']);
-  assert.equal(JSON.stringify(record), before);
+  assert.equal(writes[0].slotNumber, 1);
+  assert.equal(JSON.stringify({ ...record, selectedMeals: [record.selectedMeals[0]] }), before);
+  const retry = await runAssignMatterCoreMeals('menu', date, [{ email: nutrition.customer_email }], { snackOnly: true, matterInputs: [nutrition] });
+  assert.equal(retry.data.assignedSnacks, 0);
+  assert.equal(writes.length, 1, 'Retry cannot duplicate the second-slot snack');
+  assert.equal(record.selectedMeals.length, 2);
 });
 
 test('assignment fills only missing quantities, respects skips, and queries only this menu', async () => {

@@ -26,12 +26,14 @@ export const kitchenMealConflicts = (option, exclusions = []) => {
   // Cycle imports store ingredient exclusions on components, not legacy fields.
   // Keep kitchen replacement flags scoped to the component that conflicts.
   const recipe = Array.isArray(option.cycleMeal?.components) ? option.cycleMeal.components : [];
+  const isSalad = option.cycleMeal?.isSaladBase === true || recipe.some(component => component?.type === 'Salad');
   const groupOf = (component, visited = new Set()) => {
     if (!component || visited.has(component)) return 'general';
     if (['Protein', 'Portion', 'Breakfast', 'Snack'].includes(component.type)) return 'portion';
     if (component.type === 'Carb') return 'carb';
     if (['Vegetable', 'Salad'].includes(component.type)) return 'veg';
     if (component.type === 'Garnish') return 'garnish';
+    if (component.type === 'Sauce 2' && isSalad) return 'veg';
     if (component.type === 'Extra sauce / topping' && component.attachedComponentId) {
       return groupOf(recipe.find(candidate => candidate.id === component.attachedComponentId), new Set([...visited, component]));
     }

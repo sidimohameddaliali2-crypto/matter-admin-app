@@ -61,3 +61,21 @@ test('Raw Onion does not flag generic or cooked onion in kitchen components', ()
   assert.deepEqual(kitchenConflictFields({ veg: 'Salad with Raw Onion' }, ['Raw Onion']).vegConflict, ['Raw Onion']);
   assert.deepEqual(kitchenConflictList({ veg: 'Raw Onion' }, ['Onion']), ['Onion']);
 });
+
+for (const saladMarker of [{ isSaladBase: true }, { components: [{ id: 'salad', type: 'Salad' }] }]) {
+  test(`salad dressing and attached toppings request veg replacement (${JSON.stringify(saladMarker)})`, () => {
+    const meal = { cycleMeal: { ...saladMarker, components: [...(saladMarker.components || []),
+      { id: 'dressing', type: 'Sauce 2', exclusions: ['Soy'] },
+      { id: 'topping', type: 'Extra sauce / topping', attachedComponentId: 'dressing', exclusions: ['All Nuts'] },
+      { id: 'sauce', type: 'Sauce', exclusions: ['Egg'] },
+    ] } };
+    const flags = kitchenConflictFields(meal, ['Soy', 'All Nuts']);
+    assert.deepEqual(flags.vegConflict, ['Soy', 'All Nuts']);
+    assert.equal(flags.carbVegAction, 'replace');
+    assert.equal(flags.remark, 'veg');
+    assert.equal(flags.needsSauceChange, false);
+    assert.deepEqual(kitchenConflictFields(meal, ['Egg']).sauceConflict, ['Egg']);
+    const warmMeal = { cycleMeal: { components: [{ type: 'Sauce 2', exclusions: ['Soy'] }] } };
+    assert.deepEqual(kitchenConflictFields(warmMeal, ['Soy']).sauceConflict, ['Soy']);
+  });
+}

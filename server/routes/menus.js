@@ -21,6 +21,7 @@ import { kitchenDateUnavailable } from '../services/kitchenDeliveryEligibility.j
 import { reconcileCoreBreakfast } from '../services/kitchenBreakfastEntitlement.js';
 import { reconcileCoreMainMeals } from '../services/kitchenCoreEntitlement.js';
 import { toKitchenOption, kitchenConflictList, kitchenConflictFields, mergeKitchenMetadata } from '../services/kitchenExclusions.js';
+import { missingCoreSnackSlots } from '../services/kitchenSnackSlots.js';
 import { kitchenUpload } from '../services/kitchenUpload.js';
 import { saveManagedMenu } from '../services/managedMenuSave.js';
 import { assertAssignmentMacros } from '../services/kitchenMacroValidation.js';
@@ -1787,9 +1788,9 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     const hasBreakfastAlready = (existingRecord?.selectedMeals || []).some(
       (m) => toDateKey(m.date) === dateKey && m.mealType === 'breakfast'
     );
-    const existingSnackCount = (existingRecord?.selectedMeals || []).filter(
+    const existingSnacks = (existingRecord?.selectedMeals || []).filter(
       (m) => m.mealType === 'snack' && toDateKey(m.date) === dateKey
-    ).length;
+    );
 
     // Matter subscription's own breakfast_included wins; Customer profile is fallback.
     const breakfastInclude = typeof customer.breakfastIncluded === 'boolean'
@@ -1860,10 +1861,9 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     const snacksPerDay = customer.subscriptionId
       ? (snacksPerDayBySubscriptionId.get(customer.subscriptionId) || 0)
       : 0;
-    const snackSlotsNeeded = snacksPerDay - existingSnackCount;
-    if (snackSlotsNeeded > 0) {
-      for (let i = 0; i < snackSlotsNeeded; i += 1) {
-        const overallSlotIndex = existingSnackCount + i;
+    const missingSnackSlots = missingCoreSnackSlots(existingSnacks, snacksPerDay, snackPools);
+    if (missingSnackSlots.length > 0) {
+      for (const overallSlotIndex of missingSnackSlots) {
         const pool = (overallSlotIndex % 2 === 0 ? snackPools.first : snackPools.second)
           .filter(option => !optionExcludedByCustomer(option, exclusions));
         const choice = pool[0];
@@ -1876,6 +1876,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
           mealType: 'snack',
           mealName: choice.name,
           quantity: 1,
+          slotNumber: overallSlotIndex,
           snackMacros: {
             C: (Number(choice.C) || 0) / snacksPerDay,
             P: (Number(choice.P) || 0) / snacksPerDay,
