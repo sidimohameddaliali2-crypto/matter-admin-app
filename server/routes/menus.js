@@ -1716,16 +1716,23 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
   // no tags, keep the slots unassigned until staff configure the Core menu.
   const mealList = corePlanMenuItems.map(toKitchenOption);
   let breakfastOptions = (menu.breakfastOptionsByDate || {})[dateKey] || [];
-  if (breakfastOptions.length === 0) {
-    // No hand-built breakfast list for the date — use that day's breakfast
-    // dishes from the menu file, in file order (the FIRST one is always used).
+  {
+    // Hydrate saved rotations too: cycle component exclusions live on the
+    // dated item. Without a rotation, use the menu's file order.
     const dayBreakfastItems = await MenuItem.find({ _id: { $in: (menu.meals || []).flatMap((day) => (day.items || []).map((item) => item._id || item)) }, itemDate: new Date(dateKey), mealType: 'breakfast' }).sort({ _id: 1 }).lean();
-    breakfastOptions = dayBreakfastItems.map(toKitchenOption);
+    breakfastOptions = breakfastOptions.length ? mergeKitchenMetadata(breakfastOptions, dayBreakfastItems) : dayBreakfastItems.map(toKitchenOption);
   }
   const rawSnackPools = (menu.snackOptionsByDate || {})[dateKey];
-  const snackPools = Array.isArray(rawSnackPools)
+  let snackPools = Array.isArray(rawSnackPools)
     ? { first: rawSnackPools, second: [] }
     : { first: rawSnackPools?.first || [], second: rawSnackPools?.second || [] };
+  if (snackPools.first.length || snackPools.second.length) {
+    const snackItems = await MenuItem.find({
+      _id: { $in: (menu.meals || []).flatMap(day => day.items || []) },
+      itemDate: new Date(dateKey), mealType: 'snack',
+    }).lean();
+    snackPools = { first: mergeKitchenMetadata(snackPools.first, snackItems), second: mergeKitchenMetadata(snackPools.second, snackItems) };
+  }
 
   const breakfastIncludeByEmail = new Map(customers.map((c) => [normalizeMatterEmail(c.email), c.breakfastIncluded]));
 
@@ -2388,11 +2395,11 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
     }
 
     let breakfastOptions = (menu.breakfastOptionsByDate || {})[dateKey] || [];
-    if (breakfastOptions.length === 0) {
-      // No hand-built breakfast rotation for this date — use that day's
-      // breakfast dishes from the menu file itself.
+    {
+      // Hydrate saved rotations with dated component exclusions; when absent,
+      // use that day's breakfast dishes from the menu file itself.
       const dayBreakfastItems = await MenuItem.find({ _id: { $in: (menu.meals || []).flatMap((day) => (day.items || []).map((item) => item._id || item)) }, itemDate: new Date(dateKey), mealType: 'breakfast' }).lean();
-      breakfastOptions = dayBreakfastItems.map(toKitchenOption);
+      breakfastOptions = breakfastOptions.length ? mergeKitchenMetadata(breakfastOptions, dayBreakfastItems) : dayBreakfastItems.map(toKitchenOption);
     }
 
     if (mainMeals.length === 0) {
