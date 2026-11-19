@@ -1862,12 +1862,13 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
       ? (snacksPerDayBySubscriptionId.get(customer.subscriptionId) || 0)
       : 0;
     // Legacy snacks have no slot number. Infer their pool using the same
-    // customer-eligible candidates used for assignment, not names alone.
+    // customer-eligible candidates used for assignment, with an original
+    // pool fallback for saved snacks that have since become ineligible.
     const eligibleSnackPools = {
       first: snackPools.first.filter(option => !optionExcludedByCustomer(option, exclusions)),
       second: snackPools.second.filter(option => !optionExcludedByCustomer(option, exclusions)),
     };
-    const missingSnackSlots = missingCoreSnackSlots(existingSnacks, snacksPerDay, eligibleSnackPools);
+    const missingSnackSlots = missingCoreSnackSlots(existingSnacks, snacksPerDay, eligibleSnackPools, snackPools);
     if (missingSnackSlots.length > 0) {
       for (const overallSlotIndex of missingSnackSlots) {
         const pool = overallSlotIndex % 2 === 0 ? eligibleSnackPools.first : eligibleSnackPools.second;
