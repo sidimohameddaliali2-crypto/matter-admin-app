@@ -1,6 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { kitchenConflictFields, kitchenConflictList } from './kitchenExclusions.js';
+import { kitchenConflictFields, kitchenConflictList, mergeKitchenMetadata } from './kitchenExclusions.js';
+
+test('cycle snack exclusions survive empty legacy rotation tags without mutating either source', () => {
+  const options = [{ name: 'BRAIN CLUSTER', exclusions: [] }];
+  const items = [{ mealName: 'BRAIN CLUSTER', intolerances: '', cycleMeal: { components: [
+    { type: 'Snack', name: 'BRAIN CLUSTER', exclusions: ['All Nuts'] },
+  ] } }];
+  const before = JSON.stringify({ options, items });
+  const [option] = mergeKitchenMetadata(options, items);
+  assert.deepEqual(kitchenConflictList(option, ['All Nuts', 'Peanuts']), ['All Nuts']);
+  assert.equal(JSON.stringify({ options, items }), before);
+  assert.deepEqual(kitchenConflictList(option, ['Soy']), []);
+});
+
+test('cycle exclusions set the corresponding kitchen component flags', () => {
+  const meal = { cycleMeal: { components: [
+    { type: 'Carb', exclusions: ['Gluten'] }, { type: 'Vegetable', exclusions: ['Capsicum'] },
+    { type: 'Sauce', exclusions: ['Soy'] }, { type: 'Garnish', exclusions: ['Sesame'] },
+    { type: 'Breakfast', exclusions: ['Egg'] },
+  ] } };
+  const flags = kitchenConflictFields(meal, ['Gluten', 'Capsicum', 'Soy', 'Sesame', 'Egg']);
+  assert.deepEqual(flags.carbConflict, ['Gluten']);
+  assert.deepEqual(flags.vegConflict, ['Capsicum']);
+  assert.deepEqual(flags.sauceConflict, ['Soy']);
+  assert.deepEqual(flags.garnishConflict, ['Sesame']);
+  assert.ok(flags.exclusionConflict.includes('Egg'));
+});
+
+test('attached component exclusions follow their target, unknown types still block, cyclic attachments terminate', () => {
+  const meal = { cycleMeal: { components: [
+    { id: 'carb', type: 'Carb' },
+    { id: 'topping', type: 'Extra sauce / topping', attachedComponentId: 'carb', exclusions: ['All Nuts'] },
+    { id: 'unknown', type: 'New component type', exclusions: ['Soy'] },
+    { id: 'a', type: 'Extra sauce / topping', attachedComponentId: 'b', exclusions: ['Egg'] },
+    { id: 'b', type: 'Extra sauce / topping', attachedComponentId: 'a' },
+  ] } };
+  assert.deepEqual(kitchenConflictFields(meal, ['All Nuts']).carbConflict, ['All Nuts']);
+  assert.deepEqual(kitchenConflictList(meal, ['Soy', 'Egg']), ['Soy', 'Egg']);
+});
 
 test('carb and veg conflicts are checked even without global intolerances, including hidden ingredient tags', () => {
   const meal = { name: 'Chicken', carbs: 'Rice', vegIngredients: [{ name: 'Broccoli', visible: false }], sauce: 'Soy sauce', garnish: 'Sesame' };
@@ -23,3 +61,21 @@ test('Raw Onion does not flag generic or cooked onion in kitchen components', ()
   assert.deepEqual(kitchenConflictFields({ veg: 'Salad with Raw Onion' }, ['Raw Onion']).vegConflict, ['Raw Onion']);
   assert.deepEqual(kitchenConflictList({ veg: 'Raw Onion' }, ['Onion']), ['Onion']);
 });
+
+for (const saladMarker of [{ isSaladBase: true }, { components: [{ id: 'salad', type: 'Salad' }] }]) {
+  test(`salad dressing and attached toppings request veg replacement (${JSON.stringify(saladMarker)})`, () => {
+    const meal = { cycleMeal: { ...saladMarker, components: [...(saladMarker.components || []),
+      { id: 'dressing', type: 'Sauce 2', exclusions: ['Soy'] },
+      { id: 'topping', type: 'Extra sauce / topping', attachedComponentId: 'dressing', exclusions: ['All Nuts'] },
+      { id: 'sauce', type: 'Sauce', exclusions: ['Egg'] },
+    ] } };
+    const flags = kitchenConflictFields(meal, ['Soy', 'All Nuts']);
+    assert.deepEqual(flags.vegConflict, ['Soy', 'All Nuts']);
+    assert.equal(flags.carbVegAction, 'replace');
+    assert.equal(flags.remark, 'veg');
+    assert.equal(flags.needsSauceChange, false);
+    assert.deepEqual(kitchenConflictFields(meal, ['Egg']).sauceConflict, ['Egg']);
+    const warmMeal = { cycleMeal: { components: [{ type: 'Sauce 2', exclusions: ['Soy'] }] } };
+    assert.deepEqual(kitchenConflictFields(warmMeal, ['Soy']).sauceConflict, ['Soy']);
+  });
+}
