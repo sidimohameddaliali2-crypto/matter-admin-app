@@ -1,6 +1,6 @@
 // Core alternates first/second pools. A failed first slot must not make a
 // saved second-slot snack count as first on the next preparation attempt.
-export function missingCoreSnackSlots(meals, count, pools) {
+export function missingCoreSnackSlots(meals, count, eligiblePools) {
   const occupied = new Set();
   const slots = Array.from({ length: Math.max(0, Math.floor(count)) }, (_, slot) => slot);
   const name = value => String(value || '').trim().toLowerCase();
@@ -15,10 +15,12 @@ export function missingCoreSnackSlots(meals, count, pools) {
     } else unnumbered.push(meal);
   }
   // Preserve legacy saved snacks without rewriting them. Prefer the pool
-  // matching their name, then consume an available slot if metadata changed.
+  // matching their name among customer-eligible options, then consume an
+  // available slot if metadata changed. Raw pools are ambiguous when the
+  // same name has different exclusion tags in each pool.
   for (const meal of unnumbered) {
-    const first = pools.first.some(option => name(option.name) === name(meal.mealName));
-    const second = pools.second.some(option => name(option.name) === name(meal.mealName));
+    const first = eligiblePools.first.some(option => name(option.name) === name(meal.mealName));
+    const second = eligiblePools.second.some(option => name(option.name) === name(meal.mealName));
     for (let portion = 0; portion < portions(meal); portion++) {
       const preferred = slots.find(slot => !occupied.has(slot) && (slot % 2 === 0 ? first : second));
       const slot = preferred ?? slots.find(slot => !occupied.has(slot));

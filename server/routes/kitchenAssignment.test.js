@@ -148,6 +148,33 @@ test('Core snack assignment hydrates component tags and preserves saved customer
   assert.equal(record.selectedMeals.length, 2);
 });
 
+test('Core retry infers an unnumbered same-name snack from the eligible second pool', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-19T08:00:00Z') });
+  const date = '2026-11-19';
+  const query = value => ({ select() { return this; }, sort() { return this; }, lean: async () => value });
+  const record = { _id: 'record', matterCustomerId: 'fixture', skippedDays: [], selectedMeals: [
+    { date, mealType: 'main', mealName: 'Customer choice', quantity: 1 },
+    { date, mealType: 'snack', mealName: 'Shared snack', quantity: 1, isAutoAssigned: true },
+  ] };
+  const before = JSON.stringify(record);
+  t.mock.method(WeeklyMenu, 'findById', () => query({ meals: [{ items: ['snack-id'] }],
+    snackOptionsByDate: { [date]: { first: [{ name: 'Shared snack', exclusions: ['All Nuts'] }],
+      second: [{ name: 'Shared snack', exclusions: [] }] } } }));
+  t.mock.method(MenuItem, 'find', filter => query(filter.mealType === 'snack' ? [
+    { mealName: 'Shared snack', cycleMeal: { components: [{ type: 'Snack', name: 'Shared snack', exclusions: [] }] } },
+  ] : []));
+  t.mock.method(Record, 'find', () => query([]));
+  t.mock.method(Record, 'findOne', () => query(record));
+  t.mock.method(Record, 'findOneAndUpdate', () => assert.fail('Retry must not append the second-pool snack again'));
+  const nutrition = { customer_id: 'fixture', customer_email: 'core@example.invalid', subscription_id: 'sub', plan_name: 'Matter Core',
+    meal_frequency: 1, breakfast_included: false, snacks_per_day: 2, exclusions: ['All Nuts'], active_delivery_dates: [date], double_delivery_dates: [] };
+  for (let retry = 0; retry < 2; retry++) {
+    const result = await runAssignMatterCoreMeals('menu', date, [{ email: nutrition.customer_email }], { snackOnly: true, matterInputs: [nutrition] });
+    assert.equal(result.data.assignedSnacks, 0);
+  }
+  assert.equal(JSON.stringify(record), before, 'Legacy snack and customer selection stay unchanged');
+});
+
 test('assignment fills only missing quantities, respects skips, and queries only this menu', async () => {
   const original = { menu: WeeklyMenu.findById, items: MenuItem.find, customers: Customer.find, record: Record.findOne, records: Record.find, nutrition: matter.getKitchenNutrition, write: Record.findOneAndUpdate };
   const date = '2026-10-20';
