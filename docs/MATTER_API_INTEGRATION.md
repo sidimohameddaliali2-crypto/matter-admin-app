@@ -152,7 +152,13 @@ count of deliveries created. Results retain failures, skipped destinations,
 missing delivery windows and review comparisons; finishing does not resolve
 those cases or establish dispatch readiness.
 
-A unique active date key coalesces duplicate clicks. A shared Mongo lease
+A unique active date key coalesces duplicate clicks. The import control mounts
+only for the staff roles authorized by the endpoints; a denied status request
+stops polling and displays a permission warning rather than suggesting a job
+is running. Interrupted attempts display their last saved phase, processed
+count and any available write/skip/failure counts, including known zero counts.
+
+A shared Mongo lease
 serializes workers across PM2 processes; heartbeat and ownership checks fence
 further work after ownership loss. Queued jobs survive restarts. A running
 job whose lease expires is marked interrupted, retaining its last saved
@@ -161,6 +167,17 @@ which uses the existing delivery duplicate checks and leaves the old result
 available. A failure between a database write and the next progress update
 can leave the progress snapshot behind the actual delivery count, so retry
 rechecks stored deliveries rather than trusting that count.
+
+New imported deliveries also carry an immutable `matterImportKey`, composed
+of the source service date and subscription ID. A partial unique MongoDB
+index (`matter_import_obligation_unique`) enforces one new imported record
+per obligation even if a paused worker resumes after a replacement's insert.
+The importer explicitly awaits index creation before processing new records;
+an unavailable index blocks those writes rather than allowing an unprotected
+insert. Only collisions on this identity count as already imported; other
+write failures remain failures. Historical and manual/CSV rows without a key
+are outside the partial index and still use the existing lookup checks. No
+historical backfill or completed-record rewrite is performed.
 
 The worker consumes explicitly queued requests and does not enqueue dates
 on startup. `MATTER_IMPORT_ENABLED` still controls the separate daily/startup

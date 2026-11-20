@@ -1,4 +1,5 @@
 import Delivery from '../models/Delivery.js';
+import { ensureMatterDeliveryIdempotency, insertMatterDelivery } from './matterDeliveryInsert.js';
 import matterApiService from './matterApiService.js';
 import { resolveCustomerMatch, createCustomerFromMatterSubscription } from './customerMatchService.js';
 import { detectAreaFromAddress } from '../config/areas.js';
@@ -162,6 +163,7 @@ export async function importMatterDeliveriesForDate(dateKey, { onProgress, asser
   const summary = { date: dateKey, complete: true, discoveryFailed: 0, writeFailed: 0, total: matches.length, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, noDeliveryWindow: 0, failed: 0, errors: [], comparisons: [] };
 
   let processed = 0;
+  let idempotencyReady = false;
   await onProgress?.({ phase: 'importing', completed: 0, total: matches.length, created: 0 });
   for (const sub of matches) {
     await assertActive?.();
@@ -220,6 +222,11 @@ export async function importMatterDeliveriesForDate(dateKey, { onProgress, asser
         continue;
       }
 
+      if (!idempotencyReady) {
+        await assertActive?.();
+        await ensureMatterDeliveryIdempotency();
+        idempotencyReady = true;
+      }
       let customer = (await resolveCustomerMatch({
         email: sub.email,
         phone: sub.phone,
@@ -250,8 +257,8 @@ export async function importMatterDeliveriesForDate(dateKey, { onProgress, asser
       snapshot.customerName = displayMatterName(sub.name)
         || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || 'Matter Customer';
       await assertActive?.();
-      await Delivery.create(snapshot);
-      summary.created += 1;
+      if (await insertMatterDelivery(snapshot, sub.delivery_date || dateKey)) summary.created += 1;
+      else summary.alreadyExisted += 1;
     } catch (err) {
       if (err.code === 'MATTER_IMPORT_INTERRUPTED') throw err;
       summary.failed += 1;

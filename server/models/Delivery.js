@@ -25,6 +25,9 @@ const deliverySchema = new mongoose.Schema({
     index: true
   },
   matterCustomerId: { type: String, default: null, index: true },
+  // Immutable identity for newly imported subscription/service-day obligations.
+  // Not derived from editable scheduledTime and absent on historical/manual jobs.
+  matterImportKey: { type: String, immutable: true },
   // Independent of editable delivery names, times and subscription references.
   // Never reprice completed work from a newer subscription.
   matterRevenue: { type: mongoose.Schema.Types.Mixed, default: undefined, select: false },
@@ -291,6 +294,8 @@ deliveryType: {
 
 // Index for better query performance
 deliverySchema.index({ scheduledTime: 1 });
+deliverySchema.index({ matterImportKey: 1 }, { name: 'matter_import_obligation_unique', unique: true,
+  partialFilterExpression: { matterImportKey: { $type: 'string' } } });
 deliverySchema.index({ driver: 1, status: 1 });
 deliverySchema.index({ customerId: 1 });
 deliverySchema.index({ driver: 1, scheduledTime: 1 }); // For getDriverTodaysDeliveries query

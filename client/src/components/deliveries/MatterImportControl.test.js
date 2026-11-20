@@ -1,7 +1,7 @@
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { renderToStaticMarkup } from 'react-dom/server';
-import MatterImportControl, { importProgress } from './MatterImportControl';
+import MatterImportControl, { importProgress, canImportMatter } from './MatterImportControl';
 import api from '../../utils/api';
 
 jest.mock('../../utils/api', () => ({ get: jest.fn(), post: jest.fn() }));
@@ -24,7 +24,7 @@ test('reload restores the saved running job and terminal progress refreshes the 
   const root = createRoot(node);
   const completed = jest.fn();
   try {
-    await act(async () => root.render(<MatterImportControl date="2026-11-22" onComplete={completed} />));
+    await act(async () => root.render(<MatterImportControl role="dispatcher" date="2026-11-22" onComplete={completed} />));
     expect(node.textContent).toContain('100 / 354');
     expect(node.querySelector('button').disabled).toBe(true);
     await act(async () => { jest.advanceTimersByTime(3000); });
@@ -40,7 +40,7 @@ test('reload restores the saved running job and terminal progress refreshes the 
 });
 
 test('initial control and interrupted progress do not imply success', () => {
-  expect(renderToStaticMarkup(<MatterImportControl date="2026-11-22" onComplete={() => {}} />)).toContain('Import from Matter');
+  expect(renderToStaticMarkup(<MatterImportControl role="dispatcher" date="2026-11-22" onComplete={() => {}} />)).toContain('Import from Matter');
   expect(importProgress({ status: 'failed', message: 'Worker interrupted. Retry.' }).text).toContain('interrupted');
   expect(importProgress({ status: 'incomplete', message: 'Import incomplete.' }).text).toBe('Import incomplete.');
 });
@@ -53,7 +53,7 @@ test('incomplete result retains failure and review details and offers a delibera
   const node = document.createElement('div');
   const root = createRoot(node);
   try {
-    await act(async () => root.render(<MatterImportControl date="2026-11-22" onComplete={() => {}} />));
+    await act(async () => root.render(<MatterImportControl role="dispatcher" date="2026-11-22" onComplete={() => {}} />));
     expect(node.textContent).toContain('Import incomplete.');
     expect(node.textContent).toContain('3 created');
     expect(node.textContent).toContain('1 failed');
@@ -75,11 +75,62 @@ test('changing the selected date ignores the old date’s late progress response
   const root = createRoot(node);
   const onComplete = jest.fn();
   try {
-    await act(async () => root.render(<MatterImportControl date="2026-11-22" onComplete={onComplete} />));
-    await act(async () => root.render(<MatterImportControl date="2026-11-23" onComplete={onComplete} />));
+    await act(async () => root.render(<MatterImportControl role="dispatcher" date="2026-11-22" onComplete={onComplete} />));
+    await act(async () => root.render(<MatterImportControl role="dispatcher" date="2026-11-23" onComplete={onComplete} />));
     await act(async () => release({ data: { data: { id: 'old-job', date: '2026-11-22', status: 'completed' } } }));
     expect(node.textContent).toContain('2026-11-23');
     expect(node.textContent).not.toContain('2026-11-22');
     expect(onComplete).not.toHaveBeenCalled();
   } finally { await act(async () => root.unmount()); }
+});
+
+test('drivers and non-import staff never mount the control or poll import status', async () => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  api.get.mockReset();
+  const node = document.createElement('div');
+  const root = createRoot(node);
+  try {
+    for (const role of ['driver', 'viewer', 'kitchen', 'store_keeper', undefined]) {
+      await act(async () => root.render(<MatterImportControl role={role} date="2026-11-22" onComplete={() => {}} />));
+      expect(node.textContent).toBe('');
+    }
+    expect(api.get).not.toHaveBeenCalled();
+    for (const role of ['admin', 'super_admin', 'dispatcher', 'manager']) expect(canImportMatter(role)).toBe(true);
+  } finally { await act(async () => root.unmount()); }
+});
+
+test('an interrupted job displays saved phase, checked count and available write counts on reload', async () => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  api.get.mockResolvedValue({ data: { data: { id: 'interrupted-job', date: '2026-11-22', status: 'failed',
+    message: 'Worker was interrupted. Review saved progress and retry.',
+    progress: { phase: 'importing', completed: 5, total: 11, created: 3, alreadyExisted: 1, failed: 1, noDeliveryWindow: 0 } } } });
+  const node = document.createElement('div');
+  const root = createRoot(node);
+  try {
+    await act(async () => root.render(<MatterImportControl role="dispatcher" date="2026-11-22" onComplete={() => {}} />));
+    expect(node.textContent).toContain('Last saved progress: Importing eligible deliveries: 5 / 11');
+    expect(node.textContent).toContain('3 created');
+    expect(node.textContent).toContain('1 already imported');
+    expect(node.textContent).toContain('1 failed');
+    expect(node.textContent).toContain('0 without a delivery window');
+    expect(node.textContent).toContain('write just before interruption may not be included');
+    expect(node.textContent).not.toContain('0 already scheduled');
+    expect(node.querySelector('button').textContent).toContain('Retry');
+  } finally { await act(async () => root.unmount()); }
+});
+
+test('a denied status request stops polling and displays a permission message', async () => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  jest.useFakeTimers();
+  api.get.mockReset();
+  api.get.mockRejectedValue({ response: { status: 403 } });
+  const node = document.createElement('div');
+  const root = createRoot(node);
+  try {
+    await act(async () => root.render(<MatterImportControl role="dispatcher" date="2026-11-22" onComplete={() => {}} />));
+    expect(node.textContent).toContain('do not have permission');
+    expect(node.textContent).not.toContain('may still be running');
+    await act(async () => { jest.advanceTimersByTime(9000); });
+    expect(api.get).toHaveBeenCalledTimes(1);
+  } finally { await act(async () => root.unmount()); jest.useRealTimers(); }
 });

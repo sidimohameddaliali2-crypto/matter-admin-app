@@ -4,7 +4,7 @@ import { useSelector } from 'react-redux';
 import * as XLSX from 'xlsx';
 import api from '../utils/api';
 import PrintConfigModal from '../components/deliveries/PrintConfigModal';
-import MatterImportControl from '../components/deliveries/MatterImportControl';
+import MatterImportControl, { canImportMatter } from '../components/deliveries/MatterImportControl';
 import DeliveryDetailModal from '../components/deliveries/DeliveryDetailModal';
 import { toBusinessComponents, businessComponentsToUtcDate, formatBusinessDateInput } from '../utils/businessTime';
 import { useSocket } from '../contexts/SocketContext';
@@ -185,7 +185,7 @@ const Deliveries = () => {
     let cancelled = false;
     setMatterSyncError('');
     const loaded = fetchDeliveries();
-    if (selectedDate && ['admin', 'super_admin', 'dispatcher', 'manager'].includes(role)) {
+    if (selectedDate && canImportMatter(role)) {
       const synchronized = api.post('/matter/standardize-deliveries', { date: selectedDate });
       Promise.all([loaded, synchronized]).then(([, response]) => {
         if (cancelled) return;
@@ -491,7 +491,7 @@ const Deliveries = () => {
           <button onClick={() => setRefreshVersion((value) => value + 1)} className="p-2 text-gray-500 hover:text-blue-600 hover:bg-gray-100 rounded-lg transition-colors" title="Refresh">
             <span className={`material-symbols-outlined ${isLoading ? 'animate-spin' : ''}`}>refresh</span>
           </button>
-          <MatterImportControl date={selectedDate} formattedDate={formattedSelectedDate} onComplete={onMatterImportComplete} />
+          {canImportMatter(role) && <MatterImportControl role={role} date={selectedDate} formattedDate={formattedSelectedDate} onComplete={onMatterImportComplete} />}
           <button
             onClick={() => setIsPrintConfigOpen(true)}
             disabled={filteredDeliveries.length === 0}

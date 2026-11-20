@@ -18,7 +18,14 @@ export function importProgress(job) {
     text: `${phase.label}${p.total ? `: ${p.completed} / ${p.total}` : '…'}` };
 }
 
-export default function MatterImportControl({ date, formattedDate, onComplete }) {
+export const canImportMatter = role => ['admin', 'super_admin', 'dispatcher', 'manager'].includes(role);
+
+export default function MatterImportControl(props) {
+  // Unmount the polling effect if the staff role is absent or revoked.
+  return canImportMatter(props.role) ? <AuthorizedMatterImportControl {...props} /> : null;
+}
+
+function AuthorizedMatterImportControl({ date, formattedDate, onComplete }) {
   const [job, setJob] = useState(null);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState('');
@@ -29,6 +36,7 @@ export default function MatterImportControl({ date, formattedDate, onComplete })
     let cancelled = false;
     let timer;
     let request = 0;
+    let denied = false;
     setJob(null);
     setError('');
     completed.current = null;
@@ -44,10 +52,11 @@ export default function MatterImportControl({ date, formattedDate, onComplete })
           completed.current = saved.id;
           onComplete();
         }
-      } catch {
-        if (!cancelled) setError('Progress is temporarily unavailable. The import may still be running; do not start another copy.');
+      } catch (e) {
+        denied = [401, 403].includes(e.response?.status);
+        if (!cancelled) setError(denied ? 'You do not have permission to view Matter import progress.' : 'Progress is temporarily unavailable. The import may still be running; do not start another copy.');
       } finally {
-        if (!cancelled) timer = setTimeout(poll, 3000);
+        if (!cancelled && !denied) timer = setTimeout(poll, 3000);
       }
     };
     if (date) poll();
@@ -69,6 +78,12 @@ export default function MatterImportControl({ date, formattedDate, onComplete })
   const active = job && ['queued', 'running'].includes(job.status);
   const progress = importProgress(job);
   const s = job?.result;
+  const interrupted = job?.status === 'failed' && job.progress;
+  const savedProgress = interrupted ? importProgress({ ...job, status: 'running' }) : null;
+  const savedCounts = interrupted ? [
+    ['created', 'created'], ['alreadyExisted', 'already imported'], ['alreadyHadOtherDelivery', 'already scheduled'],
+    ['failed', 'failed'], ['noCurrentAddress', 'without a resolved address'], ['noDeliveryWindow', 'without a delivery window']
+  ].filter(([key]) => Number.isFinite(job.progress[key])).map(([key, label]) => `${job.progress[key]} ${label}`) : [];
   return <div className="flex flex-col gap-2 max-w-md" aria-live="polite">
     <button onClick={start} disabled={starting || active || !date}
       className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
@@ -78,6 +93,11 @@ export default function MatterImportControl({ date, formattedDate, onComplete })
     {job && <div className="text-xs text-gray-700 border rounded p-2 bg-gray-50">
       <p className="font-semibold">Matter import · {job.date}</p>
       <p>{progress.text}</p>
+      {interrupted && <div className="mt-1 text-amber-900">
+        <p>Last saved progress: {savedProgress.text}</p>
+        {savedCounts.length > 0 && <p>Last saved counts: {savedCounts.join(' · ')}.</p>}
+        <p>A write just before interruption may not be included in these counts. Retrying checks stored deliveries.</p>
+      </div>}
       {active && <><progress className="w-full" value={progress.percent} max="100" aria-label="Matter import progress" /><p>You can leave this page. Progress is saved.</p></>}
       {s && <p>{s.created || 0} created · {s.alreadyExisted || 0} already imported · {s.alreadyHadOtherDelivery || 0} already scheduled · {s.failed || 0} failed · {s.noCurrentAddress || 0} without a resolved address · {s.noDeliveryWindow || 0} without a delivery window.</p>}
       {s?.requiresReview && <p className="text-amber-800">Some deliveries need review. An import finishing does not resolve address or schedule conflicts.</p>}

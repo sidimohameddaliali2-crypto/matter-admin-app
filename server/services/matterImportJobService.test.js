@@ -4,6 +4,7 @@ import { createMatterImportJobs, publicImportJob } from './matterImportJobServic
 import MatterImportJob from '../models/MatterImportJob.js';
 import matterApi from './matterApiService.js';
 import Delivery from '../models/Delivery.js';
+import Customer from '../models/Customer.js';
 import { importMatterDeliveriesForDate } from './matterDeliveryImportService.js';
 
 function store() {
@@ -193,7 +194,7 @@ test('retry uses the existing delivery deduplication and reports saved jobs inst
     customer_addresses: [{ id: 1, current_delivery_address: true, status: 'active', category: 'villa', building: 'Synthetic Villa', unit: '1', area: 'Test Zone', coordinates: { lat: 25.1, lng: 55.2 } }],
     delivery_window: { label: 'By 5 AM' } };
   t.mock.method(matterApi, 'findSubscriptionsWithDeliveryOnDate', async () => [sub]);
-  t.mock.method(Delivery, 'findOne', () => ({ select: () => ({ lean: async () => ({ _id: 'saved-delivery', status: 'completed', customerName: sub.name }) }) }));
+  t.mock.method(Delivery, 'findOne', () => ({ select: async () => ({ _id: 'saved-delivery', status: 'completed', customerName: sub.name }) }));
   let writes = 0;
   t.mock.method(Delivery, 'create', async () => { writes++; });
   const progress = [];
@@ -219,4 +220,40 @@ test('real discovery reports page and calendar progress without relaxing complet
   assert.equal(progress.at(-1).total, 2);
   t.mock.method(matterApi, 'getSubscription', async () => { throw Object.assign(new Error('synthetic timeout'), { code: 'ETIMEDOUT' }); });
   await assert.rejects(() => matterApi.findSubscriptionsWithDeliveryOnDate('2026-11-22', { onProgress: async () => {} }), { code: 'INCOMPLETE_DELIVERY_ROSTER' });
+});
+
+test('index creation failure blocks the importer before new customer or delivery writes', async t => {
+  const sub = { subscription_id: 'synthetic', name: 'Synthetic Customer', delivery_date: '2026-11-22',
+    customer_addresses: [{ id: 1, current_delivery_address: true, status: 'active', building: 'Synthetic Villa', unit: '1' }],
+    delivery_window: { label: 'By 5 AM' } };
+  t.mock.method(matterApi, 'findSubscriptionsWithDeliveryOnDate', async () => [sub]);
+  t.mock.method(Delivery, 'findOne', () => ({ select: async () => null }));
+  t.mock.method(Delivery.collection, 'createIndex', async () => { throw new Error('Index unavailable'); });
+  let touched = 0;
+  t.mock.method(Customer, 'findOne', () => { touched++; throw new Error('Must not reach customer resolution'); });
+  t.mock.method(Delivery, 'create', async () => { touched++; });
+  const result = await importMatterDeliveriesForDate('2026-11-22');
+  assert.equal(result.complete, false);
+  assert.equal(result.failed, 1);
+  assert.equal(result.created, 0);
+  assert.equal(touched, 0);
+});
+
+test('an insert lost to a recovery worker counts as already imported, not another stop or a write failure', async t => {
+  const sub = { subscription_id: 'synthetic', customer_id: 'synthetic-customer', name: 'Synthetic Customer', delivery_date: '2026-11-22',
+    customer_addresses: [{ id: 1, current_delivery_address: true, status: 'active', building: 'Synthetic Villa', unit: '1' }],
+    delivery_window: { label: 'By 5 AM' } };
+  t.mock.method(matterApi, 'findSubscriptionsWithDeliveryOnDate', async () => [sub]);
+  t.mock.method(Delivery, 'findOne', () => ({ select: async () => null }));
+  t.mock.method(Delivery.collection, 'createIndex', async () => 'matter_import_obligation_unique');
+  t.mock.method(Customer, 'findOne', () => ({ select: async () => ({ customerId: 'SYNTHETIC', firstName: 'Synthetic', lastName: 'Customer' }) }));
+  t.mock.method(Delivery, 'create', async snapshot => {
+    assert.equal(snapshot.matterImportKey, '2026-11-22:synthetic');
+    throw Object.assign(new Error('duplicate'), { code: 11000, keyPattern: { matterImportKey: 1 } });
+  });
+  const result = await importMatterDeliveriesForDate('2026-11-22');
+  assert.equal(result.complete, true);
+  assert.equal(result.created, 0);
+  assert.equal(result.alreadyExisted, 1);
+  assert.equal(result.writeFailed, 0);
 });
