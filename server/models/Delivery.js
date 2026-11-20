@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { MATTER_IMPORT_IDENTITIES } from '../config/matterImportIdentity.js';
 import { sanitizeDeliveryAddressEdit } from '../services/deliveryAddressEdit.js';
 import { applyZoneRules, isAbuDhabiEmirate, ABU_DHABI_ZONE } from '../config/zoneRules.js';
 
@@ -25,6 +26,11 @@ const deliverySchema = new mongoose.Schema({
     index: true
   },
   matterCustomerId: { type: String, default: null, index: true },
+  // Immutable identity for newly imported subscription/service-day obligations.
+  // Not derived from editable scheduledTime and absent on historical/manual jobs.
+  matterImportKey: { type: String, immutable: true },
+  matterImportCustomerKey: { type: String, immutable: true },
+  matterImportSourceCustomerKey: { type: String, immutable: true },
   // Independent of editable delivery names, times and subscription references.
   // Never reprice completed work from a newer subscription.
   matterRevenue: { type: mongoose.Schema.Types.Mixed, default: undefined, select: false },
@@ -291,6 +297,10 @@ deliveryType: {
 
 // Index for better query performance
 deliverySchema.index({ scheduledTime: 1 });
+for (const [field, name] of MATTER_IMPORT_IDENTITIES) {
+  deliverySchema.index({ [field]: 1 }, { name, unique: true,
+    partialFilterExpression: { [field]: { $type: 'string' } } });
+}
 deliverySchema.index({ driver: 1, status: 1 });
 deliverySchema.index({ customerId: 1 });
 deliverySchema.index({ driver: 1, scheduledTime: 1 }); // For getDriverTodaysDeliveries query
