@@ -48,7 +48,7 @@ re-runnable any time to see current state. Last run found:
 - **7 warnings**: unparseable numeric strings (`amountPaid: "1,552.00"`,
   `discount: "10.00%"`), `menuitems.carbs` holding a dish name instead of a
   number, customers with neither email nor Matter subscription id.
-- Full detail: `server/scripts/output/mongo-sql-audit.json`.
+- The audit writes the full report locally to `server/scripts/output/mongo-sql-audit.json`.
 
 **Action before Phase 4 (ETL):** re-run the audit and get it to zero
 blockers. Some (the 234 unlinked selections) need the same merge pattern
