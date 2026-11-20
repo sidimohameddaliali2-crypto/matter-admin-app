@@ -129,6 +129,52 @@ Every route responds `{ success, data }` on success and
 HTTP status forwarded when available (so a Matter 404 reaches the client as
 a 404, not a generic 500).
 
+### Background delivery imports (2026-11-20)
+
+`POST /api/matter/import-deliveries` accepts `{ "date": "2026-11-22" }`
+and now returns **202** with `{ success: true, data: { id, date, status,
+progress } }`. It queues a request rather than waiting for every subscription
+read and delivery write. Consumers of the old synchronous response must poll
+for the final `result` instead of reading `created` from the POST response.
+
+Use `GET /api/matter/import-deliveries/jobs/:id` for one attempt, or
+`GET /api/matter/import-deliveries/status?date=YYYY-MM-DD` to restore the latest
+attempt after a reload. All three routes require an active staff JWT and an
+admin, super_admin, dispatcher or manager role. The Deliveries page polls and
+refreshes the list when work finishes. Sunday meal records still follow the
+existing Saturday/Sunday combined dispatch rules.
+
+Jobs and their result/progress snapshots are retained in MongoDB's
+`matterimportjobs` collection. Status is `queued`, `running`, `completed`,
+`incomplete` or `failed`; phases are listing pages, checking calendars,
+importing deliveries and finalizing. Calendar verification progress is not a
+count of deliveries created. Results retain failures, skipped destinations,
+missing delivery windows and review comparisons; finishing does not resolve
+those cases or establish dispatch readiness.
+
+A unique active date key coalesces duplicate clicks. A shared Mongo lease
+serializes workers across PM2 processes; heartbeat and ownership checks fence
+further work after ownership loss. Queued jobs survive restarts. A running
+job whose lease expires is marked interrupted, retaining its last saved
+progress; it is not silently resumed. Staff can retry using a new attempt,
+which uses the existing delivery duplicate checks and leaves the old result
+available. A failure between a database write and the next progress update
+can leave the progress snapshot behind the actual delivery count, so retry
+rechecks stored deliveries rather than trusting that count.
+
+The worker consumes explicitly queued requests and does not enqueue dates
+on startup. `MATTER_IMPORT_ENABLED` still controls the separate daily/startup
+schedule; when already enabled, it now queues requests through the same
+worker. It remains disabled by default. The script-only
+`runImportMatterDeliveriesOnce` helper still runs directly and must not be
+used concurrently with the queue.
+
+No new environment variables are needed. This changes delivery import
+execution and its UI, not Customer Service topics, lookup results, provider
+messages, cancellation authority or the saved API base URL. Incomplete
+upstream discovery still creates no deliveries. This change does not
+implement issue #12 reconciliation or authorize deployment or live testing.
+
 ## 4. Cross-referencing Matter subscriptions with internal customers
 
 Matter has no concept of this app's internal `Customer` records — matching
