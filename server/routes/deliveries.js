@@ -4,6 +4,7 @@ import { findRegisteredBag } from '../services/bagRecordLookup.js';
 import { moveBag } from '../services/bagMovementStore.js';
 import deliveryOrderRouter from './deliveryOrder.js';
 import express from 'express';
+import { protectMatterImportIdentityInput } from '../middleware/matterImportIdentityInput.js';
 import { structuredDeliveryAddress } from '../services/deliveryAddress.js';
 import mongoose from 'mongoose';
 import axios from 'axios';
@@ -360,6 +361,7 @@ async function checkAndApplyPendingChanges(delivery) {
 // All routes are protected
 router.use(protect);
 router.use(protectMatterRevenueInput);
+router.use(protectMatterImportIdentityInput);
 // Tracker verdicts, their baseline evidence, and receipt timestamps are server-owned.
 router.use(function protectTrackerEvidence(req, res, next) {
   const clean = value => {

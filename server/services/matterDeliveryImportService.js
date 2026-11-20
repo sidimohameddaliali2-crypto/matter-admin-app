@@ -164,7 +164,12 @@ export async function importMatterDeliveriesForDate(dateKey, { onProgress, asser
 
   let processed = 0;
   let idempotencyReady = false;
-  await onProgress?.({ phase: 'importing', completed: 0, total: matches.length, created: 0 });
+  const progressSnapshot = phase => ({ phase, completed: processed, total: matches.length,
+    created: summary.created, failed: summary.failed, alreadyExisted: summary.alreadyExisted,
+    alreadyHadOtherDelivery: summary.alreadyHadOtherDelivery, noCurrentAddress: summary.noCurrentAddress,
+    noDeliveryWindow: summary.noDeliveryWindow, customersCreated: summary.customersCreated,
+    discoveryFailed: summary.discoveryFailed, writeFailed: summary.writeFailed });
+  await onProgress?.(progressSnapshot('importing'));
   for (const sub of matches) {
     await assertActive?.();
     try {
@@ -266,16 +271,15 @@ export async function importMatterDeliveriesForDate(dateKey, { onProgress, asser
       summary.complete = false;
       summary.errors.push({ subscription_id: sub.subscription_id, message: err.message });
     } finally {
-      await onProgress?.({ phase: 'importing', completed: ++processed, total: matches.length,
-        created: summary.created, failed: summary.failed, alreadyExisted: summary.alreadyExisted,
-        alreadyHadOtherDelivery: summary.alreadyHadOtherDelivery, noCurrentAddress: summary.noCurrentAddress, noDeliveryWindow: summary.noDeliveryWindow });
+      processed++;
+      await onProgress?.(progressSnapshot('importing'));
     }
   }
 
   // Best effort from the already verified local Matter capture. Import and
   // driver operation must never depend on financial API availability.
   if (summary.created) {
-    await onProgress?.({ phase: 'finalizing', completed: processed, total: matches.length, created: summary.created });
+    await onProgress?.(progressSnapshot('finalizing'));
     try { await capturePendingMatterRevenue(); }
     catch { summary.pricingCapturePending = true; }
   }

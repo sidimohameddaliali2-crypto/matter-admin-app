@@ -257,3 +257,36 @@ test('an insert lost to a recovery worker counts as already imported, not anothe
   assert.equal(result.alreadyExisted, 1);
   assert.equal(result.writeFailed, 0);
 });
+
+test('interruption during finalization retains every saved write, existing and skip count', async t => {
+  const makeSub = id => ({ subscription_id: id, customer_id: `M-${id}`, name: `Synthetic ${id}`, delivery_date: '2026-11-22',
+    customer_addresses: [{ id: 1, current_delivery_address: true, status: 'active', building: 'Synthetic Villa', unit: '1' }],
+    delivery_window: { label: 'By 5 AM' } });
+  const rows = ['created', 'existing', 'scheduled', 'no-address', 'no-window', 'write-failure'].map(makeSub);
+  rows[3].customer_addresses = [];
+  rows[4].delivery_window = null;
+  t.mock.method(matterApi, 'findSubscriptionsWithDeliveryOnDate', async () => rows);
+  t.mock.method(Delivery, 'findOne', query => ({ select: async () => {
+    if (query.matterSubscriptionId === 'existing') return { _id: 'previous', status: 'completed', customerName: 'Synthetic existing' };
+    if (query.customerId === 'C-scheduled') return { _id: 'manual', status: 'pending' };
+    return null;
+  } }));
+  t.mock.method(Delivery.collection, 'createIndex', async () => 'synthetic-index');
+  t.mock.method(Customer, 'findOne', query => ({ select: async () => ({ customerId: `C-${query.matterSubscriptionId}` }) }));
+  t.mock.method(Delivery, 'create', async row => { if (row.matterSubscriptionId === 'write-failure') throw new Error('Synthetic write failure'); });
+  const db = store();
+  const jobs = createMatterImportJobs({ ...db, runImport: (date, options) => importMatterDeliveriesForDate(date, {
+    ...options, onProgress: async p => {
+      await options.onProgress(p);
+      if (p.phase === 'finalizing') throw new Error('Synthetic interruption after finalizing snapshot');
+    }
+  }) });
+  const job = await jobs.enqueue('2026-11-22');
+  await jobs.tick();
+  const saved = await jobs.get(job.id);
+  assert.equal(saved.status, 'failed');
+  assert.equal(saved.result, undefined);
+  assert.deepEqual(saved.progress, { phase: 'finalizing', completed: 6, total: 6,
+    created: 1, failed: 1, alreadyExisted: 1, alreadyHadOtherDelivery: 1,
+    noCurrentAddress: 1, noDeliveryWindow: 1, customersCreated: 0, discoveryFailed: 0, writeFailed: 1 });
+});

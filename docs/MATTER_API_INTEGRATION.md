@@ -168,16 +168,25 @@ available. A failure between a database write and the next progress update
 can leave the progress snapshot behind the actual delivery count, so retry
 rechecks stored deliveries rather than trusting that count.
 
-New imported deliveries also carry an immutable `matterImportKey`, composed
-of the source service date and subscription ID. A partial unique MongoDB
-index (`matter_import_obligation_unique`) enforces one new imported record
-per obligation even if a paused worker resumes after a replacement's insert.
-The importer explicitly awaits index creation before processing new records;
+New imported deliveries carry server-owned immutable identities for the source
+subscription/day (`matterImportKey`), internal customer/day
+(`matterImportCustomerKey`) and, when available, permanent Matter customer/day
+(`matterImportSourceCustomerKey`). Partial unique MongoDB indexes enforce the
+existing one-stop-per-customer/day import rule at insertion, even when a paused
+worker resumes after a replacement imports a renewed subscription. The
+permanent identity also protects against an internal customer-link change.
+The importer explicitly awaits all three indexes before processing new records;
 an unavailable index blocks those writes rather than allowing an unprotected
-insert. Only collisions on this identity count as already imported; other
-write failures remain failures. Historical and manual/CSV rows without a key
+insert. Only collisions on these identities count as already imported; other
+write failures remain failures. Single and bulk manual HTTP requests strip
+these keys, including nested/dotted paths and rename attempts, before writes.
+Historical and manual/CSV rows without a key
 are outside the partial index and still use the existing lookup checks. No
 historical backfill or completed-record rewrite is performed.
+
+The same complete counts snapshot is saved after each processed subscription
+and before finalization, so interruption during finalization does not lose
+already-imported, already-scheduled, failed or address/window skip counts.
 
 The worker consumes explicitly queued requests and does not enqueue dates
 on startup. `MATTER_IMPORT_ENABLED` still controls the separate daily/startup
