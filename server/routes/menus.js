@@ -2665,6 +2665,23 @@ router.get('/kitchen-partners/:partnerId/members', protect, async (_req, res) =>
  * dishes from the meal editor's MenuItem records (falling back to the older
  * mainMealOptionsByDate pool), plus the date's breakfast and snack options.
  */
+// Compact, date-scoped recipe labels for cook counts, including auto-assigned
+// portions that reference a rotation name instead of a MenuItem ID.
+router.get('/:id/kitchen-components', protect, async (req, res) => {
+  try {
+    const date = toDateKey(req.query.date);
+    if (!date) return res.status(400).json({ success: false, message: 'A valid date is required' });
+    const menu = await WeeklyMenu.findById(req.params.id).select('meals').lean();
+    if (!menu) return res.status(404).json({ success: false, message: 'Menu not found' });
+    const items = await MenuItem.find({
+      _id: { $in: (menu.meals || []).flatMap(day => day.items || []) }, itemDate: new Date(date),
+    }).select('mealName mealType proteinSource carbs veg sauce garnish portionType rotationCategory cycleMeal.category cycleMeal.isSaladBase cycleMeal.components.type cycleMeal.components.name').lean();
+    return res.json({ success: true, data: items });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Could not load kitchen component names' });
+  }
+});
+
 router.get('/:id/day-dishes', protect, async (req, res) => {
   try {
     const dateKey = toDateKey(req.query.date);

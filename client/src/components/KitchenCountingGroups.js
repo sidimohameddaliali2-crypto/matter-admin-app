@@ -23,6 +23,9 @@ export default function KitchenCountingGroups({ rows, onDownload }) {
         {fields.map(([field, title]) => <div key={field} className={`kitchen-weight-bar kitchen-weight-${field}`}>
           <span className="kitchen-mobile-weight-label">{title}</span>
           <strong title={`${Math.round(row[field])} g`}>{kg(row[field])} <small>kg</small></strong>
+          <div className="kitchen-count-components">{(row.components?.[{ totalProteinWeight: 'protein', totalCarbWeight: 'carb', totalVegWeight: 'veg' }[field]] || []).map(component =>
+            <div className="kitchen-count-component" key={component.name}><span>{component.name}</span><b>{Math.round(component.weight).toLocaleString()} g</b></div>
+          )}</div>
           <span className="kitchen-bar-track" aria-hidden="true"><i style={{ width: `${totals[field] ? Math.min(100, row[field] / totals[field] * 100) : 0}%` }} /></span>
         </div>)}
         <button type="button" onClick={() => onDownload(row.category, row.mealName)} aria-label={`Download customers for ${row.mealName}`} title={`Download customers for ${row.mealName}`} className="kitchen-row-download"><Download size={16} /></button>
