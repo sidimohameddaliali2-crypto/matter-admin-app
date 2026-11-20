@@ -138,3 +138,78 @@ test('a denied status request stops polling and displays a permission message', 
     expect(api.get).toHaveBeenCalledTimes(1);
   } finally { await act(async () => root.unmount()); jest.useRealTimers(); }
 });
+
+test.each([null, 'completed', 'incomplete', 'failed'])('idle status %s polls once a minute rather than every three seconds', async status => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  jest.useFakeTimers(); api.get.mockReset();
+  api.get.mockResolvedValue({ data: { data: status ? { id: 'saved', date: '2026-11-22', status } : null } });
+  const root = createRoot(document.createElement('div'));
+  try {
+    await act(async () => root.render(<MatterImportControl role="dispatcher" date="2026-11-22" onComplete={jest.fn()} />));
+    expect(api.get).toHaveBeenCalledTimes(1);
+    await act(async () => { jest.advanceTimersByTime(59999); });
+    expect(api.get).toHaveBeenCalledTimes(1);
+    await act(async () => { jest.advanceTimersByTime(1); });
+    expect(api.get).toHaveBeenCalledTimes(2);
+    await act(async () => { jest.advanceTimersByTime(3000); });
+    expect(api.get).toHaveBeenCalledTimes(2);
+  } finally { await act(async () => root.unmount()); jest.useRealTimers(); }
+});
+
+test.each(['queued', 'running'])('active status %s retains three-second progress polling', async status => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  jest.useFakeTimers(); api.get.mockReset();
+  api.get.mockResolvedValue({ data: { data: { id: 'active', date: '2026-11-22', status } } });
+  const root = createRoot(document.createElement('div'));
+  try {
+    await act(async () => root.render(<MatterImportControl role="dispatcher" date="2026-11-22" onComplete={jest.fn()} />));
+    await act(async () => { jest.advanceTimersByTime(3000); });
+    expect(api.get).toHaveBeenCalledTimes(2);
+  } finally { await act(async () => root.unmount()); jest.useRealTimers(); }
+});
+
+test('local submission wakes an idle timer, then completion returns to slow polling', async () => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  jest.useFakeTimers(); api.get.mockReset(); api.post.mockReset();
+  let job = null;
+  api.get.mockImplementation(async () => ({ data: { data: job && { ...job } } }));
+  api.post.mockImplementation(async () => {
+    job = { id: 'new-job', date: '2026-11-22', status: 'queued' };
+    return { data: { data: { ...job } } };
+  });
+  const node = document.createElement('div'); const root = createRoot(node);
+  const confirm = jest.spyOn(window, 'confirm').mockReturnValue(true);
+  try {
+    await act(async () => root.render(<MatterImportControl role="dispatcher" date="2026-11-22" onComplete={jest.fn()} />));
+    await act(async () => node.querySelector('button').click());
+    await act(async () => { jest.advanceTimersByTime(3000); });
+    expect(api.get).toHaveBeenCalledTimes(2);
+    job.status = 'completed';
+    await act(async () => { jest.advanceTimersByTime(3000); });
+    expect(api.get).toHaveBeenCalledTimes(3);
+    await act(async () => { jest.advanceTimersByTime(59999); });
+    expect(api.get).toHaveBeenCalledTimes(3);
+    await act(async () => { jest.advanceTimersByTime(1); });
+    expect(api.get).toHaveBeenCalledTimes(4);
+  } finally { await act(async () => root.unmount()); confirm.mockRestore(); jest.useRealTimers(); }
+});
+
+test('an idle read finishing after a submission cannot erase its queued state or slow its polling', async () => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  jest.useFakeTimers(); api.get.mockReset(); api.post.mockReset();
+  let release;
+  const job = { id: 'accepted', date: '2026-11-22', status: 'queued' };
+  api.get.mockReturnValueOnce(new Promise(resolve => { release = resolve; }))
+    .mockResolvedValue({ data: { data: job } });
+  api.post.mockResolvedValue({ data: { data: job } });
+  const node = document.createElement('div'); const root = createRoot(node);
+  const confirm = jest.spyOn(window, 'confirm').mockReturnValue(true);
+  try {
+    await act(async () => root.render(<MatterImportControl role="dispatcher" date="2026-11-22" onComplete={jest.fn()} />));
+    await act(async () => node.querySelector('button').click());
+    await act(async () => release({ data: { data: null } }));
+    expect(node.textContent).toContain('Import running');
+    await act(async () => { jest.advanceTimersByTime(3000); });
+    expect(api.get).toHaveBeenCalledTimes(2);
+  } finally { await act(async () => root.unmount()); confirm.mockRestore(); jest.useRealTimers(); }
+});

@@ -19,6 +19,9 @@ export function importProgress(job) {
 }
 
 export const canImportMatter = role => ['admin', 'super_admin', 'dispatcher', 'manager'].includes(role);
+const ACTIVE_POLL_MS = 3000;
+const IDLE_POLL_MS = 60000;
+const isActiveImport = status => ['queued', 'running'].includes(status);
 
 export default function MatterImportControl(props) {
   // Unmount the polling effect if the staff role is absent or revoked.
@@ -31,21 +34,30 @@ function AuthorizedMatterImportControl({ date, formattedDate, onComplete }) {
   const [error, setError] = useState('');
   const completed = useRef(null);
   const dateRef = useRef(date);
+  const wakePolling = useRef(null);
   dateRef.current = date;
   useEffect(() => {
     let cancelled = false;
     let timer;
     let request = 0;
     let denied = false;
+    let lastStatus;
+    let inFlight = false;
     setJob(null);
     setError('');
     completed.current = null;
+    const schedule = () => {
+      clearTimeout(timer);
+      if (!cancelled && !denied) timer = setTimeout(poll, isActiveImport(lastStatus) ? ACTIVE_POLL_MS : IDLE_POLL_MS);
+    };
     const poll = async () => {
       const current = ++request;
+      inFlight = true;
       try {
         const response = await api.get('/matter/import-deliveries/status', { params: { date }, timeout: 15000 });
         if (cancelled || current !== request) return;
         const saved = response.data.data;
+        lastStatus = saved?.status;
         setJob(saved);
         setError('');
         if (saved && ['completed', 'incomplete', 'failed'].includes(saved.status) && completed.current !== saved.id) {
@@ -53,14 +65,25 @@ function AuthorizedMatterImportControl({ date, formattedDate, onComplete }) {
           onComplete(saved);
         }
       } catch (e) {
+        if (cancelled || current !== request) return;
         denied = [401, 403].includes(e.response?.status);
         if (!cancelled) setError(denied ? 'You do not have permission to view Matter import progress.' : 'Progress is temporarily unavailable. The import may still be running; do not start another copy.');
       } finally {
-        if (!cancelled && !denied) timer = setTimeout(poll, 3000);
+        inFlight = false;
+        schedule();
       }
     };
+    wakePolling.current = saved => {
+      // A new local submission must not wait for the old idle timer. Ignore
+      // an earlier status read that could overwrite the accepted queued job.
+      request++;
+      lastStatus = saved?.status || 'queued';
+      denied = false;
+      clearTimeout(timer);
+      if (!inFlight) schedule();
+    };
     if (date) poll();
-    return () => { cancelled = true; clearTimeout(timer); };
+    return () => { cancelled = true; clearTimeout(timer); wakePolling.current = null; };
   }, [date, onComplete]);
 
   const start = async () => {
@@ -70,9 +93,15 @@ function AuthorizedMatterImportControl({ date, formattedDate, onComplete }) {
     setError('');
     try {
       const response = await api.post('/matter/import-deliveries', { date }, { timeout: 15000 });
-      if (dateRef.current === requestedDate) setJob(response.data.data);
+      if (dateRef.current === requestedDate) {
+        setJob(response.data.data);
+        wakePolling.current?.(response.data.data);
+      }
     } catch (e) {
-      if (dateRef.current === requestedDate) setError(e.response?.data?.message || 'Could not confirm the import request. Progress will refresh automatically; it may already be queued.');
+      if (dateRef.current === requestedDate) {
+        setError(e.response?.data?.message || 'Could not confirm the import request. Progress will refresh automatically; it may already be queued.');
+        if (![401, 403].includes(e.response?.status)) wakePolling.current?.();
+      }
     } finally { setStarting(false); }
   };
   const active = job && ['queued', 'running'].includes(job.status);

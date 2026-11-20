@@ -141,6 +141,13 @@ Use `GET /api/matter/import-deliveries/jobs/:id` for one attempt, or
 `GET /api/matter/import-deliveries/status?date=YYYY-MM-DD` to restore the latest
 attempt after a reload. All three routes require an active staff JWT and an
 admin, super_admin, dispatcher or manager role. The Deliveries page polls and
+checks progress every three seconds while a job is queued/running and every
+60 seconds when idle or finished. A local submission restarts fast polling
+without waiting for the idle timer; an earlier in-flight read cannot overwrite
+the accepted queued job. Jobs started by another staff member are discovered
+on the next idle check. Both polling endpoints are included in the generated
+traceability catalog for route matching and error activity classification.
+The page
 quietly refreshes rows once per terminal job ID, without entering the page's
 loading branch or starting another standardization request. The parent retains
 handled job IDs through control remounts caused by manual refresh or errors.
