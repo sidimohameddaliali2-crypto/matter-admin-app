@@ -141,7 +141,10 @@ Use `GET /api/matter/import-deliveries/jobs/:id` for one attempt, or
 `GET /api/matter/import-deliveries/status?date=YYYY-MM-DD` to restore the latest
 attempt after a reload. All three routes require an active staff JWT and an
 admin, super_admin, dispatcher or manager role. The Deliveries page polls and
-refreshes the list when work finishes. Sunday meal records still follow the
+quietly refreshes rows once per terminal job ID, without entering the page's
+loading branch or starting another standardization request. The parent retains
+handled job IDs through control remounts caused by manual refresh or errors.
+Sunday meal records still follow the
 existing Saturday/Sunday combined dispatch rules.
 
 Jobs and their result/progress snapshots are retained in MongoDB's
@@ -157,6 +160,8 @@ only for the staff roles authorized by the endpoints; a denied status request
 stops polling and displays a permission warning rather than suggesting a job
 is running. Interrupted attempts display their last saved phase, processed
 count and any available write/skip/failure counts, including known zero counts.
+The recovery view also includes saved customer-creation, delivery-write-failure
+and discovery-failure counts; missing counts remain unknown rather than zero.
 
 A shared Mongo lease
 serializes workers across PM2 processes; heartbeat and ownership checks fence
@@ -191,7 +196,13 @@ already-imported, already-scheduled, failed or address/window skip counts.
 The worker consumes explicitly queued requests and does not enqueue dates
 on startup. `MATTER_IMPORT_ENABLED` still controls the separate daily/startup
 schedule; when already enabled, it now queues requests through the same
-worker. It remains disabled by default. The script-only
+worker. It remains disabled by default. If scheduled enqueueing fails, an
+in-process retry retains that exact service date and backs off from one minute
+to a maximum five-minute interval. A newer daily service date does not replace
+the pending older date, and repeated attempts for the same date are coalesced.
+Once MongoDB accepts a job it is durable; a retry not yet accepted by MongoDB
+is held only by the running scheduler, not a separate durable journal.
+The script-only
 `runImportMatterDeliveriesOnce` helper still runs directly and must not be
 used concurrently with the queue.
 

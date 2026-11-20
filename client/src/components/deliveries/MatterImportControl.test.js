@@ -103,7 +103,8 @@ test('an interrupted job displays saved phase, checked count and available write
   global.IS_REACT_ACT_ENVIRONMENT = true;
   api.get.mockResolvedValue({ data: { data: { id: 'interrupted-job', date: '2026-11-22', status: 'failed',
     message: 'Worker was interrupted. Review saved progress and retry.',
-    progress: { phase: 'importing', completed: 5, total: 11, created: 3, alreadyExisted: 1, failed: 1, noDeliveryWindow: 0 } } } });
+    progress: { phase: 'importing', completed: 5, total: 11, created: 3, alreadyExisted: 1, failed: 1, noDeliveryWindow: 0,
+      customersCreated: 2, writeFailed: 1, discoveryFailed: 0 } } } });
   const node = document.createElement('div');
   const root = createRoot(node);
   try {
@@ -113,6 +114,9 @@ test('an interrupted job displays saved phase, checked count and available write
     expect(node.textContent).toContain('1 already imported');
     expect(node.textContent).toContain('1 failed');
     expect(node.textContent).toContain('0 without a delivery window');
+    expect(node.textContent).toContain('2 customer records created');
+    expect(node.textContent).toContain('1 delivery write failures');
+    expect(node.textContent).toContain('0 discovery failures');
     expect(node.textContent).toContain('write just before interruption may not be included');
     expect(node.textContent).not.toContain('0 already scheduled');
     expect(node.querySelector('button').textContent).toContain('Retry');

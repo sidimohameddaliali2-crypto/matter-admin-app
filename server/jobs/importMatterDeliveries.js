@@ -1,6 +1,7 @@
 import { traceJob } from '../observability/telemetry.js';
 import { importMatterDeliveriesForDate } from '../services/matterDeliveryImportService.js';
 import { matterImportJobs } from '../services/matterImportJobService.js';
+import { createScheduledImportEnqueuer } from './matterImportEnqueueRetry.js';
 
 // Owner (2026-09-22, refined same day: "the Wednesday one [should import]
 // on Tuesday at 6:00 AM"): pull tomorrow's delivery schedule from the real
@@ -64,8 +65,8 @@ export function startImportMatterDeliveriesJob() {
   }
 
   // Startup catch-up — see the comment above for why.
-  const queueTomorrow = () => matterImportJobs.enqueue(tomorrowDateKey())
-    .catch(() => console.error('[MatterImport] Could not queue scheduled import.'));
+  const retryQueue = createScheduledImportEnqueuer({ enqueue: date => matterImportJobs.enqueue(date) });
+  const queueTomorrow = () => retryQueue.queue(tomorrowDateKey());
   queueTomorrow();
 
   const now = new Date();
@@ -75,8 +76,10 @@ export function startImportMatterDeliveriesJob() {
   if (nowLocal >= nextRun) nextRun.setDate(nextRun.getDate() + 1);
   const msUntilNextRun = nextRun - nowLocal;
 
-  setTimeout(() => {
+  let dailyTimer;
+  const firstTimer = setTimeout(() => {
     queueTomorrow();
-    setInterval(queueTomorrow, 24 * 60 * 60 * 1000);
+    dailyTimer = setInterval(queueTomorrow, 24 * 60 * 60 * 1000);
   }, msUntilNextRun);
+  return () => { clearTimeout(firstTimer); clearInterval(dailyTimer); retryQueue.stop(); };
 }

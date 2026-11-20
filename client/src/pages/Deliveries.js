@@ -128,7 +128,8 @@ const Deliveries = () => {
   useEffect(() => { selectionRef.current = selectedDeliveries; }, [selectedDeliveries]);
   const [allDrivers, setAllDrivers] = useState([]);
   const [isPrintConfigOpen, setIsPrintConfigOpen] = useState(false);
-  const onMatterImportComplete = useCallback(() => setRefreshVersion(value => value + 1), []);
+  // Keep receipts above the loading/error branches that can unmount the control.
+  const handledMatterImportJobs = React.useRef(new Set());
   const [isDeletingSelected, setIsDeletingSelected] = useState(false);
   // Owner (2026-10-10): clicking a delivery opens its details in a modal,
   // in place, instead of navigating to a separate page — closing it must
@@ -180,6 +181,14 @@ const Deliveries = () => {
       if (selectedDateRef.current === selectedDate && !quiet) setIsLoading(false);
     }
   }, [selectedDate]);
+
+  const onMatterImportComplete = useCallback(job => {
+    if (!job?.id || job.date !== selectedDateRef.current || handledMatterImportJobs.current.has(job.id)) return;
+    handledMatterImportJobs.current.add(job.id);
+    // Refresh only rows. A terminal import must not trigger the page-loading
+    // branch or another standardization run and remount its own polling control.
+    fetchDeliveries(true);
+  }, [fetchDeliveries]);
 
   useEffect(() => {
     let cancelled = false;

@@ -50,7 +50,7 @@ function AuthorizedMatterImportControl({ date, formattedDate, onComplete }) {
         setError('');
         if (saved && ['completed', 'incomplete', 'failed'].includes(saved.status) && completed.current !== saved.id) {
           completed.current = saved.id;
-          onComplete();
+          onComplete(saved);
         }
       } catch (e) {
         denied = [401, 403].includes(e.response?.status);
@@ -82,7 +82,8 @@ function AuthorizedMatterImportControl({ date, formattedDate, onComplete }) {
   const savedProgress = interrupted ? importProgress({ ...job, status: 'running' }) : null;
   const savedCounts = interrupted ? [
     ['created', 'created'], ['alreadyExisted', 'already imported'], ['alreadyHadOtherDelivery', 'already scheduled'],
-    ['failed', 'failed'], ['noCurrentAddress', 'without a resolved address'], ['noDeliveryWindow', 'without a delivery window']
+    ['failed', 'failed'], ['noCurrentAddress', 'without a resolved address'], ['noDeliveryWindow', 'without a delivery window'],
+    ['customersCreated', 'customer records created'], ['writeFailed', 'delivery write failures'], ['discoveryFailed', 'discovery failures']
   ].filter(([key]) => Number.isFinite(job.progress[key])).map(([key, label]) => `${job.progress[key]} ${label}`) : [];
   return <div className="flex flex-col gap-2 max-w-md" aria-live="polite">
     <button onClick={start} disabled={starting || active || !date}
