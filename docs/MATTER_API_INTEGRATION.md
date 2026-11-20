@@ -156,6 +156,10 @@ and import results/controls. An inline warning labels the sheet as the last
 loaded version and offers a quiet sheet-refresh retry. A successful retry
 clears that warning; initial/foreground loading errors retain the existing
 full-page error behavior.
+Delivery reads also carry increasing request IDs. Only the latest request for
+the selected date may apply rows, prune selections or show errors. Foreground
+loading ownership is tracked separately so a superseding quiet read can release
+the spinner, and an older response cannot clear a newer foreground spinner.
 Sunday meal records still follow the
 existing Saturday/Sunday combined dispatch rules.
 
@@ -166,6 +170,24 @@ importing deliveries and finalizing. Calendar verification progress is not a
 count of deliveries created. Results retain failures, skipped destinations,
 missing delivery windows and review comparisons; finishing does not resolve
 those cases or establish dispatch readiness.
+
+The model declares `{ status: 1, createdAt: 1 }` for oldest-queued claims and
+`{ status: 1, leaseUntil: 1 }` for expired-running recovery. These use the
+existing Mongoose schema/index initialization mechanism (`Job.init()` on the
+enqueue path); no new production index-deployment command is introduced.
+An isolated MongoDB 6.0 check seeded 20,000 completed jobs with no eligible
+jobs, initialized the actual model, and explained the worker's findAndModify
+claim and multi-update recovery commands without hints. Winning plans used
+`status_1_createdAt_1` and `status_1_leaseUntil_1`, respectively; both examined
+zero documents and zero keys, with no collection scan or blocking sort.
+
+To repeat against a disposable local MongoDB only, set the test-only variable
+`MATTER_IMPORT_TEST_MONGO_URI=mongodb://127.0.0.1:PORT/matter_import_index_test_local`
+and run `node --test server/models/MatterImportJob.indexes.test.js` from the
+repository root. The integration case refuses non-loopback/non-test database
+names, does not load app environment files, and drops its synthetic database
+on completion. It is skipped without that variable. This is isolated query-plan
+evidence, not verification of deployed production indexes.
 
 A unique active date key coalesces duplicate clicks. The import control mounts
 only for the staff roles authorized by the endpoints; a denied status request

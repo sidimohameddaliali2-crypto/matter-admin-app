@@ -121,6 +121,8 @@ const Deliveries = () => {
   const [rowRefreshError, setRowRefreshError] = useState('');
   const [selectedDate, setSelectedDate] = useState(() => formatBusinessDateInput(new Date()));
   const selectedDateRef = React.useRef(selectedDate);
+  const deliveryRequestId = React.useRef(0);
+  const foregroundDeliveryRequest = React.useRef(null);
   selectedDateRef.current = selectedDate;
   const [matterSyncError, setMatterSyncError] = useState('');
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -143,8 +145,11 @@ const Deliveries = () => {
   // the whole day regardless of which table filters are active.
   const fetchDeliveries = useCallback(async (quiet = false) => {
     quiet = quiet === true;
+    const requestId = ++deliveryRequestId.current;
+    const isLatest = () => deliveryRequestId.current === requestId && selectedDateRef.current === selectedDate;
     try {
       if (!quiet) {
+        foregroundDeliveryRequest.current = { id: requestId, date: selectedDate };
         setIsLoading(true);
         setError(null);
         setRowRefreshError('');
@@ -161,7 +166,7 @@ const Deliveries = () => {
       }
 
       const response = await api.get('/deliveries', { params });
-      if (selectedDateRef.current !== selectedDate) return;
+      if (!isLatest()) return;
       if (!response.data?.success) {
         throw new Error(response.data?.message || 'Failed to load deliveries');
       }
@@ -172,6 +177,7 @@ const Deliveries = () => {
       setRowRefreshError('');
       setDeliveries(pageDeliveries);
       setSelectedDeliveries((prev) => {
+        if (!isLatest()) return prev;
         if (prev.size === 0) return prev;
         const validIds = new Set(pageDeliveries.map((d) => d._id));
         const next = new Set();
@@ -179,7 +185,7 @@ const Deliveries = () => {
         return next;
       });
     } catch (err) {
-      if (selectedDateRef.current !== selectedDate) return;
+      if (!isLatest()) return;
       console.error('Error fetching deliveries:', err);
       if (quiet) {
         // A failed background read is not evidence that stored rows vanished.
@@ -190,7 +196,14 @@ const Deliveries = () => {
       setDeliveries([]);
       setError(err.response?.data?.message || 'Failed to load deliveries');
     } finally {
-      if (selectedDateRef.current === selectedDate && !quiet) setIsLoading(false);
+      const foreground = foregroundDeliveryRequest.current;
+      if (selectedDateRef.current === selectedDate && foreground?.date === selectedDate
+        && ((!quiet && foreground.id === requestId) || (quiet && isLatest()))) {
+        // Loading ownership is separate from response ordering: a newer quiet
+        // read may finish while the superseded foreground request is pending.
+        foregroundDeliveryRequest.current = null;
+        setIsLoading(false);
+      }
     }
   }, [selectedDate]);
 

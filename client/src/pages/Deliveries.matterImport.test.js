@@ -6,7 +6,8 @@ import api from '../utils/api';
 jest.mock('../utils/api', () => ({ get: jest.fn(), post: jest.fn() }));
 jest.mock('react-redux', () => ({ useSelector: selector => selector({ auth: { user: { role: 'dispatcher' } } }) }));
 jest.mock('react-router-dom', () => ({ Link: ({ children }) => children, useSearchParams: () => [new URLSearchParams()] }), { virtual: true });
-jest.mock('../contexts/SocketContext', () => ({ useSocket: () => ({ socket: null }) }));
+let mockSocket = null;
+jest.mock('../contexts/SocketContext', () => ({ useSocket: () => ({ socket: mockSocket }) }));
 jest.mock('../utils/activityCapture', () => ({ recordActivityChange: jest.fn() }));
 jest.mock('../components/deliveries/PrintConfigModal', () => () => null);
 jest.mock('../components/deliveries/DeliveryDetailModal', () => () => null);
@@ -59,6 +60,79 @@ test.each(['completed', 'incomplete', 'failed'])('a %s job refreshes rows once, 
     confirm.mockRestore();
     jest.useRealTimers();
   }
+});
+
+test.each(['success', 'failure'])('an older same-date %s cannot replace imported rows or clear their selections', async olderOutcome => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  jest.useFakeTimers(); jest.setSystemTime(new Date('2026-11-22T08:00:00Z'));
+  api.get.mockReset(); api.post.mockReset();
+  let releaseStandardization, resolveOld, rejectOld;
+  let count = 0;
+  let status = 'running';
+  const old = { _id: 'old', customerId: 'C1', customerName: 'Existing synthetic', type: 'Delivery', status: 'pending', scheduledTime: '2026-11-22T01:00:00Z' };
+  const added = { ...old, _id: 'imported', customerId: 'C2', customerName: 'Imported synthetic' };
+  api.get.mockImplementation(path => {
+    if (path === '/deliveries') {
+      count++;
+      if (count === 2) return new Promise((resolve, reject) => { resolveOld = resolve; rejectOld = reject; });
+      return Promise.resolve({ data: { success: true, data: { deliveries: count === 1 ? [old] : [old, added] } } });
+    }
+    if (path === '/matter/import-deliveries/status') return Promise.resolve({ data: { data: { id: 'job', date: '2026-11-22', status } } });
+    return Promise.resolve({ data: { data: [] } });
+  });
+  api.post.mockImplementation(() => new Promise(resolve => { releaseStandardization = resolve; }));
+  const node = document.createElement('div'); const root = createRoot(node);
+  try {
+    await act(async () => root.render(<Deliveries />));
+    await act(async () => releaseStandardization({ data: { data: { updated: 1 } } }));
+    expect(count).toBe(2); // Older standardization refresh is still pending.
+    status = 'completed';
+    await act(async () => { jest.advanceTimersByTime(3000); });
+    expect(count).toBe(3); // Import refresh wins before the old response.
+    expect(node.textContent).toContain('Imported synthetic');
+    await act(async () => node.querySelector('input[type="checkbox"]').click());
+    expect(node.textContent).toContain('Print (2)');
+    await act(async () => {
+      if (olderOutcome === 'success') resolveOld({ data: { success: true, data: { deliveries: [old] } } });
+      else rejectOld(new Error('Synthetic stale failure'));
+    });
+    expect(node.textContent).toContain('Imported synthetic');
+    expect(node.textContent).toContain('Print (2)');
+    expect(node.textContent).not.toContain('Showing the last loaded sheet');
+    expect(node.textContent).not.toContain('Error loading deliveries');
+  } finally { await act(async () => root.unmount()); jest.useRealTimers(); }
+});
+
+test('a quiet request superseding a foreground request releases the spinner before the old request finishes', async () => {
+  global.IS_REACT_ACT_ENVIRONMENT = true;
+  jest.useFakeTimers(); jest.setSystemTime(new Date('2026-11-22T08:00:00Z'));
+  api.get.mockReset(); api.post.mockReset();
+  const listeners = new Map();
+  mockSocket = { on: (event, callback) => listeners.set(event, callback), off: jest.fn() };
+  let releaseStandardization, resolveForeground;
+  let count = 0;
+  const row = { _id: 'imported', customerId: 'C1', customerName: 'Fresh synthetic', type: 'Delivery', status: 'pending', scheduledTime: '2026-11-22T01:00:00Z' };
+  api.get.mockImplementation(path => {
+    if (path === '/deliveries') {
+      count++;
+      if (count === 2) return new Promise(resolve => { resolveForeground = resolve; });
+      return Promise.resolve({ data: { success: true, data: { deliveries: count === 1 ? [] : [row] } } });
+    }
+    return Promise.resolve({ data: { data: [] } });
+  });
+  api.post.mockImplementation(() => new Promise(resolve => { releaseStandardization = resolve; }));
+  const node = document.createElement('div'); const root = createRoot(node);
+  try {
+    await act(async () => root.render(<Deliveries />));
+    await act(async () => listeners.get('delivery:updated')({ status: 'delivered', customerName: 'Synthetic event' }));
+    expect(node.textContent).toContain('Loading deliveries...');
+    await act(async () => releaseStandardization({ data: { data: { updated: 1 } } }));
+    expect(count).toBe(3);
+    expect(node.textContent).toContain('Fresh synthetic');
+    expect(node.textContent).not.toContain('Loading deliveries...');
+    await act(async () => resolveForeground({ data: { success: true, data: { deliveries: [] } } }));
+    expect(node.textContent).toContain('Fresh synthetic');
+  } finally { await act(async () => root.unmount()); mockSocket = null; jest.useRealTimers(); }
 });
 
 test.each(['completed', 'incomplete', 'failed'])('a %s job keeps loaded rows, selection and import controls after quiet-refresh failures', async status => {

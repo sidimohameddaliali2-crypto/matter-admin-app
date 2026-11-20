@@ -15,4 +15,6 @@ const schema = new mongoose.Schema({
   message: String
 }, { timestamps: true });
 schema.index({ date: 1, createdAt: -1 });
+schema.index({ status: 1, createdAt: 1 });
+schema.index({ status: 1, leaseUntil: 1 });
 export default mongoose.model('MatterImportJob', schema);
