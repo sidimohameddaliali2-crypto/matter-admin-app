@@ -144,6 +144,11 @@ admin, super_admin, dispatcher or manager role. The Deliveries page polls and
 quietly refreshes rows once per terminal job ID, without entering the page's
 loading branch or starting another standardization request. The parent retains
 handled job IDs through control remounts caused by manual refresh or errors.
+If a quiet row refresh fails, the page retains the last loaded rows, selections
+and import results/controls. An inline warning labels the sheet as the last
+loaded version and offers a quiet sheet-refresh retry. A successful retry
+clears that warning; initial/foreground loading errors retain the existing
+full-page error behavior.
 Sunday meal records still follow the
 existing Saturday/Sunday combined dispatch rules.
 

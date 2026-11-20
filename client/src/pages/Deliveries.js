@@ -118,6 +118,7 @@ const Deliveries = () => {
   const [driverFilter, setDriverFilter] = useState(() => searchParams.get('driver') || 'all');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [rowRefreshError, setRowRefreshError] = useState('');
   const [selectedDate, setSelectedDate] = useState(() => formatBusinessDateInput(new Date()));
   const selectedDateRef = React.useRef(selectedDate);
   selectedDateRef.current = selectedDate;
@@ -143,8 +144,11 @@ const Deliveries = () => {
   const fetchDeliveries = useCallback(async (quiet = false) => {
     quiet = quiet === true;
     try {
-      if (!quiet) setIsLoading(true);
-      setError(null);
+      if (!quiet) {
+        setIsLoading(true);
+        setError(null);
+        setRowRefreshError('');
+      }
 
       const params = { page: 1, limit: MAX_FETCH_LIMIT };
       if (selectedDate) {
@@ -164,6 +168,8 @@ const Deliveries = () => {
 
       const data = response.data?.data || {};
       const pageDeliveries = Array.isArray(data.deliveries) ? data.deliveries : [];
+      setError(null);
+      setRowRefreshError('');
       setDeliveries(pageDeliveries);
       setSelectedDeliveries((prev) => {
         if (prev.size === 0) return prev;
@@ -175,6 +181,12 @@ const Deliveries = () => {
     } catch (err) {
       if (selectedDateRef.current !== selectedDate) return;
       console.error('Error fetching deliveries:', err);
+      if (quiet) {
+        // A failed background read is not evidence that stored rows vanished.
+        // Keep the sheet, selections and import recovery controls mounted.
+        setRowRefreshError(err.response?.data?.message || 'Failed to refresh delivery rows');
+        return;
+      }
       setDeliveries([]);
       setError(err.response?.data?.message || 'Failed to load deliveries');
     } finally {
@@ -482,6 +494,13 @@ const Deliveries = () => {
 
   return (
     <div className="matter-analytics p-6 bg-gray-50 min-h-screen">
+      {rowRefreshError && <div role="alert" className="mb-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+        <p>Delivery rows could not be refreshed. Showing the last loaded sheet.</p>
+        <p>{rowRefreshError}</p>
+        <button type="button" onClick={() => fetchDeliveries(true)} className="mt-2 rounded border border-amber-400 px-3 py-1 font-medium hover:bg-amber-100">
+          Retry sheet refresh
+        </button>
+      </div>}
       {matterSyncError && <p role="status" className="mb-4 text-sm text-amber-800">{matterSyncError}</p>}
       {completionToast && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-lg bg-emerald-600 text-white font-medium shadow-lg">
