@@ -158,6 +158,10 @@
 .kitchen-count-row { display: grid; grid-template-columns: 65px minmax(0, 1fr) repeat(3, 130px) 36px; align-items: center; gap: 20px; padding: 20px 24px; border-top: 1px solid var(--k-dust); font-variant-numeric: tabular-nums; }
 .kitchen-portion-number { font-size: 42px; color: var(--k-navy); font-weight: 500; line-height: 1; }
 .kitchen-count-dish { font-size: 16px; font-weight: 700; color: var(--k-navy); }
+.kitchen-count-components { margin-top: 8px; display: grid; gap: 7px; }
+.kitchen-count-component { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 3px 8px; font-size: 11px; line-height: 1.4; color: var(--k-muted); }
+.kitchen-count-component span { min-width: 0; overflow-wrap: anywhere; }
+.kitchen-count-component b { white-space: nowrap; color: var(--k-navy); font-weight: 600; }
 .kitchen-weight-bar strong { display: block; font-size: 15px; color: var(--k-navy); font-weight: 700; }
 .kitchen-weight-bar small { font-size: 11px; color: var(--k-muted); font-weight: 400; }
 .kitchen-bar-track { display: block; background: var(--k-dust); height: 4px; margin-top: 8px; }

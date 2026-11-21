@@ -8,6 +8,8 @@ jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), 
 jest.mock('../contexts/SocketContext', () => ({useSocket: () => ({socket: null})}));
 const mockCountingSave = jest.fn();
 const mockCountingRows = jest.fn(rows => rows);
+const mockCookingSave = jest.fn();
+jest.mock('xlsx-js-style', () => ({ __esModule: true, default: { ...jest.requireActual('xlsx-js-style'), writeFile: (...args) => mockCookingSave(...args) } }));
 jest.mock('xlsx', () => ({utils: {book_new: () => ({}), json_to_sheet: rows => mockCountingRows(rows), book_append_sheet: () => {}}, writeFile: (...args) => mockCountingSave(...args)}));
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -188,6 +190,55 @@ test('Partner order is inline below cook groups and included in the main Excel e
   expect(container.textContent).toContain('Partner feed failed');
 });
 
+
+test('component names appear beside their summed weights and in the Excel breakdown', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => path.endsWith('/kitchen-components')
+    ? { data: { success: true, data: [{ _id: 'recipe', mealType: 'main', mealName: 'Fixture meal', cycleMeal: { components: [
+      { type: 'Protein', name: 'Chicken portion' }, { type: 'Carb', name: 'Saffron rice' }, { type: 'Vegetable', name: 'Green beans' },
+    ] } }] } } : originalGet(path, config));
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  const parts = [...container.querySelectorAll('.kitchen-count-component')];
+  expect(parts.map(part => part.querySelector('span').textContent)).toEqual(['Chicken portion', 'Saffron rice', 'Green beans']);
+  expect(parts.every(part => /^\d[\d,]* g$/.test(part.querySelector('b').textContent))).toBe(true);
+  await act(async () => exportButton().click());
+  const exported = mockCountingRows.mock.calls.at(-1)[0][0];
+  expect(exported['Protein Components']).toBe(`Chicken portion: ${exported['Total Protein Weight (g)']} g`);
+  expect(exported['Carb Components']).toBe(`Saffron rice: ${exported['Total Carb Weight (g)']} g`);
+});
+
+test('a component-label request failure does not remove verified counts', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => {
+    if (path.endsWith('/kitchen-components')) throw new Error('Recipe labels unavailable');
+    return originalGet(path, config);
+  });
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  expect(container.textContent).toContain('1 main meal(s) total');
+  expect(container.textContent).toContain('Component names could not be loaded');
+  expect(exportButton().disabled).toBe(false);
+});
+
+test('Cooking & EOD is a separate download with buffered kg and blank staff fields', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => path.endsWith('/kitchen-components') ? { data: { success: true, data: [{
+    _id: 'recipe', mealName: 'Fixture meal', mealType: 'main', proteinSource: 'Chicken', carbs: 'Rice', veg: 'Carrot', sauce: 'BBQ sauce', garnish: 'Parsley',
+  }] } } : originalGet(path, config));
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  const button = [...container.querySelectorAll('button')].find(item => item.textContent.includes('Cooking & EOD Excel'));
+  expect(button.disabled).toBe(false);
+  await act(async () => button.click());
+  expect(mockCookingSave).toHaveBeenCalledWith(expect.anything(), `cooking-and-eod-${A}.xlsx`);
+  const wb = mockCookingSave.mock.calls.at(-1)[0], ws = wb.Sheets['Cooking & EOD'];
+  expect(ws.B2.v).toBe(0.05); expect(ws.E8.v).toBe('KG'); expect(ws.B8.f).toContain('*(1+$B$2)');
+  expect(ws.C8.v).toBe(''); expect(ws.D8.v).toBe('');
+  expect(ws.E11.v).toBe('PCS'); expect(ws.B11.v).toBe(1);
+  expect(mockCountingSave).not.toHaveBeenCalled();
+  expect(api.post.mock.calls.every(([url]) => !/selections|meal-edits/.test(url))).toBe(true);
+});
 
 test('a partner-only cooking day can use the main Excel download', async () => {
   const originalGet = api.get.getMockImplementation();

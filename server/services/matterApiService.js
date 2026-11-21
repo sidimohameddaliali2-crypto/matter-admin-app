@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { cacheGet, cacheSet } from '../config/cache.js';
 import { boundedMap } from './boundedMap.js';
+import { readMatterGet } from './matterReadRetry.js';
 import { resolveMatterDeliveryAddress, matterMealContract, matterWeekendEnabled, matterDoubleDeliveryDates } from './matterSubscriptionContract.js';
 
 // A customer's macro/plan config on Matter changes on the order of days or
@@ -138,7 +139,7 @@ class MatterApiService {
    * List subscriptions, optionally filtered by email/customerId/renewal date and paginated.
    */
   async listSubscriptions({ page = 1, pageSize = 50, email, customerId, updatedSince } = {}) {
-    const response = await this.client().get('/subscriptions', {
+    const response = await readMatterGet(this.client(), '/subscriptions', {
       params: {
         page,
         page_size: pageSize,
@@ -155,7 +156,7 @@ class MatterApiService {
    * Get a single subscription by id.
    */
   async getSubscription(subscriptionId) {
-    const response = await this.client().get(`/subscriptions/${subscriptionId}`);
+    const response = await readMatterGet(this.client(), `/subscriptions/${subscriptionId}`);
     return response.data;
   }
 
