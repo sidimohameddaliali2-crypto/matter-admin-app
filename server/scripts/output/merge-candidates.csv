@@ -1,5 +1,0 @@
-throwawayCustomerId,throwawayEmail,matterName,selectionCount,candidateRank,candidateCustomerId,candidateEmail,candidateName,candidateDataSource,matchReason,confirmed
-"CUST-000124076","fm-al@live.com","Fatima AlMheiri","4","1","CUST-000123211","fatimah.harib@gmail.com","Fatima Almheiri","ImportedFromExcel","same person, 71 vs 22 deliveries","yes"
-"CUST-000118264","craig@base3.comhhh","CRAIG HARRIMAN","0","1","CUST-000123599","craig@base3.ae","CRAIG HARRIMAN","ImportedFromExcel","same person, 139 vs 97 deliveries, 22 vs 0 selections, clean email","yes"
-"CUST-000123213","sergioviu9@gmail.com111","Sergio Viu Dominguez","1","1","CUST-000124143","sergioviu9@gmail.com","Sergio Viu Dominguez","ManualEntry","same person, 7x more selections, clean email","yes"
-"CUST-000122895","asdasdasd@gmail.com","Laura Guinea","1","1","CUST-000124037","laura.guineaxo@hotmail.com","Laura Guinea","ManualEntry","same person, 11x more selections, real email vs placeholder","yes"

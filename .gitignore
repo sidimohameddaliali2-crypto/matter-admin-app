@@ -39,3 +39,10 @@ website-build.tar.gz
 
 # Private activity journal awaiting database delivery
 server/.activity-journal/
+
+# Local settings, scratch files, and generated reports
+/.claude/settings.local.json
+/temp.txt
+/server/routes/deliveries.js.bak
+/outputs/
+/server/scripts/output/
