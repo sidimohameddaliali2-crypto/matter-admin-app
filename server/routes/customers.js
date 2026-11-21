@@ -58,21 +58,26 @@ const buildEmailRegex = (email) => {
   return new RegExp(`^${escapeRegex(cleaned)}$`, 'i');
 };
 
+const EXCLUSION_SENTINELS = new Set(['none', 'n/a', 'na', '-', 'null']);
+
+// Spreadsheet cells list phrases separated by comma, semicolon, or pipe.
+// Do not split on spaces: "Raw Onion" and "All Fish" are single exclusions
+// (issue #13). Case-insensitive duplicates collapse; the first spelling is kept.
 const normalizeMealExclusions = (exclusions) => {
-  const raw = String(exclusions || '').trim();
-  if (!raw) return '';
+  const raw = String(exclusions || '').trim().replace(/\s+/g, ' ');
+  if (!raw || EXCLUSION_SENTINELS.has(raw.toLowerCase())) return '';
 
-  const lowered = raw.toLowerCase();
-  if (['none', 'n/a', 'na', '-', 'null'].includes(lowered)) {
-    return '';
+  const phrases = [];
+  const seen = new Set();
+  for (const part of raw.split(/[,;|\n\r]+/)) {
+    const phrase = part.trim().replace(/\s+/g, ' ');
+    if (!phrase) continue;
+    const key = phrase.toLowerCase();
+    if (EXCLUSION_SENTINELS.has(key) || seen.has(key)) continue;
+    seen.add(key);
+    phrases.push(phrase);
   }
-
-  const ingredients = raw
-    .split(/[\s,;|]+/)
-    .map((value) => value.trim())
-    .filter(Boolean);
-
-  return [...new Set(ingredients)].join(', ');
+  return phrases.join(', ');
 };
 
 /**

@@ -137,6 +137,20 @@ test('upload-bulk: a brand-new customer is created; a duplicate row for it later
   });
 });
 
+test('upload-bulk keeps multi-word exclusion phrases and does not treat them as separate words (#13)', async () => {
+  await withDb([], async (calls) => {
+    const r = await call(uploadBulk, { customers: [
+      bulkRow({ customerId: 'NEW-1', email: 'n@example.com', exclusions: 'Raw Onion, All Fish, raw onion; none' }),
+      bulkRow({ customerId: 'NEW-2', email: 'm@example.com', exclusions: 'N/A' }),
+      bulkRow({ customerId: 'NEW-3', email: 'p@example.com', exclusions: '  All   Fish | Raw Onion  ' })
+    ] });
+    assert.equal(r.body.success, true);
+    assert.equal(r.body.conflicts, undefined);
+    const stored = calls.bulkOps.map((op) => op.updateOne.update.$set.mealExclusion);
+    assert.deepEqual(stored, ['Raw Onion, All Fish', '', 'All Fish, Raw Onion']);
+  });
+});
+
 test('upload-bulk 5: a failed/conflicting upload cannot orphan delivery history (no delivery or customer write)', async () => {
   await withDb([A, B], async (calls) => {
     await call(uploadBulk, { customers: [
