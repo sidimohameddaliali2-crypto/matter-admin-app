@@ -317,3 +317,42 @@ test('deletion requires new consent, an opted-in admin policy, and a separate no
     assert.equal(refreshed.scope, scope);
   } finally { await setup.close(); }
 });
+
+test('meal reading needs new OAuth consent and current menu/customer permissions, not write access', async () => {
+  const setup = await fixture();
+  const connect = async token => {
+    const client = new Client({ name: 'meal-scope-test', version: '1.0.0' });
+    await client.connect(new StreamableHTTPClientTransport(new URL(`${setup.base}/api/mcp`), { requestInit: {
+      headers: { Authorization: `Bearer ${token}` },
+    } }));
+    return client;
+  };
+  try {
+    const client = await setup.register();
+    const old = await (await setup.exchange(client, await setup.issueCode(client))).json();
+    const oldClient = await connect(old.access_token);
+    try { assert.ok(!(await oldClient.listTools()).tools.some(tool => tool.name === 'matter_get_daily_menu')); }
+    finally { await oldClient.close(); }
+    const requested = { scope: 'deliveries:read meals:read' };
+    await assert.rejects(setup.provider.exchangeRefreshToken(client, old.refresh_token, requested.scope.split(' ')), /expand/);
+    const unchecked = await (await setup.exchange(client, await setup.issueCode(client, { allowWrites: false }, requested))).json();
+    assert.equal(unchecked.scope, 'deliveries:read');
+    const tokens = await (await setup.exchange(client, await setup.issueCode(client, { allowWrites: false, allowMealReads: true }, requested))).json();
+    assert.equal(tokens.scope, requested.scope);
+    const linked = await connect(tokens.access_token);
+    try {
+      const tools = (await linked.listTools()).tools;
+      assert.ok(tools.some(tool => tool.name === 'matter_get_daily_menu'));
+      assert.ok(tools.some(tool => tool.name === 'matter_get_customer_meal_selections'));
+      assert.ok(!tools.some(tool => tool.name === 'matter_create_delivery'));
+      setup.changeUser({ _id: staffId, isActive: true, role: 'admin', permissionsConfigured: true,
+        permissions: { customers: false } });
+      assert.ok(!(await linked.listTools()).tools.some(tool => tool.name === 'matter_get_customer_meal_selections'));
+      setup.changeUser({ _id: staffId, isActive: true, role: 'admin', permissionsConfigured: true,
+        permissions: { menus: false, kitchen_list: false } });
+      assert.ok(!(await linked.listTools()).tools.some(tool => tool.name === 'matter_get_daily_menu'));
+    } finally { await linked.close(); }
+    const refreshed = await setup.provider.exchangeRefreshToken(client, tokens.refresh_token);
+    assert.equal(refreshed.scope, 'deliveries:read');
+  } finally { await setup.close(); }
+});
