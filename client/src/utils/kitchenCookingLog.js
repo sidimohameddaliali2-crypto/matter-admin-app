@@ -26,7 +26,11 @@ export function buildCookingLog(entries, date, catalog) {
     };
     const pcs = category === 'breakfast' || category === 'snack';
     const salad = item.cycleMeal?.isSaladBase === true || recipe.some(component => component.type === 'Salad');
+    const coreMain = category === 'meal' && (meal.flags?.matterCorePlan === true || clean(entry.planName).toLowerCase() === 'matter core');
     for (const [kind, label] of [['protein', 'Portion'], ['carb', 'Carb'], ['veg', salad ? 'Salad base' : 'Veg']]) {
+      // Core main meals have no vegetable portion. A PCS salad must not be
+      // inferred from recipe metadata when the calculated portion excludes it.
+      if (kind === 'veg' && salad && coreMain) continue;
       // Breakfast/snack recipes often have no separate carb or veg component.
       if (pcs && kind !== 'protein' && names[kind] === 'Component not recorded') continue;
       const unit = pcs || (kind === 'veg' && salad) ? 'PCS' : 'KG';

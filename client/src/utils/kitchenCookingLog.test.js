@@ -24,6 +24,31 @@ test('salad bases and dressing use pcs; main protein and carbs retain kg', () =>
   expect(block.components.find(row => row.kind === 'Carb').unit).toBe('KG');
 });
 
+for (const marker of ['flag', 'plan']) {
+  test(`Matter Core ${marker} excludes only its main salad base in mixed cook counts`, () => {
+    const salad = { ...recipe, cycleMeal: { ...recipe.cycleMeal, isSaladBase: true } };
+    const core = { ...(marker === 'plan' ? { planName: ' Matter Core ' } : {}), selectedMeals: [meal({
+      quantity: 2, vegWeight: 0, ...(marker === 'flag' ? { flags: { matterCorePlan: true } } : {}),
+    })] };
+    const standard = { planName: 'Custom', selectedMeals: [meal({ quantity: 3 })] };
+    const entries = [core, standard], before = JSON.stringify(entries);
+    const [block] = buildCookingLog(entries, date, [salad]);
+    expect(block.count).toBe(5);
+    expect(block.components.find(row => row.kind === 'Salad base')).toMatchObject({ base: 3, unit: 'PCS' });
+    expect(block.components.find(row => row.kind === 'Portion').base).toBe(0.75);
+    expect(block.components.find(row => row.kind === 'Sauce').base).toBe(5);
+    expect(block.components.find(row => row.kind === 'Garnish').base).toBe(5);
+    expect(buildCookingLog([core], date, [salad])[0].components.some(row => row.kind === 'Salad base')).toBe(false);
+    expect(JSON.stringify(entries)).toBe(before);
+  });
+}
+
+test('Matter Core main salad exclusion does not remove its additional breakfast vegetables', () => {
+  const breakfast = { ...recipe, mealName: 'Breakfast salad', mealType: 'breakfast', cycleMeal: { components: [{ type: 'Salad', name: 'Breakfast veg' }] } };
+  const [block] = buildCookingLog([{ planName: 'Matter Core', selectedMeals: [meal({ category: 'breakfast', mealType: 'breakfast', mealName: breakfast.mealName })] }], date, [breakfast]);
+  expect(block.components.find(row => row.kind === 'Salad base')).toMatchObject({ base: 1, unit: 'PCS' });
+});
+
 test('breakfast/snack quantities use pieces, large breakfast is separate and no sauce means no sauce row', () => {
   const breakfast = meal({ category: 'breakfast', mealType: 'breakfast', mealName: 'Oats', quantity: 2 });
   const snack = meal({ category: 'snack', mealType: 'snack', mealName: 'Truffle' });
