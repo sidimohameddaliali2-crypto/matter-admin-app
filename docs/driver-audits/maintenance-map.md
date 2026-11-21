@@ -199,6 +199,48 @@ For an Activity history release, also check that a real authorized report reques
 
 Record each result and unresolved gap. A report displaying only its pre-activation capture, a source-only success, or a passing fixture suite does not complete this journey.
 
+## Operational tracker activity volume (2026-11-21)
+
+The generic Mongoose activity producer is
+[`activityDatabase.js`](../../server/observability/activityDatabase.js), with
+the narrow predicate in [`activityScope.js`](../../server/observability/activityScope.js).
+The operational `customer-tracker-visits` job writes Delivery `trackerVisit`
+and occasionally its one-time `trackerVisitGpsBaseline`. Its full pre-write
+snapshot duplicated the terminal audit payload in `activity_audit_events`.
+
+The prepared change defers only that automated tracker-only `updateOne` start
+snapshot. It retains saved/unchanged terminal events and records a failed write
+as explicitly uncertain without exposing raw errors. Human/action contexts,
+mixed business fields, upserts, bulk writes and other jobs retain their existing
+audit behavior. A crash before any terminal outcome no longer has an individual
+durable tracker-start row; job telemetry and the independent tracker/GPS retry
+and evidence paths remain. This is not a blanket Delivery audit exclusion.
+
+Impact check: GPS acquisition, immutable capture batches, tracker history,
+delivery proof/status, original report evidence, Supabase reviews, source and
+builder controls are unchanged. No private source export or serving package
+needs replacement for this generic operational activity change.
+
+Local acceptance: `activityTrackerVisit.test.js` covers exact predicate
+boundaries, saved/unchanged/uncertain outcomes, original error propagation and
+real Mongoose writes in disposable MongoDB. Run the existing activity scope,
+transaction, journal, vehicle capture/store and Truckoom visit tests too.
+The optional integration uses `TRACKER_AUDIT_TEST_MONGO_URI` and refuses
+non-loopback/non-test databases; it drops only its synthetic database.
+
+Production acceptance remains pending: verify actual serving SHA and sample
+tracker write outcomes plus continuing operational GPS capture after a separately
+authorized release. This note authorizes no deployment, deletion or retention
+change. Existing started/saved rows remain intact. A possible redundant start
+is `stage=record_change_started`, `outcome=pending`, not a `status=started`
+field. Its confirmed saved counterpart must independently match `operationId`,
+`job=customer-tracker-visits`, `record.type=Delivery`, the same `record.id`,
+`stage=record_saved`, `outcome=saved`, and a non-earlier event time. Event IDs
+are different: the start uses its own UUID, while the saved event uses the
+operation UUID. Unmatched, failed or uncertain attempts are outside any
+redundant-start cleanup. Backup, restore proof and cleanup admission are a
+separate prerequisite owned by the incident coordinator.
+
 ## Run the relevant checks
 
 Run targeted checks for the changed component, then the repository's required checks. These commands run from `server/`:
