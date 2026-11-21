@@ -2507,6 +2507,8 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
     };
     recordProofReceipt(delivery, { ...bodyProof, photoUrl: delivery.proof.photoUrl });
 
+    // Reject invalid capture metadata before any bag custody write.
+    await delivery.validate();
     await recordDeliveryBagMovements(delivery,{status:'delivered',proof:delivery.proof,bagId:req.body.bagId||bodyProof.bagId||delivery.bagAssignment?.bagId||delivery.bag?.bagId},req.user);
 
     // Complete delivery
@@ -2547,16 +2549,20 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
     });
   } catch (error) {
     console.error('Complete delivery error:', error);
+    const invalidCapture = error.name === 'ValidationError' && Object.keys(error.errors || {})
+      .some(path => path === 'proof.clientEventId' || path.startsWith('proof.photoEvidence'));
+    if (invalidCapture) error.statusCode = 400;
     try{await recordCompletionFailure(authorizedDeliveryId,req.user?._id,req.body,error);}
     catch{console.warn('Unable to record failed completion bag details');}
     // Preserve actionable bag/validation rejections for the driver's saved sync
     // queue. Treating every rejection as HTTP 500 causes endless blind retries.
-    const status = Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode < 500
+    const status = invalidCapture ? 400 : Number.isInteger(error.statusCode) && error.statusCode >= 400 && error.statusCode < 500
       ? error.statusCode
       : 500;
     res.status(status).json({
       success: false,
-      message: status < 500 ? error.message : 'Server error'
+      message: invalidCapture ? 'Invalid photo capture metadata. Keep the original saved photo and contact dispatch.'
+        : status < 500 ? error.message : 'Server error'
     });
   }
 });
