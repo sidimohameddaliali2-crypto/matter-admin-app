@@ -422,7 +422,7 @@ const KitchenCounting = () => {
             ))}
             <PartnerKitchenCounts state={partnerOrders} />
             {exportError && <p role="alert" className="text-sm text-red-700">{exportError}</p>}
-            <p className="kitchen-table-note">Standard Excel retains grams. Cooking & EOD uses kg with a 5% buffer for main protein, carbs and vegetables, and pcs without a buffer for sauces, garnish, salad bases, breakfasts and snacks. Large breakfasts stay separate.</p>
+            <p className="kitchen-table-note">Standard Excel retains grams. Cooking & EOD uses kg with a 5% buffer for main protein, carbs and vegetables, and pcs without a buffer for sauces, garnish, salad bases, breakfasts and snacks. Cooking & EOD combines normal and Large breakfasts and labels the Large count; standard counts keep them separate.</p>
           </div>
         )}
       </div>
