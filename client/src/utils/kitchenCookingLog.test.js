@@ -96,6 +96,29 @@ test('INITIAL rounds buffered kg to one decimal, while unbuffered quantities and
   expect(wb.Sheets.Calculation.E2.v).toBe(27.765 / 1.05);
 });
 
+test('twenty 150g portions aggregate in grams and round the buffered 3.15kg total up to 3.2kg', () => {
+  const entries = Array.from({ length: 20 }, () => ({ selectedMeals: [meal({ proteinWeight: 150, carbWeight: 150, vegWeight: 150 })] }));
+  const before = JSON.stringify(entries), blocks = buildCookingLog(entries, date, [recipe]);
+  for (const component of blocks[0].components.filter(row => row.unit === 'KG')) expect(component.base).toBe(3);
+  const wb = cookingLogWorkbook(XLSX, blocks, date), ws = wb.Sheets['Cooking & EOD'];
+  for (const address of ['B8', 'B9', 'B10']) expect(ws[address].v).toBe(3.2);
+  expect(wb.Sheets.Calculation.E2.v).toBe(3);
+  expect(ws.B11.v).toBe(20);
+  const restored = XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), { type: 'buffer', cellFormula: true });
+  expect(restored.Sheets['Cooking & EOD'].B8.v).toBe(3.2);
+  expect(restored.Sheets['Cooking & EOD'].B8.f).toBe('ROUND(Calculation!E2*(1+$B$2),1)');
+  expect(JSON.stringify(entries)).toBe(before);
+  const bulk = buildCookingLog([{ selectedMeals: [meal({ quantity: 20, proteinWeight: 150 })] }], date, [recipe]);
+  expect(cookingLogWorkbook(XLSX, bulk, date).Sheets['Cooking & EOD'].B8.v).toBe(3.2);
+});
+
+test('buffered rounding remains distinct just below, at and above the half-step', () => {
+  for (const [grams, expected] of [[2999, 3.1], [3000, 3.2], [3001, 3.2], [1000, 1.1], [5000, 5.3]]) {
+    const blocks = buildCookingLog([{ selectedMeals: [meal({ proteinWeight: grams })] }], date, [recipe]);
+    expect(cookingLogWorkbook(XLSX, blocks, date).Sheets['Cooking & EOD'].B8.v).toBe(expected);
+  }
+});
+
 test('combined breakfast names count Large quantities only and do not alter saved meals', () => {
   const breakfast = meal({ category: 'breakfast', mealType: 'breakfast', mealName: 'Scramble egg (150G)', quantity: 32 });
   const entries = [{ selectedMeals: [breakfast, { ...breakfast, quantity: 21, flags: { isLargeBreakfast: true } }] }];

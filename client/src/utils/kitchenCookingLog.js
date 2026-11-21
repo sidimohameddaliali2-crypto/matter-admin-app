@@ -43,7 +43,9 @@ export function buildCookingLog(entries, date, catalog) {
       // Breakfast/snack recipes often have no separate carb or veg component.
       if (pcs && kind !== 'protein' && names[kind] === 'Component not recorded') continue;
       const unit = pcs || (kind === 'veg' && salad) ? 'PCS' : 'KG';
-      add(label, names[kind], unit, unit === 'PCS' ? qty : (Number(meal[`${kind}Weight`]) || 0) * qty / 1000);
+      // Sum the calculator's gram quantities first. Converting each 150g
+      // portion to 0.15kg before adding can turn 3000g into 2.999999999999999kg.
+      add(label, names[kind], unit, unit === 'PCS' ? qty : (Number(meal[`${kind}Weight`]) || 0) * qty);
     }
     const componentNames = types => [...new Set(recipe.filter(component => types.includes(component.type)).map(component => clean(component.name)).filter(Boolean))];
     const sauces = meal.sauceChoice ? [meal.sauceChoice] : componentNames(['Sauce']);
@@ -54,6 +56,12 @@ export function buildCookingLog(entries, date, catalog) {
     for (const name of garnish.length ? garnish : [item.garnish]) add('Garnish', name, 'PCS', qty);
   }
   for (const block of blocks.values()) {
+    for (const component of block.components) {
+      if (component.unit === 'KG') {
+        component.baseGrams = component.base;
+        component.base = component.baseGrams / 1000;
+      }
+    }
     if (!block.largeCount) continue;
     block.name = `${block.name} (${block.largeCount}-LARGE)`;
     for (const component of block.components) {
@@ -97,7 +105,9 @@ export function cookingLogWorkbook(XLSX, blocks, date) {
         const r = row + 3 + offset;
         [block.name, component.kind, component.name, component.unit, component.base].forEach((value, c) => put(base, baseRow, c, value, c === 4 ? { numFmt: component.unit === 'PCS' ? '0' : '0.000' } : {}));
         const ref = `Calculation!E${baseRow + 1}`, kg = component.unit === 'KG';
-        const initial = kg ? Math.round((component.base * 1.05 + Number.EPSILON) * 10) / 10 : component.base;
+        // Calculate tenths of buffered kg directly from source grams using
+        // the exact 105/10000 ratio; do not apply a fixed floating-point epsilon.
+        const initial = kg ? Math.round((component.baseGrams ?? component.base * 1000) * 105 / 10000) / 10 : component.base;
         put(sheet, r, col, `${component.kind}: ${component.name}`);
         put(sheet, r, col + 1, initial, { numFmt: kg ? '0.0' : '0' }, kg ? `ROUND(${ref}*(1+$B$2),1)` : ref);
         for (const c of [col + 2, col + 3]) put(sheet, r, c, '', { fill: { fgColor: { rgb: 'FFF2CC' } }, numFmt: kg ? '0.000' : '0' });
