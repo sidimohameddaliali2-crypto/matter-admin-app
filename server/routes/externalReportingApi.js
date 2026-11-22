@@ -1,6 +1,7 @@
 import express from 'express';
 import mongoose from 'mongoose';
 import Delivery from '../models/Delivery.js';
+import { ABU_DHABI_ZONE } from '../config/zoneRules.js';
 import { getBusinessDayBounds, isDateKey } from '../utils/businessDate.js';
 import { apiKeyAuth, isReportingApiClient } from '../middleware/apiKeyAuth.js';
 import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
@@ -54,13 +55,20 @@ router.get('/days/:day/ids', async (req, res) => {
     // or the source row's update clock and status.
     const result = await mongoose.connection.transaction(async session => {
       const through = await readReportingWatermark(session);
-      const rows = await Delivery.find({ scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive } })
-        .session(session).select('_id status type updatedAt +reportingVersion')
+      const rows = await Delivery.find({
+        scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive },
+        $expr: { $ne: [
+          { $toLower: { $trim: { input: { $convert: { input: '$zone', to: 'string', onNull: '', onError: '' } } } } },
+          ABU_DHABI_ZONE.toLowerCase(),
+        ] },
+      }).session(session).select('_id status type updatedAt +reportingVersion')
         .sort({ scheduledTime: 1, _id: 1 }).limit(maxDayRows + 1).maxTimeMS(5_000).lean();
       if (rows.length > maxDayRows) return null;
       return { through, data: rows.map(row => ({
-        id: String(row._id), status: row.status ?? null, type: row.type ?? null,
-        updatedAt: row.updatedAt?.toISOString() ?? null,
+        id: String(row._id),
+        status: typeof row.status === 'string' ? row.status.trim().toLowerCase() || null : null,
+        type: typeof row.type === 'string' ? row.type.trim() || null : null,
+        updatedAt: row.updatedAt instanceof Date && Number.isFinite(+row.updatedAt) ? row.updatedAt.toISOString() : null,
         reportingVersion: Number.isSafeInteger(row.reportingVersion) && row.reportingVersion > 0 ? row.reportingVersion : null,
       })) };
     }, { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } });
