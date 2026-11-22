@@ -87,6 +87,17 @@ The [service worker](../../client/public/service-worker.js) and [worker compatib
 
 The saved source assessments view reuses the archive catalog pinned by the selected release. The first date lookup streams the original browser snapshot to verify its hash and extracts only its history index. The runtime reuses the verified index for later lookups. Compare case versions against the preserved staff history using exact saved rows. The link appears in the staff report frame when its package declares a source snapshot.
 
+## Source reporting change feed
+
+The owned reporting worker can catch up through the operational app’s API. Keep this feed disabled until the source owner approves activation and verifies that the storage deployment supports MongoDB transactions.
+
+- Set `MATTER_REPORTING_API_CLIENTS` to the existing report worker key labels. A bare key uses the `default` label. Normal external clients retain their existing delivery detail shape.
+- Set `MATTER_REPORTING_CAPTURE_ENABLED=1` to record metadata-only events with the delivery write or completed GPS batch. The source uses a global committed sequence. The existing 10:30 and noon Dubai report builds remain separate.
+- Set `MATTER_REPORTING_EMITTER_ENABLED=1` only with the approved HTTPS `MATTER_REPORTING_WEBHOOK_URL` and private `MATTER_REPORTING_WEBHOOK_SECRET`. The sender signs the Unix-seconds timestamp, a period and the exact JSON body. It retries the same event ID when delivery is uncertain. Disabling emission retains the recorded outbox.
+- `GET /api/external/reporting/changes?after=0&limit=200` gives the upper sequence `through` for the page set. Retain that value and pass the latest `cursor` as `after` until `hasMore` is false. `GET /api/external/reporting/gps-batches/:id` returns only an immutable completed batch. The worker reads the changed delivery through `GET /api/external/deliveries/:id` and uses the returned `reportingVersion` to check the requested revision.
+- `GET /api/external/reporting/days/:day/ids` reads Dubai scheduled-day IDs, status, update clock and reporting revision with the feed watermark in one read-only transaction. It fails above 5,000 deliveries rather than omitting rows. Compare IDs and update clocks against the reporting state to recover gaps from bulk paths outside the outbox. `GET /api/external/reporting/readiness` checks the connected database topology without attempting writes or exposing host details; it does not confirm data-write permission.
+- Before enabling production, verify that a rolled-back delivery leaves no event, two concurrent saves produce consecutive cursors, an expired sender lease retries the same ID, and an unfinished GPS batch cannot be read. Verify one authorized saved proof and one completed GPS batch in the reporting Preview without writing a staff review.
+
 ## Source schedules and upstream inputs
 
 The supervisor invokes the following request identities as child functions; they are **not Express routes mounted on Sidi**. Each job retains its original request method/path, cron authorization and a 300-second maximum. Exact active schedules come from the pinned source manifest. The recovered schedule set uses UTC; delivery-day boundaries use Dubai time.

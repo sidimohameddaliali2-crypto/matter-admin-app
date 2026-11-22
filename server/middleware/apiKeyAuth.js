@@ -50,3 +50,10 @@ export const apiKeyAuth = (req, res, next) => {
   req.apiClient = keys.get(provided);
   next();
 };
+
+// Reuse the tooling key, but opt in only the worker's configured label to
+// additional reporting evidence. Bare external keys use the default label.
+export function isReportingApiClient(req, env = process.env) {
+  return typeof req.apiClient === 'string'
+    && (env.MATTER_REPORTING_API_CLIENTS || '').split(',').map(label => label.trim()).filter(Boolean).includes(req.apiClient);
+}

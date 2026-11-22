@@ -2,7 +2,7 @@ import express from 'express';
 import mongoose from 'mongoose';
 import Delivery from '../models/Delivery.js';
 import Customer from '../models/Customer.js';
-import { apiKeyAuth } from '../middleware/apiKeyAuth.js';
+import { apiKeyAuth, isReportingApiClient } from '../middleware/apiKeyAuth.js';
 import { isDateKey, businessDayStart } from '../utils/businessDate.js';
 
 // Read-only delivery API for external/third-party consumers (logistics
@@ -87,14 +87,19 @@ function timingFor(delivery) {
 // `customersById` is a Map keyed by Customer.customerId (delivery.customerId
 // is the same string, not a Mongo ref) — pass it pre-fetched so a list
 // endpoint doesn't do one Customer lookup per delivery.
-export function serializeDelivery(delivery, customersById) {
+export function serializeDelivery(delivery, customersById, { includeProofEvidence = false } = {}) {
   const d = typeof delivery.toObject === 'function' ? delivery.toObject() : delivery;
   const t = timingFor(d);
   const proof = d.proof || {};
   const customer = customersById?.get(String(d.customerId)) || null;
+  const { lat, lng } = proof.location || {};
+  const hasProofCoordinates = Number.isFinite(lat) && Number.isFinite(lng)
+    && Math.abs(lat) <= 90 && Math.abs(lng) <= 180 && (lat !== 0 || lng !== 0);
 
   return {
     id: String(d._id),
+    ...(includeProofEvidence && Number.isSafeInteger(d.reportingVersion) && d.reportingVersion > 0
+      ? { reportingVersion: d.reportingVersion } : {}),
     customerId: d.customerId || null,
     customerName: d.customerName || null,
     company: d.company === 'Other' && d.otherCompany ? d.otherCompany : (d.company || null),
@@ -122,6 +127,12 @@ export function serializeDelivery(delivery, customersById) {
       photoUrl: proof.photoUrl || (Array.isArray(proof.images) && proof.images[0]) || null,
       notes: proof.notes || null,
       timestamp: proof.timestamp || null,
+      ...(includeProofEvidence ? {
+        receivedAt: proof.receivedAt || null,
+        photoCapturedAt: proof.photoCapturedAt || null,
+        photoSource: proof.photoSource || null,
+        location: hasProofCoordinates ? { lat, lng } : null,
+      } : {}),
     },
     gpsLocation: d.gpsLocation?.lat != null && d.gpsLocation?.lng != null
       ? { lat: d.gpsLocation.lat, lng: d.gpsLocation.lng, link: d.gpsLocation.link || null }
@@ -250,14 +261,16 @@ router.get('/', async (req, res) => {
 // @desc    Get one delivery (with driver + customer meal count).
 // @route   GET /api/external/deliveries/:id
 router.get('/:id', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ success: false, message: 'Invalid delivery id' });
     }
 
-    const delivery = await Delivery.findById(req.params.id)
-      .populate('driver', 'profile.firstName profile.lastName profile.phone profile.vehicleType email')
-      .lean();
+    const includeProofEvidence = isReportingApiClient(req);
+    const query = Delivery.findById(req.params.id);
+    if (includeProofEvidence) query.select('+reportingVersion').read('primary').readConcern('majority');
+    const delivery = await query.populate('driver', 'profile.firstName profile.lastName profile.phone profile.vehicleType email').lean();
 
     if (!delivery) {
       return res.status(404).json({ success: false, message: 'Delivery not found' });
@@ -265,7 +278,7 @@ router.get('/:id', async (req, res) => {
 
     const customersById = await fetchCustomersFor([delivery]);
 
-    res.json({ success: true, data: serializeDelivery(delivery, customersById) });
+    res.json({ success: true, data: serializeDelivery(delivery, customersById, { includeProofEvidence }) });
   } catch (error) {
     console.error('External delivery API get-by-id error:', error);
     res.status(500).json({ success: false, message: 'Server error' });

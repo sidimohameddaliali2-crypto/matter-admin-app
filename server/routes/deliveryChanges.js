@@ -1,3 +1,4 @@
+import { updateReportingDelivery } from '../services/reportingOutbox.js';
 import express from 'express';
 import multer from 'multer';
 import csv from 'csv-parser';
@@ -221,11 +222,7 @@ export async function applyChangesToDelivery(delivery, changes) {
 
   console.log('Update fields for delivery:', delivery._id, updateFields);
   
-  const updatedDelivery = await Delivery.findByIdAndUpdate(
-    delivery._id, 
-    { $set: updateFields },
-    { new: true, runValidators: true }
-  );
+  const updatedDelivery = await updateReportingDelivery(Delivery, delivery._id, { $set: updateFields });
   
   if (!updatedDelivery) {
     throw new Error('Failed to update delivery - delivery not found');

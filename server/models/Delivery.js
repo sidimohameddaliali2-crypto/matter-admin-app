@@ -1,9 +1,11 @@
 import mongoose from 'mongoose';
 import { MATTER_IMPORT_IDENTITIES } from '../config/matterImportIdentity.js';
 import { sanitizeDeliveryAddressEdit } from '../services/deliveryAddressEdit.js';
+import { saveReportingDelivery } from '../services/reportingOutbox.js';
 import { applyZoneRules, isAbuDhabiEmirate, ABU_DHABI_ZONE } from '../config/zoneRules.js';
 
 const deliverySchema = new mongoose.Schema({
+  reportingVersion: { type: Number, immutable: true, select: false },
   bagReturnReceipts: [{bagId:String,eventId:String,receivedAt:Date}],
   
   customerId: {
@@ -314,7 +316,7 @@ deliverySchema.index({ customerId: 1, addressId: 1, scheduledTime: 1 }); // Pin-
 deliverySchema.pre('validate', async function clearStaleAddressOnSave() {
   if (this.isNew || !this.isModified('address')) return;
   const original = await this.constructor.findById(this._id)
-    .select('address addressId addressDetails gpsLocation').lean();
+    .select('address addressId addressDetails gpsLocation').session(this.$session() ?? null).lean();
   if (!original) return;
   const fields = { address: this.address };
   for (const key of ['addressId', 'addressDetails', 'gpsLocation']) {
@@ -340,7 +342,7 @@ deliverySchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], async functi
   // Bulk edits cannot share one old address; invalidate dependent fields
   // conservatively unless the caller supplies replacements.
   const original = this.op === 'updateMany' ? null : await this.model.findOne(this.getQuery())
-    .select('address addressId addressDetails gpsLocation').lean();
+    .select('address addressId addressDetails gpsLocation').session(this.getOptions().session ?? null).lean();
   sanitizeDeliveryAddressEdit(original, set);
 });
 
@@ -412,7 +414,7 @@ deliverySchema.methods.updateStatus = async function (status, notes, location) {
     };
   }
 
-  return this.save();
+  return saveReportingDelivery(this);
 };
 
 deliverySchema.statics.getDriverTodaysDeliveries = function (driverId) {

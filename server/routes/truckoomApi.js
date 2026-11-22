@@ -1,5 +1,5 @@
 import express from 'express';
-import { captureMetadata, driverMappings, CAPTURE_FIELDS } from '../services/vehicleLocationView.js';
+import { captureMetadata, driverMappings, CAPTURE_FIELDS, serializeHistoryPoint } from '../services/vehicleLocationView.js';
 import User from '../models/User.js';
 import truckoomApiService from '../services/truckoomApiService.js';
 import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
@@ -184,14 +184,7 @@ router.get('/history', async (req, res) => {
       .select('vehicleNo driver latitude longitude gpsTime recordedAt ' + CAPTURE_FIELDS)
       .lean();
 
-    const data = points.slice(0, 10000).map(point => {
-      const { vehicleNo, driver, latitude, longitude, recordedAt, gpsTime, _id } = point;
-      const capture = captureMetadata(point);
-      const valid = Number.isFinite(latitude) && Number.isFinite(longitude)
-        && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180 && !(latitude === 0 && longitude === 0);
-      return { _id, vehicleNo, driver, latitude: valid ? latitude : null, longitude: valid ? longitude : null, recordedAt, gpsTime: gpsTime || null,
-        ...(capture ? { capture } : {}) };
-    });
+    const data = points.slice(0, 10000).map(serializeHistoryPoint);
     res.json({ success: true, data, range: { filteredBy: 'recordedAt' },
       pagination: { limit: 10000, returned: data.length, truncated: points.length > 10000 } });
   } catch (error) {
