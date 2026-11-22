@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { reportingCaptureEnabled, reportingChangesQuery, reportingEnvelope, reportingTransactionTopology, signReportingEvent, withReportingEvents } from './reportingOutbox.js';
+import { bulkWriteReportingDeliveries, reportingCaptureEnabled, reportingChangesQuery, reportingEnvelope, reportingTransactionTopology, signReportingEvent, withReportingEvents } from './reportingOutbox.js';
 import { serializeHistoryPoint } from './vehicleLocationView.js';
 import { serializeDelivery } from '../routes/externalDeliveryApi.js';
 import { isReportingApiClient } from '../middleware/apiKeyAuth.js';
@@ -16,6 +16,11 @@ test('reporting is opt-in and disabled writes need neither Mongo nor a webhook',
   const old = process.env.MATTER_REPORTING_CAPTURE_ENABLED;
   delete process.env.MATTER_REPORTING_CAPTURE_ENABLED;
   try {
+    const ops = [{ updateOne: { filter: { _id: 'fixture-delivery' }, update: { $set: { status: 'assigned' } } } }];
+    assert.deepEqual(await bulkWriteReportingDeliveries({ bulkWrite(...args) {
+      assert.deepEqual(args, [ops]);
+      return { modifiedCount: 1 };
+    } }, ops), { modifiedCount: 1 });
     assert.equal(await withReportingEvents(async (session, enqueue) => {
       assert.equal(session, undefined);
       await enqueue('delivery.changed', ['fixture-delivery']);

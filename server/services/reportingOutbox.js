@@ -97,6 +97,26 @@ export async function recordReportingDeliveryChanges(session, enqueue, ids, coll
   if (result.matchedCount !== events.length) throw new Error('Reporting delivery version could not be recorded');
 }
 
+// For existing ordered updates with stable membership throughout the batch:
+// ID-only assignments (including repeated IDs) or disjoint guarded updates.
+export function bulkWriteReportingDeliveries(model, operations) {
+  if (!reportingCaptureEnabled() || operations.length === 0) return model.bulkWrite(operations);
+  return withReportingEvents(async (session, enqueue) => {
+    const filters = operations.map(operation => {
+      const filter = (operation.updateOne ?? operation.updateMany)?.filter;
+      if (!filter?._id) throw new Error('Reporting bulk updates require an explicit delivery ID filter');
+      return filter;
+    });
+    const matched = await model.find({ $or: filters }).session(session).select('_id').lean();
+    const result = await model.bulkWrite(operations, { session });
+    if (result.matchedCount < matched.length) throw new Error('Reporting bulk delivery membership changed');
+    if (result.modifiedCount > 0) {
+      await recordReportingDeliveryChanges(session, enqueue, matched.map(delivery => delivery._id), model.collection);
+    }
+    return result;
+  });
+}
+
 export function updateReportingDelivery(model, id, update) {
   return withReportingEvents(async (session, enqueue) => {
     const delivery = await model.findByIdAndUpdate(id, update, { new: true, runValidators: true, session });
