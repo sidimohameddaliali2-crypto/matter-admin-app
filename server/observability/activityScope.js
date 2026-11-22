@@ -3,6 +3,7 @@
 const observationModels = new Set([
   'VehicleLocationHistory', 'VehicleLocationCaptureBatch', 'TrackerSyncLease',
   'TruckoomGpsReceipt', 'TruckoomTrackHistory', 'TrackerGeofenceEvent', 'TruckoomLiveSnapshot',
+  'ReportingCounter', 'ReportingOutbox',
 ]);
 export const shouldAuditModel = name => !observationModels.has(name);
 

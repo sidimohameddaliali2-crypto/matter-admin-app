@@ -1,3 +1,4 @@
+import { bulkWriteReportingDeliveries } from './reportingOutbox.js';
 import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -560,7 +561,7 @@ export async function applyRoutePlan(routes, handoffs = [], kitchenReturns = [],
   });
 
   if (bulkOps.length === 0) return { modifiedCount: 0, handoffsCreated: 0 };
-  const result = await Delivery.bulkWrite(bulkOps);
+  const result = await bulkWriteReportingDeliveries(Delivery, bulkOps);
 
   // This is the main day-to-day path deliveries actually get assigned to
   // drivers through, and it previously sent no signal to the driver at all
@@ -624,7 +625,7 @@ export async function applyRoutePlan(routes, handoffs = [], kitchenReturns = [],
     ]);
     handoffsCreated = docs.length;
 
-    await Delivery.bulkWrite(docs.map((doc) => ({
+    await bulkWriteReportingDeliveries(Delivery, docs.map((doc) => ({
       updateMany: {
         filter: { _id: { $in: doc.deliveryIds } },
         update: { $set: { handoff: doc._id } }

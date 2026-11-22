@@ -1,5 +1,6 @@
 import Delivery from '../models/Delivery.js';
 import { MATTER_IMPORT_IDENTITIES, matterImportIdentityKeys } from '../config/matterImportIdentity.js';
+import { reportingCaptureEnabled, saveReportingDelivery } from './reportingOutbox.js';
 
 export const matterImportKey = (subscriptionId, serviceDate) => `${serviceDate}:${String(subscriptionId)}`;
 
@@ -16,7 +17,9 @@ export async function ensureMatterDeliveryIdempotency() {
 export async function insertMatterDelivery(snapshot, serviceDate) {
   const keys = matterImportIdentityKeys(snapshot, serviceDate);
   try {
-    await Delivery.create({ ...snapshot, ...keys });
+    const delivery = { ...snapshot, ...keys };
+    if (reportingCaptureEnabled()) await saveReportingDelivery(new Delivery(delivery));
+    else await Delivery.create(delivery);
     return true;
   } catch (error) {
     // A replacement worker may have inserted after our read/lease check.

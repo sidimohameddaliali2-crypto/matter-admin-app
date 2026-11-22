@@ -41,6 +41,7 @@ import { startImportMatterDeliveriesJob } from './jobs/importMatterDeliveries.js
 import { startMatterImportWorker } from './jobs/processMatterImports.js';
 import { startCaptureMatterSalesJob } from './jobs/captureMatterSales.js';
 import { startRecordVehicleLocationsJob } from './jobs/recordVehicleLocations.js';
+import { startReportingEmitter } from './services/reportingOutbox.js';
 import { startCustomerTrackerVisitsJob } from './jobs/syncCustomerTrackerVisits.js';
 import { authenticateSocket, registerStaffSocket } from './middleware/socketAuth.js';
 import {authenticateStaffToken} from './middleware/auth.js';
@@ -215,6 +216,7 @@ import xeroRoutes from './routes/xero.js';
 import vehicleRoutes from './routes/vehicles.js';
 import yellowblockRoutes from './routes/yellowblock.js';
 import externalDeliveryApiRoutes from './routes/externalDeliveryApi.js';
+import externalReportingApiRoutes from './routes/externalReportingApi.js';
 import externalDriverLocationApiRoutes from './routes/externalDriverLocationApi.js';
 import mobileUpdatesRoutes from './routes/mobileUpdates.js';
 import { createMcpRouter } from './routes/mcp.js';
@@ -271,6 +273,7 @@ app.use('/api/yellowblock', yellowblockRoutes);
 // API key (DELIVERY_API_KEYS), not the app's own JWT login. See
 // middleware/apiKeyAuth.js and docs/EXTERNAL_DELIVERY_API.md.
 app.use('/api/external/deliveries', externalDeliveryApiRoutes);
+app.use('/api/external/reporting', externalReportingApiRoutes);
 // Same static API key, for live driver/vehicle GPS instead of delivery
 // records — see docs/EXTERNAL_DELIVERY_API.md.
 app.use('/api/external/drivers', externalDriverLocationApiRoutes);
@@ -436,6 +439,7 @@ startImportMatterDeliveriesJob();
 startMatterImportWorker();
 startCaptureMatterSalesJob();
 startRecordVehicleLocationsJob();
+startReportingEmitter();
 startCustomerTrackerVisitsJob(io);
 
 // Warm the Supy recipe search cache so the first meal-editor search of the
