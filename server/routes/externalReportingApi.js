@@ -4,18 +4,85 @@ import Delivery from '../models/Delivery.js';
 import { ABU_DHABI_ZONE } from '../config/zoneRules.js';
 import { getBusinessDayBounds, isDateKey } from '../utils/businessDate.js';
 import { apiKeyAuth, isReportingApiClient } from '../middleware/apiKeyAuth.js';
+import { createReportingVercelIdentity, isReportingVercelRead } from '../middleware/reportingVercelIdentity.js';
 import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
 import VehicleLocationCaptureBatch from '../models/VehicleLocationCaptureBatch.js';
 import { CAPTURE_MAX_ROWS, captureObservationId, captureTickId } from '../services/vehicleLocationCaptureStore.js';
 import { CAPTURE_FIELDS, serializeHistoryPoint } from '../services/vehicleLocationView.js';
 import { inspectReportingMongoTopology, readReportingChanges, readReportingWatermark, reportingCaptureEnabled } from '../services/reportingOutbox.js';
+import { serializeDelivery } from './externalDeliveryApi.js';
 
 const router = express.Router();
-router.use(apiKeyAuth);
-router.use((req, res, next) => {
+const hasReportingVercelIdentity = createReportingVercelIdentity();
+
+router.use(async (req, res, next) => {
   res.set('Cache-Control', 'private, no-store');
-  if (!isReportingApiClient(req)) return res.status(403).json({ success: false, message: 'Reporting access is not enabled for this API client' });
-  next();
+  if (isReportingVercelRead(req)) {
+    if (!await hasReportingVercelIdentity(req)) {
+      return res.status(401).json({ success: false, message: 'Invalid reporting identity' });
+    }
+    return next();
+  }
+  return apiKeyAuth(req, res, () => {
+    if (!isReportingApiClient(req)) {
+      return res.status(403).json({ success: false, message: 'Reporting access is not enabled for this API client' });
+    }
+    return next();
+  });
+});
+
+const reportingAddressFields = [
+  'label', 'city', 'area', 'street', 'sourceCategory', 'building', 'floor',
+  'apartment', 'unit', 'addressStatus', 'locationType',
+];
+
+export function serializeReportingDelivery(delivery) {
+  const summary = {
+    id: String(delivery._id),
+    reportingVersion: delivery.reportingVersion,
+    scheduledTime: delivery.scheduledTime,
+    zone: delivery.zone ?? null,
+  };
+  if (typeof summary.zone === 'string' && summary.zone.trim().toLowerCase() === ABU_DHABI_ZONE.toLowerCase()) {
+    // Keep the source revision so a previously published delivery can be removed.
+    return summary;
+  }
+  const data = serializeDelivery(delivery, undefined, { includeProofEvidence: true });
+  const { customerName, customerId, company, type, status, address, addressId, addressDetails,
+    matterSubscriptionId, locationType, deliveredTime, timing, driver, proof, gpsLocation, updatedAt } = data;
+  return {
+    ...summary, customerName, customerId, company, type, status, address, addressId,
+    matterSubscriptionId, locationType, deliveredTime, timing, updatedAt,
+    addressDetails: addressDetails
+      ? Object.fromEntries(reportingAddressFields.map(field => [field, addressDetails[field] ?? null])) : null,
+    driver: driver ? { id: driver.id, name: driver.name, vehicleType: driver.vehicleType } : null,
+    proof: {
+      photoUrl: proof.photoUrl,
+      timestamp: proof.timestamp,
+      receivedAt: proof.receivedAt,
+      photoCapturedAt: proof.photoCapturedAt,
+      location: proof.location,
+    },
+    gpsLocation: gpsLocation ? { lat: gpsLocation.lat, lng: gpsLocation.lng } : null,
+  };
+}
+
+router.get('/deliveries/:id', async (req, res) => {
+  if (!/^[a-f0-9]{24}$/i.test(req.params.id)) {
+    return res.status(400).json({ success: false, message: 'Invalid delivery id' });
+  }
+  try {
+    const delivery = await Delivery.findById(req.params.id).read('primary').readConcern('majority')
+      .select('customerId customerName company otherCompany type status address addressId addressDetails zone matterSubscriptionId scheduledTime deliveredTime completedAt deliveryType lateMinutes earlyMinutes driver proof.photoUrl proof.images proof.timestamp proof.receivedAt proof.photoCapturedAt proof.location gpsLocation updatedAt +reportingVersion')
+      .populate('driver', 'profile.firstName profile.lastName profile.vehicleType').maxTimeMS(5000).lean();
+    if (!Number.isSafeInteger(delivery?.reportingVersion) || delivery.reportingVersion < 1) {
+      return res.status(404).json({ success: false, message: 'Versioned reporting delivery not found' });
+    }
+    return res.json({ success: true, data: serializeReportingDelivery(delivery) });
+  } catch {
+    console.error('Reporting delivery snapshot is unavailable');
+    return res.status(503).json({ success: false, message: 'Reporting delivery snapshot is unavailable' });
+  }
 });
 
 router.get('/changes', async (req, res) => {
