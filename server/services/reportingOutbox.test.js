@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { bulkWriteReportingDeliveries, reportingCaptureEnabled, reportingChangesQuery, reportingEnvelope, reportingTransactionTopology, signReportingEvent, withReportingEvents } from './reportingOutbox.js';
+import { bulkWriteReportingDeliveries, isReportingWebhookReceipt, reportingCaptureEnabled, reportingChangesQuery, reportingEnvelope, reportingTransactionTopology, signReportingEvent, withReportingEvents } from './reportingOutbox.js';
 import { serializeHistoryPoint } from './vehicleLocationView.js';
 import { serializeDelivery } from '../routes/externalDeliveryApi.js';
 import { isReportingApiClient } from '../middleware/apiKeyAuth.js';
@@ -55,6 +55,16 @@ test('changes bounds are canonical safe integers and permit a fixed high waterma
     { after: '8', through: '7' }, { through: '9007199254740992' }]) {
     assert.throws(() => reportingChangesQuery(query), { statusCode: 400 });
   }
+});
+
+test('only a durable inbox receipt acknowledges a webhook', async () => {
+  const workId = 'a704155c-ba14-4c29-89a4-ce1151a86bb2';
+  assert.equal(await isReportingWebhookReceipt(Response.json({ status: 'accepted', workId }, { status: 202 })), true);
+  assert.equal(await isReportingWebhookReceipt(Response.json({ status: 'duplicate', workId })), true);
+  assert.equal(await isReportingWebhookReceipt(Response.json({ status: 'accepted', workId })), false);
+  assert.equal(await isReportingWebhookReceipt(Response.json({ status: 'accepted' }, { status: 202 })), false);
+  assert.equal(await isReportingWebhookReceipt(Response.json({ status: 'accepted', workId, large: 'a'.repeat(1024) }, { status: 202 })), false);
+  assert.equal(await isReportingWebhookReceipt(new Response('<html>OK</html>')), false);
 });
 
 test('delivery detail separates and limits proof clocks and handset coordinates; list shape is unchanged', () => {

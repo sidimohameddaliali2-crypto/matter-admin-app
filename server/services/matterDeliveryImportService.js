@@ -8,6 +8,7 @@ import { displayMatterName } from '../utils/matterName.js';
 import { resolveMatterDeliveryAddress } from './matterSubscriptionContract.js';
 import { compareMatterDelivery } from './matterDeliveryComparison.js';
 import { capturePendingMatterRevenue } from './matterSalesService.js';
+import { recordReportingDeliveryChanges, withReportingEvents } from './reportingOutbox.js';
 
 // Only pending/assigned work today or later can receive a name refresh.
 const EDITABLE_STATUSES = new Set(['pending', 'assigned']);
@@ -191,7 +192,14 @@ export async function importMatterDeliveriesForDate(dateKey, { onProgress, asser
         const matterName = displayMatterName(sub.name);
         if (matterName && existingFromThisImport.customerName !== matterName && EDITABLE_STATUSES.has(existingFromThisImport.status) && startOfDay >= getBusinessDayBounds(new Date()).startOfDay) {
           await assertActive?.();
-          await Delivery.updateOne({ _id: existingFromThisImport._id, status: { $in: ['pending', 'assigned'] } }, { $set: { customerName: matterName } });
+          await withReportingEvents(async (session, enqueue) => {
+            const filter = { _id: existingFromThisImport._id, status: { $in: ['pending', 'assigned'] } };
+            const update = { $set: { customerName: matterName } };
+            const result = await Delivery.updateOne(filter, update, session ? { session } : undefined);
+            if (result.modifiedCount) {
+              await recordReportingDeliveryChanges(session, enqueue, [existingFromThisImport._id], Delivery.collection);
+            }
+          });
           summary.namesRefreshed = (summary.namesRefreshed || 0) + 1;
         }
         continue;

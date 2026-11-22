@@ -96,7 +96,7 @@ router.get('/changes', async (req, res) => {
   }
 });
 
-const maxDayRows = 5000;
+const maxDayRows = 2000;
 
 router.get('/readiness', async (_req, res) => {
   try {

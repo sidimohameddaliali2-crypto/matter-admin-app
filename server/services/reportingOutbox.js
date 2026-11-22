@@ -7,6 +7,9 @@ const batchSize = 10;
 const sendTimeoutMs = 8_000;
 const leaseMs = 30_000;
 const tickMs = 5_000;
+const receiptMaxBytes = 1024;
+const majorityWriteConcern = { w: 'majority', wtimeout: 10_000 };
+const workIdPattern = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 let initialization;
 
 export function reportingCaptureEnabled(env = process.env) {
@@ -212,6 +215,34 @@ function retryDelay(attempts) {
   return Math.min(60 * 60_000, 15_000 * 2 ** Math.min(attempts, 10));
 }
 
+export async function isReportingWebhookReceipt(response) {
+  const expectedStatus = response.status === 202 ? 'accepted' : response.status === 200 ? 'duplicate' : null;
+  if (!response.body) return false;
+  if (!expectedStatus || response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() !== 'application/json') {
+    await response.body.cancel().catch(() => {});
+    return false;
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > receiptMaxBytes) return false;
+      chunks.push(value);
+    }
+    const receipt = JSON.parse(Buffer.concat(chunks, size).toString('utf8'));
+    return receipt?.status === expectedStatus && typeof receipt.workId === 'string' && workIdPattern.test(receipt.workId);
+  } catch {
+    return false;
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 async function publishOne(settings) {
   const now = new Date();
   const leaseId = randomUUID();
@@ -221,7 +252,7 @@ async function publishOne(settings) {
   }, {
     $set: { leaseId, leaseUntil: new Date(+now + leaseMs) },
     $inc: { attempts: 1 },
-  }, { sort: { sourceVersion: 1 }, new: true }).lean();
+  }, { sort: { sourceVersion: 1 }, new: true, writeConcern: majorityWriteConcern }).lean();
   if (!row) return false;
 
   let accepted = false;
@@ -230,15 +261,14 @@ async function publishOne(settings) {
       method: 'POST', redirect: 'error', signal: AbortSignal.timeout(sendTimeoutMs),
       ...signReportingEvent(row, settings.signingSecret),
     });
-    accepted = response.ok;
-    await response.body?.cancel().catch(() => {});
+    accepted = await isReportingWebhookReceipt(response);
   } catch {
     // A timeout or lost response can replay the same immutable event ID.
   }
   const state = accepted ? { deliveredAt: new Date() } : { nextAttemptAt: new Date(Date.now() + retryDelay(row.attempts)) };
   await ReportingOutbox.updateOne({ _id: row._id, leaseId }, {
     $set: state, $unset: { leaseId: 1, leaseUntil: 1 },
-  });
+  }, { writeConcern: majorityWriteConcern });
   return true;
 }
 
