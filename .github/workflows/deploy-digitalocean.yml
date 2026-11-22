@@ -27,6 +27,10 @@ on:
           - audit-source-pause
           - audit-source-resume
           - audit-source-rollback
+          - reporting-readiness
+          - reporting-preview-stage
+          - reporting-preview-enable
+          - reporting-preview-disable
       audit_source_manifest_sha256:
         description: SHA-256 of the reviewed private source runtime manifest
         type: string
@@ -55,7 +59,7 @@ on:
         description: SHA-256 of the reviewed replacement builder
         type: string
       expected_sha:
-        description: Exact reviewed application commit for audit operations
+        description: Exact deployed application commit for audit and reporting operations
         type: string
       app_reader_previous_sha:
         description: Exact currently deployed app commit for the report-only release
@@ -96,6 +100,9 @@ on:
     # A diagnostics-only release must not restart the worker it is inspecting.
     paths-ignore:
       - '.github/workflows/deploy-digitalocean.yml'
+      - '.github/workflows/reporting-vercel-identity-checks.yml'
+      - 'server/scripts/reporting-source-operator.mjs'
+      - 'server/scripts/reporting-source-operator.test.mjs'
       - '.github/workflows/audit-sync-status.yml'
       - '.github/scripts/audit-sync-status.mjs'
       - '.github/scripts/audit-sync-status.test.mjs'
@@ -113,7 +120,7 @@ permissions:
 
 jobs:
   deploy:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && !startsWith(inputs.operation || '', 'reporting-')
     environment: production
     runs-on: ubuntu-latest
 
@@ -604,3 +611,84 @@ jobs:
           if (!/^\.source-transfer-[a-f0-9-]{36}$/.test(dir || '')) throw Error('Invalid cleanup path');
           await fs.rm(dir, {recursive: true, force: true});
           NODE
+
+  reporting-preview:
+    if: >-
+      github.repository == 'sidimohameddaliali2-crypto/matter-admin-app' &&
+      github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' &&
+      contains(fromJSON('["reporting-readiness","reporting-preview-stage","reporting-preview-enable","reporting-preview-disable"]'), inputs.operation)
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Check out the reviewed operator
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Select the exact reporting operation
+        id: reporting-operator
+        shell: bash
+        env:
+          REPORTING_OPERATION: ${{ inputs.operation }}
+          REPORTING_DEPLOYED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          case "$REPORTING_OPERATION" in
+            reporting-readiness) mode=inspect ;;
+            reporting-preview-stage) mode=stage ;;
+            reporting-preview-enable) mode=enable ;;
+            reporting-preview-disable) mode=disable ;;
+            *) echo "Invalid reporting operation."; exit 1 ;;
+          esac
+          if [[ ! "$REPORTING_DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ || "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "Select the exact deployed app commit from the reviewed main workflow."
+            exit 1
+          fi
+          operator=server/scripts/reporting-source-operator.mjs
+          if [[ "$(wc -c < "$operator")" -gt 49152 ]]; then
+            echo "The reporting operator exceeds its transfer limit."
+            exit 1
+          fi
+          node --check "$operator"
+          checksum=$(sha256sum "$operator")
+          printf 'mode=%s\ncode=%s\nsha256=%s\n' "$mode" "$(base64 -w0 "$operator")" "${checksum%% *}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure only Preview delivery reporting
+        uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17 # v1.2.0
+        env:
+          DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
+          REPORTING_WORKFLOW_SHA: ${{ github.sha }}
+          REPORTING_DEPLOYED_SHA: ${{ inputs.expected_sha }}
+          REPORTING_OPERATOR_MODE: ${{ steps.reporting-operator.outputs.mode }}
+          REPORTING_OPERATOR_CODE: ${{ steps.reporting-operator.outputs.code }}
+          REPORTING_OPERATOR_SHA256: ${{ steps.reporting-operator.outputs.sha256 }}
+          MATTER_REPORTING_WEBHOOK_SECRET: ${{ inputs.operation == 'reporting-preview-enable' && secrets.MATTER_REPORTING_WEBHOOK_SECRET || '' }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          command_timeout: 6m
+          envs: ${{ inputs.operation == 'reporting-preview-enable' && 'DO_APP_PATH,REPORTING_WORKFLOW_SHA,REPORTING_DEPLOYED_SHA,REPORTING_OPERATOR_MODE,REPORTING_OPERATOR_CODE,REPORTING_OPERATOR_SHA256,MATTER_REPORTING_WEBHOOK_SECRET' || 'DO_APP_PATH,REPORTING_WORKFLOW_SHA,REPORTING_DEPLOYED_SHA,REPORTING_OPERATOR_MODE,REPORTING_OPERATOR_CODE,REPORTING_OPERATOR_SHA256' }}
+          script: |
+            set -eu
+            cd -- "$DO_APP_PATH"
+            if [ "$(git ls-remote --exit-code origin refs/heads/main | cut -f1)" != "$REPORTING_WORKFLOW_SHA" ] ||
+              [ "$(git --no-replace-objects rev-parse HEAD)" != "$REPORTING_DEPLOYED_SHA" ] ||
+              ! git --no-replace-objects diff --quiet HEAD -- server; then
+              echo "The main workflow or deployed server checkout differs from the selected commit."
+              exit 1
+            fi
+            umask 077
+            operator=$(mktemp --suffix=.mjs server/scripts/.reporting-preview-op.XXXXXXXX)
+            trap 'rm -f -- "$operator"' EXIT
+            printf '%s' "$REPORTING_OPERATOR_CODE" | base64 --decode > "$operator"
+            checksum=$(sha256sum "$operator")
+            if [ "${checksum%% *}" != "$REPORTING_OPERATOR_SHA256" ]; then
+              echo "The reporting operator checksum did not match."
+              exit 1
+            fi
+            unset REPORTING_OPERATOR_CODE
+            node "$operator" "$REPORTING_OPERATOR_MODE" "$REPORTING_DEPLOYED_SHA"
