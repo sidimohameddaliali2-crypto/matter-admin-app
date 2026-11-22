@@ -4,7 +4,8 @@ import { lstat, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { confirmWebhookSecret, managedSettings, readEnvironmentSnapshot, replaceAndRestart } from './reporting-source-operator.mjs';
+import { authorizeReportingChange, confirmWebhookSecret, managedSettings,
+  readEnvironmentSnapshot, replaceAndRestart } from './reporting-source-operator.mjs';
 
 const parseFixture = bytes => Object.fromEntries(Array.from(bytes.toString().matchAll(/^([A-Z_]+)=([^\r\n]*)/gm), match => [match[1], match[2]]));
 const signFixture = 'inert-fixture-signing-value-never-used-remotely';
@@ -41,6 +42,30 @@ test('refuses incomplete and contaminated blocks and rejects dotenv collateral c
   assert.throws(() => managedSettings(Buffer.alloc(0), 'enable', 'short', parseFixture), /missing-or-invalid-signing-value/);
   const mismatchedParse = bytes => ({ ...parseFixture(bytes), UNRELATED: String(bytes.length) });
   assert.throws(() => managedSettings(Buffer.alloc(0), 'stage', undefined, mismatchedParse), /unrelated-environment-would-change/);
+});
+
+test('requires ownership through the staged, activated and disabled states', () => {
+  const original = Buffer.from('UNRELATED=keep\n');
+  assert.equal(authorizeReportingChange(original, 'stage', parseFixture), null);
+  assert.equal(authorizeReportingChange(original, 'disable', parseFixture), 'already-disabled');
+  assert.throws(() => authorizeReportingChange(original, 'enable', parseFixture), /prepare-preview-identity-first/);
+  const staged = managedSettings(original, 'stage', undefined, parseFixture);
+  assert.equal(authorizeReportingChange(staged, 'enable', parseFixture), 'staged');
+  assert.equal(authorizeReportingChange(staged, 'stage', parseFixture), 'staged');
+  assert.throws(() => authorizeReportingChange(staged, 'disable', parseFixture, [{ [capture]: '1' }]),
+    /existing-reporting-settings-not-owned/);
+  assert.throws(() => authorizeReportingChange(staged, 'enable', parseFixture, [{ [key]: 'another-integration' }]),
+    /existing-reporting-webhook-not-owned/);
+  const active = managedSettings(staged, 'enable', signFixture, parseFixture);
+  assert.equal(authorizeReportingChange(active, 'disable', parseFixture), 'active');
+  assert.equal(authorizeReportingChange(active, 'enable', parseFixture), 'active');
+  assert.throws(() => authorizeReportingChange(active, 'stage', parseFixture), /capture-already-present/);
+  assert.throws(() => authorizeReportingChange(Buffer.from(capture + '=1\n'), 'disable', parseFixture),
+    /existing-reporting-settings-not-owned/);
+  assert.throws(() => authorizeReportingChange(Buffer.concat([active, Buffer.from(capture + '=0\n')]), 'disable', parseFixture),
+    /managed-settings-are-overridden/);
+  const disabled = managedSettings(active, 'disable', undefined, parseFixture);
+  assert.equal(authorizeReportingChange(disabled, 'disable', parseFixture), 'disabled');
 });
 
 test('qualifies a webhook signing value against an inert request without accepting a generic 400', async () => {
@@ -101,4 +126,16 @@ test('rolls back an initially absent file and leaves later external edits intact
   const link = path.join(path.dirname(file), '.env');
   await symlink(file, link);
   await assert.rejects(readEnvironmentSnapshot(link), { code: 'ELOOP' });
+});
+
+test('emergency disable keeps reporting off if the driver cannot recover during the check', async t => {
+  const file = await environment(t);
+  const active = managedSettings(Buffer.from('UNRELATED=keep\n'), 'enable', signFixture, parseFixture);
+  await writeFile(file, active, { mode: 0o600 });
+  const previous = await readEnvironmentSnapshot(file);
+  const disabled = managedSettings(active, 'disable', undefined, parseFixture);
+  await assert.rejects(replaceAndRestart({ file, previous, bytes: disabled, rollbackOnFailure: false,
+    verifyHost: async () => {}, restartAndVerify: async () => { throw Error('server still down'); } }),
+  /reporting-disabled-restart-needs-operator/);
+  assert.deepEqual(await readFile(file), disabled);
 });
