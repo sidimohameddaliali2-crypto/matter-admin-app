@@ -3,6 +3,8 @@ on:
   pull_request:
     paths:
       - '.github/workflows/reporting-vercel-identity-checks.yml'
+      - '.github/workflows/deploy-digitalocean.yml'
+      - 'server/scripts/reporting-source-operator*.mjs'
       - 'server/middleware/apiKeyAuth.js'
       - 'server/middleware/reportingVercelIdentity*.js'
       - 'server/routes/externalReportingApi.js'
@@ -30,6 +32,8 @@ jobs:
           node-version: '24.22.1'
       - name: Verify Vercel reporting authentication
         run: node --test server/middleware/reportingVercelIdentity.test.js
+      - name: Verify protected reporting operator settings and rollback
+        run: node --test server/scripts/reporting-source-operator.test.mjs
   reporting-mongo:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
