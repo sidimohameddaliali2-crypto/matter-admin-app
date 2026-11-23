@@ -87,7 +87,7 @@ export function MealComposer({ meal, isNew, onSave }) {
     const initial = meal ? JSON.parse(JSON.stringify(meal)) : { id: `PREVIEW-${Date.now()}`, name: '', day: '', category: '', temperature: 'WARM', tags: '', carbCombined: 'No', notes: '', components: [] };
     const mealKind = meal ? kindOf(meal) : 'Main meal';
     const isSaladBase = mealKind === 'Main meal' && (meal?.isSaladBase ?? Boolean(initial.components.some(c => c.type === 'Sauce 2' || c.type === 'Salad') || /SALAD BASE/i.test(initial.tags || '')));
-    return { ...initial, mealKind, mealType: meal ? mealType(meal) : '', isOatmeal: meal?.isOatmeal ?? meal?.category === 'OATS', isSaladBase, components: editorComponents(initial, mealKind, isSaladBase) };
+    return { ...initial, qtyUnit: initial.qtyUnit || (mealKind === 'Main meal' ? 'KG' : 'PCS'), gramsPerPiece: initial.gramsPerPiece ?? '', mealKind, mealType: meal ? mealType(meal) : '', isOatmeal: meal?.isOatmeal ?? meal?.category === 'OATS', isSaladBase, components: editorComponents(initial, mealKind, isSaladBase) };
   });
   const kindDrafts = useRef({});
   const [error, setError] = useState('');
@@ -120,7 +120,7 @@ export function MealComposer({ meal, isNew, onSave }) {
     const isSaladBase = kind === 'Main meal' && form.isSaladBase;
     const types = kind === 'Breakfast' ? ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish', 'Extra sauce / topping'] : ['Protein', 'Carb', 'Vegetable', 'Sauce', 'Garnish', 'Salad', 'Sauce 2', 'Extra sauce / topping'];
     const components = editorComponents(form, kind, isSaladBase);
-    setForm({ ...form, mealKind: kind, isSaladBase, components: kind === 'Snack' ? components : components.filter(c => types.includes(c.type)) });
+    setForm({ ...form, qtyUnit: kind === 'Main meal' ? 'KG' : 'PCS', gramsPerPiece: '', mealKind: kind, isSaladBase, components: kind === 'Snack' ? components : components.filter(c => types.includes(c.type)) });
   };
   const toggleSalad = checked => setForm(f => {
     if (!checked) return { ...f, isSaladBase: false, components: f.components.filter(c => c.type !== 'Sauce 2').map(c => c.type === 'Salad' ? { ...c, type: 'Vegetable' } : c) };
@@ -129,6 +129,7 @@ export function MealComposer({ meal, isNew, onSave }) {
     return { ...f, isSaladBase: true, components: [...f.components.filter(c => !['Vegetable', 'Salad'].includes(c.type)), saladComponent, ...(!f.components.some(c => c.type === 'Sauce 2') ? [newComponent('Sauce 2')] : [])] };
   });
   const save = async () => {
+    if (form.mealKind === 'Main meal' && form.qtyUnit === 'PCS' && (!Number.isFinite(Number(form.gramsPerPiece)) || Number(form.gramsPerPiece) <= 0)) return setError('Enter grams per piece greater than zero.');
     if (!form.name.trim()) return setError(`Enter a ${isSnack ? 'snack' : 'meal'} name.`);
     if (form.mealKind === 'Main meal' && form.isSaladBase && !salad?.name.trim()) return setError('Enter the salad name or uncheck Includes a salad base.');
     if (form.mealKind === 'Main meal' && !MEAL_TYPES.includes(form.mealType)) return setError('Choose Chicken, Beef or Fish for a main meal.');
@@ -136,7 +137,7 @@ export function MealComposer({ meal, isNew, onSave }) {
     components = components.filter(c => c.type !== 'Sauce 2' || c.name.trim());
     if (!components.length || components.some(c => !c.name.trim())) return setError('Add a name for each component, including the salad when selected.');
     setSaving(true);
-    try { await onSave({ ...form, name: form.name.trim(), mealFormat: isBreakfast ? 'Breakfast' : isSnack ? 'Snack' : 'Main', mealType: form.mealKind === 'Main meal' ? form.mealType : '', isOatmeal: isBreakfast && form.isOatmeal, isSaladBase: form.mealKind === 'Main meal' && form.isSaladBase, status: 'Draft', components: components.map(({ relationship, ...c }) => c.type === 'Sauce 2' ? { ...c, saladComponentId: salad?.id || '' } : c) }); }
+    try { await onSave({ ...form, gramsPerPiece: form.qtyUnit === 'PCS' && form.mealKind === 'Main meal' ? Number(form.gramsPerPiece) : null, name: form.name.trim(), mealFormat: isBreakfast ? 'Breakfast' : isSnack ? 'Snack' : 'Main', mealType: form.mealKind === 'Main meal' ? form.mealType : '', isOatmeal: isBreakfast && form.isOatmeal, isSaladBase: form.mealKind === 'Main meal' && form.isSaladBase, status: 'Draft', components: components.map(({ relationship, ...c }) => c.type === 'Sauce 2' ? { ...c, saladComponentId: salad?.id || '' } : c) }); }
     catch (err) { setError(err.response?.data?.message || err.message || 'Could not save the meal.'); }
     finally { setSaving(false); }
   };
@@ -153,6 +154,9 @@ export function MealComposer({ meal, isNew, onSave }) {
     <fieldset disabled={saving} style={{ display: 'contents' }}>
     <Panel title="Create as"><fieldset className="av2-choice-chips"><legend>Choose what to create</legend>{['Main meal', 'Breakfast', 'Snack'].map(kind => <label key={kind}><input type="radio" name="meal-kind" checked={form.mealKind === kind} onChange={() => changeKind(kind)}/>{kind}</label>)}</fieldset></Panel>
     <Panel title={isSnack ? 'Snack details' : 'Meal details'}>
+      <label className="av2-field">QTY<select aria-label="QTY" value={form.qtyUnit} onChange={e => field('qtyUnit', e.target.value)}><option value="KG">KG</option><option value="PCS">PCS</option></select></label>
+      {form.qtyUnit === 'PCS' && form.mealKind === 'Main meal' && <label className="av2-field">Grams per piece<input aria-label="Grams per piece" type="number" min="0.001" step="any" value={form.gramsPerPiece} onChange={e => field('gramsPerPiece', e.target.value)}/></label>}
+      <p>QTY controls the portion component in Cooking &amp; EOD. PCS main meals use total portion grams plus 5%, divided by grams per piece and rounded up. Side components keep their existing units.</p>
       <label className="av2-field">{isSnack ? 'Snack name' : 'Meal name'}<input value={form.name} onChange={e => field('name', e.target.value)}/></label>
       {isSnack ? <ComponentExclusions values={snack?.exclusions || []} componentName={form.name || 'snack'} componentId={snack?.id} onChange={values => field('components', [{ ...(snack || newComponent('Snack')), name: form.name, exclusions: values }])}/> : <>
         <div className="av2-form-grid">{!isBreakfast && <label>Meal type<select aria-label="Meal type" value={form.mealType} onChange={e => field('mealType', e.target.value)}><option value="">Choose meal type...</option>{MEAL_TYPES.map(type => <option key={type}>{type}</option>)}</select></label>}<label>Temperature<select aria-label="Temperature" value={form.temperature} onChange={e => field('temperature', e.target.value)}><option>WARM</option><option>COLD</option></select></label></div>

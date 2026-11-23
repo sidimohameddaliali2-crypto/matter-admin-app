@@ -24,6 +24,21 @@ const setInput = (input, value) => act(() => {
 });
 const component = (id, type, name, exclusions, notes = '') => ({ id, type, name, exclusions, notes, adaptation: 'Not reviewed' });
 
+test('QTY defaults to KG and saves a validated PCS conversion', async () => {
+  const save = render({ id: 'qty', name: 'Patty', mealKind: 'Main meal', mealType: 'Beef', components: [component('p', 'Protein', 'Patty', [])] });
+  const select = host.querySelector('[aria-label="QTY"]'); expect(select.value).toBe('KG');
+  act(() => { select.value = 'PCS'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+  await click('Save draft'); expect(save).not.toHaveBeenCalled(); expect(host.textContent).toContain('Enter grams per piece');
+  setInput(host.querySelector('[aria-label="Grams per piece"]'), '100');
+  await click('Save draft'); expect(save).toHaveBeenCalledWith(expect.objectContaining({ qtyUnit: 'PCS', gramsPerPiece: 100 }));
+});
+
+test.each(['Breakfast', 'Snack'])('%s defaults to PCS without requiring weight conversion', kind => {
+  render({ id: 'qty', name: kind, mealKind: kind, components: [component('p', kind, kind, [])] });
+  expect(host.querySelector('[aria-label="QTY"]').value).toBe('PCS');
+  expect(host.querySelector('[aria-label="Grams per piece"]')).toBeNull();
+});
+
 test('one deduplicated library record remains visible under all of its source cycle days',async()=>{
   const meal={id:'one',name:'Own meal',day:'DAY 1',cycleDays:['DAY 1','DAY 6 & 7'],mealKind:'Main meal',mealType:'Chicken',components:[component('p','Protein','Roast',[])]};
   await act(async()=>root.render(<MealLibrary meals={[meal]} source="Own.xlsx"/>));

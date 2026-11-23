@@ -132,3 +132,63 @@ test('combined breakfast names count Large quantities only and do not alter save
   expect(JSON.stringify(entries)).toBe(before);
   expect(buildCookingLog([{ selectedMeals: [breakfast] }], date, [])[0].name).toBe('Scramble egg (150G)');
 });
+
+const burgerRecipe = { ...recipe, mealName: 'MEXICAN BURGER WITH GREEN RICE', cycleMeal: { components: [
+  { type: 'Protein', name: 'MEXICAN BURGER' }, { type: 'Carb', name: 'GREEN RICE' },
+  { type: 'Vegetable', name: 'Carrot' }, { type: 'Sauce', name: 'LEMON GINGER SAUCE' },
+] } };
+const burger = extra => meal({ mealName: burgerRecipe.mealName, date: '2026-11-24', ...extra });
+
+test('meal QTY configuration supports 50g and 100g pieces and overrides the legacy burger rule', () => {
+  const entries = [{ selectedMeals: [burger({ proteinWeight: 260 })] }];
+  for (const [gramsPerPiece, expected] of [[50, 6], [100, 3]]) {
+    const configured = { ...burgerRecipe, cycleMeal: { ...burgerRecipe.cycleMeal, qtyUnit: 'PCS', gramsPerPiece } };
+    const blocks = buildCookingLog(entries, '2026-11-24', [configured]);
+    expect(cookingLogWorkbook(XLSX, blocks, '2026-11-24').Sheets['Cooking & EOD'].B8.v).toBe(expected);
+  }
+  const kg = { ...burgerRecipe, cycleMeal: { ...burgerRecipe.cycleMeal, qtyUnit: 'KG', gramsPerPiece: null } };
+  expect(buildCookingLog(entries, '2026-11-24', [kg])[0].components[0].unit).toBe('KG');
+  const invalid = { ...burgerRecipe, cycleMeal: { ...burgerRecipe.cycleMeal, qtyUnit: 'PCS', gramsPerPiece: 0 } };
+  expect(() => buildCookingLog(entries, '2026-11-24', [invalid])).toThrow('Set grams per piece');
+});
+
+test('Mexican burger sums source grams before dividing by 50g and rounding up to pieces', () => {
+  const entries = [{ selectedMeals: [burger({ proteinWeight: 110 }), burger({ proteinWeight: 110 })] }];
+  const before = JSON.stringify(entries), [block] = buildCookingLog(entries, '2026-11-24', [burgerRecipe]);
+  expect(block.count).toBe(2);
+  expect(block.components.find(row => row.kind === 'Portion')).toMatchObject({ unit: 'PCS', baseGrams: 220, gramsPerPiece: 50, base: 5 });
+  expect(block.components.find(row => row.kind === 'Carb')).toMatchObject({ name: 'GREEN RICE', unit: 'KG', base: 0.4 });
+  expect(block.components.find(row => row.kind === 'Sauce')).toMatchObject({ unit: 'PCS', base: 2 });
+  expect(JSON.stringify(entries)).toBe(before);
+  const bulk = buildCookingLog([{ selectedMeals: [burger({ proteinWeight: 110, quantity: 2 })] }], '2026-11-24', [burgerRecipe]);
+  expect(bulk[0].components[0].base).toBe(5);
+});
+
+test('burger workbook buffers source grams before rounding up once to whole PCS', () => {
+  const blocks = buildCookingLog([{ selectedMeals: [burger({ proteinWeight: 260 })] }], '2026-11-24', [burgerRecipe]);
+  const wb = cookingLogWorkbook(XLSX, blocks, '2026-11-24'), ws = wb.Sheets['Cooking & EOD'], source = wb.Sheets.Calculation;
+  expect(ws.B8.v).toBe(6); expect(ws.B8.s.numFmt).toBe('0'); expect(ws.E8.v).toBe('PCS');
+  expect(ws.B8.f).toBe('ROUNDUP(Calculation!F2*(1+$B$2)/Calculation!G2,0)');
+  expect(source.E2.f).toBe('ROUNDUP(F2/G2,0)'); expect(source.E2.v).toBe(6);
+  expect(source.F2.v).toBe(260); expect(source.G2.v).toBe(50);
+  expect(ws.B9.f).toBe('ROUND(Calculation!E3*(1+$B$2),1)');
+  expect(ws.C8.v).toBe(''); expect(ws.D8.v).toBe('');
+  const restored = XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), { type: 'buffer', cellFormula: true });
+  expect(restored.Sheets.Calculation.E2.v).toBe(6);
+  expect(restored.Sheets.Calculation.E2.f).toBe('ROUNDUP(F2/G2,0)');
+  expect(restored.Sheets['Cooking & EOD'].B8.v).toBe(6);
+  for (const [grams, expected] of [[0, 0], [250, 6], [260, 6], [300, 7], [1000, 21]]) {
+    const plan = buildCookingLog([{ selectedMeals: [burger({ proteinWeight: grams })] }], '2026-11-24', [burgerRecipe]);
+    expect(cookingLogWorkbook(XLSX, plan, '2026-11-24').Sheets['Cooking & EOD'].B8.v).toBe(expected);
+  }
+});
+
+test('burger exact multiples stay exact and unrelated protein components stay in kg', () => {
+  for (const [grams, expected] of [[0, 0], [250, 5], [260, 6], [300, 6]]) {
+    const [block] = buildCookingLog([{ selectedMeals: [burger({ proteinWeight: grams })] }], '2026-11-24', [burgerRecipe]);
+    expect(block.components[0].base).toBe(expected);
+  }
+  const different = { ...burgerRecipe, cycleMeal: { components: [{ type: 'Protein', name: 'Grilled chicken' }] } };
+  const [block] = buildCookingLog([{ selectedMeals: [burger({ proteinWeight: 260 })] }], '2026-11-24', [different]);
+  expect(block.components[0]).toMatchObject({ unit: 'KG', base: 0.26 });
+});

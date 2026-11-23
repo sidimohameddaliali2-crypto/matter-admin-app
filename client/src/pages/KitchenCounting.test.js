@@ -208,6 +208,32 @@ test('component names appear beside their summed weights and in the Excel breakd
   expect(exported['Carb Components']).toBe(`Saffron rice: ${exported['Total Carb Weight (g)']} g`);
 });
 
+test('saved PCS changes refresh without preparation and match both Excel downloads', async () => {
+  const originalGet = api.get.getMockImplementation();
+  let settings = { qtyUnit: 'KG' };
+  api.get.mockImplementation(async (path, config) => path.endsWith('/kitchen-components')
+    ? { data: { success: true, data: [{ _id: 'recipe', mealType: 'main', mealName: 'Fixture meal',
+      proteinSource: 'Patty', cycleMeal: settings }] } } : originalGet(path, config));
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  const preparationCalls = api.post.mock.calls.length;
+  settings = { qtyUnit: 'PCS', gramsPerPiece: 50 };
+  await act(async () => window.dispatchEvent(new Event('focus')));
+  const pieceLabel = container.querySelector('.kitchen-count-component b').textContent;
+  expect(pieceLabel).toMatch(/^\d+ PCS$/);
+  await act(async () => exportButton().click());
+  const standard = mockCountingRows.mock.calls.at(-1)[0][0];
+  const expected = Math.ceil(standard['Total Protein Weight (g)'] * 1.05 / 50);
+  expect(pieceLabel).toBe(`${expected} PCS`);
+  expect(standard['Protein Components']).toBe(`Patty: ${expected} PCS`);
+  const button = [...container.querySelectorAll('button')].find(item => item.textContent.includes('Cooking & EOD Excel'));
+  await act(async () => button.click());
+  const sheet = mockCookingSave.mock.calls.at(-1)[0].Sheets['Cooking & EOD'];
+  expect(sheet.B8.v).toBe(expected);
+  expect(sheet.E8.v).toBe('PCS');
+  expect(api.post.mock.calls).toHaveLength(preparationCalls);
+});
+
 test('a component-label request failure does not remove verified counts', async () => {
   const originalGet = api.get.getMockImplementation();
   api.get.mockImplementation(async (path, config) => {

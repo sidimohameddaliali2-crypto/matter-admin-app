@@ -8,6 +8,11 @@ const named = value => typeof value === 'string' && value.trim().length > 0;
 export function validateCycleMealSnapshot(value) {
   if (!object(value)) invalid('a meal snapshot object is required; it cannot be cleared.');
   if (!named(value.id) || !named(value.name)) invalid('meal ID and name are required.');
+  if (value.qtyUnit !== undefined && !['KG', 'PCS'].includes(value.qtyUnit)) invalid('QTY must be KG or PCS.');
+  const isCountedMeal = ['Breakfast', 'Snack'].includes(value.mealKind || value.mealFormat)
+    || /B'FAST|OATS|SNACK/.test(value.category || '') && value.mealKind !== 'Main meal';
+  if (value.gramsPerPiece != null && (typeof value.gramsPerPiece !== 'number' || !Number.isFinite(value.gramsPerPiece) || value.gramsPerPiece <= 0)) invalid('grams per piece must be greater than zero.');
+  if (value.qtyUnit === 'PCS' && !isCountedMeal && !(value.gramsPerPiece > 0)) invalid('enter grams per piece for a PCS main meal.');
   if (!Array.isArray(value.components) || !value.components.length) invalid('components must be a non-empty array.');
   const ids = new Set();
   for (const component of value.components) {

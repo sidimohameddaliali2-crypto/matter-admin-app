@@ -1,5 +1,6 @@
 import React from 'react';
 import { Download } from 'lucide-react';
+import { countingComponentQuantity } from '../utils/kitchenCountingComponents';
 
 const categories = [['breakfast', 'Breakfast'], ['meal', 'Main meals'], ['snack', 'Snacks']];
 const fields = [['totalProteinWeight', 'Protein'], ['totalCarbWeight', 'Carb'], ['totalVegWeight', 'Veg']];
@@ -24,7 +25,7 @@ export default function KitchenCountingGroups({ rows, onDownload }) {
           <span className="kitchen-mobile-weight-label">{title}</span>
           <strong title={`${Math.round(row[field])} g`}>{kg(row[field])} <small>kg</small></strong>
           <div className="kitchen-count-components">{(row.components?.[{ totalProteinWeight: 'protein', totalCarbWeight: 'carb', totalVegWeight: 'veg' }[field]] || []).map(component =>
-            <div className="kitchen-count-component" key={component.name}><span>{component.name}</span><b>{Math.round(component.weight).toLocaleString()} g</b></div>
+            <div className="kitchen-count-component" key={JSON.stringify([component.name, component.pcs !== undefined, component.gramsPerPiece])}><span>{component.name}</span><b>{countingComponentQuantity(component)}</b></div>
           )}</div>
           <span className="kitchen-bar-track" aria-hidden="true"><i style={{ width: `${totals[field] ? Math.min(100, row[field] / totals[field] * 100) : 0}%` }} /></span>
         </div>)}

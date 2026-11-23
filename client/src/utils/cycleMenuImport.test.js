@@ -7,6 +7,13 @@ const input = () => {
   return { catalogue: { meals, source: 'Own workbook.xlsx' }, boards: { 'Main menu:Week 1': value }, week: 'Week 1', startDate: '2026-11-09', endDate: '2026-11-15' };
 };
 
+test('QTY and grams-per-piece follow the library meal into its dated menu snapshot', () => {
+  const options = input();
+  Object.assign(options.catalogue.meals[0], { qtyUnit: 'PCS', gramsPerPiece: 100 });
+  const item = importCycleMenu(options)[0].items[1];
+  expect(item.cycleMeal).toMatchObject({ qtyUnit: 'PCS', gramsPerPiece: 100 });
+});
+
 test('copies placements to actual dates with Main/Sub, Core and internal-only component snapshots', () => {
   const options = input(), before = JSON.stringify(options), days = importCycleMenu(options);
   expect(days).toHaveLength(7); expect(days[6].date).toBe('2026-11-15');

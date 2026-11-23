@@ -6,6 +6,19 @@ export const countingMealName = meal => {
 };
 const normalized = value => String(value || '').trim().toLowerCase();
 const type = value => ['breakfast', 'snack'].includes(value) ? value : 'main';
+export function kitchenPortionQuantity(category, name, recipe) {
+  const { qtyUnit, gramsPerPiece } = recipe.cycleMeal || {};
+  if (qtyUnit === 'KG') return { unit: 'KG' };
+  if (category === 'breakfast' || category === 'snack') return { unit: 'PCS' };
+  if (qtyUnit === 'PCS') return { unit: 'PCS', gramsPerPiece };
+  if (normalized(name).replace(/\s+/g, ' ') === 'mexican burger') return { unit: 'PCS', gramsPerPiece: 50 };
+  return { unit: 'KG' };
+}
+
+export const bufferedPortionPieces = (grams, gramsPerPiece) => Math.ceil(grams * 105 / (gramsPerPiece * 100));
+
+export const countingComponentQuantity = component => component.pcs === undefined
+  ? `${Math.round(component.weight)} g` : `${component.pcs} PCS`;
 export function kitchenRecipeForMeal(meal, catalog = []) {
   const populated = typeof meal.menuItemId === 'object' ? meal.menuItemId : null;
   const id = String(populated?._id || meal.menuItemId || '');
@@ -37,17 +50,29 @@ export function buildKitchenCountRows(entries, date, catalog = []) {
       totalProteinWeight: 0, totalCarbWeight: 0, totalVegWeight: 0,
       components: { protein: [], carb: [], veg: [] } });
     const row = grouped.get(key), names = kitchenComponentNames(meal, catalog);
+    const portion = kitchenPortionQuantity(category, names.protein, kitchenRecipeForMeal(meal, catalog));
     row.count += qty;
     for (const [kind, total] of [['protein', 'totalProteinWeight'], ['carb', 'totalCarbWeight'], ['veg', 'totalVegWeight']]) {
       const weight = (Number(meal[`${kind}Weight`]) || 0) * qty;
       row[total] += weight;
-      const existing = row.components[kind].find(component => normalized(component.name) === normalized(names[kind]));
-      if (existing) existing.weight += weight;
-      else row.components[kind].push({ name: names[kind], weight });
+      const pieces = kind === 'protein' && portion.unit === 'PCS'
+        && (category !== 'meal' || Number.isFinite(portion.gramsPerPiece) && portion.gramsPerPiece > 0);
+      const gramsPerPiece = pieces ? portion.gramsPerPiece : undefined;
+      const existing = row.components[kind].find(component => normalized(component.name) === normalized(names[kind])
+        && (component.pcs !== undefined) === pieces && component.gramsPerPiece === gramsPerPiece);
+      const component = existing || { name: names[kind], weight: 0 };
+      component.weight += weight;
+      if (pieces) {
+        if (gramsPerPiece) {
+          component.gramsPerPiece = gramsPerPiece;
+          component.pcs = bufferedPortionPieces(component.weight, gramsPerPiece);
+        } else component.pcs = (component.pcs || 0) + qty;
+      }
+      if (!existing) row.components[kind].push(component);
     }
   }
   const order = { breakfast: 0, meal: 1, snack: 2 };
   return [...grouped.values()].sort((a, b) => (order[a.category] ?? 9) - (order[b.category] ?? 9) || a.mealName.localeCompare(b.mealName));
 }
 
-export const componentWeightText = components => (components || []).map(component => `${component.name}: ${Math.round(component.weight)} g`).join('; ');
+export const componentWeightText = components => (components || []).map(component => `${component.name}: ${countingComponentQuantity(component)}`).join('; ');

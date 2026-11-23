@@ -215,6 +215,35 @@ const KitchenCounting = () => {
 
   useEffect(() => { loadCounts(); return () => requestGuard.current.cancel(); }, [loadCounts]);
 
+  // A return from Meal Details refreshes the quantity rules without rerunning
+  // preparation or downloading the customer roster again.
+  useEffect(() => {
+    const scope = `${selectedMenuId}:${selectedDate}`;
+    if (loading || partnerOnlyDate || !selectedDate || loadedScope !== scope) return;
+    let controller;
+    const refreshComponents = async () => {
+      controller?.abort();
+      const request = new AbortController();
+      controller = request;
+      try {
+        const response = await api.get(`/menus/${selectedMenuId}/kitchen-components`, {
+          params: { date: selectedDate }, signal: request.signal, timeout: 30000,
+        });
+        if (request.signal.aborted || activeScope.current !== scope) return;
+        if (!Array.isArray(response.data?.data)) throw new Error('Invalid component response.');
+        setComponentCatalog(response.data.data);
+        setComponentWarning('');
+      } catch {
+        if (!request.signal.aborted && activeScope.current === scope) setComponentWarning('Component settings could not be refreshed. Refresh to retry.');
+      }
+    };
+    window.addEventListener('focus', refreshComponents);
+    return () => {
+      window.removeEventListener('focus', refreshComponents);
+      controller?.abort();
+    };
+  }, [loading, loadedScope, partnerOnlyDate, selectedDate, selectedMenuId]);
+
   // The whole point of this page: cook-counts must exactly match what
   // Kitchen List shows for the same menu+date — guaranteed here because both
   // pages run the identical selection data through the identical
