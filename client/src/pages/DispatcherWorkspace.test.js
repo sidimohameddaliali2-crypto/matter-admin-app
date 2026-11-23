@@ -324,11 +324,16 @@ const reviewHandover = async () => {
   await click('Scan test bag');
   await click('Review handover');
 };
-test('handover uses four searchable drivers, exact scanned tags and explicit confirmation', async () => {
+test('handover lists every active driver, exact scanned tags and explicit confirmation', async () => {
   await click('Handover');
-  expect(container.querySelectorAll('.dp-driver-choices button')).toHaveLength(4);
-  await click('Dispatch');
-  await reviewHandover();
+  expect(container.querySelectorAll('.dp-driver-choices button')).toHaveLength(6);
+  await fill(container.querySelector('[aria-label="Search receiving drivers"]'), ' saif ');
+  expect(container.querySelectorAll('.dp-driver-choices button')).toHaveLength(1);
+  await pickFirst();
+  await click('Continue to bags');
+  await click('Start camera');
+  await click('Scan test bag');
+  await click('Review handover');
   expect(api.post).not.toHaveBeenCalled();
   expect(button('Confirm physical handover').disabled).toBe(true);
   await act(async () => container.querySelector('.dp-check input').click());
@@ -345,7 +350,7 @@ test('handover uses four searchable drivers, exact scanned tags and explicit con
   });
   await click('Confirm physical handover');
   expect(api.post).toHaveBeenCalledWith('/dispatcher-handovers', expect.objectContaining({
-    driverId: 'driver-2',
+    driverId: 'driver-6',
     bags: [{
       bagId: 'BAG-00001',
       expectedVersion: 7
@@ -528,8 +533,11 @@ test('plain-array driver endpoint populates active drivers and permits bulk sele
  // Remount to exercise the actual initial plain-array response.
  await act(async()=>root.render(null));await act(async()=>root.render(<DispatcherWorkspace/>));
  await click('Select all deliveries');expect(container.querySelector('.dp-selection').textContent).toContain('35 selected');await click('Assign / reassign');
- expect(container.textContent).not.toContain('Inactive driver');await pickFirst();await click('Confirm assignment');
- expect(api.patch).toHaveBeenCalledWith('/deliveries/assign-driver',expect.objectContaining({deliveryIds:deliveries.map(d=>d._id),driverId:drivers[0]._id}));
+ expect(container.querySelectorAll('.dp-driver-choices button')).toHaveLength(6);
+ expect(container.textContent).not.toContain('Inactive driver');
+ await act(async()=>[...container.querySelectorAll('.dp-driver-choices button')].find(b=>b.querySelector('strong').textContent==='Saif').click());
+ await click('Confirm assignment');
+ expect(api.patch).toHaveBeenCalledWith('/deliveries/assign-driver',expect.objectContaining({deliveryIds:deliveries.map(d=>d._id),driverId:'driver-6'}));
 });
 test('zone counts show available work and change to remaining unassigned work after assignment',async()=>{
  await act(async()=>container.querySelector('.dp-filter-trigger').click());
