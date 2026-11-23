@@ -153,11 +153,31 @@ export default function DispatcherWorkspace() {
   const zones = useMemo(() => [...new Set(deliveries.map(d => d.zone || d.addressDetails?.area || 'No zone'))].sort(), [deliveries]),
     emirates = useMemo(() => [...new Set(deliveries.map(emirate).filter(Boolean))].sort(), [deliveries]);
   const filterCount = Object.values(filters).reduce((sum, values) => sum + values.length, 0);
+  let driverSummary = 'All drivers';
+  if (filters.drivers.length === 1) {
+    const [id] = filters.drivers;
+    const driver = drivers.find(d => driverId(d) === id)
+      || deliveries.find(d => typeof d.driver === 'object' && driverId(d.driver) === id)?.driver;
+    driverSummary = id === 'unassigned' ? 'Unassigned' : driver ? staffName(driver) : 'Selected driver';
+  } else if (filters.drivers.length > 1) {
+    driverSummary = `${filters.drivers.length} selected`;
+  } else if (unassigned) {
+    driverSummary = 'Unassigned';
+  }
   const close = () => {
     detailId.current++;
     setModal(null);
     setDetail(null);
     setFormError('');
+  };
+  const applyFilters = value => {
+    const driverChanged = value.drivers.length !== filters.drivers.length
+      || value.drivers.some(id => !filters.drivers.includes(id));
+    const showAssigned = unassigned && value.drivers.length > 0 && !value.drivers.includes('unassigned');
+    if (driverChanged || showAssigned) setSelected([]);
+    if (showAssigned) setUnassigned(false);
+    setFilters(value);
+    close();
   };
   const changeDate = value => {
     if (!value) return;
@@ -264,7 +284,18 @@ export default function DispatcherWorkspace() {
               });
             }}><CalendarDays size={17} />{date === shiftDay(businessToday(), 1) ? 'Tomorrow' : date === businessToday() ? 'Today' : dateLabel(date + 'T12:00:00Z')}⌄</button></div><div className="dp-board-filters"><label className="dp-search"><Search size={18} /><input aria-label="Search deliveries" placeholder="Customer, ID, address or zone…" value={search} onChange={e => setSearch(e.target.value)} /></label><button className="dp-filter-trigger" onClick={() => setModal({
               type: 'filters'
-            })}><span><strong>Filters</strong><small>Zone · Driver · Hours · Emirate</small></span><b>{filterCount ? `${filterCount} selected` : 'All'} ⌄</b></button></div><div className="dp-board-actions"><button aria-pressed={unassigned} onClick={() => setUnassigned(v => !v)}>Unassigned</button><button onClick={() => setModal({
+            })}><span><strong>Filters</strong><small>Zone · Driver · Hours · Emirate</small></span><b>{filterCount ? `${filterCount} selected` : 'All'} ⌄</b></button>
+          <button
+            type="button"
+            className="dp-filter-trigger dp-driver-filter"
+            aria-label="Filter by driver"
+            aria-describedby="dp-driver-filter-summary"
+            onClick={() => setModal({ type: 'driver-filter' })}
+          >
+            <span><Users size={17} aria-hidden="true" /><strong>Filter by driver</strong></span>
+            <b id="dp-driver-filter-summary">{driverSummary} ⌄</b>
+          </button>
+          </div><div className="dp-board-actions"><button aria-pressed={unassigned} onClick={() => setUnassigned(v => !v)}>Unassigned</button><button onClick={() => setModal({
               type: 'order'
             })} disabled={driverLoading}><ListOrdered size={17} />Arrange order</button></div><DispatcherNewCustomers /><div className="dp-select-all"><button aria-label="Select all deliveries" disabled={loading || !selectable.length} onClick={() => setSelected(selectable.map(d => d._id))}>Select all deliveries <b>{selectable.length}</b></button><small>All matching deliveries across every page</small></div>{chosen.length > 0 && <div className="dp-selection"><strong>{chosen.length} selected</strong><button className="primary" disabled={loading || driverLoading} onClick={() => openAssign(chosen)}>Assign / reassign</button><button disabled={loading || !chosen.some(d => d.driver)} onClick={() => openUnassign(chosen)}>Unassign</button><button onClick={() => setSelected([])}>Clear</button></div>}{error && <p className="dp-error" role="alert">{error} <button onClick={load}>Retry</button></p>}{loading && <p className="dp-empty" role="status">Loading deliveries…</p>}{!loading && <><div className="dp-table-wrap"><table><thead><tr><th><input type="checkbox" aria-label="Select all filtered deliveries" checked={selectable.length > 0 && selectable.every(d => selected.includes(d._id))} onChange={e => setSelected(e.target.checked ? selectable.map(d => d._id) : [])} /></th><th>Customer / delivery</th><th>Area & time</th><th>Driver</th><th>Status</th><th /></tr></thead><tbody>{visible.map(d => <tr key={d._id}><td><input type="checkbox" aria-label={`Select ${d.customerName}`} disabled={isFinished(d)} checked={selected.includes(d._id)} onChange={() => toggle(d._id)} /></td><td><strong>{d.customerName}</strong><small>{d.customerId} · {d.type}</small>{d.combinedSunday && <small>Sunday meals included</small>}{d.sundayOnlyCarriedOver && <small>Sunday meal carried to Saturday</small>}</td><td>{d.zone || 'No zone'}<small>{formatBusinessTime(d.scheduledTime)}</small></td><td>{d.driver ? staffName(typeof d.driver === 'object' ? d.driver : drivers.find(x => String(x._id) === driverId(d.driver))) : 'Unassigned'}</td><td>{pill(d)}</td><td><button aria-label={`Open ${d.customerName}`} onClick={() => openDetail(d)}><ArrowRight size={17} /></button></td></tr>)}</tbody></table></div><div className="dp-delivery-cards">{visible.map(deliveryCard)}</div>{!rows.length && !error && <p className="dp-empty">No deliveries match this date and these filters.</p>}</>}<footer className="dp-board-footer"><small>{rows.length} matching deliveries · Dubai time</small>{rows.length > 30 && <div><button disabled={page === 0} onClick={() => setPage(p => p - 1)}>Previous</button><span>{page + 1} / {Math.ceil(rows.length / 30)}</span><button disabled={(page + 1) * 30 >= rows.length} onClick={() => setPage(p => p + 1)}>Next</button></div>}</footer></section></>}
  {view === 'drivers' && <><div className="dp-heading"><div><p className="dp-eyebrow">PREPARE THE TEAM</p><h1>Drivers & their day.</h1><p>{dateLabel(date + 'T12:00:00Z')} · selected dispatch schedule</p></div></div><label className="dp-search"><Search size={18} /><input aria-label="Search drivers" placeholder="Search drivers…" value={driverSearch} onChange={e => setDriverSearch(e.target.value)} /></label><div className="dp-driver-grid">{drivers.filter(d => staffName(d).toLowerCase().includes(driverSearch.toLowerCase())).map(d => <article className="dp-panel" key={d._id}><span className="dp-avatar">{staffName(d).slice(0, 2).toUpperCase()}</span><h3>{staffName(d)}</h3><p className="dp-help">{d.profile?.vehicleType || 'Driver'}</p><div className="dp-summary-row"><span>Assigned deliveries</span><strong>{deliveries.filter(x => driverId(x.driver) === String(d._id)).length}</strong></div>{canBags && <button className="primary dp-full" onClick={() => tab('handover')}>Prepare bag handover</button>}</article>)}</div></>}
@@ -274,15 +305,13 @@ export default function DispatcherWorkspace() {
             receipt: r
           })}><span className={`dp-pill ${r.status}`}>{r.status === 'pending' ? 'Awaiting acceptance' : r.status}</span><strong>{r.dispatcherName} → {r.driverName}</strong><small>{timestamp(r.preparedAt)}</small><span><b>{r.preparedCount}</b> prepared · <b>{r.acceptedCount}</b> accepted</span><small>{r.id}</small></button>)}</section></>}
  </main><nav className="dp-bottom-nav" aria-label="Mobile dispatcher navigation">{nav.map(([key, label, Icon]) => <button key={key} aria-current={view === key ? 'page' : undefined} className={view === key ? 'active' : ''} onClick={() => tab(key)}><Icon size={21} /><span>{label}</span></button>)}</nav>
- {modal?.type === 'filters' && <DispatcherFilters {...{
+ {['filters', 'driver-filter'].includes(modal?.type) && <DispatcherFilters {...{
       filters,
       zones,
       drivers,
       emirates
-    }} deliveries={deliveries} date={date} searchTerm={search} collections={collections} unassigned={unassigned} onClose={close} onApply={value => {
-      setFilters(value);
-      close();
-    }} />}
+    }} driversOnly={modal.type === 'driver-filter'} deliveries={deliveries} date={date} searchTerm={search}
+      collections={collections} unassigned={unassigned} onClose={close} onApply={applyFilters} />}
  {modal?.type === 'date' && <DispatcherDialog title="Choose a date" onClose={close}><div className="dp-actions dp-date-shortcuts"><button onClick={() => changeDate(businessToday())}>Today</button><button className="primary" onClick={() => changeDate(shiftDay(businessToday(), 1))}>Tomorrow</button></div><form onSubmit={e => {
         e.preventDefault();
         changeDate(customDate);

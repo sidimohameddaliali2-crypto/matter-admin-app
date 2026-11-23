@@ -214,8 +214,9 @@ afterEach(async () => {
   container.remove();
   jest.restoreAllMocks();
 });
-test('single filter button replaces print, routing and grid controls', () => {
-  expect(container.querySelectorAll('.dp-filter-trigger')).toHaveLength(1);
+test('advanced and driver filters are available without print, routing or grid controls', () => {
+  expect(container.querySelectorAll('.dp-filter-trigger:not(.dp-driver-filter)')).toHaveLength(1);
+  expect(button('Filter by driver')).toBeDefined();
   expect(buttons().map(b => b.textContent).join(' ')).not.toMatch(/Grid view|Map assignment|Driver routes|Print/);
   expect(api.post).not.toHaveBeenCalled();
 });
@@ -551,4 +552,43 @@ test('unassigning a driver increases the unassigned zone count and select-all ex
  const original=api.patch.getMockImplementation();api.patch.mockImplementation(async(url,body)=>{if(url==='/deliveries/unassign-driver')deliveries=deliveries.map(d=>body.deliveryIds.includes(d._id)?{...d,driver:null,status:'pending'}:d);return original(url,body);});
  await select('Assigned customer');await click('Unassign');await click('Confirm unassign');await click('Unassigned');await act(async()=>container.querySelector('.dp-filter-trigger').click());expect(button('JVC').textContent).toContain('1 unassigned');await click('Close dialog');await click('Unassigned');
  deliveries=[...deliveries,{...deliveries[0],_id:'finished',status:'delivered',customerName:'Finished customer'}];await click('Refresh deliveries');await click('Select all deliveries');expect(container.querySelector('.dp-selection').textContent).toContain('2 selected');
+});
+
+test('quick driver filter shows only the selected driver and clears hidden bulk selections', async () => {
+  await select('Pending customer');
+  await click('Unassigned');
+  await click('Filter by driver');
+  const dialog = container.querySelector('[role="dialog"]');
+  expect(dialog.getAttribute('aria-label')).toBe('Filter by driver');
+  expect(dialog.querySelector('[aria-label="Search zones"]')).toBeNull();
+  expect(dialog.querySelector('[aria-label="Drivers options"]').querySelectorAll('button')).toHaveLength(7);
+  await fill(dialog.querySelector('[aria-label="Search drivers"]'), 'ravi');
+  await click('Ravi');
+  await click('Show deliveries');
+  expect(button('Filter by driver').textContent).toContain('Ravi');
+  expect(button('Unassigned').getAttribute('aria-pressed')).toBe('false');
+  expect(container.querySelector('.dp-selection')).toBeNull();
+  expect(container.querySelectorAll('.dp-delivery-card')).toHaveLength(1);
+  expect(container.querySelector('.dp-delivery-card').textContent).toContain('Assigned customer');
+  await click('Select all deliveries');
+  expect(container.querySelector('.dp-selection').textContent).toContain('1 selected');
+  expect(api.patch).not.toHaveBeenCalled();
+});
+
+test('quick and advanced driver filters stay in sync and clearing drivers preserves other filters', async () => {
+  const openAdvanced = () => act(async () => container.querySelector('.dp-board-filters .dp-filter-trigger:not(.dp-driver-filter)').click());
+  await openAdvanced();
+  await click('JVC');
+  await click('Ravi');
+  await click('Apply filters');
+  expect(button('Filter by driver').textContent).toContain('Ravi');
+  await click('Filter by driver');
+  expect(button('Ravi').getAttribute('aria-pressed')).toBe('true');
+  await click('Clear drivers');
+  await click('Show deliveries');
+  expect(button('Filter by driver').textContent).toContain('All drivers');
+  expect(container.querySelectorAll('.dp-delivery-card')).toHaveLength(1);
+  await openAdvanced();
+  expect(button('JVC').getAttribute('aria-pressed')).toBe('true');
+  expect(button('Ravi').getAttribute('aria-pressed')).toBe('false');
 });

@@ -45,6 +45,7 @@ export default function DispatcherFilters({
   filters,
   zones,
   drivers,
+  driversOnly = false,
   emirates,
   deliveries = [], date, searchTerm = '', collections = false, unassigned = false,
   onApply,
@@ -80,24 +81,26 @@ export default function DispatcherFilters({
     value: e,
     label: e
   }))]];
-  const total = Object.values(draft).reduce((n, a) => n + a.length, 0);
-  return <DispatcherDialog title="Delivery filters" onClose={onClose}><p>Choose more than one zone, driver, hour or emirate.</p>{groups.map(([key, label, options]) => {
+  const shownGroups = driversOnly ? groups.filter(([key]) => key === 'drivers') : groups;
+  const total = shownGroups.reduce((n, [key]) => n + draft[key].length, 0);
+  const clearFilters = () => {
+    setDraft(previous => driversOnly ? { ...previous, drivers: [] } : {
+      zones: [], drivers: [], hours: [], emirates: []
+    });
+    setSearch({ zones: '', drivers: '' });
+  };
+  return <DispatcherDialog title={driversOnly ? 'Filter by driver' : 'Delivery filters'} onClose={onClose}>{!driversOnly && <p>Choose more than one zone, driver, hour or emirate.</p>}{shownGroups.map(([key, label, options]) => {
       const searchable = key === 'zones' || key === 'drivers',
         matches = options.filter(o => (o.label + ' ' + (o.detail || '')).toLowerCase().includes((search[key] || '').trim().toLowerCase()));
       return <fieldset className="dp-filter-group" key={key}><legend>{label}<small>{draft[key].length} selected</small></legend>{searchable && <label className="dp-search"><Search size={17} /><input aria-label={`Search ${key}`} placeholder={`Search ${key}…`} value={search[key]} onChange={e => setSearch(s => ({
             ...s,
             [key]: e.target.value
           }))} /></label>}<div className={searchable ? 'dp-filter-list' : 'dp-chips'} role="group" aria-label={`${label} options`} tabIndex={searchable ? 0 : undefined}>{matches.map(o => <button type="button" key={o.value} aria-label={key === 'zones' ? o.label : undefined} aria-describedby={key === 'zones' ? `dp-zone-count-${encodeURIComponent(o.value)}` : undefined} aria-pressed={draft[key].includes(o.value)} onClick={() => toggle(key, o.value)}><span>{o.label}{o.detail && <small id={key === 'zones' ? `dp-zone-count-${encodeURIComponent(o.value)}` : undefined}>{o.detail}</small>}</span>{searchable && <i>{draft[key].includes(o.value) && <Check size={15} />}</i>}</button>)}{!matches.length && <p className="dp-empty">No {key} match your search.</p>}</div>{searchable && <small className="dp-help">{matches.length} of {options.length} {key} · scroll for more</small>}</fieldset>;
-    })}<footer className="dp-dialog-footer"><p>{total ? `${total} filters selected · selections stay when you search` : 'No filters selected · show all deliveries'}</p><div className="dp-actions"><button onClick={() => {
-          setDraft({
-            zones: [],
-            drivers: [],
-            hours: [],
-            emirates: []
-          });
-          setSearch({
-            zones: '',
-            drivers: ''
-          });
-        }}>Clear all</button><button className="primary" onClick={() => onApply(draft)}>Apply filters</button></div></footer></DispatcherDialog>;
+    })}<footer className="dp-dialog-footer">
+      {!driversOnly && <p>{total ? `${total} filters selected · selections stay when you search` : 'No filters selected · show all deliveries'}</p>}
+      <div className="dp-actions">
+        <button onClick={clearFilters}>{driversOnly ? 'Clear drivers' : 'Clear all'}</button>
+        <button className="primary" onClick={() => onApply(draft)}>{driversOnly ? 'Show deliveries' : 'Apply filters'}</button>
+      </div>
+    </footer></DispatcherDialog>;
 }
