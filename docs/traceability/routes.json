@@ -120,7 +120,7 @@
   "sourceDigests": {
     "client/src/App.js": "fd3e3bb0e6d9325f1a8618f7e29a68d254e3368f5373c710173f59cd7169a23b",
     "server/middleware/socketAuth.js": "19d61a9198b7025048b7ae6688174bf586389f1f06938bf0594191fc8b9c0723",
-    "server/routes/adminPartners.js": "65e2670e54651113353adceffdbadc7fbfce721ace398e0fd469cf2826a5299b",
+    "server/routes/adminPartners.js": "6a49ce0e09fa7464a3b16795b628ef314a1ada858f6685917eec003caeef43e1",
     "server/routes/alerts.js": "14af024c0c10fefb3ab5b6a743ef965b662efc08a30f5975701f353efc5b7cc0",
     "server/routes/auth.js": "d6e5c56d3ff6dabf9ae397979f3d2bb084b7260c4fecfc45cd6c10654ea1fef8",
     "server/routes/bagFollowups.js": "d5441c5eebac8cb486fb68b7f63366fc79815f69e1a144e8b5e16f3ba67b4456",
@@ -129,7 +129,7 @@
     "server/routes/bagRefunds.js": "4fef960c4b380452383c5b9dd037bdaa35fd9c07b6a4cc4f2ae8d1b2f720a8e1",
     "server/routes/bags.js": "5365c35d13f485789ae19f03793aa8bf6e998f8cee2b8cf052bd377e1e2a4d07",
     "server/routes/communications.js": "7d9bc696d81f850efc61dd35ef19207555691ec81fdb7658280620f045a81335",
-    "server/routes/customers.js": "5057c947f119daf2fcb5baf1ae14c2a5bac1ec8288dba5f9b967bceb5f7e2fba",
+    "server/routes/customers.js": "bf2e81bbd0efe257f4e266c62dc3eb0e78cd9c42fc3362f40039bd6047370395",
     "server/routes/customerService.js": "af8607225feee2254c7b196d0b4ece2b10e32755a45873ede5c7991f51762b28",
     "server/routes/customerServiceCustomers.js": "8e423eed0825e3d04321b36ee80fcba081b6cc9beeb46bb14d6f82fa3cf2da93",
     "server/routes/customerServiceData.js": "81a0b095e4ad7cab736569e831b74a482f40c489b623284bcd9e5cb04a6c977b",
@@ -156,10 +156,10 @@
     "server/routes/matterCore.js": "8806621c38d341c65d3f1cb36755a496f987c797957da5c682c6abc92821c587",
     "server/routes/mcp.js": "d464463076adef564d753f6a43127bbb62c5fe8a83b0f8c516de0a3efc6d0835",
     "server/routes/mcpOAuth.js": "67b47bfefc1a4b35582d8e0970106750434e9c89dc09b737d1afeaf0f079df9e",
-    "server/routes/mealCreation.js": "0073db500890aa437d7daf500416993f2a9a5ca253b258199040cf4b096d7224",
+    "server/routes/mealCreation.js": "b735b5bb67d0745eb626cc02b7dc23dd120ea1d0f0e2376ca26e4110c1dded70",
     "server/routes/memberAuth.js": "13ef4e188032158fb37a99e3936abe515d8e3dc4d5d3c5b4bb6a8642262e06e7",
     "server/routes/memberPortal.js": "7dc30835086de937a520bd3e562492e6c16ba2188bf32453a488844530d1e5a1",
-    "server/routes/menus.js": "5f677c78906ce5ccf140a73c28f39a697dbdf9ede6cb8bf1de1366c596ccd1d4",
+    "server/routes/menus.js": "8ac5a2fd7127b8803911b27601e01d15746c27305ec26a5edd783311f2c7f473",
     "server/routes/mobileUpdates.js": "ae0adbf9181078dd39a7ad82b170965ff2f2785c2461d74589134e2581d5a157",
     "server/routes/partnerAuth.js": "73dc7968c330a39c4fb6f538411f14ef7ec9ad2802ee45b6c0db4deb5b9bfafa",
     "server/routes/partnerPortal.js": "0cd063e3c71211f1495cfda6c812d54e7e2bd39cff246a618130bd181bc510ae",
@@ -5591,7 +5591,7 @@
     {
       "id": "e1d922fc7165509a",
       "method": "GET",
-      "source": "server/routes/menus.js:52",
+      "source": "server/routes/menus.js:53",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5616,7 +5616,7 @@
     {
       "id": "739299465543c56e",
       "method": "GET",
-      "source": "server/routes/menus.js:214",
+      "source": "server/routes/menus.js:215",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -5645,7 +5645,7 @@
     {
       "id": "7ea6e3b9492a0871",
       "method": "GET",
-      "source": "server/routes/menus.js:422",
+      "source": "server/routes/menus.js:423",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -5677,7 +5677,7 @@
     {
       "id": "ac37884b999b647c",
       "method": "GET",
-      "source": "server/routes/menus.js:499",
+      "source": "server/routes/menus.js:500",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -5708,7 +5708,7 @@
     {
       "id": "1e97793a09ff33f0",
       "method": "POST",
-      "source": "server/routes/menus.js:610",
+      "source": "server/routes/menus.js:611",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -5747,7 +5747,7 @@
     {
       "id": "7a94724851fd4f98",
       "method": "GET",
-      "source": "server/routes/menus.js:700",
+      "source": "server/routes/menus.js:701",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -5774,7 +5774,7 @@
     {
       "id": "c3577bd5285759f4",
       "method": "GET",
-      "source": "server/routes/menus.js:754",
+      "source": "server/routes/menus.js:755",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -5803,7 +5803,7 @@
     {
       "id": "c5ea2d63d29d248f",
       "method": "GET",
-      "source": "server/routes/menus.js:827",
+      "source": "server/routes/menus.js:828",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5833,7 +5833,7 @@
     {
       "id": "d59178c8681e8644",
       "method": "GET",
-      "source": "server/routes/menus.js:899",
+      "source": "server/routes/menus.js:900",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5856,7 +5856,7 @@
     {
       "id": "6252c38c517a0099",
       "method": "GET",
-      "source": "server/routes/menus.js:927",
+      "source": "server/routes/menus.js:928",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5879,7 +5879,7 @@
     {
       "id": "c04b01fe9544274a",
       "method": "PUT",
-      "source": "server/routes/menus.js:951",
+      "source": "server/routes/menus.js:952",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5903,7 +5903,7 @@
     {
       "id": "41befcc6aa50feba",
       "method": "GET",
-      "source": "server/routes/menus.js:1006",
+      "source": "server/routes/menus.js:1007",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5926,7 +5926,7 @@
     {
       "id": "25e6bf284aab73d4",
       "method": "PUT",
-      "source": "server/routes/menus.js:1049",
+      "source": "server/routes/menus.js:1050",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -5942,7 +5942,7 @@
     {
       "id": "78a904c639ee4afb",
       "method": "PATCH",
-      "source": "server/routes/menus.js:1050",
+      "source": "server/routes/menus.js:1051",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -5958,7 +5958,7 @@
     {
       "id": "a78661ed70ee4414",
       "method": "GET",
-      "source": "server/routes/menus.js:1056",
+      "source": "server/routes/menus.js:1057",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5984,7 +5984,7 @@
     {
       "id": "ae5faca15279ac3e",
       "method": "PUT",
-      "source": "server/routes/menus.js:1090",
+      "source": "server/routes/menus.js:1091",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6011,7 +6011,7 @@
     {
       "id": "159ebf630f43e6d9",
       "method": "GET",
-      "source": "server/routes/menus.js:1264",
+      "source": "server/routes/menus.js:1265",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6037,7 +6037,7 @@
     {
       "id": "74b57430c4218b21",
       "method": "PUT",
-      "source": "server/routes/menus.js:1291",
+      "source": "server/routes/menus.js:1292",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6064,7 +6064,7 @@
     {
       "id": "b9d8d25875f83724",
       "method": "GET",
-      "source": "server/routes/menus.js:1356",
+      "source": "server/routes/menus.js:1357",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6090,7 +6090,7 @@
     {
       "id": "ba4125c200fb6871",
       "method": "PUT",
-      "source": "server/routes/menus.js:1387",
+      "source": "server/routes/menus.js:1388",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6119,7 +6119,7 @@
     {
       "id": "8f9becc15ca079bb",
       "method": "POST",
-      "source": "server/routes/menus.js:1630",
+      "source": "server/routes/menus.js:1631",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6142,7 +6142,7 @@
     {
       "id": "f21bc8875f3e4226",
       "method": "POST",
-      "source": "server/routes/menus.js:1930",
+      "source": "server/routes/menus.js:1931",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6167,7 +6167,7 @@
     {
       "id": "7ad4fa1c498c2c84",
       "method": "GET",
-      "source": "server/routes/menus.js:2123",
+      "source": "server/routes/menus.js:2124",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6195,7 +6195,7 @@
     {
       "id": "4e296e3ec478867d",
       "method": "POST",
-      "source": "server/routes/menus.js:2131",
+      "source": "server/routes/menus.js:2132",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6223,7 +6223,7 @@
     {
       "id": "ffda832169022415",
       "method": "POST",
-      "source": "server/routes/menus.js:2139",
+      "source": "server/routes/menus.js:2140",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6246,7 +6246,7 @@
     {
       "id": "0242a5474c792750",
       "method": "POST",
-      "source": "server/routes/menus.js:2144",
+      "source": "server/routes/menus.js:2145",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6274,7 +6274,7 @@
     {
       "id": "41cdf2b9c576ccfc",
       "method": "GET",
-      "source": "server/routes/menus.js:2167",
+      "source": "server/routes/menus.js:2168",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6300,7 +6300,7 @@
     {
       "id": "bd80d0d96a11ab4b",
       "method": "PUT",
-      "source": "server/routes/menus.js:2201",
+      "source": "server/routes/menus.js:2202",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6327,7 +6327,7 @@
     {
       "id": "ed99813c9fed423c",
       "method": "GET",
-      "source": "server/routes/menus.js:2264",
+      "source": "server/routes/menus.js:2265",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6353,7 +6353,7 @@
     {
       "id": "1efc69154c700171",
       "method": "PUT",
-      "source": "server/routes/menus.js:2289",
+      "source": "server/routes/menus.js:2290",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6380,7 +6380,7 @@
     {
       "id": "babf4f80c2843fba",
       "method": "GET",
-      "source": "server/routes/menus.js:2647",
+      "source": "server/routes/menus.js:2648",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6403,7 +6403,7 @@
     {
       "id": "d0574bf7bf068e39",
       "method": "GET",
-      "source": "server/routes/menus.js:2660",
+      "source": "server/routes/menus.js:2661",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6423,7 +6423,7 @@
     {
       "id": "be18c51622e751fa",
       "method": "GET",
-      "source": "server/routes/menus.js:2670",
+      "source": "server/routes/menus.js:2671",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6444,7 +6444,8 @@
       ],
       "referencedCalls": [
         "MenuItem.find",
-        "WeeklyMenu.findById"
+        "WeeklyMenu.findById",
+        "withCurrentKitchenQuantities"
       ],
       "path": "/api/menus/:id/kitchen-components",
       "middlewareDeclarations": []
@@ -6452,7 +6453,7 @@
     {
       "id": "bb4ccf8728d6b312",
       "method": "GET",
-      "source": "server/routes/menus.js:2685",
+      "source": "server/routes/menus.js:2687",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6481,7 +6482,7 @@
     {
       "id": "b57a29af78fa364b",
       "method": "POST",
-      "source": "server/routes/menus.js:2739",
+      "source": "server/routes/menus.js:2741",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6501,7 +6502,7 @@
     {
       "id": "fb7e5d2a8ee051af",
       "method": "POST",
-      "source": "server/routes/menus.js:2741",
+      "source": "server/routes/menus.js:2743",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6526,7 +6527,7 @@
     {
       "id": "482eac8120c5f2c9",
       "method": "GET",
-      "source": "server/routes/menus.js:2767",
+      "source": "server/routes/menus.js:2769",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -6552,7 +6553,7 @@
     {
       "id": "8f49ee7ca71fd3ab",
       "method": "GET",
-      "source": "server/routes/menus.js:2840",
+      "source": "server/routes/menus.js:2842",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6578,7 +6579,7 @@
     {
       "id": "8319696ee3d92b4c",
       "method": "POST",
-      "source": "server/routes/menus.js:2909",
+      "source": "server/routes/menus.js:2911",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6593,7 +6594,7 @@
     {
       "id": "b5ecc5b5d431f8d6",
       "method": "PUT",
-      "source": "server/routes/menus.js:2915",
+      "source": "server/routes/menus.js:2917",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6608,7 +6609,7 @@
     {
       "id": "2fb87708d4414ed1",
       "method": "GET",
-      "source": "server/routes/menus.js:2921",
+      "source": "server/routes/menus.js:2923",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6634,7 +6635,7 @@
     {
       "id": "f203472339be2c57",
       "method": "DELETE",
-      "source": "server/routes/menus.js:2958",
+      "source": "server/routes/menus.js:2960",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6662,7 +6663,7 @@
     {
       "id": "d0d43ea4e9e546bc",
       "method": "GET",
-      "source": "server/routes/menus.js:2995",
+      "source": "server/routes/menus.js:2997",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6691,7 +6692,7 @@
     {
       "id": "3db57f9bc11db3cd",
       "method": "GET",
-      "source": "server/routes/menus.js:3017",
+      "source": "server/routes/menus.js:3019",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6717,7 +6718,7 @@
     {
       "id": "026783ef36a8e622",
       "method": "GET",
-      "source": "server/routes/menus.js:3030",
+      "source": "server/routes/menus.js:3032",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6746,7 +6747,7 @@
     {
       "id": "c0e719db152dfdb9",
       "method": "GET",
-      "source": "server/routes/menus.js:3073",
+      "source": "server/routes/menus.js:3075",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6771,7 +6772,7 @@
     {
       "id": "0627179e7aec5479",
       "method": "GET",
-      "source": "server/routes/menus.js:3094",
+      "source": "server/routes/menus.js:3096",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -6797,7 +6798,7 @@
     {
       "id": "2af61b818c252b74",
       "method": "POST",
-      "source": "server/routes/menus.js:3123",
+      "source": "server/routes/menus.js:3125",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6846,7 +6847,7 @@
     {
       "id": "cbc5fa6c6fb238b6",
       "method": "POST",
-      "source": "server/routes/menus.js:3209",
+      "source": "server/routes/menus.js:3211",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -6872,7 +6873,7 @@
     {
       "id": "d89fe8e985932833",
       "method": "POST",
-      "source": "server/routes/menus.js:3252",
+      "source": "server/routes/menus.js:3254",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -6919,7 +6920,7 @@
     {
       "id": "61f6aca9ae727c64",
       "method": "DELETE",
-      "source": "server/routes/menus.js:3516",
+      "source": "server/routes/menus.js:3518",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6947,7 +6948,7 @@
     {
       "id": "64e7021562d595f0",
       "method": "PATCH",
-      "source": "server/routes/menus.js:3542",
+      "source": "server/routes/menus.js:3544",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -6976,7 +6977,7 @@
     {
       "id": "be76d29116825ab1",
       "method": "PATCH",
-      "source": "server/routes/menus.js:3573",
+      "source": "server/routes/menus.js:3575",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -7004,7 +7005,7 @@
     {
       "id": "79de545bd3bf6836",
       "method": "PATCH",
-      "source": "server/routes/menus.js:3618",
+      "source": "server/routes/menus.js:3620",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -7032,7 +7033,7 @@
     {
       "id": "dae71fff2ede72f2",
       "method": "PUT",
-      "source": "server/routes/menus.js:3674",
+      "source": "server/routes/menus.js:3676",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -7066,7 +7067,7 @@
     {
       "id": "a6e3e013e4e1204f",
       "method": "POST",
-      "source": "server/routes/mealCreation.js:13",
+      "source": "server/routes/mealCreation.js:14",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -7096,7 +7097,7 @@
     {
       "id": "106d4bad7f60dc7b",
       "method": "GET",
-      "source": "server/routes/mealCreation.js:46",
+      "source": "server/routes/mealCreation.js:54",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7120,7 +7121,7 @@
     {
       "id": "ba9d35e28494e600",
       "method": "PUT",
-      "source": "server/routes/mealCreation.js:54",
+      "source": "server/routes/mealCreation.js:62",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -7130,6 +7131,7 @@
         "success"
       ],
       "requestKeys": [
+        "body.catalogue",
         "body.revision"
       ],
       "referencedCalls": [
@@ -7221,7 +7223,7 @@
     {
       "id": "d60860e39de45129",
       "method": "POST",
-      "source": "server/routes/customers.js:82",
+      "source": "server/routes/customers.js:83",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7257,7 +7259,7 @@
     {
       "id": "060aa5f7523cbbfd",
       "method": "POST",
-      "source": "server/routes/customers.js:213",
+      "source": "server/routes/customers.js:214",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7293,7 +7295,7 @@
     {
       "id": "28a2183102e0a6b9",
       "method": "POST",
-      "source": "server/routes/customers.js:378",
+      "source": "server/routes/customers.js:379",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7323,7 +7325,7 @@
     {
       "id": "fb674699c5930b38",
       "method": "POST",
-      "source": "server/routes/customers.js:483",
+      "source": "server/routes/customers.js:484",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7357,9 +7359,34 @@
       ]
     },
     {
+      "id": "595c1635a0a8ea66",
+      "method": "POST",
+      "source": "server/routes/customers.js:554",
+      "description": null,
+      "handlerGuards": [
+        "authorize(['admin', 'super_admin', 'dispatcher', 'manager'])"
+      ],
+      "declaredStatuses": [
+        502
+      ],
+      "responseKeys": [
+        "data",
+        "message",
+        "success"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [
+        "refreshCustomerMetadata"
+      ],
+      "path": "/api/customers/matter-metadata/refresh",
+      "middlewareDeclarations": [
+        "protect"
+      ]
+    },
+    {
       "id": "6864c706a8b1a5ba",
       "method": "GET",
-      "source": "server/routes/customers.js:553",
+      "source": "server/routes/customers.js:563",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7387,7 +7414,7 @@
     {
       "id": "59dd9e41784be033",
       "method": "POST",
-      "source": "server/routes/customers.js:595",
+      "source": "server/routes/customers.js:605",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7418,7 +7445,7 @@
     {
       "id": "efd7517b6645bd05",
       "method": "PATCH",
-      "source": "server/routes/customers.js:677",
+      "source": "server/routes/customers.js:687",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7453,7 +7480,7 @@
     {
       "id": "6452f79be48301b0",
       "method": "PATCH",
-      "source": "server/routes/customers.js:778",
+      "source": "server/routes/customers.js:788",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7484,7 +7511,7 @@
     {
       "id": "338bfda1023040a6",
       "method": "GET",
-      "source": "server/routes/customers.js:875",
+      "source": "server/routes/customers.js:885",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7513,7 +7540,7 @@
     {
       "id": "435755533182550e",
       "method": "POST",
-      "source": "server/routes/customers.js:897",
+      "source": "server/routes/customers.js:907",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7540,7 +7567,7 @@
     {
       "id": "d22e786ebeb69264",
       "method": "POST",
-      "source": "server/routes/customers.js:927",
+      "source": "server/routes/customers.js:937",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7564,7 +7591,7 @@
     {
       "id": "c19310a0dc6c7505",
       "method": "POST",
-      "source": "server/routes/customers.js:960",
+      "source": "server/routes/customers.js:970",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7589,7 +7616,7 @@
     {
       "id": "16ab45d314ecba91",
       "method": "GET",
-      "source": "server/routes/customers.js:989",
+      "source": "server/routes/customers.js:999",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7616,7 +7643,7 @@
     {
       "id": "d0e30b9822f4849c",
       "method": "GET",
-      "source": "server/routes/customers.js:1018",
+      "source": "server/routes/customers.js:1028",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8502,7 +8529,7 @@
     {
       "id": "5514641ba8318cd2",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:40",
+      "source": "server/routes/adminPartners.js:43",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8526,7 +8553,7 @@
     {
       "id": "3c2552cb1deb5086",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:49",
+      "source": "server/routes/adminPartners.js:52",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8563,7 +8590,7 @@
     {
       "id": "1e3660bc2e397d59",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:65",
+      "source": "server/routes/adminPartners.js:68",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -8594,7 +8621,7 @@
     {
       "id": "71877a269fdbf281",
       "method": "DELETE",
-      "source": "server/routes/adminPartners.js:82",
+      "source": "server/routes/adminPartners.js:85",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -8622,7 +8649,7 @@
     {
       "id": "08935e563ebc83c1",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:96",
+      "source": "server/routes/adminPartners.js:99",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8646,7 +8673,7 @@
     {
       "id": "12a737209f4825ac",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:112",
+      "source": "server/routes/adminPartners.js:115",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8674,7 +8701,7 @@
     {
       "id": "90875b36402e9b63",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:129",
+      "source": "server/routes/adminPartners.js:132",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8702,7 +8729,7 @@
     {
       "id": "1794c560a8faf151",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:146",
+      "source": "server/routes/adminPartners.js:149",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8733,7 +8760,7 @@
     {
       "id": "9738ac871dd3e4e0",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:182",
+      "source": "server/routes/adminPartners.js:185",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8761,7 +8788,7 @@
     {
       "id": "8b16cc4f6299949e",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:194",
+      "source": "server/routes/adminPartners.js:197",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -8792,7 +8819,7 @@
     {
       "id": "3a63c8ae4f220fd9",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:212",
+      "source": "server/routes/adminPartners.js:215",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -8830,7 +8857,7 @@
     {
       "id": "d9a93acfe28e921b",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:305",
+      "source": "server/routes/adminPartners.js:308",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8857,7 +8884,7 @@
     {
       "id": "5fbe7dcc8eb0ea41",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:321",
+      "source": "server/routes/adminPartners.js:324",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8885,7 +8912,7 @@
     {
       "id": "9f73f0a8df362697",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:338",
+      "source": "server/routes/adminPartners.js:341",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8914,7 +8941,7 @@
     {
       "id": "a363f56c8ccdf574",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:356",
+      "source": "server/routes/adminPartners.js:359",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -8953,7 +8980,7 @@
     {
       "id": "129fe343cce506c9",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:384",
+      "source": "server/routes/adminPartners.js:387",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -8981,7 +9008,7 @@
     {
       "id": "d5d31fa4ca0d87fb",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:432",
+      "source": "server/routes/adminPartners.js:435",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -9011,7 +9038,7 @@
     {
       "id": "6ec0b87b2d9bd1f6",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:505",
+      "source": "server/routes/adminPartners.js:508",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -9038,7 +9065,7 @@
     {
       "id": "30a0adec30aa4db3",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:568",
+      "source": "server/routes/adminPartners.js:571",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9070,15 +9097,14 @@
     {
       "id": "80fae840241b4916",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:581",
+      "source": "server/routes/adminPartners.js:584",
       "description": null,
       "handlerGuards": [
         "admin"
       ],
       "declaredStatuses": [
         201,
-        400,
-        500
+        400
       ],
       "responseKeys": [
         "data",
@@ -9092,9 +9118,12 @@
         "body.businessType",
         "body.contactName",
         "body.email",
+        "body.financeContact",
         "body.menuSelectionEnabled",
+        "body.ownerContact",
         "body.password",
         "body.phone",
+        "body.pointOfContact",
         "body.presetMacros",
         "body.profilePicture"
       ],
@@ -9112,7 +9141,7 @@
     {
       "id": "cc826e3d85d723d0",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:609",
+      "source": "server/routes/adminPartners.js:616",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9139,7 +9168,7 @@
     {
       "id": "c1e1cf49a77b69b2",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:619",
+      "source": "server/routes/adminPartners.js:626",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -9155,6 +9184,7 @@
       ],
       "requestKeys": [
         "body.k",
+        "body.role",
         "params.id"
       ],
       "referencedCalls": [
@@ -9169,7 +9199,7 @@
     {
       "id": "67b060c58072e165",
       "method": "DELETE",
-      "source": "server/routes/adminPartners.js:632",
+      "source": "server/routes/adminPartners.js:651",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -9197,7 +9227,7 @@
     {
       "id": "f2648dc1c7fa0246",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:643",
+      "source": "server/routes/adminPartners.js:662",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9226,7 +9256,7 @@
     {
       "id": "6cd5307cb526ae7a",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:680",
+      "source": "server/routes/adminPartners.js:699",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9257,7 +9287,7 @@
     {
       "id": "b111d60253840609",
       "method": "DELETE",
-      "source": "server/routes/adminPartners.js:703",
+      "source": "server/routes/adminPartners.js:722",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9283,7 +9313,7 @@
     {
       "id": "d23b12274f9412f4",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:716",
+      "source": "server/routes/adminPartners.js:735",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9309,7 +9339,7 @@
     {
       "id": "a75ba59ebee8d858",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:726",
+      "source": "server/routes/adminPartners.js:745",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9336,7 +9366,7 @@
     {
       "id": "2ab02c26026cd270",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:745",
+      "source": "server/routes/adminPartners.js:764",
       "description": null,
       "handlerGuards": [
         "admin"

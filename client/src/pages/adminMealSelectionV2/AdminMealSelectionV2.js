@@ -36,9 +36,9 @@ export default function AdminMealSelectionV2() {
   const cycleSelector = cycles.length ? <label className="av2-cycle-selector">Saved cycle<select aria-label="Saved cycle" value={selectedCycle?.id || ''} onChange={event => setSelectedCycleId(event.target.value)}>{page !== 'weekly-menu' && <option value="">All saved meals</option>}{cycles.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label> : null;
   return <div className="av2 av2-integrated" ref={contentRef}><div className="av2-page-body">
     {(saved.error || message) && <div className="av2-feedback" role="status">{saved.error || message}<button aria-label="Dismiss message" onClick={() => setMessage('')}><X size={16} /></button></div>}
-    {page === 'meals' && (route[1] ? <MealComposer key={route[1]} meal={cycle.meals.find(m => m.id === ((saved.data.aliases || []).find(alias => alias.from === route[1])?.to || route[1]))} isNew={route[1] === 'new'} onSave={async meal => {
+    {page === 'meals' && (route[1] ? <MealComposer key={route[1]} meal={cycle.meals.find(m => m.id === ((saved.data.aliases || []).find(alias => alias.from === route[1])?.to || route[1]))} isNew={route[1] === 'new'} revision={saved.data.revision} onSave={async (meal, revision) => {
       const version = view.current.version;
-      await mealCreationStore.save({ catalogue: { meals: [meal] } });
+      await mealCreationStore.save({ catalogue: { meals: [meal] } }, revision);
       if (!alive.current || version !== view.current.version) return;
       if (route[1] === 'new') setSelectedCycleId('');
       setMessage('Meal and component rules saved to the library.');

@@ -41,6 +41,24 @@ test('serializes pending saves across navigation and uses accepted revisions', a
   expect(client.put.mock.calls.map(call=>call[1].revision)).toEqual([0,1]);expect(store.getSnapshot().data.revision).toBe(2);
 });
 
+test('a queued edit cannot overwrite a newer revision with an older meal draft', async () => {
+  const state = initial();
+  let finish;
+  const client = { post: jest.fn(async () => response(state)),
+    put: jest.fn(() => new Promise(resolve => { finish = resolve; })) };
+  const store = createMealCreationStore(client);
+  await store.load();
+  const saving = store.save({ catalogue: state.catalogue }, 0);
+  const staleSave = expect(store.save({ catalogue: state.catalogue }, 0)).rejects.toThrow('Reopen the meal');
+  await Promise.resolve();
+  expect(client.put).toHaveBeenCalledTimes(1);
+  finish(response({ ...state, revision: 1 }));
+  await saving;
+  await staleSave;
+  expect(client.put).toHaveBeenCalledTimes(1);
+  expect(store.getSnapshot().data.revision).toBe(1);
+});
+
 test('failed loads never create an empty writable catalogue; failed saves retain accepted data and block queued overwrites',async()=>{
   const client={post:jest.fn().mockRejectedValueOnce(new Error('Offline')).mockResolvedValue(response(initial())),put:jest.fn().mockRejectedValue({response:{status:409,data:{message:'Changed elsewhere'}}})};
   const store=createMealCreationStore(client);

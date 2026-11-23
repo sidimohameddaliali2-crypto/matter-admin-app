@@ -53,6 +53,21 @@ const customerSchema = new mongoose.Schema({
     sparse: true
   },
 
+  // Matter-owned labels captured from the subscription list. No local plan,
+  // address, meal entitlement or delivery status is changed by this snapshot.
+  matterMetadata: {
+    type: new mongoose.Schema({
+      subscription_id: String,
+      customer_id: String,
+      customer_type: { type: String, default: undefined },
+      customer_tags: { type: [{ _id: false, id: String, name: String, color: String }], default: undefined },
+      upcoming_plan: { type: mongoose.Schema.Types.Mixed, default: undefined },
+      updated_at: Date,
+      fetchedAt: Date,
+    }, { _id: false }),
+    default: undefined,
+  },
+
   // Geocoded location, cached here (not just per-delivery) so a customer's
   // address is only ever sent to Google Geocoding once. Every delivery for
   // this customer — past, present, and future — and every Optimize Routes

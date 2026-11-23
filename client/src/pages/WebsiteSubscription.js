@@ -1,11 +1,13 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { Search, Package, PauseCircle, Receipt, CheckCircle2, X } from 'lucide-react';
+import { Search, Package, PauseCircle, Receipt, CheckCircle2, X, RefreshCw } from 'lucide-react';
 import api from '../utils/api';
 import { recordActivityChange } from '../utils/activityCapture';
 import DeliveryCalendar from '../components/DeliveryCalendar';
 import { matchLabels } from '../components/subscriptionUi';
 import { formatDate, formatMoney, isCycleEnded, daysUntil } from '../utils/subscriptionFormat';
+import CustomerMatterDetails, { CustomerTypeTag, CustomerTagBadges } from '../components/CustomerMatterDetails';
+import { websiteMetadataCustomer, hasUpcomingPlan, typeLabel, matchesCustomerType } from '../utils/customerMatterMetadata';
 
 // "Due for renewal" = fewer than 6 days left until renewal_due_date, and the
 // cycle hasn't already ended (a cycle-ended customer belongs in that tab
@@ -39,12 +41,15 @@ function StatusPill({ status }) {
 /* Left panel: searchable / filterable customer list                      */
 /* ---------------------------------------------------------------------- */
 
-function CustomerListPanel({ selectedId, onSelect }) {
+function CustomerListPanel({ selectedId, onSelect, onRefresh }) {
   const [allSubscriptions, setAllSubscriptions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [statusTab, setStatusTab] = useState('all');
+  const [typeFilter, setTypeFilter] = useState('');
+  const selectionRef = useRef({ selectedId, onSelect });
+  selectionRef.current = { selectedId, onSelect };
   const [visibleCount, setVisibleCount] = useState(PAGE_STEP);
   const [noMatchIds, setNoMatchIds] = useState(new Set());
   const [noMatchOnly, setNoMatchOnly] = useState(false);
@@ -57,11 +62,10 @@ function CustomerListPanel({ selectedId, onSelect }) {
       const res = await api.get('/matter/subscriptions/all');
       const list = res.data?.data || [];
       setAllSubscriptions(list);
-      if (!selectedId && list.length > 0) onSelect(list[0].subscription_id, { replace: true });
+      if (!selectionRef.current.selectedId && list.length > 0) selectionRef.current.onSelect(list[0].subscription_id, { replace: true });
     } catch (err) {
       console.error('Failed to load subscriptions:', err);
       setError(err.response?.data?.message || 'Failed to load subscriptions.');
-      setAllSubscriptions([]);
     } finally {
       setLoading(false);
     }
@@ -102,13 +106,14 @@ function CustomerListPanel({ selectedId, onSelect }) {
   }, [allSubscriptions]);
 
   const statusCounts = useMemo(() => {
-    const counts = { all: allSubscriptions.length, active: 0, renewal: 0, cycleEnded: 0, cancelled: 0 };
+    const counts = { all: allSubscriptions.length, active: 0, renewal: 0, cycleEnded: 0, cancelled: 0, upcoming: 0 };
     allSubscriptions.forEach((s) => {
       const cycleEnded = isCycleEnded(s.cycle_end_date);
       if (s.subscription_status === 'cancelled') counts.cancelled += 1;
       if (cycleEnded) counts.cycleEnded += 1;
       else if (s.subscription_status === 'active') counts.active += 1;
       if (isDueForRenewal(s)) counts.renewal += 1;
+      if (hasUpcomingPlan(websiteMetadataCustomer(s))) counts.upcoming += 1;
     });
     return counts;
   }, [allSubscriptions]);
@@ -121,38 +126,56 @@ function CustomerListPanel({ selectedId, onSelect }) {
       if (statusTab === 'renewal' && !isDueForRenewal(s)) return false;
       if (statusTab === 'cycleEnded' && !cycleEnded) return false;
       if (statusTab === 'cancelled' && s.subscription_status !== 'cancelled') return false;
+      if (statusTab === 'upcoming' && !hasUpcomingPlan(websiteMetadataCustomer(s))) return false;
+      if (!matchesCustomerType(websiteMetadataCustomer(s), typeFilter)) return false;
       if (noMatchOnly && !noMatchIds.has(String(s.subscription_id))) return false;
       if (term) {
-        const haystack = `${s.name || ''} ${s.email || ''} ${s.subscription_id || ''} ${s.customer_id || ''}`.toLowerCase();
+        const haystack = `${s.name || ''} ${s.email || ''} ${s.subscription_id || ''} ${s.customer_id || ''} ${s.customer_type || ''} ${(s.customer_tags || []).map(tag => tag.name).join(' ')}`.toLowerCase();
         if (!haystack.includes(term)) return false;
       }
       return true;
     });
-  }, [allSubscriptions, statusTab, search, noMatchOnly, noMatchIds]);
+  }, [allSubscriptions, statusTab, search, noMatchOnly, noMatchIds, typeFilter]);
 
-  useEffect(() => { setVisibleCount(PAGE_STEP); }, [statusTab, search, noMatchOnly]);
+  useEffect(() => { setVisibleCount(PAGE_STEP); }, [statusTab, search, noMatchOnly, typeFilter]);
 
   const visible = filtered.slice(0, visibleCount);
 
   const tabs = [
     { key: 'all', label: 'All', count: statusCounts.all },
     { key: 'active', label: 'Active', count: statusCounts.active },
+    { key: 'upcoming', label: 'Upcoming plan', count: statusCounts.upcoming },
     { key: 'renewal', label: 'Due for renewal', count: statusCounts.renewal },
     { key: 'cycleEnded', label: 'Cycle ended', count: statusCounts.cycleEnded },
     { key: 'cancelled', label: 'Cancelled', count: statusCounts.cancelled },
   ];
 
   return (
-    <div className="bg-white rounded-2xl border border-matter-dust/40 shadow-md p-4 flex flex-col lg:sticky lg:top-6 lg:max-h-[calc(100vh-140px)]">
+    <div role="region" aria-label="Customer list" className="bg-white rounded-2xl border border-matter-dust/40 shadow-md p-4 flex flex-col lg:sticky lg:top-6 lg:max-h-[calc(100vh-140px)]">
       <div className="relative mb-3 flex-shrink-0">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
         <input
           type="text"
-          placeholder="Search name, email or ID"
+          placeholder="Search name, email, ID, type or tag"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="w-full pl-9 pr-3 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-matter-sky focus:border-matter-sky"
         />
+      </div>
+
+      <div className="mb-3 flex items-end gap-2 flex-shrink-0">
+        <label className="flex-1 min-w-0 text-xs font-semibold text-gray-600">Customer type
+          <select aria-label="Customer type" value={typeFilter} onChange={event => setTypeFilter(event.target.value)}
+            className="mt-1 w-full border border-gray-200 rounded-xl px-3 py-2.5 bg-white text-sm font-normal focus:outline-none focus:ring-2 focus:ring-matter-sky">
+            <option value="">All customer types</option>
+            {[...new Set(['new', 'returning', ...allSubscriptions.map(s => s.customer_type).filter(Boolean)])].sort().map(type => <option key={type} value={type}>{typeLabel(type)}</option>)}
+            <option value="__unknown">Not provided</option>
+          </select>
+        </label>
+        <button type="button" aria-label="Refresh Matter customers" title="Refresh Matter customers" disabled={loading} onClick={async () => { await fetchAll(); onRefresh?.(); }}
+          className="p-2.5 rounded-xl border border-gray-200 text-gray-600 disabled:opacity-50 hover:bg-gray-50">
+          <RefreshCw className={`h-5 w-5 ${loading ? 'animate-spin' : ''}`} />
+        </button>
       </div>
 
       <div className="flex flex-wrap gap-1.5 mb-4 flex-shrink-0">
@@ -165,6 +188,7 @@ function CustomerListPanel({ selectedId, onSelect }) {
             }`}
           >
             {tab.label}
+            {tab.key === 'upcoming' && ` (${tab.count})`}
           </button>
         ))}
         <button
@@ -182,10 +206,11 @@ function CustomerListPanel({ selectedId, onSelect }) {
         )}
       </div>
 
+      {error && allSubscriptions.length > 0 && <p role="alert" className="text-xs text-matter-red mb-2">{error} Showing the previously loaded list.</p>}
       <div className="flex-1 overflow-y-auto no-scrollbar space-y-2 min-h-[200px]">
         {loading ? (
           <div className="text-center py-12 text-gray-400 animate-pulse text-sm">Loading…</div>
-        ) : error ? (
+        ) : error && allSubscriptions.length === 0 ? (
           <div className="text-center py-12 text-matter-red text-sm px-2">{error}</div>
         ) : visible.length === 0 ? (
           <div className="text-center py-12">
@@ -211,6 +236,7 @@ function CustomerListPanel({ selectedId, onSelect }) {
                   <p className="text-xs text-gray-500 truncate">
                     CUS-{s.customer_id} · {s.plan?.name || 'No plan'}
                   </p>
+                  <CustomerMatterDetails customer={websiteMetadataCustomer(s)} compact />
                 </button>
               );
             })}
@@ -533,7 +559,7 @@ function PauseModal({ subscriptionId, cycleEndDate, onClose, onSuccess }) {
   );
 }
 
-function CustomerProfilePanel({ subscriptionId }) {
+function CustomerProfilePanel({ subscriptionId, refreshVersion }) {
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -576,7 +602,7 @@ function CustomerProfilePanel({ subscriptionId }) {
       })
       .finally(() => mounted && setLoading(false));
     return () => { mounted = false; };
-  }, [subscriptionId]);
+  }, [subscriptionId, refreshVersion]);
 
   useEffect(() => { setActiveTab('logistics'); return loadProfile(); }, [loadProfile]);
 
@@ -723,13 +749,9 @@ function CustomerProfilePanel({ subscriptionId }) {
       <div className="bg-white rounded-2xl border border-matter-dust/40 shadow-md p-6 mb-4 flex flex-col md:flex-row md:items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-3 mb-1 flex-wrap">
+            <CustomerTagBadges customer={websiteMetadataCustomer(profile)} />
             <h2 className="font-serif-mgmt text-2xl font-bold text-matter-navy">{profile.name}</h2>
-            <StatusPill status={profile.subscription_status} />
-            {profile.renewal_eligible && (
-              <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-matter-dustedblue/40 text-matter-navy whitespace-nowrap">
-                Renews {formatDate(profile.renewal_due_date)}
-              </span>
-            )}
+            <CustomerTypeTag customer={websiteMetadataCustomer(profile)} />
             {isCycleEnded(profile.cycle_end_date) && (
               <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-gray-100 text-gray-500 whitespace-nowrap">
                 Cycle ended
@@ -766,6 +788,7 @@ function CustomerProfilePanel({ subscriptionId }) {
       </div>
 
       {/* Subscription details + Macro profile */}
+      <div className="mb-4"><CustomerMatterDetails customer={websiteMetadataCustomer(profile)} /></div>
       <div className="grid grid-cols-12 gap-4 mb-4">
         <div className="col-span-12 lg:col-span-7 bg-white rounded-2xl border border-matter-dust/40 shadow-md p-6">
           <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-1">Subscription</p>
@@ -1163,6 +1186,7 @@ function CustomerProfilePanel({ subscriptionId }) {
 const WebsiteSubscription = () => {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [profileRefresh, setProfileRefresh] = useState(0);
 
   const handleSelect = (subscriptionId, opts) => {
     navigate(`/website-subscriptions/${subscriptionId}`, opts);
@@ -1186,8 +1210,8 @@ const WebsiteSubscription = () => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-5 items-start">
-        <CustomerListPanel selectedId={id} onSelect={handleSelect} />
-        <CustomerProfilePanel subscriptionId={id} />
+        <CustomerListPanel selectedId={id} onSelect={handleSelect} onRefresh={() => setProfileRefresh(value => value + 1)} />
+        <CustomerProfilePanel subscriptionId={id} refreshVersion={profileRefresh} />
       </div>
     </div>
   );

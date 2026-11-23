@@ -25,6 +25,9 @@ import { partnerReportScope } from '../services/partnerReportScope.js';
 import { partnerUnitPrice } from '../services/partnerOrderValidation.js';
 import { emitPartnerKitchenChange } from '../services/partnerKitchenOrders.js';
 
+const partnerContactProjection = req => ['admin', 'super_admin'].includes(req.user?.role)
+  ? '+financeContact +ownerContact' : '-financeContact -ownerContact';
+
 const adminOrKitchen = authorize(['admin', 'super_admin', 'kitchen']);
 
 const router = express.Router();
@@ -571,7 +574,7 @@ router.get('/', async (req, res) => {
     const q = {};
     if (search) { const re = new RegExp(search, 'i'); q.$or = [{ businessName: re }, { email: re }, { contactName: re }]; }
     const total = await Partner.countDocuments(q);
-    const partners = await Partner.find(q).sort({ createdAt: -1 }).skip((Number(page) - 1) * Number(limit)).limit(Number(limit));
+    const partners = await Partner.find(q).select(partnerContactProjection(req)).sort({ createdAt: -1 }).skip((Number(page) - 1) * Number(limit)).limit(Number(limit));
     res.json({ success: true, data: partners, total, page: Number(page), totalPages: Math.ceil(total / Number(limit)) });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -592,7 +595,10 @@ router.post('/', admin, async (req, res) => {
       menuSelectionEnabled: !!menuSelectionEnabled,
       presetMacros: presetMacros || undefined,
       accountCategory: ['retail','member','partner'].includes(req.body.accountCategory) ? req.body.accountCategory : 'partner',
-      profilePicture: profilePicture || ''
+      profilePicture: profilePicture || '',
+      pointOfContact: req.body.pointOfContact,
+      financeContact: req.body.financeContact,
+      ownerContact: req.body.ownerContact
     });
     partner.password = undefined;
     // New partner should already have every master-menu item, not just
@@ -602,13 +608,14 @@ router.post('/', admin, async (req, res) => {
     res.status(201).json({ success: true, data: partner });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    const invalid = ['ValidationError', 'CastError'].includes(err.name);
+    res.status(invalid ? 400 : 500).json({ success: false, message: invalid ? err.message : 'Server error' });
   }
 });
 
 router.get('/:id', async (req, res) => {
   try {
-    const partner = await Partner.findById(req.params.id);
+    const partner = await Partner.findById(req.params.id).select(partnerContactProjection(req));
     if (!partner) return res.status(404).json({ success: false, message: 'Partner not found' });
     res.json({ success: true, data: partner });
   } catch (err) {
@@ -621,7 +628,19 @@ router.patch('/:id', admin, async (req, res) => {
     const allowed = ['businessName', 'businessType', 'contactName', 'phone', 'address', 'isActive', 'minimumOrder', 'menuSelectionEnabled', 'presetMacros', 'profilePicture', 'accountCategory'];
     const updates = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
-    const partner = await Partner.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true, runValidators: true });
+    for (const role of ['pointOfContact', 'financeContact', 'ownerContact']) {
+      const contact = req.body[role];
+      if (contact === undefined) continue;
+      if (!contact || typeof contact !== 'object' || Array.isArray(contact)) {
+        return res.status(400).json({ success: false, message: `${role} must contain contact fields` });
+      }
+      // Updating one contact field must retain the other saved contact details.
+      for (const field of ['fullName', 'email', 'phone']) {
+        if (contact[field] !== undefined) updates[`${role}.${field}`] = contact[field];
+      }
+    }
+    const partner = await Partner.findByIdAndUpdate(req.params.id, { $set: updates }, { new: true, runValidators: true })
+      .select('+financeContact +ownerContact');
     if (!partner) return res.status(404).json({ success: false, message: 'Partner not found' });
     res.json({ success: true, data: partner });
   } catch (err) {

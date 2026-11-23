@@ -30,12 +30,12 @@ test('switching customer details and filtering never mutates saved meals or tran
 
 test('counting groups preserve normal and large dishes, exact gram inputs and correct download targets', async () => {
   const rows = [
-    { category: 'breakfast', mealName: 'Oats', count: 2, totalProteinWeight: 200, totalCarbWeight: 200, totalVegWeight: 160 },
-    { category: 'breakfast', mealName: 'Oats (LARGE)', count: 1, totalProteinWeight: 150, totalCarbWeight: 200, totalVegWeight: 80 },
-    { category: 'snack', mealName: 'Bites', count: 1, totalProteinWeight: 50, totalCarbWeight: 50, totalVegWeight: 0 },
+    { key: 'oats', category: 'breakfast', mealName: 'Oats', count: 2, totalProteinWeight: 200, totalCarbWeight: 200, totalVegWeight: 160 },
+    { key: 'large-oats', category: 'breakfast', mealName: 'Oats (LARGE)', count: 1, totalProteinWeight: 150, totalCarbWeight: 200, totalVegWeight: 80 },
+    { key: 'bites', category: 'snack', mealName: 'Bites', count: 1, totalProteinWeight: 50, totalCarbWeight: 50, totalVegWeight: 0 },
   ];
   const before = JSON.stringify(rows), onDownload = jest.fn();
-  await act(async () => root.render(<KitchenCountingGroups rows={rows} onDownload={onDownload} />));
+  await act(async () => root.render(<KitchenCountingGroups rows={rows} onDownload={onDownload} componentsReady />));
   const groups = container.querySelectorAll('section');
   expect(groups).toHaveLength(2);
   expect(groups[0].querySelector('.kitchen-group-heading > div > strong').textContent).toBe('3');
@@ -45,6 +45,6 @@ test('counting groups preserve normal and large dishes, exact gram inputs and co
   expect(container.querySelectorAll('.kitchen-bar-track i')[0].style.width).toBe(`${200 / 350 * 100}%`);
   expect(groups[1].querySelector('.kitchen-weight-totalVegWeight .kitchen-bar-track i').style.width).toBe('0%');
   await act(async () => container.querySelector('[aria-label="Download customers for Oats (LARGE)"]').click());
-  expect(onDownload).toHaveBeenCalledWith('breakfast', 'Oats (LARGE)');
+  expect(onDownload).toHaveBeenCalledWith(rows[1]);
   expect(JSON.stringify(rows)).toBe(before);
 });

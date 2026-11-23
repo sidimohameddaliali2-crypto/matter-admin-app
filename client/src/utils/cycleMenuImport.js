@@ -1,4 +1,5 @@
 import { mealType, mealFormat, cycleSlots, cycleDayIndexes } from '../pages/adminMealSelectionV2/workbookMeals';
+import { recipeForDatedCopy } from './managedMenuItems';
 
 export const CYCLE_CATALOGUE_KEY = 'matter-admin-v2:workbook-cycle-v2';
 export const CYCLE_BOARD_KEY = 'matter-admin-v2:weekly-board-v1';
@@ -65,7 +66,7 @@ export function importCycleMenu({ catalogue, boards, cycles = [], cycleId, week,
         usedForCorePlan: type === 'main' && !!entry.isMatterCore,
         ingredients: '', intolerances: '', allergens: '',
         portionIngredients: [], carbIngredients: [], vegIngredients: [], sauceIngredients: [],
-        cycleMeal: clone({ ...meal, cycleSource: { workbook: cycle?.source || catalogue.source || '', week, day: day + 1, ...(cycle ? { cycleId: cycle.id, cycleName: cycle.name, sourceMealId: occurrence?.sourceMealId || meal.id, sourceDay: occurrence?.day || '', sourceDays: occurrence?.cycleDays || [] } : {}) } }),
+        cycleMeal: clone({ ...recipeForDatedCopy(meal, type), cycleSource: { workbook: cycle?.source || catalogue.source || '', week, day: day + 1, ...(cycle ? { cycleId: cycle.id, cycleName: cycle.name, sourceMealId: occurrence?.sourceMealId || meal.id, sourceDay: occurrence?.day || '', sourceDays: occurrence?.cycleDays || [] } : {}) } }),
       };
     }));
     return { date, items };

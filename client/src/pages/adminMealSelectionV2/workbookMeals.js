@@ -108,5 +108,5 @@ export function cycleSlots(meal) {
 
 // A single library recipe may have several source-workbook cycle occurrences.
 export function cycleDayIndexes(meal) {
-  return [...new Set([meal.day, ...(meal.cycleDays || [])].flatMap(day => day === 'DAY 6 & 7' ? [5, 6] : /^DAY ([1-5])$/.test(day || '') ? [Number(day.slice(-1)) - 1] : []))];
+  return [...new Set([meal.day, ...(meal.cycleDays || [])].flatMap(day => day === 'DAY 6 & 7' ? [5, 6] : /^DAY ([1-7])$/.test(day || '') ? [Number(day.slice(-1)) - 1] : []))];
 }
