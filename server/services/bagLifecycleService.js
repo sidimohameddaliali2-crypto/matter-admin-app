@@ -39,9 +39,11 @@ export function planBagMovement(bag,command,actor,now=new Date()) {
     if(bag.quantity!=null&&bag.quantity!==1)throw fault('This tag represents an unresolved quantity. Reconcile individual physical tags first.');
     set.lifecycleState=bag.condition==='poor'?'quarantined':'received';set.location='warehouse';set.status='maintenance';set.quantity=1;clearAssignment();
   }else if(action==='pack'){
-    warehouse();requireState('ready');if(!command.driverId)throw fault('Select the receiving driver.',400);
+    // Owner (2026-11-23): dispatchers can prepare ready warehouse bags only;
+    // receipt, cleaning, repair and the receiving driver's acceptance stay separate.
+    if(actor.role!=='dispatcher')warehouse();requireState('ready');if(bag.location!=='warehouse')throw fault('Receive this bag at the warehouse before preparing a handover.');if(!command.driverId)throw fault('Select the receiving driver.',400);
     if(bag.isFlagged||bag.condition==='poor')throw fault('Flagged or damaged stock cannot be dispatched.');
-    set.lifecycleState='packed';set.status='assigned';set.pendingHandover={driver:command.driverId,preparedBy:actor._id,preparedAt:now};
+    set.lifecycleState='packed';set.status='assigned';set.pendingHandover={driver:command.driverId,preparedBy:actor._id,preparedAt:now,eventId:command.eventId};
   }else if(action==='accept'){
     requireState('packed');if(!isDriver||id(bag.pendingHandover?.driver)!==id(actor._id))throw fault('Only the nominated driver may accept this bag.',403);
     set.lifecycleState='outbound';set.location='driver';set.status='assigned';set.assignedTo={driver:actor._id,assignedBy:bag.pendingHandover.preparedBy,assignmentTime:now};unset.pendingHandover='';
@@ -102,7 +104,7 @@ export function planBagMovement(bag,command,actor,now=new Date()) {
     set.assignedTo={...bag.assignedTo,driver:actor._id};unset.pendingHandover='';
   }else throw fault('Unsupported bag movement.',400);
   set.verifiedAt=now;set.updatedAt=now;
-  return {set,unset,event:{eventId:command.eventId,fingerprint,eventType:action,status:set.status||bag.status,location:set.location||bag.location,lifecycleState:set.lifecycleState||state,assignedBy:{user:actor._id,name:actor.name||actor.role},assignedTo:set.assignedTo||bag.assignedTo,notes:note,reassignment,physicalScan:scannedDelivery,registeredFromScan:bag.unregistered===true,proofPhotoUrl:command.proofPhotoUrl||null,before:{state:bag.unregistered?'unregistered':state,status:bag.status,location:bag.location,isActive:bag.isActive,condition:bag.condition,isFlagged:bag.isFlagged,pendingHandover:bag.pendingHandover,quantity:bag.quantity??null,assignedTo:bag.assignedTo,currentDelivery:bag.currentDelivery},occurredAt,timestamp:now}};
+  return {set,unset,event:{eventId:command.eventId,fingerprint,eventType:action,status:set.status||bag.status,location:set.location||bag.location,lifecycleState:set.lifecycleState||state,assignedBy:{user:actor._id,name:actor.name||actor.role},assignedTo:action==='pack'?{driver:command.driverId}:set.assignedTo||bag.assignedTo,notes:note,reassignment,physicalScan:scannedDelivery,registeredFromScan:bag.unregistered===true,proofPhotoUrl:command.proofPhotoUrl||null,before:{state:bag.unregistered?'unregistered':state,status:bag.status,location:bag.location,isActive:bag.isActive,condition:bag.condition,isFlagged:bag.isFlagged,pendingHandover:bag.pendingHandover,quantity:bag.quantity??null,assignedTo:bag.assignedTo,currentDelivery:bag.currentDelivery},occurredAt,timestamp:now}};
 }
 
 export async function executeBagMovement(repository,bagId,command,actor) {
