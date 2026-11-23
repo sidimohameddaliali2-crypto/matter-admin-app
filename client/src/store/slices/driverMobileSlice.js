@@ -20,7 +20,7 @@ export const fetchDriverDeliveries = createAsyncThunk(
       const dateFrom = new Date(localMidnight.getTime() - offsetMs);
       let dateTo = new Date(dateFrom.getTime() + 24 * 60 * 60 * 1000 - 1);
 
-      if (EARLY_NEXT_DAY_ENABLED && nowLocal.getHours() >= NEXT_DAY_AVAILABLE_HOUR) {
+      if (EARLY_NEXT_DAY_ENABLED && nowLocal.getUTCHours() >= NEXT_DAY_AVAILABLE_HOUR) {
         dateTo = new Date(dateFrom.getTime() + 48 * 60 * 60 * 1000 - 1);
       }
       
@@ -155,11 +155,13 @@ const driverMobileSlice = createSlice({
   extraReducers: (builder) => {
     builder
       // Fetch driver deliveries
-      .addCase(fetchDriverDeliveries.pending, (state) => {
+      .addCase(fetchDriverDeliveries.pending, (state, action) => {
+        state.fetchRequestId = action.meta.requestId;
         state.isLoading = true;
         state.error = null;
       })
       .addCase(fetchDriverDeliveries.fulfilled, (state, action) => {
+        if (state.fetchRequestId !== action.meta.requestId) return;
         state.isLoading = false;
         state.deliveries = action.payload.deliveries;
         state.handoffs = action.payload.handoffs || [];
@@ -167,10 +169,10 @@ const driverMobileSlice = createSlice({
         console.log('Redux state updated with deliveries:', action.payload.deliveries);
       })
       .addCase(fetchDriverDeliveries.rejected, (state, action) => {
+        if (state.fetchRequestId !== action.meta.requestId) return;
         state.isLoading = false;
         state.error = action.payload?.message || 'Failed to fetch deliveries';
-        state.deliveries = [];
-        state.handoffs = [];
+        // Preserve the last confirmed feed when a background request fails.
       })
       // Update delivery status
       .addCase(updateDeliveryStatus.pending, (state) => {
