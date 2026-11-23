@@ -118,7 +118,7 @@
     }
   ],
   "sourceDigests": {
-    "client/src/App.js": "21923b722b8e57916629d52fe7249310ba8cff13d77eee7bd2c8d7066035ebaa",
+    "client/src/App.js": "fd3e3bb0e6d9325f1a8618f7e29a68d254e3368f5373c710173f59cd7169a23b",
     "server/middleware/socketAuth.js": "19d61a9198b7025048b7ae6688174bf586389f1f06938bf0594191fc8b9c0723",
     "server/routes/adminPartners.js": "6a49ce0e09fa7464a3b16795b628ef314a1ada858f6685917eec003caeef43e1",
     "server/routes/alerts.js": "14af024c0c10fefb3ab5b6a743ef965b662efc08a30f5975701f353efc5b7cc0",
@@ -140,6 +140,8 @@
     "server/routes/deliveryChanges.js": "57a773c8ad9f1c91327bd4a35cf35e6f0388cdb7e90810787130c1d66fa505af",
     "server/routes/deliveryIssues.js": "724c27d8f1b1c31a0c3c2d7d96f148c710d30e14e499f29f7bedbd10fab295cd",
     "server/routes/deliveryOrder.js": "9878c87a45a8e972e43bb4bba611aeec39dcfa4f7ae8822f2c3b01b442d145ba",
+    "server/routes/dispatcherHandovers.js": "6432b395ad15a2e5c40bd1da2ce8fa9da04cc7b7f3fdf580d039232c3fd97bd9",
+    "server/routes/dispatcherLocationReviews.js": "00f993e549db407b01315db3a3dfd324737eb774e9a74e3718ecae294f8c1ef0",
     "server/routes/drivers.js": "147fb9519b6be77f42f3402fefd843891c8e163444b83c9dbd3241a2e335a78d",
     "server/routes/employees.js": "ec4db79bcee3ad0581c5869d0aa2e548eb097fae6cabf10d5d36b9aeed988b6b",
     "server/routes/events.js": "32e740ac024915317cd2960dcef817e9aa8c973c49fd2a69c677e0d78de62005",
@@ -171,7 +173,7 @@
     "server/routes/webhooks.js": "1397b466b9d9d01c02d21a9faa4e764bd6d911023ebd39624f2cbfb2bc5a0ddd",
     "server/routes/xero.js": "6cf8feab5eed7033fe713a54d119772d4af54c0d3931f65d2e76123f86b3b18a",
     "server/routes/yellowblock.js": "f35f023eddc53257e2088c3463d36361fc83e55e96f12deb7882a671363d2fb3",
-    "server/server.js": "130770ba88d300105dacb866788a1e72fd2ba8ef2c2e7545489c457717ee0a87",
+    "server/server.js": "25e6329bee13c5e4d15ef2d3f44b81df9efb026c22da8b3683b11e5e7704242c",
     "server/services/customerServiceAdminMount.js": "60edc65da5ae777216df14460320cb5a53c0460f1736af2f3303ccd6aca98282",
     "server/services/driverAuditIntegration.js": "98c3c2fae9b2006e317b03099db8dd68a36d30d0181f4aa84df792524fcd55d2",
     "server/vendor/driver-audits/integration/cloud/cloud-http.mjs": "36a798b80b27d3f9d59c4b3a6199d4ac839c8aba486d0af1eb74ec79f5fa9026"
@@ -3895,6 +3897,144 @@
       "path": "/api/bag-operations/stock-counts",
       "middlewareDeclarations": [
         "protect"
+      ]
+    },
+    {
+      "id": "10760cf58bfd61cd",
+      "method": "GET",
+      "source": "server/routes/dispatcherLocationReviews.js:23",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [
+        400
+      ],
+      "responseKeys": [
+        "data",
+        "message",
+        "success"
+      ],
+      "requestKeys": [
+        "query.details",
+        "query.page"
+      ],
+      "referencedCalls": [
+        "boundedMap",
+        "matterApiService.listAllSubscriptions",
+        "newSubscriptionCustomers"
+      ],
+      "path": "/api/dispatcher-location-reviews",
+      "middlewareDeclarations": [
+        "protect",
+        "dispatcher"
+      ]
+    },
+    {
+      "id": "54be4e3ae26d7d05",
+      "method": "GET",
+      "source": "server/routes/dispatcherLocationReviews.js:32",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "requestKeys": [
+        "params.id"
+      ],
+      "referencedCalls": [],
+      "path": "/api/dispatcher-location-reviews/:id",
+      "middlewareDeclarations": [
+        "protect",
+        "dispatcher"
+      ]
+    },
+    {
+      "id": "4bf61bb508868dd0",
+      "method": "POST",
+      "source": "server/routes/dispatcherLocationReviews.js:33",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [
+        400,
+        409
+      ],
+      "responseKeys": [
+        "data",
+        "message",
+        "success"
+      ],
+      "requestKeys": [
+        "body.action",
+        "body.category",
+        "body.issue",
+        "body.requestId",
+        "body.revision",
+        "params.id"
+      ],
+      "referencedCalls": [
+        "Review.create",
+        "Review.findOne",
+        "validateLocationReview"
+      ],
+      "path": "/api/dispatcher-location-reviews/:id",
+      "middlewareDeclarations": [
+        "protect",
+        "dispatcher"
+      ]
+    },
+    {
+      "id": "849f7ba72c46ad73",
+      "method": "GET",
+      "source": "server/routes/dispatcherHandovers.js:19",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [
+        500
+      ],
+      "responseKeys": [
+        "data",
+        "message",
+        "success"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [
+        "Bag.aggregate",
+        "User.find",
+        "buildDispatcherHandovers"
+      ],
+      "path": "/api/dispatcher-handovers",
+      "middlewareDeclarations": [
+        "protect",
+        "authorize(['super_admin', 'admin', 'manager', 'dispatcher'])"
+      ]
+    },
+    {
+      "id": "0afd68548869348c",
+      "method": "POST",
+      "source": "server/routes/dispatcherHandovers.js:76",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [
+        400
+      ],
+      "responseKeys": [
+        "data",
+        "message",
+        "success"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [
+        "User.findById",
+        "findRegisteredBag",
+        "moveBag",
+        "normalizeBagId",
+        "validateDispatcherHandover"
+      ],
+      "path": "/api/dispatcher-handovers",
+      "middlewareDeclarations": [
+        "protect",
+        "authorize(['super_admin', 'admin', 'manager', 'dispatcher'])"
       ]
     },
     {
@@ -11533,7 +11673,7 @@
     {
       "id": "089abcb7620e7ade",
       "method": "GET",
-      "source": "server/server.js:283",
+      "source": "server/server.js:287",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11561,7 +11701,7 @@
     {
       "id": "c29a469271fd28ce",
       "method": "HEAD",
-      "source": "server/server.js:292",
+      "source": "server/server.js:296",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11584,7 +11724,7 @@
     {
       "id": "6d60c150d6a24c0b",
       "method": "GET",
-      "source": "server/server.js:297",
+      "source": "server/server.js:301",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -11609,7 +11749,7 @@
     {
       "id": "eafb4524ecc7b522",
       "method": "GET",
-      "source": "server/server.js:306",
+      "source": "server/server.js:310",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -11636,7 +11776,7 @@
     {
       "id": "710f3d0488501add",
       "method": "GET",
-      "source": "server/server.js:326",
+      "source": "server/server.js:330",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11660,7 +11800,7 @@
   "browser": [
     {
       "path": "/traceability",
-      "source": "client/src/App.js:270",
+      "source": "client/src/App.js:256",
       "elements": [
         "ProtectedRoute",
         "ActivityHistoryRoute",
@@ -11672,7 +11812,7 @@
     },
     {
       "path": "/login",
-      "source": "client/src/App.js:279",
+      "source": "client/src/App.js:265",
       "elements": [
         "Login"
       ],
@@ -11680,7 +11820,7 @@
     },
     {
       "path": "/privacy-policy",
-      "source": "client/src/App.js:280",
+      "source": "client/src/App.js:266",
       "elements": [
         "PrivacyPolicy"
       ],
@@ -11688,7 +11828,7 @@
     },
     {
       "path": "/partner/login",
-      "source": "client/src/App.js:281",
+      "source": "client/src/App.js:267",
       "elements": [
         "PartnerLogin"
       ],
@@ -11696,7 +11836,7 @@
     },
     {
       "path": "/partner/portal",
-      "source": "client/src/App.js:282",
+      "source": "client/src/App.js:268",
       "elements": [
         "PartnerRoute",
         "PartnerPortal"
@@ -11705,7 +11845,7 @@
     },
     {
       "path": "/join/:token",
-      "source": "client/src/App.js:283",
+      "source": "client/src/App.js:269",
       "elements": [
         "MemberJoin"
       ],
@@ -11713,7 +11853,7 @@
     },
     {
       "path": "/member/portal",
-      "source": "client/src/App.js:284",
+      "source": "client/src/App.js:270",
       "elements": [
         "MemberRoute",
         "MemberPortal"
@@ -11722,7 +11862,7 @@
     },
     {
       "path": "/",
-      "source": "client/src/App.js:286",
+      "source": "client/src/App.js:272",
       "elements": [
         "ProtectedRoute",
         "Navigate"
@@ -11731,7 +11871,7 @@
     },
     {
       "path": "/dashboard",
-      "source": "client/src/App.js:292",
+      "source": "client/src/App.js:278",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11744,7 +11884,7 @@
     },
     {
       "path": "/drivers",
-      "source": "client/src/App.js:302",
+      "source": "client/src/App.js:288",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11757,7 +11897,7 @@
     },
     {
       "path": "/fleet",
-      "source": "client/src/App.js:312",
+      "source": "client/src/App.js:298",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11770,7 +11910,7 @@
     },
     {
       "path": "/live-tracking",
-      "source": "client/src/App.js:322",
+      "source": "client/src/App.js:308",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11783,7 +11923,7 @@
     },
     {
       "path": "/drivers/create",
-      "source": "client/src/App.js:332",
+      "source": "client/src/App.js:318",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11796,7 +11936,7 @@
     },
     {
       "path": "/drivers/:id",
-      "source": "client/src/App.js:342",
+      "source": "client/src/App.js:328",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11809,7 +11949,7 @@
     },
     {
       "path": "/driver-mobile",
-      "source": "client/src/App.js:351",
+      "source": "client/src/App.js:337",
       "elements": [
         "ProtectedRoute",
         "DriverMobile"
@@ -11820,7 +11960,7 @@
     },
     {
       "path": "/dispatcher",
-      "source": "client/src/App.js:356",
+      "source": "client/src/App.js:342",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -11833,7 +11973,7 @@
     },
     {
       "path": "/dispatcher/driver-routes",
-      "source": "client/src/App.js:363",
+      "source": "client/src/App.js:349",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -11846,7 +11986,7 @@
     },
     {
       "path": "/store-keeper",
-      "source": "client/src/App.js:371",
+      "source": "client/src/App.js:357",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -11861,7 +12001,7 @@
     },
     {
       "path": "/users",
-      "source": "client/src/App.js:381",
+      "source": "client/src/App.js:367",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11874,7 +12014,7 @@
     },
     {
       "path": "/employees",
-      "source": "client/src/App.js:390",
+      "source": "client/src/App.js:376",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11887,7 +12027,7 @@
     },
     {
       "path": "/deliveries",
-      "source": "client/src/App.js:399",
+      "source": "client/src/App.js:385",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11900,7 +12040,7 @@
     },
     {
       "path": "/customers",
-      "source": "client/src/App.js:409",
+      "source": "client/src/App.js:395",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11913,7 +12053,7 @@
     },
     {
       "path": "/events",
-      "source": "client/src/App.js:419",
+      "source": "client/src/App.js:405",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11928,7 +12068,7 @@
     },
     {
       "path": "/dispatcher/events",
-      "source": "client/src/App.js:429",
+      "source": "client/src/App.js:415",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -11941,7 +12081,7 @@
     },
     {
       "path": "/customer-service/*",
-      "source": "client/src/App.js:437",
+      "source": "client/src/App.js:423",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11959,7 +12099,7 @@
     },
     {
       "path": "/complaints",
-      "source": "client/src/App.js:442",
+      "source": "client/src/App.js:428",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -11972,7 +12112,7 @@
     },
     {
       "path": "/batch-auto-assign",
-      "source": "client/src/App.js:452",
+      "source": "client/src/App.js:438",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -11985,7 +12125,7 @@
     },
     {
       "path": "/test-api",
-      "source": "client/src/App.js:462",
+      "source": "client/src/App.js:448",
       "elements": [
         "ProtectedRoute",
         "TestAPI"
@@ -11994,7 +12134,7 @@
     },
     {
       "path": "/deliveries/:id",
-      "source": "client/src/App.js:468",
+      "source": "client/src/App.js:454",
       "elements": [
         "ProtectedRoute",
         "Layout",
@@ -12004,7 +12144,7 @@
     },
     {
       "path": "/add-delivery",
-      "source": "client/src/App.js:476",
+      "source": "client/src/App.js:462",
       "elements": [
         "ProtectedRoute",
         "Layout",
@@ -12014,7 +12154,7 @@
     },
     {
       "path": "/bags",
-      "source": "client/src/App.js:484",
+      "source": "client/src/App.js:470",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12027,7 +12167,7 @@
     },
     {
       "path": "/reports",
-      "source": "client/src/App.js:492",
+      "source": "client/src/App.js:478",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12040,7 +12180,7 @@
     },
     {
       "path": "/driver-audits",
-      "source": "client/src/App.js:501",
+      "source": "client/src/App.js:487",
       "elements": [
         "Navigate"
       ],
@@ -12048,7 +12188,7 @@
     },
     {
       "path": "/driver-reports",
-      "source": "client/src/App.js:502",
+      "source": "client/src/App.js:488",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12061,7 +12201,7 @@
     },
     {
       "path": "/subscription",
-      "source": "client/src/App.js:509",
+      "source": "client/src/App.js:495",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12074,7 +12214,7 @@
     },
     {
       "path": "/website-subscriptions",
-      "source": "client/src/App.js:518",
+      "source": "client/src/App.js:504",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12087,7 +12227,7 @@
     },
     {
       "path": "/website-subscriptions/:id",
-      "source": "client/src/App.js:527",
+      "source": "client/src/App.js:513",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12100,7 +12240,7 @@
     },
     {
       "path": "/customer-analytics",
-      "source": "client/src/App.js:536",
+      "source": "client/src/App.js:522",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12113,7 +12253,7 @@
     },
     {
       "path": "/renewal",
-      "source": "client/src/App.js:545",
+      "source": "client/src/App.js:531",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12126,7 +12266,7 @@
     },
     {
       "path": "/delivery-changes",
-      "source": "client/src/App.js:554",
+      "source": "client/src/App.js:540",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12139,7 +12279,7 @@
     },
     {
       "path": "/delivery-changes/add",
-      "source": "client/src/App.js:564",
+      "source": "client/src/App.js:550",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12152,7 +12292,7 @@
     },
     {
       "path": "/admin/meal-selection-v2/*",
-      "source": "client/src/App.js:574",
+      "source": "client/src/App.js:560",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12167,7 +12307,7 @@
     },
     {
       "path": "/menus",
-      "source": "client/src/App.js:584",
+      "source": "client/src/App.js:570",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12180,7 +12320,7 @@
     },
     {
       "path": "/menu-select/:token",
-      "source": "client/src/App.js:594",
+      "source": "client/src/App.js:580",
       "elements": [
         "MenuSelectPage"
       ],
@@ -12188,7 +12328,7 @@
     },
     {
       "path": "/menu-select-v2",
-      "source": "client/src/App.js:600",
+      "source": "client/src/App.js:586",
       "elements": [
         "MenuSelectionLinkPage"
       ],
@@ -12196,7 +12336,7 @@
     },
     {
       "path": "/matter-core",
-      "source": "client/src/App.js:604",
+      "source": "client/src/App.js:590",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12209,7 +12349,7 @@
     },
     {
       "path": "/matter-core/:token",
-      "source": "client/src/App.js:614",
+      "source": "client/src/App.js:600",
       "elements": [
         "MatterCorePdfPage"
       ],
@@ -12217,7 +12357,7 @@
     },
     {
       "path": "/admin/partners",
-      "source": "client/src/App.js:618",
+      "source": "client/src/App.js:604",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12231,7 +12371,7 @@
     },
     {
       "path": "/kitchen-list",
-      "source": "client/src/App.js:628",
+      "source": "client/src/App.js:614",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12245,7 +12385,7 @@
     },
     {
       "path": "/kitchen-counting",
-      "source": "client/src/App.js:638",
+      "source": "client/src/App.js:624",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12259,7 +12399,7 @@
     },
     {
       "path": "/yellowblock/*",
-      "source": "client/src/App.js:648",
+      "source": "client/src/App.js:634",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -12510,12 +12650,12 @@
     {
       "event": "connection",
       "direction": "on",
-      "source": "server/server.js:315"
+      "source": "server/server.js:319"
     },
     {
       "event": "disconnect",
       "direction": "on",
-      "source": "server/server.js:320"
+      "source": "server/server.js:324"
     },
     {
       "event": "driver:join",

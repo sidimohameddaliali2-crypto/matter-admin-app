@@ -16,6 +16,8 @@ const deliverySchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  // Contact entered by dispatch stays with this delivery snapshot.
+  customerPhone: { type: String, trim: true, default: '' },
   // Set when this delivery was auto-imported from the real Matter
   // subscription platform (services/matterDeliveryImportService.js,
   // jobs/importMatterDeliveries.js) — the Matter subscription_id it came
