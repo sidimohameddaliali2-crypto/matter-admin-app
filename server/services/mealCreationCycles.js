@@ -1,7 +1,7 @@
 const clone = value => JSON.parse(JSON.stringify(value));
 const emptyBoard = () => Array.from({ length: 7 }, () => Array.from({ length: 4 }, () => []));
 const sourceDays = meal => [...new Set([meal.day, ...(meal.cycleDays || [])].filter(Boolean))];
-const dayIndexes = occurrence => [...new Set(sourceDays(occurrence).flatMap(day => day === 'DAY 6 & 7' ? [5, 6] : /^DAY [1-7]$/.test(day) ? [Number(day.slice(4)) - 1] : []))];
+export const dayIndexes = occurrence => [...new Set(sourceDays(occurrence).flatMap(day => day === 'DAY 6 & 7' ? [5, 6] : /^DAY [1-7]$/.test(day) ? [Number(day.slice(4)) - 1] : []))];
 const slotFor = meal => meal.mealKind === 'Breakfast' || meal.mealFormat === 'Breakfast' ? 0 : meal.mealKind === 'Snack' || meal.mealFormat === 'Snack' ? 3 : meal.mealKind === 'Main meal' || meal.mealFormat === 'Main' ? 1 : /B'FAST|OATS/.test(meal.category || '') ? 0 : /SNACK/.test(meal.category || '') ? 3 : 1;
 const compact = value => String(value || '').trim().toUpperCase().replace(/\s+/g, '');
 
@@ -29,7 +29,7 @@ const addSeed = (cycle, item, meal, indexes = dayIndexes(item)) => {
 };
 const resolve = (id, aliases) => aliases.get(id) || id;
 
-export function updateMealCycles(current, catalogue, aliases, imported = []) {
+export function updateMealCycles(current, catalogue, aliases, imported = [], previousRecipeSignatures = new Map()) {
   const replacements = new Map(aliases.map(alias => [alias.from, alias.to]));
   const byId = new Map(catalogue.meals.map(meal => [meal.id, meal]));
   const cycles = clone(current.cycles || []);
@@ -42,13 +42,15 @@ export function updateMealCycles(current, catalogue, aliases, imported = []) {
   const addOccurrence = (cycle, item, meal, seed = true) => {
     const previous = cycle.meals.find(value => value.sourceMealId === item.sourceMealId && value.mealId === item.mealId);
     if (!previous) { cycle.meals.push(item); if (seed) addSeed(cycle, item, meal); return; }
+    const recipeSignatures = [...new Set([...(previous.recipeSignatures || []), ...(item.recipeSignatures || [])])];
     if (previous.inferredDays) {
       // An alias retained the original ID but not its day. Exact re-upload is
       // authoritative; do not union guesses or alter manually saved placements.
-      cycle.meals[cycle.meals.indexOf(previous)] = item;
+      cycle.meals[cycle.meals.indexOf(previous)] = { ...item, ...(recipeSignatures.length ? { recipeSignatures } : {}) };
       if (seed && !preImportWeeks.has(cycle.id)) addSeed(cycle, item, meal);
       return;
     }
+    if (recipeSignatures.length) previous.recipeSignatures = recipeSignatures;
     const previousIndexes = dayIndexes(previous), days = [...new Set([...sourceDays(previous), ...sourceDays(item)])];
     if (JSON.stringify(days) !== JSON.stringify(sourceDays(previous))) previous.cycleDays = days;
     if (seed) addSeed(cycle, previous, meal, dayIndexes(previous).filter(day => !previousIndexes.includes(day)));
@@ -77,15 +79,19 @@ export function updateMealCycles(current, catalogue, aliases, imported = []) {
     }
   }
   for (const cycle of cycles) {
-    cycle.meals = cycle.meals.map(item => ({ ...item, mealId: resolve(item.mealId, replacements) })).filter(item => byId.has(item.mealId));
+    cycle.meals = cycle.meals.map(item => {
+      const previousSignature = previousRecipeSignatures.get(item.mealId);
+      const inferredRecipeSignature = item.inferredRecipeSignature || (!item.recipeSignatures?.length ? previousSignature : undefined);
+      return { ...item, mealId: resolve(item.mealId, replacements), ...(inferredRecipeSignature ? { inferredRecipeSignature } : {}) };
+    }).filter(item => byId.has(item.mealId));
     if (Object.hasOwn(cycle.boards, 'Main menu:Week 1')) preImportWeeks.add(cycle.id);
   }
-  for (const { meal, mealId, source = '' } of imported) {
+  for (const { meal, mealId, source = '', recipeSignature } of imported) {
     const canonical = byId.get(mealId);
     if (!canonical) continue;
     const identity = cycleIdentity(meal, source), cycle = cycleFor(identity);
     if (source) cycle.source = source;
-    addOccurrence(cycle, occurrence(meal, mealId), canonical);
+    addOccurrence(cycle, { ...occurrence(meal, mealId), ...(recipeSignature ? { recipeSignatures: [recipeSignature] } : {}) }, canonical);
   }
   const represented = new Set(cycles.flatMap(cycle => cycle.meals.map(item => item.mealId)));
   for (const meal of catalogue.meals) if (!represented.has(meal.id)) {
@@ -97,20 +103,28 @@ export function updateMealCycles(current, catalogue, aliases, imported = []) {
 
 // Menus are newest first. A newer saved week wins only within its own cycle;
 // another workbook's Week 1 must never erase the older cycle's Week 1.
-export function recoverMealCycles(menus, catalogue, validate = value => value) {
+export function recoverMealCycles(menus, catalogue, validate, signatureFor) {
   const byId = new Map(catalogue.meals.map(meal => [meal.id, meal])), cycles = new Map();
   for (const menu of menus) {
     const menuBoards = new Map();
     for (const row of menu.meals || []) for (const item of row.items || []) {
       let meal;
-      try { meal = validate(item?.cycleMeal); } catch { continue; }
+      try { meal = validate(item?.cycleMeal, item?.mealType || row.mealType); } catch { continue; }
       const canonical = byId.get(meal?.id);
       if (!canonical) continue;
       const identity = cycleIdentity(meal, meal.cycleSource?.workbook || '');
       let cycle = cycles.get(identity.id);
       if (!cycle) { cycle = { ...identity, meals: [], boards: {} }; cycles.set(identity.id, cycle); }
       const original = occurrence(meal, canonical.id);
-      if (!cycle.meals.some(value => value.sourceMealId === original.sourceMealId && value.mealId === original.mealId)) cycle.meals.push(original);
+      const signature = signatureFor(meal);
+      const previous = cycle.meals.find(value => value.sourceMealId === original.sourceMealId && value.mealId === original.mealId);
+      if (!previous) cycle.meals.push({ ...original, recipeSignatures: [signature] });
+      else {
+        if (!previous.recipeSignatures.includes(signature)) previous.recipeSignatures.push(signature);
+        const knownDays = sourceDays(previous);
+        const days = [...new Set([...knownDays, ...sourceDays(original)])];
+        if (days.length > knownDays.length) previous.cycleDays = days;
+      }
       const source = meal.cycleSource;
       if (!['Week 1', 'Week 2'].includes(source?.week) || !Number.isInteger(source.day) || source.day < 1 || source.day > 7) continue;
       const key = `Main menu:${source.week}`, scopedKey = `${identity.id}\0${key}`;
