@@ -1,5 +1,23 @@
 # Matter API integration
 
+## Customer Management labels (23 November 2026)
+
+Customer type appears as a blue `New`/`Returning` badge in the profile header after the customer name, rather than inside Matter customer details. The header's subscription status and `Renews` badges are removed. The same type badge is retained on list cards; the dropdown remains below search.
+
+Named customer tags appear as rounded badges to the left of the customer name in the profile header. Badge tints use Matter's supplied tag colour, with a blue fallback. Tags are no longer listed in the Matter customer details box; no placeholder badge is shown when there are no tags.
+
+The staff screen titled **Customer Management** is `WebsiteSubscription.js` at `/website-subscriptions` (and `/:id`). Its Customer type dropdown sits directly below search, alongside a refresh control. It reads types, tags, source update time and upcoming plans directly from the existing Matter list/detail API, including subscribers without an internal customer match. Search also includes type and tag names; the Upcoming plan tab combines with the type filter and existing controls. Refresh reloads both list and selected profile. The older `/customers` logistics directory also displays captured labels as described below.
+
+Customer Management captures `customer_type`, named `customer_tags` and `upcoming_plan` from every verified page of the Matter subscription list. Opening the page or using Refresh as an admin, super admin, manager or dispatcher invokes `POST /api/customers/matter-metadata/refresh` (also requires the existing customers permission). Other permitted readers see saved labels. Refreshes share an in-process request and have a one-minute success cooldown; no new scheduled job is enabled.
+
+The snapshot is stored in `Customer.matterMetadata`, exposed by `GET /api/customers`. Match by saved permanent `matterCustomerId`, or an exact saved subscription link when no permanent ID exists. Multiple subscriptions for one permanent ID remain unresolved; names, email and phone do not assign these labels. Unlinked/manual customers remain available with type “Not provided.” The refresh neither creates customer/delivery records nor changes internal plans, addresses or entitlements.
+
+`updated_at` is Matter's source update clock, not a plan start date. Older source responses cannot overwrite newer snapshots; concurrent requests also compare capture clocks and saved identity links at the write boundary. Unchanged snapshots generate no customer writes. Read the complete list instead of relying on `updated_since`, because an upcoming plan has its own update clock. Missing fields stay unknown or preserve previous supplied values; explicit null/empty values clear labels. Failed/partial pagination preserves saved data and produces an inline retry warning.
+
+The Upcoming plan filter and badge use `upcoming_plan.starting_date` against today's Dubai calendar date (including today); a past start is excluded. Do not infer paid service from subscription status. Missing start dates remain explicitly unavailable. Customer type filtering combines with search and existing plan/status filters. Profiles show source update/capture times, type, tags, upcoming plan name, subscription and start date.
+
+Scope check: this changes the existing logistics Customer Management page (`client/src/pages/Customers.js`) and MongoDB customer labels. It does not change the separate Customer Service components, Supabase directory, conversation identity, actions or reports; the shared Customer Service review pack remains applicable to that unchanged journey. Local acceptance covers persistence, pagination failures, identity/renewal ambiguity, date rules, filters, profiles and saved-data recovery. Live provider reads verified these list fields; deployment and real staff acceptance remain separate.
+
 This app reads live subscription/nutrition/delivery data from Matter's own
 backend (the website people subscribe through) and, in one place, writes to
 it (pausing a subscription's deliveries). It's the source of truth for a
