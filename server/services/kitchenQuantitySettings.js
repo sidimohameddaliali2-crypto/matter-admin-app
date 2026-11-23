@@ -11,7 +11,9 @@ export async function withCurrentKitchenQuantities(items) {
   return items.map(item => {
     const id = item.cycleMeal?.id;
     const current = meals.get(id) || meals.get(aliases.get(id));
-    if (!current?.qtyUnit) return item;
+    if (!['KG', 'PCS'].includes(current?.qtyUnit)) return item;
+    if (item.mealType === 'main' && current.qtyUnit === 'PCS'
+      && !(Number.isFinite(current.gramsPerPiece) && current.gramsPerPiece > 0)) return item;
     return { ...item, cycleMeal: { ...item.cycleMeal, qtyUnit: current.qtyUnit, gramsPerPiece: current.gramsPerPiece ?? null } };
   });
 }

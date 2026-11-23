@@ -22,7 +22,7 @@ test('component names are read only from this menu and date, without customer re
 });
 
 test('existing dated menu follows the saved library quantity by ID without rewriting selections or recipes', async t => {
-  const item = { _id: 'linked', mealName: 'Bowl', cycleMeal: { id: 'old-id', qtyUnit: 'KG', components: [{ type: 'Protein', name: 'Dated recipe' }] } };
+  const item = { _id: 'linked', mealName: 'Bowl', mealType: 'main', cycleMeal: { id: 'old-id', qtyUnit: 'KG', components: [{ type: 'Protein', name: 'Dated recipe' }] } };
   let meal = { id: 'library-id', qtyUnit: 'PCS', gramsPerPiece: 100 };
   t.mock.method(Menu, 'findById', () => ({ select() { return this; }, lean: async () => ({ meals: [{ items: ['linked'] }] }) }));
   t.mock.method(Item, 'find', () => ({ select() { return this; }, lean: async () => [item] }));
@@ -37,6 +37,9 @@ test('existing dated menu follows the saved library quantity by ID without rewri
   meal = { ...meal, gramsPerPiece: 50 };
   const second = response(); await handler(req, second);
   assert.equal(second.body.data[0].cycleMeal.gramsPerPiece, 50);
+  meal = { ...meal, mealKind: 'Breakfast', gramsPerPiece: null };
+  const third = response(); await handler(req, third);
+  assert.deepEqual(third.body.data[0], item);
   assert.equal(item.cycleMeal.qtyUnit, 'KG');
 });
 

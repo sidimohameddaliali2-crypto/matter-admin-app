@@ -16,7 +16,7 @@ export const libraryMealKind = meal => {
 // IDs, workbook locations and cycle days identify occurrences, not recipes.
 // Preserve all operational fields (including notes/adaptations and attachments)
 // so different dietary/preparation variants can never be collapsed by name.
-export function mealFingerprint(meal) {
+export function mealFingerprint(meal, { ignoreQuantity = false } = {}) {
   const base = component => stable({ ...without(component, componentSource), type: ['Protein','Portion','Breakfast','Snack'].includes(component.type) ? 'Portion' : component.type, exclusions: sortedTerms(component.exclusions), allergens: sortedTerms(component.allergens), ingredients: component.ingredients || [], notes: component.notes || '', adaptation: component.adaptation || 'Not reviewed', replacement: component.replacement || '' });
   const components = meal.components || [], byId = new Map(components.map(component => [component.id, component]));
   const signature = (component, visited = new Set()) => {
@@ -31,7 +31,7 @@ export function mealFingerprint(meal) {
   const explicitProtein = text(meal.mealType);
   const protein = ['chicken','beef','fish'].includes(explicitProtein) ? explicitProtein : /\b(CHX|CHICKEN)\b/i.test(meal.category || '') ? 'Chicken' : /\bBEEF\b/i.test(meal.category || '') ? 'Beef' : /\bFISH\b/i.test(meal.category || '') ? 'Fish' : '';
   return JSON.stringify(stable({
-    ...without(meal, [...mealSource,'components']), kind, protein: kind === 'Main' ? protein : '',
+    ...without(meal, [...mealSource, 'components', ...(ignoreQuantity ? ['qtyUnit', 'gramsPerPiece'] : [])]), kind, protein: kind === 'Main' ? protein : '',
     notes: meal.notes || '', temperature: meal.temperature || '', tags: meal.tags || '', carbCombined: meal.carbCombined || 'Not specified', allergens: sortedTerms(meal.allergens),
     isOatmeal: meal.isOatmeal ?? meal.category === 'OATS', isSaladBase: !!meal.isSaladBase,
     components: components.map(component => JSON.stringify(signature(component))).sort(),

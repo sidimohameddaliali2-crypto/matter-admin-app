@@ -55,6 +55,8 @@ const KitchenCounting = () => {
   const [customerEntries, setCustomerEntries] = useState([]);
   const [componentCatalog, setComponentCatalog] = useState([]);
   const [componentWarning, setComponentWarning] = useState('');
+  const [componentsReady, setComponentsReady] = useState(false);
+  const componentRequest = useRef(0);
   const nutritionCacheRef = useRef(new Map());
   const requestGuard = useRef(createKitchenRequestGuard());
   const activeScope = useRef('');
@@ -132,6 +134,8 @@ const KitchenCounting = () => {
     setCustomerEntries([]);
     setComponentCatalog([]);
     setComponentWarning('');
+    setComponentsReady(false);
+    componentRequest.current++;
     setLoadedScope('');
     if (!selectedMenuId || !selectedDate) { setLoading(false); return; }
     nutritionCacheRef.current.clear();
@@ -203,7 +207,10 @@ const KitchenCounting = () => {
       // exactly as Kitchen List does. Another day's lookup cannot block it.
       const deliverable = computed.map(entry => kitchenCustomerDay(entry, selectedDate));
       assertKitchenExportReady(deliverable);
-      setComponentCatalog(Array.isArray(componentResponse.data?.data) ? componentResponse.data.data : []);
+      const ready = Array.isArray(componentResponse.data?.data) && componentResponse.data?.success === true;
+      setComponentCatalog(ready ? componentResponse.data.data : []);
+      setComponentsReady(ready);
+      if (!ready) setComponentWarning('Component settings could not be loaded. Refresh to retry.');
       setCustomerEntries(deliverable);
       setLoadedScope(scope);
     } catch (err) {
@@ -222,6 +229,8 @@ const KitchenCounting = () => {
     if (loading || partnerOnlyDate || !selectedDate || loadedScope !== scope) return;
     let controller;
     const refreshComponents = async () => {
+      componentRequest.current++;
+      setComponentsReady(false);
       controller?.abort();
       const request = new AbortController();
       controller = request;
@@ -230,9 +239,10 @@ const KitchenCounting = () => {
           params: { date: selectedDate }, signal: request.signal, timeout: 30000,
         });
         if (request.signal.aborted || activeScope.current !== scope) return;
-        if (!Array.isArray(response.data?.data)) throw new Error('Invalid component response.');
+        if (!response.data?.success || !Array.isArray(response.data?.data)) throw new Error('Invalid component response.');
         setComponentCatalog(response.data.data);
         setComponentWarning('');
+        setComponentsReady(true);
       } catch {
         if (!request.signal.aborted && activeScope.current === scope) setComponentWarning('Component settings could not be refreshed. Refresh to retry.');
       }
@@ -303,7 +313,8 @@ const KitchenCounting = () => {
   };
 
   const exportToExcel = async () => {
-    if (exportInFlight.current || !productionDate || (!partnerOnlyDate && (loading || error || loadedScope !== `${selectedMenuId}:${selectedDate}`))) return;
+    if (exportInFlight.current || !productionDate || (!partnerOnlyDate && (!componentsReady || loading || error || loadedScope !== `${selectedMenuId}:${selectedDate}`))) return;
+    const componentVersion = componentRequest.current;
     const scope = partnerOnlyDate ? `partner:${productionDate}` : `${selectedMenuId}:${productionDate}`;
     exportInFlight.current = true; setExporting(true); setExportError('');
     try {
@@ -316,7 +327,7 @@ const KitchenCounting = () => {
       rows.push(...partnerCountingRows(partnerData));
       if (!rows.length) return;
       const XLSX = await loadXLSX();
-      if (activeScope.current !== scope) return;
+      if (activeScope.current !== scope || (!partnerOnlyDate && componentRequest.current !== componentVersion)) return;
       const worksheet = XLSX.utils.json_to_sheet(rows);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Counting');
@@ -327,15 +338,15 @@ const KitchenCounting = () => {
 
   const exportCookingLog = async () => {
     const scope = `${selectedMenuId}:${selectedDate}`;
-    if (exportInFlight.current || partnerOnlyDate || loading || error || !selectedDate || loadedScope !== scope) return;
+    if (exportInFlight.current || partnerOnlyDate || !componentsReady || loading || error || !selectedDate || loadedScope !== scope) return;
+    const componentVersion = componentRequest.current;
     exportInFlight.current = true; setExporting(true); setExportError('');
     try {
-      if (componentWarning) throw new Error('Refresh the component names before downloading Cooking & EOD.');
       assertKitchenExportReady(customerEntries);
       const blocks = buildCookingLog(customerEntries, selectedDate, componentCatalog);
       if (!blocks.length) return;
       const module = await import('xlsx-js-style');
-      if (activeScope.current !== scope) return;
+      if (activeScope.current !== scope || componentRequest.current !== componentVersion) return;
       const XLSX = module.default || module;
       XLSX.writeFile(cookingLogWorkbook(XLSX, blocks, selectedDate), `cooking-and-eod-${selectedDate}.xlsx`);
     } catch (err) {
@@ -429,14 +440,14 @@ const KitchenCounting = () => {
               </div>
               <div className="flex flex-wrap gap-2">
               {!partnerOnlyDate && <button type="button" onClick={exportCookingLog}
-                disabled={exporting || loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}` || !countRows.length}
+                disabled={exporting || !componentsReady || loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}` || !countRows.length}
                 className="kitchen-button-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold disabled:opacity-50">
                 <Download size={16} /> Cooking & EOD Excel
               </button>}
               <button
                 type="button"
                 onClick={exportToExcel}
-                disabled={exporting || (!partnerOnlyDate && (loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}`)) || (!(partnerOnlyDate ? 0 : countRows.length) && !partnerOrders.data?.counts.length)}
+                disabled={exporting || (!partnerOnlyDate && (!componentsReady || loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}`)) || (!(partnerOnlyDate ? 0 : countRows.length) && !partnerOrders.data?.counts.length)}
                 className="kitchen-button-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold disabled:opacity-50"
               >
                 <Download size={16} /> Export Excel

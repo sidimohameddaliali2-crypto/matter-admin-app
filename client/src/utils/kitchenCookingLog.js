@@ -66,7 +66,7 @@ export function buildCookingLog(entries, date, catalog) {
     for (const component of block.components) {
       if (component.gramsPerPiece) {
         component.baseGrams = component.base;
-        component.base = Math.ceil(component.baseGrams / component.gramsPerPiece);
+        component.base = bufferedPortionPieces(component.baseGrams, component.gramsPerPiece, 0);
       } else if (component.unit === 'KG') {
         component.baseGrams = component.base;
         component.base = component.baseGrams / 1000;
@@ -116,7 +116,7 @@ export function cookingLogWorkbook(XLSX, blocks, date) {
         [block.name, component.kind, component.name, component.unit, component.base,
           component.baseGrams ?? '', component.gramsPerPiece ?? ''].forEach((value, c) => put(base, baseRow, c, value, c === 4 ? { numFmt: component.unit === 'PCS' ? '0' : '0.000' } : {}));
         if (component.gramsPerPiece) {
-          base[`E${baseRow + 1}`].f = `ROUNDUP(F${baseRow + 1}/G${baseRow + 1},0)`;
+          base[`E${baseRow + 1}`].f = `ROUNDUP(ROUND(F${baseRow + 1}/G${baseRow + 1},12),0)`;
           base[`G${baseRow + 1}`].c = [{ a: 'MATTER', t: `Portion rule: ${component.gramsPerPiece}g per piece. INITIAL adds the buffer to total assigned grams, divides by grams per piece and rounds up once. Base quantity here is before the buffer.` }];
         }
         const ref = `Calculation!E${baseRow + 1}`, kg = component.unit === 'KG';
@@ -126,7 +126,7 @@ export function cookingLogWorkbook(XLSX, blocks, date) {
         const initial = pieceWeight ? bufferedPortionPieces(component.baseGrams, pieceWeight)
           : kg ? Math.round((component.baseGrams ?? component.base * 1000) * 105 / 10000) / 10 : component.base;
         put(sheet, r, col, `${component.kind}: ${component.name}`);
-        const formula = pieceWeight ? `ROUNDUP(Calculation!F${baseRow + 1}*(1+$B$2)/Calculation!G${baseRow + 1},0)`
+        const formula = pieceWeight ? `ROUNDUP(ROUND(Calculation!F${baseRow + 1}*(1+$B$2)/Calculation!G${baseRow + 1},12),0)`
           : kg ? `ROUND(${ref}*(1+$B$2),1)` : ref;
         put(sheet, r, col + 1, initial, { numFmt: kg ? '0.0' : '0' }, formula);
         for (const c of [col + 2, col + 3]) put(sheet, r, c, '', { fill: { fgColor: { rgb: 'FFF2CC' } }, numFmt: kg ? '0.000' : '0' });

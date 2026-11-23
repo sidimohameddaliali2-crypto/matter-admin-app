@@ -87,7 +87,17 @@ export function changeMealCreationState(current, change, missingOnly = false) {
     const byId = new Map(catalogue.meals.map(meal => [meal.id, meal]));
     const fingerprints = new Map(catalogue.meals.map(meal => [mealFingerprint(meal), meal.id]));
     for (const meal of incoming.meals) {
-      const canonicalId = fingerprints.get(mealFingerprint(meal));
+      let canonicalId = fingerprints.get(mealFingerprint(meal));
+      if ((change.skipDuplicates || missingOnly) && meal.qtyUnit === undefined) {
+        const recipe = mealFingerprint(meal, { ignoreQuantity: true });
+        const sameRecipe = candidate => candidate && mealFingerprint(candidate, { ignoreQuantity: true }) === recipe;
+        const original = byId.get(meal.id) || byId.get(aliases.find(alias => alias.from === meal.id)?.to);
+        if (sameRecipe(original)) canonicalId = original.id;
+        else if (!canonicalId) {
+          const matches = [...byId.values()].filter(sameRecipe);
+          if (matches.length === 1) canonicalId = matches[0].id;
+        }
+      }
       if ((change.skipDuplicates || missingOnly) && canonicalId) {
         imported.push({ meal, mealId: canonicalId, source: incoming.source });
         if (!byId.has(meal.id) && meal.id !== canonicalId) aliases.push({ from: meal.id, to: canonicalId });

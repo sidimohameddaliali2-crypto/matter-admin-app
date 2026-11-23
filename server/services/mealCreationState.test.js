@@ -7,6 +7,18 @@ const meal = (id, name = id) => ({ id, name, mealKind: 'Main meal', mealType: 'C
 const board = () => Array.from({ length: 7 }, () => Array.from({ length: 4 }, () => []));
 const initial = () => ({ catalogue: { meals: [meal('one')], source: 'Original.xlsx' }, boards: { 'Main menu:Week 1': board() } });
 
+test('reimporting an unchanged workbook keeps its meal ID, saved QTY and single cycle placement', () => {
+  const original = { ...meal('one'), day: 'DAY 1', category: 'MAIN CHX' };
+  const workbook = { catalogue: { meals: [original], source: 'Original.xlsx' }, skipDuplicates: true };
+  const first = changeMealCreationState(initial(), workbook);
+  for (const settings of [{ qtyUnit: 'KG', gramsPerPiece: null }, { qtyUnit: 'PCS', gramsPerPiece: 65.1 }]) {
+    const edited = changeMealCreationState(first, { catalogue: { meals: [{ ...original, ...settings }] } });
+    const reimported = changeMealCreationState(edited, workbook);
+    assert.deepEqual(reimported.catalogue.meals, edited.catalogue.meals);
+    assert.deepEqual(reimported.cycles, edited.cycles);
+  }
+});
+
 test('actual workbook parser blank combined flags import and migrate without losing notes or exclusions',async()=>{
   const source=readFileSync(new URL('../../client/src/pages/adminMealSelectionV2/workbookMeals.js',import.meta.url));
   const {parseMealWorkbook}=await import(`data:text/javascript;base64,${source.toString('base64')}`);

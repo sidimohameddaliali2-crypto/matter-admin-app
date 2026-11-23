@@ -15,7 +15,19 @@ export function kitchenPortionQuantity(category, name, recipe) {
   return { unit: 'KG' };
 }
 
-export const bufferedPortionPieces = (grams, gramsPerPiece) => Math.ceil(grams * 105 / (gramsPerPiece * 100));
+export function bufferedPortionPieces(grams, gramsPerPiece, bufferPercent = 5) {
+  const decimalParts = value => {
+    const [mantissa, exponent = '0'] = String(value).split('e');
+    const [whole, fraction = ''] = mantissa.split('.');
+    return [BigInt(whole + fraction), Number(exponent) - fraction.length];
+  };
+  const [weight, weightScale] = decimalParts(grams);
+  const [piece, pieceScale] = decimalParts(gramsPerPiece);
+  const scale = weightScale - pieceScale;
+  const numerator = weight * BigInt(100 + bufferPercent) * BigInt(10) ** BigInt(Math.max(0, scale));
+  const denominator = piece * BigInt(100) * BigInt(10) ** BigInt(Math.max(0, -scale));
+  return Number((numerator + denominator - BigInt(1)) / denominator);
+}
 
 export const countingComponentQuantity = component => component.pcs === undefined
   ? `${Math.round(component.weight)} g` : `${component.pcs} PCS`;

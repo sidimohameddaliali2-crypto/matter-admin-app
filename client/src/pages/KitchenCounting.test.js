@@ -35,6 +35,7 @@ beforeEach(async () => {
   api.get.mockImplementation(async (path, config) => {
     if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}};
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', startDate: A, endDate: B }] } };
+    if (path.endsWith('/kitchen-components')) return { data: { success: true, data: [] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [entry] } };
     if (path.includes('kitchen-inputs')) return { data: { data: { plan_name: 'Custom', macros: { carbohydrates: 60, protein: 60, fat: 20 }, active_delivery_dates: [A, B] } } };
     if (path.includes('delivery-on-date')) {
@@ -211,14 +212,27 @@ test('component names appear beside their summed weights and in the Excel breakd
 test('saved PCS changes refresh without preparation and match both Excel downloads', async () => {
   const originalGet = api.get.getMockImplementation();
   let settings = { qtyUnit: 'KG' };
+  let refresh;
   api.get.mockImplementation(async (path, config) => path.endsWith('/kitchen-components')
-    ? { data: { success: true, data: [{ _id: 'recipe', mealType: 'main', mealName: 'Fixture meal',
+    ? refresh ? await refresh : { data: { success: true, data: [{ _id: 'recipe', mealType: 'main', mealName: 'Fixture meal',
       proteinSource: 'Patty', cycleMeal: settings }] } } : originalGet(path, config));
   await select(1, A);
   await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
   const preparationCalls = api.post.mock.calls.length;
+  const cookingButton = () => [...container.querySelectorAll('button')].find(item => item.textContent.includes('Cooking & EOD Excel'));
+  let rejectRefresh;
+  refresh = new Promise((resolve, reject) => { rejectRefresh = reject; });
+  await act(async () => window.dispatchEvent(new Event('focus')));
+  expect(exportButton().disabled).toBe(true);
+  expect(cookingButton().disabled).toBe(true);
+  await act(async () => { rejectRefresh(new Error('Unavailable')); });
+  expect(exportButton().disabled).toBe(true);
+  expect(cookingButton().disabled).toBe(true);
+  refresh = undefined;
   settings = { qtyUnit: 'PCS', gramsPerPiece: 50 };
   await act(async () => window.dispatchEvent(new Event('focus')));
+  expect(exportButton().disabled).toBe(false);
+  expect(cookingButton().disabled).toBe(false);
   const pieceLabel = container.querySelector('.kitchen-count-component b').textContent;
   expect(pieceLabel).toMatch(/^\d+ PCS$/);
   await act(async () => exportButton().click());
@@ -243,8 +257,8 @@ test('a component-label request failure does not remove verified counts', async 
   await select(1, A);
   await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
   expect(container.textContent).toContain('1 main meal(s) total');
-  expect(container.textContent).toContain('Component names could not be loaded');
-  expect(exportButton().disabled).toBe(false);
+  expect(container.textContent).toContain('Component settings could not be loaded');
+  expect(exportButton().disabled).toBe(true);
 });
 
 test('Cooking & EOD is a separate download with buffered kg and blank staff fields', async () => {

@@ -1,5 +1,6 @@
 import XLSX from 'xlsx-js-style';
 import { buildCookingLog, cookingLogWorkbook } from './kitchenCookingLog';
+import { buildKitchenCountRows, componentWeightText } from './kitchenCountingComponents';
 const date = '2026-11-23';
 const meal = extra => ({ date, category: 'meal', mealType: 'main', mealName: 'Chicken bowl',
   proteinWeight: 150, carbWeight: 200, vegWeight: 80, quantity: 1, ...extra });
@@ -168,19 +169,30 @@ test('burger workbook buffers source grams before rounding up once to whole PCS'
   const blocks = buildCookingLog([{ selectedMeals: [burger({ proteinWeight: 260 })] }], '2026-11-24', [burgerRecipe]);
   const wb = cookingLogWorkbook(XLSX, blocks, '2026-11-24'), ws = wb.Sheets['Cooking & EOD'], source = wb.Sheets.Calculation;
   expect(ws.B8.v).toBe(6); expect(ws.B8.s.numFmt).toBe('0'); expect(ws.E8.v).toBe('PCS');
-  expect(ws.B8.f).toBe('ROUNDUP(Calculation!F2*(1+$B$2)/Calculation!G2,0)');
-  expect(source.E2.f).toBe('ROUNDUP(F2/G2,0)'); expect(source.E2.v).toBe(6);
+  expect(ws.B8.f).toBe('ROUNDUP(ROUND(Calculation!F2*(1+$B$2)/Calculation!G2,12),0)');
+  expect(source.E2.f).toBe('ROUNDUP(ROUND(F2/G2,12),0)'); expect(source.E2.v).toBe(6);
   expect(source.F2.v).toBe(260); expect(source.G2.v).toBe(50);
   expect(ws.B9.f).toBe('ROUND(Calculation!E3*(1+$B$2),1)');
   expect(ws.C8.v).toBe(''); expect(ws.D8.v).toBe('');
   const restored = XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }), { type: 'buffer', cellFormula: true });
   expect(restored.Sheets.Calculation.E2.v).toBe(6);
-  expect(restored.Sheets.Calculation.E2.f).toBe('ROUNDUP(F2/G2,0)');
+  expect(restored.Sheets.Calculation.E2.f).toBe('ROUNDUP(ROUND(F2/G2,12),0)');
   expect(restored.Sheets['Cooking & EOD'].B8.v).toBe(6);
   for (const [grams, expected] of [[0, 0], [250, 6], [260, 6], [300, 7], [1000, 21]]) {
     const plan = buildCookingLog([{ selectedMeals: [burger({ proteinWeight: grams })] }], '2026-11-24', [burgerRecipe]);
     expect(cookingLogWorkbook(XLSX, plan, '2026-11-24').Sheets['Cooking & EOD'].B8.v).toBe(expected);
   }
+});
+
+test.each([[309, 5], [310, 5], [311, 6]])('65.1g pieces at %sg match the screen and both exports', (grams, expected) => {
+  const entries = [{ selectedMeals: [burger({ proteinWeight: grams })] }];
+  const day = '2026-11-24';
+  const catalog = [{ ...burgerRecipe, cycleMeal: { ...burgerRecipe.cycleMeal, qtyUnit: 'PCS', gramsPerPiece: 65.1 } }];
+  const [count] = buildKitchenCountRows(entries, day, catalog);
+  expect(count.components.protein[0].pcs).toBe(expected);
+  expect(componentWeightText(count.components.protein)).toBe(`MEXICAN BURGER: ${expected} PCS`);
+  const workbook = cookingLogWorkbook(XLSX, buildCookingLog(entries, day, catalog), day);
+  expect(workbook.Sheets['Cooking & EOD'].B8.v).toBe(expected);
 });
 
 test('burger exact multiples stay exact and unrelated protein components stay in kg', () => {
