@@ -120,7 +120,7 @@
   "sourceDigests": {
     "client/src/App.js": "fd3e3bb0e6d9325f1a8618f7e29a68d254e3368f5373c710173f59cd7169a23b",
     "server/middleware/socketAuth.js": "19d61a9198b7025048b7ae6688174bf586389f1f06938bf0594191fc8b9c0723",
-    "server/routes/adminPartners.js": "65e2670e54651113353adceffdbadc7fbfce721ace398e0fd469cf2826a5299b",
+    "server/routes/adminPartners.js": "6a49ce0e09fa7464a3b16795b628ef314a1ada858f6685917eec003caeef43e1",
     "server/routes/alerts.js": "14af024c0c10fefb3ab5b6a743ef965b662efc08a30f5975701f353efc5b7cc0",
     "server/routes/auth.js": "d6e5c56d3ff6dabf9ae397979f3d2bb084b7260c4fecfc45cd6c10654ea1fef8",
     "server/routes/bagFollowups.js": "d5441c5eebac8cb486fb68b7f63366fc79815f69e1a144e8b5e16f3ba67b4456",
@@ -129,7 +129,7 @@
     "server/routes/bagRefunds.js": "4fef960c4b380452383c5b9dd037bdaa35fd9c07b6a4cc4f2ae8d1b2f720a8e1",
     "server/routes/bags.js": "5365c35d13f485789ae19f03793aa8bf6e998f8cee2b8cf052bd377e1e2a4d07",
     "server/routes/communications.js": "7d9bc696d81f850efc61dd35ef19207555691ec81fdb7658280620f045a81335",
-    "server/routes/customers.js": "5057c947f119daf2fcb5baf1ae14c2a5bac1ec8288dba5f9b967bceb5f7e2fba",
+    "server/routes/customers.js": "bf2e81bbd0efe257f4e266c62dc3eb0e78cd9c42fc3362f40039bd6047370395",
     "server/routes/customerService.js": "af8607225feee2254c7b196d0b4ece2b10e32755a45873ede5c7991f51762b28",
     "server/routes/customerServiceCustomers.js": "8e423eed0825e3d04321b36ee80fcba081b6cc9beeb46bb14d6f82fa3cf2da93",
     "server/routes/customerServiceData.js": "81a0b095e4ad7cab736569e831b74a482f40c489b623284bcd9e5cb04a6c977b",
@@ -140,8 +140,8 @@
     "server/routes/deliveryChanges.js": "57a773c8ad9f1c91327bd4a35cf35e6f0388cdb7e90810787130c1d66fa505af",
     "server/routes/deliveryIssues.js": "724c27d8f1b1c31a0c3c2d7d96f148c710d30e14e499f29f7bedbd10fab295cd",
     "server/routes/deliveryOrder.js": "9878c87a45a8e972e43bb4bba611aeec39dcfa4f7ae8822f2c3b01b442d145ba",
-    "server/routes/dispatcherHandovers.js": "6a713a25e9e44833af23aedd6a910fc0e8fd1c545739aee2ca9df249f92115b9",
-    "server/routes/dispatcherLocationReviews.js": "2898b6d49c2bfe2e692721908df090d0e94e8e7b5def4dae29f028a952c54381",
+    "server/routes/dispatcherHandovers.js": "6432b395ad15a2e5c40bd1da2ce8fa9da04cc7b7f3fdf580d039232c3fd97bd9",
+    "server/routes/dispatcherLocationReviews.js": "00f993e549db407b01315db3a3dfd324737eb774e9a74e3718ecae294f8c1ef0",
     "server/routes/drivers.js": "147fb9519b6be77f42f3402fefd843891c8e163444b83c9dbd3241a2e335a78d",
     "server/routes/employees.js": "ec4db79bcee3ad0581c5869d0aa2e548eb097fae6cabf10d5d36b9aeed988b6b",
     "server/routes/events.js": "32e740ac024915317cd2960dcef817e9aa8c973c49fd2a69c677e0d78de62005",
@@ -173,7 +173,7 @@
     "server/routes/webhooks.js": "1397b466b9d9d01c02d21a9faa4e764bd6d911023ebd39624f2cbfb2bc5a0ddd",
     "server/routes/xero.js": "6cf8feab5eed7033fe713a54d119772d4af54c0d3931f65d2e76123f86b3b18a",
     "server/routes/yellowblock.js": "f35f023eddc53257e2088c3463d36361fc83e55e96f12deb7882a671363d2fb3",
-    "server/server.js": "abe693cd415ea51c44fe607b5805f15cbb8efcf996591e521d9d6ac90f1300fd",
+    "server/server.js": "25e6329bee13c5e4d15ef2d3f44b81df9efb026c22da8b3683b11e5e7704242c",
     "server/services/customerServiceAdminMount.js": "60edc65da5ae777216df14460320cb5a53c0460f1736af2f3303ccd6aca98282",
     "server/services/driverAuditIntegration.js": "98c3c2fae9b2006e317b03099db8dd68a36d30d0181f4aa84df792524fcd55d2",
     "server/vendor/driver-audits/integration/cloud/cloud-http.mjs": "36a798b80b27d3f9d59c4b3a6199d4ac839c8aba486d0af1eb74ec79f5fa9026"
@@ -7223,7 +7223,7 @@
     {
       "id": "d60860e39de45129",
       "method": "POST",
-      "source": "server/routes/customers.js:82",
+      "source": "server/routes/customers.js:83",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7259,7 +7259,7 @@
     {
       "id": "060aa5f7523cbbfd",
       "method": "POST",
-      "source": "server/routes/customers.js:213",
+      "source": "server/routes/customers.js:214",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7295,7 +7295,7 @@
     {
       "id": "28a2183102e0a6b9",
       "method": "POST",
-      "source": "server/routes/customers.js:378",
+      "source": "server/routes/customers.js:379",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7325,7 +7325,7 @@
     {
       "id": "fb674699c5930b38",
       "method": "POST",
-      "source": "server/routes/customers.js:483",
+      "source": "server/routes/customers.js:484",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7359,9 +7359,34 @@
       ]
     },
     {
+      "id": "595c1635a0a8ea66",
+      "method": "POST",
+      "source": "server/routes/customers.js:554",
+      "description": null,
+      "handlerGuards": [
+        "authorize(['admin', 'super_admin', 'dispatcher', 'manager'])"
+      ],
+      "declaredStatuses": [
+        502
+      ],
+      "responseKeys": [
+        "data",
+        "message",
+        "success"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [
+        "refreshCustomerMetadata"
+      ],
+      "path": "/api/customers/matter-metadata/refresh",
+      "middlewareDeclarations": [
+        "protect"
+      ]
+    },
+    {
       "id": "6864c706a8b1a5ba",
       "method": "GET",
-      "source": "server/routes/customers.js:553",
+      "source": "server/routes/customers.js:563",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7389,7 +7414,7 @@
     {
       "id": "59dd9e41784be033",
       "method": "POST",
-      "source": "server/routes/customers.js:595",
+      "source": "server/routes/customers.js:605",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7420,7 +7445,7 @@
     {
       "id": "efd7517b6645bd05",
       "method": "PATCH",
-      "source": "server/routes/customers.js:677",
+      "source": "server/routes/customers.js:687",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7455,7 +7480,7 @@
     {
       "id": "6452f79be48301b0",
       "method": "PATCH",
-      "source": "server/routes/customers.js:778",
+      "source": "server/routes/customers.js:788",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7486,7 +7511,7 @@
     {
       "id": "338bfda1023040a6",
       "method": "GET",
-      "source": "server/routes/customers.js:875",
+      "source": "server/routes/customers.js:885",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7515,7 +7540,7 @@
     {
       "id": "435755533182550e",
       "method": "POST",
-      "source": "server/routes/customers.js:897",
+      "source": "server/routes/customers.js:907",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7542,7 +7567,7 @@
     {
       "id": "d22e786ebeb69264",
       "method": "POST",
-      "source": "server/routes/customers.js:927",
+      "source": "server/routes/customers.js:937",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7566,7 +7591,7 @@
     {
       "id": "c19310a0dc6c7505",
       "method": "POST",
-      "source": "server/routes/customers.js:960",
+      "source": "server/routes/customers.js:970",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7591,7 +7616,7 @@
     {
       "id": "16ab45d314ecba91",
       "method": "GET",
-      "source": "server/routes/customers.js:989",
+      "source": "server/routes/customers.js:999",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -7618,7 +7643,7 @@
     {
       "id": "d0e30b9822f4849c",
       "method": "GET",
-      "source": "server/routes/customers.js:1018",
+      "source": "server/routes/customers.js:1028",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8504,7 +8529,7 @@
     {
       "id": "5514641ba8318cd2",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:40",
+      "source": "server/routes/adminPartners.js:43",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8528,7 +8553,7 @@
     {
       "id": "3c2552cb1deb5086",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:49",
+      "source": "server/routes/adminPartners.js:52",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8565,7 +8590,7 @@
     {
       "id": "1e3660bc2e397d59",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:65",
+      "source": "server/routes/adminPartners.js:68",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -8596,7 +8621,7 @@
     {
       "id": "71877a269fdbf281",
       "method": "DELETE",
-      "source": "server/routes/adminPartners.js:82",
+      "source": "server/routes/adminPartners.js:85",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -8624,7 +8649,7 @@
     {
       "id": "08935e563ebc83c1",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:96",
+      "source": "server/routes/adminPartners.js:99",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8648,7 +8673,7 @@
     {
       "id": "12a737209f4825ac",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:112",
+      "source": "server/routes/adminPartners.js:115",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8676,7 +8701,7 @@
     {
       "id": "90875b36402e9b63",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:129",
+      "source": "server/routes/adminPartners.js:132",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8704,7 +8729,7 @@
     {
       "id": "1794c560a8faf151",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:146",
+      "source": "server/routes/adminPartners.js:149",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8735,7 +8760,7 @@
     {
       "id": "9738ac871dd3e4e0",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:182",
+      "source": "server/routes/adminPartners.js:185",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8763,7 +8788,7 @@
     {
       "id": "8b16cc4f6299949e",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:194",
+      "source": "server/routes/adminPartners.js:197",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -8794,7 +8819,7 @@
     {
       "id": "3a63c8ae4f220fd9",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:212",
+      "source": "server/routes/adminPartners.js:215",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -8832,7 +8857,7 @@
     {
       "id": "d9a93acfe28e921b",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:305",
+      "source": "server/routes/adminPartners.js:308",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8859,7 +8884,7 @@
     {
       "id": "5fbe7dcc8eb0ea41",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:321",
+      "source": "server/routes/adminPartners.js:324",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8887,7 +8912,7 @@
     {
       "id": "9f73f0a8df362697",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:338",
+      "source": "server/routes/adminPartners.js:341",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -8916,7 +8941,7 @@
     {
       "id": "a363f56c8ccdf574",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:356",
+      "source": "server/routes/adminPartners.js:359",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -8955,7 +8980,7 @@
     {
       "id": "129fe343cce506c9",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:384",
+      "source": "server/routes/adminPartners.js:387",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -8983,7 +9008,7 @@
     {
       "id": "d5d31fa4ca0d87fb",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:432",
+      "source": "server/routes/adminPartners.js:435",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -9013,7 +9038,7 @@
     {
       "id": "6ec0b87b2d9bd1f6",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:505",
+      "source": "server/routes/adminPartners.js:508",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -9040,7 +9065,7 @@
     {
       "id": "30a0adec30aa4db3",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:568",
+      "source": "server/routes/adminPartners.js:571",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9072,15 +9097,14 @@
     {
       "id": "80fae840241b4916",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:581",
+      "source": "server/routes/adminPartners.js:584",
       "description": null,
       "handlerGuards": [
         "admin"
       ],
       "declaredStatuses": [
         201,
-        400,
-        500
+        400
       ],
       "responseKeys": [
         "data",
@@ -9094,9 +9118,12 @@
         "body.businessType",
         "body.contactName",
         "body.email",
+        "body.financeContact",
         "body.menuSelectionEnabled",
+        "body.ownerContact",
         "body.password",
         "body.phone",
+        "body.pointOfContact",
         "body.presetMacros",
         "body.profilePicture"
       ],
@@ -9114,7 +9141,7 @@
     {
       "id": "cc826e3d85d723d0",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:609",
+      "source": "server/routes/adminPartners.js:616",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9141,7 +9168,7 @@
     {
       "id": "c1e1cf49a77b69b2",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:619",
+      "source": "server/routes/adminPartners.js:626",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -9157,6 +9184,7 @@
       ],
       "requestKeys": [
         "body.k",
+        "body.role",
         "params.id"
       ],
       "referencedCalls": [
@@ -9171,7 +9199,7 @@
     {
       "id": "67b060c58072e165",
       "method": "DELETE",
-      "source": "server/routes/adminPartners.js:632",
+      "source": "server/routes/adminPartners.js:651",
       "description": null,
       "handlerGuards": [
         "admin"
@@ -9199,7 +9227,7 @@
     {
       "id": "f2648dc1c7fa0246",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:643",
+      "source": "server/routes/adminPartners.js:662",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9228,7 +9256,7 @@
     {
       "id": "6cd5307cb526ae7a",
       "method": "POST",
-      "source": "server/routes/adminPartners.js:680",
+      "source": "server/routes/adminPartners.js:699",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9259,7 +9287,7 @@
     {
       "id": "b111d60253840609",
       "method": "DELETE",
-      "source": "server/routes/adminPartners.js:703",
+      "source": "server/routes/adminPartners.js:722",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9285,7 +9313,7 @@
     {
       "id": "d23b12274f9412f4",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:716",
+      "source": "server/routes/adminPartners.js:735",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9311,7 +9339,7 @@
     {
       "id": "a75ba59ebee8d858",
       "method": "GET",
-      "source": "server/routes/adminPartners.js:726",
+      "source": "server/routes/adminPartners.js:745",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -9338,7 +9366,7 @@
     {
       "id": "2ab02c26026cd270",
       "method": "PATCH",
-      "source": "server/routes/adminPartners.js:745",
+      "source": "server/routes/adminPartners.js:764",
       "description": null,
       "handlerGuards": [
         "admin"
