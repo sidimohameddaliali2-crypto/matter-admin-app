@@ -1,5 +1,16 @@
 import { copyManagedMenuItem, managedMenuPayload } from './managedMenuItems';
 
+test('Duplicate Day drops invalid inherited quantities but keeps recipe content and identity', () => {
+  const item = { _id: 'dated', menuItemId: 'dated', mealType: 'main', cycleMeal: {
+    id: 'library', qtyUnit: 'PCS', components: [{ type: 'Protein', name: 'Patty', notes: 'Cook gently' }],
+  } };
+  expect(copyManagedMenuItem(item)).toEqual({
+    mealType: 'main', cycleMeal: { id: 'library', components: item.cycleMeal.components },
+  });
+  expect(item.cycleMeal.qtyUnit).toBe('PCS');
+  expect(copyManagedMenuItem({ ...item, cycleMeal: { ...item.cycleMeal, gramsPerPiece: 50 } }).cycleMeal.gramsPerPiece).toBe(50);
+});
+
 test('copying a dish or day creates independent items without claiming the original ID', () => {
   const item = { menuItemId: 'selected-dish', _id: 'selected-dish', mealName: 'Chicken', carbIngredients: [{ name: 'Rice', visible: true }] };
   const copied = copyManagedMenuItem(item);

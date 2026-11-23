@@ -1,42 +1,113 @@
 import { getDateKey } from '../lib/kitchenData';
-import { bufferedPortionPieces, countingMealName, kitchenComponentNames, kitchenPortionQuantity, kitchenRecipeForMeal } from './kitchenCountingComponents';
+import { addAssignedGrams, bufferedPortionPieces, countingMealName, decimalGramNumber, isAbsentKitchenComponent, isLargeKitchenBreakfast, kitchenComponentNames, kitchenMealCategory, kitchenMealGroupKey, kitchenMealNameKey, kitchenPortionQuantity, kitchenRecipeForMeal } from './kitchenCountingComponents';
 
 const clean = value => String(value || '').trim();
-const absent = value => !clean(value) || /^(no|none|n\/a)(\s+(sauce|garnish))?$/i.test(clean(value));
+const recipeComponentNames = (item, types) => [...new Set((item.cycleMeal?.components || [])
+  .filter(component => types.includes(component.type)).map(component => clean(component.name)).filter(Boolean))];
+const resolvedGarnishes = item => {
+  const names = recipeComponentNames(item, ['Garnish']);
+  return names.length ? names : [item.garnish];
+};
+const resolvedSauces = (meal, item) => {
+  if (meal.sauceChoice) return [meal.sauceChoice];
+  const names = recipeComponentNames(item, ['Sauce']);
+  return names.length ? names : [item.sauce];
+};
+const breakfastBase = name => clean(name).replace(/\s*\(LARGE\)$/i, '');
+const breakfastComponentKey = name => clean(name).split(/\s+\+\s+/).map(part => kitchenMealNameKey(breakfastBase(part))).sort().join(' + ');
+const dietaryKey = values => [...new Set((Array.isArray(values) ? values : []).map(kitchenMealNameKey).filter(Boolean))].sort();
+const ingredientKey = value => typeof value === 'string' ? kitchenMealNameKey(value) : value || [];
+const compatibleBreakfastChoices = (first, second) => Object.keys(first).every(kind => !first[kind] || !second[kind] || first[kind] === second[kind]);
+const compatibleBreakfasts = (first, second) => {
+  const firstRecipe = first.cycleMeal || {}, secondRecipe = second.cycleMeal || {};
+  if (JSON.stringify(ingredientKey(first.ingredients)) !== JSON.stringify(ingredientKey(second.ingredients))) return false;
+  if (JSON.stringify(ingredientKey(firstRecipe.ingredients)) !== JSON.stringify(ingredientKey(secondRecipe.ingredients))) return false;
+  const garnishes = item => resolvedGarnishes(item).filter(value => !isAbsentKitchenComponent(value)).map(breakfastComponentKey).sort();
+  if (JSON.stringify(garnishes(first)) !== JSON.stringify(garnishes(second))) return false;
+  if (['notes', 'temperature'].some(field => kitchenMealNameKey(firstRecipe[field]) !== kitchenMealNameKey(secondRecipe[field]))) return false;
+  if (JSON.stringify(dietaryKey(firstRecipe.allergens)) !== JSON.stringify(dietaryKey(secondRecipe.allergens))) return false;
+  if (firstRecipe.components?.length && secondRecipe.components?.length) {
+    const componentSignature = recipe => JSON.stringify(recipe.components.map(component => {
+      const type = ['Breakfast', 'Protein', 'Portion'].includes(component.type) ? 'Portion' : component.type;
+      return JSON.stringify([type, breakfastComponentKey(component.name), kitchenMealNameKey(component.notes),
+        kitchenMealNameKey(component.adaptation), kitchenMealNameKey(component.replacement),
+        dietaryKey(component.exclusions), dietaryKey(component.allergens), ingredientKey(component.ingredients)]);
+    }).sort());
+    if (componentSignature(firstRecipe) !== componentSignature(secondRecipe)) return false;
+  } else if (firstRecipe.id && secondRecipe.id && firstRecipe.id !== secondRecipe.id) {
+    return false;
+  }
+  return ['proteinSource', 'carbs', 'veg', 'sauce', 'garnish'].every(field => !first[field] || !second[field]
+    || breakfastComponentKey(first[field]) === breakfastComponentKey(second[field]));
+};
+
+// Excel stores only 15 significant digits. Preserve the integer from the
+// exact decimal calculation for the exported inputs, including after Excel
+// recalculates. If staff change the inputs, calculate from their new values.
+const pieceFormula = (gramsCell, pieceCell, component, pieces, bufferCell) => {
+  const bufferChecks = bufferCell ? `,${bufferCell}=5%` : '';
+  const multiplier = bufferCell ? `*(1+${bufferCell})` : '';
+  return `IF(AND(${gramsCell}=${component.baseGrams},${pieceCell}=${component.gramsPerPiece}${bufferChecks}),${pieces},ROUNDUP(${gramsCell}${multiplier}/${pieceCell},0))`;
+};
 
 // Production planning only. Never resize saved portions or change macros.
 export function buildCookingLog(entries, date, catalog) {
   const blocks = new Map();
-  for (const entry of entries) for (const meal of entry.selectedMeals || []) {
-    if (getDateKey(meal.date) !== date) continue;
-    const category = meal.category || (['breakfast', 'snack'].includes(meal.mealType) ? meal.mealType : 'meal');
-    const name = category === 'breakfast'
-      ? countingMealName({ ...meal, category, flags: {} }).replace(/\s*\(LARGE\)$/i, '')
-      : countingMealName({ ...meal, category });
-    const key = `${category}:${name}`;
-    const item = kitchenRecipeForMeal(meal, catalog), names = kitchenComponentNames({ ...meal, category }, catalog);
+  const portionWeights = new WeakMap();
+  const portions = entries.flatMap(entry => (entry.selectedMeals || []).filter(meal => getDateKey(meal.date) === date).map(meal => {
+    const item = kitchenRecipeForMeal(meal, catalog), category = kitchenMealCategory(meal);
+    const rawName = countingMealName(meal, item);
+    const name = category === 'breakfast' ? breakfastBase(rawName) : rawName;
+    const breakfastUnit = category === 'breakfast' ? kitchenPortionQuantity(category, '', item, date, name, meal).unit : undefined;
+    const names = kitchenComponentNames(meal, catalog, item);
+    const sauces = resolvedSauces(meal, item);
+    const sauceChoices = sauces.filter(value => !isAbsentKitchenComponent(value)).map(breakfastComponentKey).sort();
+    const choices = category === 'breakfast' ? {
+      ...Object.fromEntries(Object.entries(names).map(([kind, value]) => [kind, !value || value === 'Component not recorded' ? '' : breakfastComponentKey(value)])),
+      sauce: sauceChoices.length || item._id && !item.unresolved || sauces.some(Boolean) ? JSON.stringify(sauceChoices) : '',
+    } : null;
+    const largeBreakfast = isLargeKitchenBreakfast(meal, item);
+    const itemKey = kitchenMealGroupKey(meal, item, name);
+    const key = category === 'breakfast' ? JSON.stringify([largeBreakfast ? 'large' : 'regular', itemKey, breakfastUnit, choices]) : itemKey;
+    return { entry, meal, item, category, name, names, sauces, choices, breakfastUnit, largeBreakfast, key };
+  }));
+  const regularBreakfasts = new Map();
+  for (const portion of portions) {
+    if (portion.category !== 'breakfast' || portion.largeBreakfast || portion.item.ambiguous) continue;
+    const label = kitchenMealNameKey(portion.name);
+    if (!regularBreakfasts.has(label)) regularBreakfasts.set(label, new Map());
+    regularBreakfasts.get(label).set(portion.key, portion);
+  }
+  for (const { entry, meal, item, category, name, names, sauces, choices, breakfastUnit, largeBreakfast, key: itemKey } of portions) {
+    const regularKeys = largeBreakfast && !item.ambiguous ? [...(regularBreakfasts.get(kitchenMealNameKey(name)) || [])]
+      .filter(([, regular]) => regular.breakfastUnit === breakfastUnit
+        && compatibleBreakfasts(regular.item, item) && compatibleBreakfastChoices(regular.choices, choices)) : [];
+    const key = regularKeys.length === 1 ? regularKeys[0][0] : itemKey;
     const recipe = item.cycleMeal?.components || [];
     const qty = Number(meal.quantity) || 1;
     if (!blocks.has(key)) blocks.set(key, { name, category, count: 0,
       label: item.cycleMeal?.category || [item.rotationCategory, item.portionType].filter(Boolean).join(' ') || category,
       components: [] });
     const block = blocks.get(key); block.count += qty;
-    const largeBreakfast = category === 'breakfast' && meal.flags?.isLargeBreakfast === true;
     if (largeBreakfast) block.largeCount = (block.largeCount || 0) + qty;
-    const add = (kind, label, unit, value, gramsPerPiece) => {
-      if (absent(label)) return;
-      const componentName = category === 'breakfast' && kind === 'Portion' ? clean(label).replace(/\s*\(LARGE\)$/i, '') : clean(label);
-      const existing = block.components.find(row => row.kind === kind && row.name.toLowerCase() === componentName.toLowerCase() && row.unit === unit
+    const add = (kind, label, unit, value, gramsPerPiece, assignedGrams) => {
+      if (isAbsentKitchenComponent(label)) return;
+      const componentName = category === 'breakfast' && kind === 'Portion'
+        ? clean(label).split(/\s+\+\s+/).map(breakfastBase).join(' + ') : clean(label);
+      const componentKey = category === 'breakfast' ? breakfastComponentKey : kitchenMealNameKey;
+      const existing = block.components.find(row => row.kind === kind && componentKey(row.name) === componentKey(componentName) && row.unit === unit
         && row.gramsPerPiece === gramsPerPiece);
-      if (existing) {
-        existing.base += value;
-        if (largeBreakfast && kind === 'Portion') existing.largeCount = (existing.largeCount || 0) + qty;
-      } else block.components.push({ kind, name: componentName, unit, base: value,
-        ...(gramsPerPiece ? { gramsPerPiece } : {}),
-        ...(largeBreakfast && kind === 'Portion' ? { largeCount: qty } : {}) });
+      const component = existing || { kind, name: componentName, unit, base: 0 };
+      component.base += value;
+      if (gramsPerPiece) {
+        component.gramsPerPiece = gramsPerPiece;
+        portionWeights.set(component, addAssignedGrams(portionWeights.get(component), assignedGrams, qty));
+      }
+      if (largeBreakfast && kind === 'Portion') component.largeCount = (component.largeCount || 0) + qty;
+      if (!existing) block.components.push(component);
     };
     const pcs = category === 'breakfast' || category === 'snack';
-    const portion = kitchenPortionQuantity(category, names.protein, item);
+    const portion = kitchenPortionQuantity(category, names.protein, item, date, name, meal);
     const salad = item.cycleMeal?.isSaladBase === true || recipe.some(component => component.type === 'Salad');
     const coreMain = category === 'meal' && (meal.flags?.matterCorePlan === true || clean(entry.planName).toLowerCase() === 'matter core');
     for (const [kind, label] of [['protein', 'Portion'], ['carb', 'Carb'], ['veg', salad ? 'Salad base' : 'Veg']]) {
@@ -47,26 +118,24 @@ export function buildCookingLog(entries, date, catalog) {
       if (pcs && kind !== 'protein' && names[kind] === 'Component not recorded') continue;
       const unit = kind === 'protein' ? portion.unit : pcs || (kind === 'veg' && salad) ? 'PCS' : 'KG';
       const gramsPerPiece = kind === 'protein' && category === 'meal' && unit === 'PCS' ? portion.gramsPerPiece : undefined;
-      if (kind === 'protein' && category === 'meal' && unit === 'PCS' && !(Number.isFinite(gramsPerPiece) && gramsPerPiece > 0)) {
-        throw new Error(`Set grams per piece for ${name} before exporting.`);
-      }
       // Sum the calculator's gram quantities first. Converting each 150g
       // portion to 0.15kg before adding can turn 3000g into 2.999999999999999kg.
-      add(label, names[kind], unit, unit === 'PCS' && !gramsPerPiece ? qty : (Number(meal[`${kind}Weight`]) || 0) * qty, gramsPerPiece);
+      const componentName = (kind === 'protein' && portion.componentName) || names[kind];
+      const grams = Number(meal[`${kind}Weight`]) || 0;
+      add(label, componentName, unit, unit === 'PCS' && !gramsPerPiece ? qty : grams * qty, gramsPerPiece, grams);
     }
-    const componentNames = types => [...new Set(recipe.filter(component => types.includes(component.type)).map(component => clean(component.name)).filter(Boolean))];
-    const sauces = meal.sauceChoice ? [meal.sauceChoice] : componentNames(['Sauce']);
-    for (const sauce of sauces.length ? sauces : [item.sauce]) add('Sauce', sauce, 'PCS', qty);
-    for (const sauce of componentNames(['Sauce 2'])) add('Sauce 2 / dressing', sauce, 'PCS', qty);
-    for (const topping of componentNames(['Extra sauce / topping'])) add('Extra sauce / topping', topping, 'PCS', qty);
-    const garnish = componentNames(['Garnish']);
-    for (const name of garnish.length ? garnish : [item.garnish]) add('Garnish', name, 'PCS', qty);
+    for (const sauce of sauces) add('Sauce', sauce, 'PCS', qty);
+    for (const sauce of recipeComponentNames(item, ['Sauce 2'])) add('Sauce 2 / dressing', sauce, 'PCS', qty);
+    for (const topping of recipeComponentNames(item, ['Extra sauce / topping'])) add('Extra sauce / topping', topping, 'PCS', qty);
+    for (const name of resolvedGarnishes(item)) add('Garnish', name, 'PCS', qty);
   }
   for (const block of blocks.values()) {
     for (const component of block.components) {
       if (component.gramsPerPiece) {
-        component.baseGrams = component.base;
-        component.base = bufferedPortionPieces(component.baseGrams, component.gramsPerPiece, 0);
+        const grams = portionWeights.get(component);
+        component.baseGrams = decimalGramNumber(grams);
+        component.base = bufferedPortionPieces(grams, component.gramsPerPiece, 0);
+        component.bufferedPieces = bufferedPortionPieces(grams, component.gramsPerPiece);
       } else if (component.unit === 'KG') {
         component.baseGrams = component.base;
         component.base = component.baseGrams / 1000;
@@ -116,19 +185,20 @@ export function cookingLogWorkbook(XLSX, blocks, date) {
         [block.name, component.kind, component.name, component.unit, component.base,
           component.baseGrams ?? '', component.gramsPerPiece ?? ''].forEach((value, c) => put(base, baseRow, c, value, c === 4 ? { numFmt: component.unit === 'PCS' ? '0' : '0.000' } : {}));
         if (component.gramsPerPiece) {
-          base[`E${baseRow + 1}`].f = `ROUNDUP(ROUND(F${baseRow + 1}/G${baseRow + 1},12),0)`;
+          base[`E${baseRow + 1}`].f = pieceFormula(`F${baseRow + 1}`, `G${baseRow + 1}`, component, component.base);
           base[`G${baseRow + 1}`].c = [{ a: 'MATTER', t: `Portion rule: ${component.gramsPerPiece}g per piece. INITIAL adds the buffer to total assigned grams, divides by grams per piece and rounds up once. Base quantity here is before the buffer.` }];
         }
         const ref = `Calculation!E${baseRow + 1}`, kg = component.unit === 'KG';
         // Calculate tenths of buffered kg directly from source grams using
         // the exact 105/10000 ratio; do not apply a fixed floating-point epsilon.
+        const bufferedKg = kg && block.category === 'meal';
         const pieceWeight = component.gramsPerPiece;
-        const initial = pieceWeight ? bufferedPortionPieces(component.baseGrams, pieceWeight)
-          : kg ? Math.round((component.baseGrams ?? component.base * 1000) * 105 / 10000) / 10 : component.base;
+        const initial = pieceWeight ? (component.bufferedPieces ?? bufferedPortionPieces(component.baseGrams, pieceWeight))
+          : bufferedKg ? Math.round((component.baseGrams ?? component.base * 1000) * 105 / 10000) / 10 : component.base;
         put(sheet, r, col, `${component.kind}: ${component.name}`);
-        const formula = pieceWeight ? `ROUNDUP(ROUND(Calculation!F${baseRow + 1}*(1+$B$2)/Calculation!G${baseRow + 1},12),0)`
-          : kg ? `ROUND(${ref}*(1+$B$2),1)` : ref;
-        put(sheet, r, col + 1, initial, { numFmt: kg ? '0.0' : '0' }, formula);
+        const formula = pieceWeight ? pieceFormula(`Calculation!F${baseRow + 1}`, `Calculation!G${baseRow + 1}`, component, initial, '$B$2')
+          : bufferedKg ? `ROUND(${ref}*(1+$B$2),1)` : ref;
+        put(sheet, r, col + 1, initial, { numFmt: bufferedKg ? '0.0' : kg ? '0.0##' : '0' }, formula);
         for (const c of [col + 2, col + 3]) put(sheet, r, c, '', { fill: { fgColor: { rgb: 'FFF2CC' } }, numFmt: kg ? '0.000' : '0' });
         put(sheet, r, col + 4, component.unit);
         sheet['!rows'][r] = { hpt: 36 }; baseRow++;
@@ -146,7 +216,7 @@ export function cookingLogWorkbook(XLSX, blocks, date) {
     ['How to use'],
     ['Fill only ACTUAL COOK and EOD on the Cooking & EOD sheet, using the listed unit.'],
     ['INITIAL is the required quantity: assigned main protein/carb/veg weights plus the buffer in B2, rounded to one decimal place for KG.'],
-    ['Sauces, dressing, garnish, salad bases, breakfasts and snacks use pieces without a buffer.'],
+    ['Sauces, dressing, garnish and salad bases use pieces without a buffer. Breakfasts and snacks also have no buffer and use pieces by default.'],
     ['Main portions configured as PCS: sum assigned grams, add 5%, divide by the saved grams per piece and round up once (250g × 1.05 ÷ 50 = 6 PCS). Calculation shows source grams and the conversion.'],
     ['Duplicate meal portions each need their own sauce/garnish piece. Breakfast totals combine normal and Large portions; (21-LARGE) means 21 of the total are Large.'],
     ['Calculation contains the unbuffered source quantities. Changing this workbook does not update customer selections.'],

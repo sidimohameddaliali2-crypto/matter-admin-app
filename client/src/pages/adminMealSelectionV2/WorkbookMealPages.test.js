@@ -24,18 +24,85 @@ const setInput = (input, value) => act(() => {
 });
 const component = (id, type, name, exclusions, notes = '') => ({ id, type, name, exclusions, notes, adaptation: 'Not reviewed' });
 
+test('a QTY-only save keeps the original imported salad and dressing snapshot', async () => {
+  const imported = { id: 'salad', name: 'Imported bowl', category: 'MAIN CHX', mealType: 'Chicken', components: [
+    component('p', 'Protein', 'Chicken', []), component('v1', 'Vegetable', 'Leaves', []),
+    component('v2', 'Vegetable', 'Tomato', []), component('d', 'Sauce 2', 'Dressing', ['Soy']),
+  ] };
+  const save = render(imported);
+  const select = host.querySelector('[aria-label="QTY"]');
+  act(() => { select.value = 'PCS'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+  setInput(host.querySelector('[aria-label="Grams per piece"]'), '65.1');
+  await click('Save draft');
+  expect(save).toHaveBeenCalledWith({ ...imported, qtyUnit: 'PCS', gramsPerPiece: 65.1 }, undefined);
+});
+
+test('a QTY-only save does not require protein classification on a legacy meal', async () => {
+  const legacy = { id: 'legacy', category: 'SUB', name: 'Imported sub', components: [component('p', 'Protein', 'Patty', [])] };
+  const save = render(legacy);
+  const select = host.querySelector('[aria-label="QTY"]');
+  act(() => { select.value = 'PCS'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+  setInput(host.querySelector('[aria-label="Grams per piece"]'), '50');
+  await click('Save draft');
+  expect(save).toHaveBeenCalledWith({ ...legacy, qtyUnit: 'PCS', gramsPerPiece: 50 }, undefined);
+});
+
 test('QTY defaults to KG and saves a validated PCS conversion', async () => {
   const save = render({ id: 'qty', name: 'Patty', mealKind: 'Main meal', mealType: 'Beef', components: [component('p', 'Protein', 'Patty', [])] });
-  const select = host.querySelector('[aria-label="QTY"]'); expect(select.value).toBe('KG');
+  const select = host.querySelector('[aria-label="QTY"]'); expect(select.selectedOptions[0].text).toBe('KG (default)');
   act(() => { select.value = 'PCS'; select.dispatchEvent(new Event('change', { bubbles: true })); });
   await click('Save draft'); expect(save).not.toHaveBeenCalled(); expect(host.textContent).toContain('Enter grams per piece');
+  setInput(host.querySelector('[aria-label="Grams per piece"]'), '1e-307');
+  await click('Save draft'); expect(save).not.toHaveBeenCalled(); expect(host.textContent).toContain('at least 0.001');
   setInput(host.querySelector('[aria-label="Grams per piece"]'), '100');
-  await click('Save draft'); expect(save).toHaveBeenCalledWith(expect.objectContaining({ qtyUnit: 'PCS', gramsPerPiece: 100 }));
+  await click('Save draft'); expect(save).toHaveBeenCalledWith(expect.objectContaining({ qtyUnit: 'PCS', gramsPerPiece: 100 }), undefined);
+});
+
+test('an unrelated edit does not turn the library default into a saved override', async () => {
+  const save = render({ id: 'burger', name: 'Mexican Burger with Green Rice', mealKind: 'Main meal', mealType: 'Beef',
+    components: [component('p', 'Protein', 'Mexican Burger', [])] });
+  const select = host.querySelector('[aria-label="QTY"]');
+  expect(select.selectedOptions[0].text).toBe('KG (default)');
+  expect(host.querySelector('[aria-label="Grams per piece"]')).toBeNull();
+  setInput(inputFor('Meal name'), 'Mexican Burger and Green Rice');
+  await click('Save draft');
+  expect(save).toHaveBeenCalledWith(expect.objectContaining({ name: 'Mexican Burger and Green Rice', qtyUnit: undefined }), undefined);
+  act(() => { select.value = 'KG'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+  await click('Save draft');
+  expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ qtyUnit: 'KG', gramsPerPiece: null }), undefined);
+});
+
+test('a recipe edit can retain an existing conversion that must fall back for production', async () => {
+  const save = render({ id: 'legacy', name: 'Legacy patty', mealKind: 'Main meal', mealType: 'Beef', qtyUnit: 'PCS',
+    components: [component('p', 'Protein', 'Patty', [])] });
+  setInput(inputFor('Meal name'), 'Legacy patty and rice');
+  await click('Save draft');
+  expect(save).toHaveBeenCalledWith(expect.objectContaining({ name: 'Legacy patty and rice', qtyUnit: 'PCS', gramsPerPiece: undefined }), undefined);
+});
+
+test('re-entering the displayed conversion repairs a legacy string instead of retaining it', async () => {
+  const save = render({ id: 'legacy', name: 'Legacy patty', mealKind: 'Main meal', mealType: 'Beef', qtyUnit: 'PCS', gramsPerPiece: '50',
+    components: [component('p', 'Protein', 'Patty', [])] });
+  const conversion = host.querySelector('[aria-label="Grams per piece"]');
+  setInput(conversion, '5');
+  setInput(conversion, '50');
+  await click('Save draft');
+  expect(save).toHaveBeenCalledWith(expect.objectContaining({ qtyUnit: 'PCS', gramsPerPiece: 50 }), undefined);
+});
+
+test('reselecting PCS clears a corrupt conversion on a counted breakfast', async () => {
+  const breakfast = { id: 'legacy', name: 'Oats', mealKind: 'Breakfast', qtyUnit: 'PCS', gramsPerPiece: 50,
+    components: [component('p', 'Breakfast', 'Oats', [])] };
+  const save = render(breakfast);
+  const unit = host.querySelector('[aria-label="QTY"]');
+  for (const value of ['KG', 'PCS']) act(() => { unit.value = value; unit.dispatchEvent(new Event('change', { bubbles: true })); });
+  await click('Save draft');
+  expect(save).toHaveBeenCalledWith({ ...breakfast, gramsPerPiece: null }, undefined);
 });
 
 test.each(['Breakfast', 'Snack'])('%s defaults to PCS without requiring weight conversion', kind => {
   render({ id: 'qty', name: kind, mealKind: kind, components: [component('p', kind, kind, [])] });
-  expect(host.querySelector('[aria-label="QTY"]').value).toBe('PCS');
+  expect(host.querySelector('[aria-label="QTY"]').selectedOptions[0].text).toBe('PCS (default)');
   expect(host.querySelector('[aria-label="Grams per piece"]')).toBeNull();
 });
 

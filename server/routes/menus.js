@@ -2676,7 +2676,7 @@ router.get('/:id/kitchen-components', protect, async (req, res) => {
     if (!menu) return res.status(404).json({ success: false, message: 'Menu not found' });
     const items = await MenuItem.find({
       _id: { $in: (menu.meals || []).flatMap(day => day.items || []) }, itemDate: new Date(date),
-    }).select('mealName mealType proteinSource carbs veg sauce garnish portionType rotationCategory cycleMeal.id cycleMeal.qtyUnit cycleMeal.gramsPerPiece cycleMeal.category cycleMeal.isSaladBase cycleMeal.components.type cycleMeal.components.name').lean();
+    }).select('mealName mealType proteinSource carbs veg sauce garnish category portionType rotationCategory ingredients cycleMeal.id cycleMeal.qtyUnit cycleMeal.gramsPerPiece cycleMeal.category cycleMeal.mealType cycleMeal.mealKind cycleMeal.mealFormat cycleMeal.isSaladBase cycleMeal.notes cycleMeal.temperature cycleMeal.allergens cycleMeal.ingredients cycleMeal.components.type cycleMeal.components.name cycleMeal.components.notes cycleMeal.components.adaptation cycleMeal.components.replacement cycleMeal.components.exclusions cycleMeal.components.allergens cycleMeal.components.ingredients').lean();
     res.set('Cache-Control', 'no-store');
     return res.json({ success: true, data: await withCurrentKitchenQuantities(items) });
   } catch (error) {

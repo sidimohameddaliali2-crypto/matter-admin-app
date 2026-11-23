@@ -11,6 +11,7 @@ const isDriverAuditPath = pathname => pathname === '/driver-audit-view'
   || pathname === '/api/session' || pathname === '/api/session/refresh'
   || pathname.startsWith('/api/reporting/')
   || pathname.startsWith('/report-data/') || pathname.startsWith('/report-assets/');
+const isKitchenComponentsPath = pathname => /^\/api\/menus\/[^/]+\/kitchen-components\/?$/.test(pathname);
 
 // Assets to cache on install
 const STATIC_ASSETS = [
@@ -52,13 +53,13 @@ self.addEventListener('activate', (event) => {
         })
       );
     }).then(async () => {
-      // Remove only audit entries left by an earlier worker; retain operational
+      // Remove live-only entries left by an earlier worker; retain operational
       // offline assets and queued delivery requests in the current cache.
       const cache = await caches.open(CACHE_NAME);
       const requests = await cache.keys();
       await Promise.all(requests.filter(request => {
         const url = new URL(request.url);
-        return url.origin === location.origin && (isDriverAuditPath(url.pathname) || url.pathname.startsWith('/api/traceability/'));
+        return url.origin === location.origin && (isDriverAuditPath(url.pathname) || url.pathname.startsWith('/api/traceability/') || isKitchenComponentsPath(url.pathname));
       }).map(request => cache.delete(request)));
       console.log('[Service Worker] Claiming clients');
       return self.clients.claim();
@@ -86,6 +87,7 @@ self.addEventListener('fetch', (event) => {
   // A previously cached successful response cannot establish current Matter data.
   if (url.pathname === '/api/matter/subscriptions/kitchen-inputs'
     || url.pathname === '/api/matter/subscriptions/delivery-on-date'
+    || isKitchenComponentsPath(url.pathname)
     || /^\/api\/bag-refunds(?:\/|$)/.test(url.pathname)
     || /^\/api\/bag-followups(?:\/|$)/.test(url.pathname)
     || /^\/api\/bag-operations(?:\/|$)/.test(url.pathname)

@@ -64,8 +64,11 @@ export function createMealCreationStore(client, legacyReader = () => undefined) 
       try { return accept(await client.post('/meal-creation/bootstrap', { legacy: legacyReader() })); }
       catch (error) { return reject(error); }
     }),
-    save: change => enqueue(async () => {
+    save: (change, expectedRevision) => enqueue(async () => {
       if (!snapshot.data || snapshot.error) throw new Error(snapshot.error || 'Load the saved library before editing.');
+      if (expectedRevision !== undefined && expectedRevision !== snapshot.data.revision) {
+        throw new Error('The meal library changed while this draft was open. Reopen the meal before saving.');
+      }
       publish({ saving: true });
       try { return accept(await client.put('/meal-creation', { ...change, revision: snapshot.data.revision })); }
       catch (error) { return reject(error); }

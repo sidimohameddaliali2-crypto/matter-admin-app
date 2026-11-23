@@ -14,6 +14,19 @@ test('QTY and grams-per-piece follow the library meal into its dated menu snapsh
   expect(item.cycleMeal).toMatchObject({ qtyUnit: 'PCS', gramsPerPiece: 100 });
 });
 
+test('corrupt legacy quantity fields do not prevent a dated copy of a saved recipe', () => {
+  const options = input();
+  Object.assign(options.catalogue.meals[0], { qtyUnit: 'PCS' });
+  Object.assign(options.catalogue.meals[2], { qtyUnit: 'PCS', gramsPerPiece: 50 });
+  const before = JSON.stringify(options);
+  const [day] = importCycleMenu(options);
+  for (const item of day.items.slice(0, 2)) {
+    expect(item.cycleMeal.qtyUnit).toBeUndefined();
+    expect(item.cycleMeal.gramsPerPiece).toBeUndefined();
+  }
+  expect(JSON.stringify(options)).toBe(before);
+});
+
 test('copies placements to actual dates with Main/Sub, Core and internal-only component snapshots', () => {
   const options = input(), before = JSON.stringify(options), days = importCycleMenu(options);
   expect(days).toHaveLength(7); expect(days[6].date).toBe('2026-11-15');
@@ -62,6 +75,21 @@ test('storage reader performs no writes and reports malformed saved JSON', () =>
 test('a deduplicated recipe seeds every original workbook occurrence once',()=>{
   const options=input();options.catalogue.meals=[{...options.catalogue.meals[0],day:'DAY 1',cycleDays:['DAY 1','DAY 6 & 7']}];options.boards={};
   const days=importCycleMenu(options);expect(days.map(day=>day.items.length)).toEqual([1,0,0,0,0,1,1]);expect(days[6].items[0].cycleMeal.id).toBe('Main');
+});
+
+test('individual weekend occurrences retain their own workbook source IDs', () => {
+  const options = input(), placements = board();
+  placements[5][1] = placements[6][1] = [{ mealId: 'Main' }];
+  options.cycles = [{
+    id: 'NOV', source: 'November.xlsx', boards: { 'Main menu:Week 1': placements },
+    meals: [
+      { mealId: 'Main', sourceMealId: 'C-001', day: 'DAY 1' },
+      { mealId: 'Main', sourceMealId: 'C-002', day: 'DAY 6' },
+      { mealId: 'Main', sourceMealId: 'C-003', day: 'DAY 7' },
+    ],
+  }];
+  const days = importCycleMenu({ ...options, cycleId: 'NOV' });
+  expect(days.slice(5).map(day => day.items[0].cycleMeal.cycleSource.sourceMealId)).toEqual(['C-002', 'C-003']);
 });
 
 test('NOV3, NOV4 and DEC1 import independently without consuming shared recipes or cycles',()=>{
