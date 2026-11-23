@@ -1,10 +1,13 @@
 import express from 'express';
 import { protect, dispatcher } from '../middleware/auth.js';
 import { effectivePermissions } from '../models/User.js';
+import Customer from '../models/Customer.js';
+import Delivery from '../models/Delivery.js';
+import { loadNewCustomerQueue } from '../services/dispatcherNewCustomerQueue.js';
 import Review from '../models/DispatcherLocationReview.js';
 import matterApiService from '../services/matterApiService.js';
 import { boundedMap } from '../services/boundedMap.js';
-import { newSubscriptionCustomers, subscriptionLocation, validateLocationReview } from '../services/dispatcherLocationReviewService.js';
+import { subscriptionLocation, validateLocationReview } from '../services/dispatcherLocationReviewService.js';
 const router=express.Router();
 router.use(protect,dispatcher,(req,res,next)=>{
   res.set('Cache-Control','no-store');
@@ -12,20 +15,24 @@ router.use(protect,dispatcher,(req,res,next)=>{
   next();
 });
 const fail=(res,e)=>res.status(e.status||502).json({success:false,message:e.status?e.message:'Could not load the current subscription location. Please retry.'});
-async function current(id) {
+const queue = () => loadNewCustomerQueue({matter:matterApiService,Customer,Delivery});
+async function current(id, eligible) {
   if(!/^\d+$/.test(id)){const e=new Error('Invalid subscription ID.');e.status=400;throw e;}
   const result=await matterApiService.getSubscription(id), s=result?.data;
   if(!s||String(s.subscription_id)!==id||s.customer_id==null)throw new Error('Subscription identity could not be verified.');
-  if(String(s.customer_type||'').toLowerCase()!=='new'){const e=new Error('This customer is no longer marked New. Refresh the list.');e.status=409;throw e;}
-  return subscriptionLocation(s);
+  if(String(s.customer_type||'').trim().toLowerCase()!=='new'){const e=new Error('This customer is no longer marked New. Refresh the list.');e.status=409;throw e;}
+  const pending = (eligible || await queue()).subscriptions.find(candidate => String(candidate.subscription_id) === id && String(candidate.customer_id) === String(s.customer_id));
+  if (!pending) { const e=new Error('This customer is no longer awaiting a first delivery with an upcoming delivery. Refresh the list.');e.status=409;throw e; }
+  return {...subscriptionLocation(s),nextDeliveryAt:pending.nextDeliveryAt};
 }
 async function withHistory(data) {return {...data,reviews:await Review.find({customerId:data.customerId}).sort({timestamp:-1,_id:-1}).limit(50).lean()};}
 router.get('/',async(req,res)=>{
  try{
   const page=Number(req.query.page||1);if(!Number.isInteger(page)||page<1)return res.status(400).json({success:false,message:'Invalid page.'});
-  const {subscriptions,count}=newSubscriptionCustomers(await matterApiService.listAllSubscriptions());
+  const eligible=await queue();
+  const {subscriptions,count}=eligible;
   const selected=subscriptions.slice((page-1)*20,page*20);
-  const rows=req.query.details==='true'?await boundedMap(selected,4,async s=>{try{return await current(String(s.subscription_id));}catch{return {customerId:String(s.customer_id),subscriptionId:String(s.subscription_id),customerName:s.name||'Unnamed customer',unavailable:true};}}):[];
+  const rows=req.query.details==='true'?await boundedMap(selected,4,async s=>{try{return await current(String(s.subscription_id),eligible);}catch{return {customerId:String(s.customer_id),subscriptionId:String(s.subscription_id),customerName:s.name||'Unnamed customer',unavailable:true};}}):[];
   res.json({success:true,data:{count,rows,page,pages:Math.ceil(subscriptions.length/20),subscriptions:subscriptions.length}});
  }catch(e){fail(res,e);}
 });

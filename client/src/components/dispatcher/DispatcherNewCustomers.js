@@ -1,21 +1,33 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Search, ArrowRight, MapPin } from 'lucide-react';
 import api from '../../utils/api';
+import { useSocket } from '../../contexts/SocketContext';
 import { DispatcherDialog } from './DispatcherFilters';
 import { errorMessage, newRequestId } from '../../utils/dispatcher';
 import { timestamp } from './DispatcherDelivery';
 
 export default function DispatcherNewCustomers() {
+  const { socket } = useSocket();
+  const [reload,setReload] = useState(0);
   const [count,setCount]=useState(null),[countError,setCountError]=useState(''),[open,setOpen]=useState(false),[rows,setRows]=useState([]),[page,setPage]=useState(1),[pages,setPages]=useState(0),[search,setSearch]=useState(''),[detail,setDetail]=useState(null),[loading,setLoading]=useState(false),[busy,setBusy]=useState(false),[error,setError]=useState(''),[feedback,setFeedback]=useState(false),[category,setCategory]=useState(''),[issue,setIssue]=useState(''),[notice,setNotice]=useState('');
-  const attempt=useRef(null),lock=useRef(false),generation=useRef(0);
-  const loadCount=useCallback(async()=>{try{const r=await api.get('/dispatcher-location-reviews');setCount(r.data.data.count);setCountError('');}catch(e){setCount(null);setCountError(errorMessage(e));}},[]);
-  useEffect(()=>{loadCount();},[loadCount]);
+  const attempt=useRef(null),lock=useRef(false),generation=useRef(0),countGeneration=useRef(0);
+  const loadCount=useCallback(async()=>{const n=++countGeneration.current;try{const r=await api.get('/dispatcher-location-reviews');if(n!==countGeneration.current)return;setCount(r.data.data.count);setCountError('');}catch(e){if(n!==countGeneration.current)return;setCount(null);setCountError(errorMessage(e));}},[]);
+  useEffect(()=>{loadCount();return()=>{countGeneration.current++;};},[loadCount]);
+  useEffect(()=>{
+    if(!socket)return;
+    let timer;
+    const refresh=()=>{clearTimeout(timer);timer=setTimeout(()=>{if(open)setReload(v=>v+1);else loadCount();},350);};
+    const events=['delivery:created','delivery:updated','delivery:statusUpdate','deliveries:deleted','connect'];
+    events.forEach(name=>socket.on(name,refresh));
+    return()=>{clearTimeout(timer);events.forEach(name=>socket.off(name,refresh));};
+  },[socket,open,loadCount]);
   useEffect(()=>{
     if(!open)return;
+    countGeneration.current++;
     const n=++generation.current;setLoading(true);setError('');setRows([]);
-    api.get('/dispatcher-location-reviews',{params:{details:true,page}}).then(r=>{if(n!==generation.current)return;setRows(r.data.data.rows);setPages(r.data.data.pages);setCount(r.data.data.count);setCountError('');}).catch(e=>{if(n===generation.current)setError(errorMessage(e));}).finally(()=>{if(n===generation.current)setLoading(false);});
+    api.get('/dispatcher-location-reviews',{params:{details:true,page}}).then(r=>{if(n!==generation.current)return;setRows(r.data.data.rows);setPages(r.data.data.pages);setPage(p=>Math.min(p,Math.max(1,r.data.data.pages)));setCount(r.data.data.count);setCountError('');}).catch(e=>{if(n===generation.current)setError(errorMessage(e));}).finally(()=>{if(n===generation.current)setLoading(false);});
     return()=>{generation.current++;};
-  },[open,page]);
+  },[open,page,reload]);
   const select=async s=>{
     if(lock.current)return;lock.current=true;setBusy(true);setError('');setNotice('');attempt.current=null;
     try{const r=await api.get(`/dispatcher-location-reviews/${s.subscriptionId}`);setDetail(r.data.data);setFeedback(false);setCategory('');setIssue('');}
@@ -35,12 +47,12 @@ export default function DispatcherNewCustomers() {
   return <div className="dp-new-customer-action"><button aria-label={`New customer, ${count===null?'count unavailable':count}`} onClick={()=>{setPage(1);setSearch('');setOpen(true);}}>New customer <span className="dp-count-badge">{count===null?'—':count}</span></button>{countError&&<p className="dp-help">New customer count unavailable. <button onClick={loadCount}>Retry count</button></p>}
     {open&&<DispatcherDialog title={detail?'Review customer location':'New customers'} busy={busy} onClose={close}>
       {notice&&<p className="dp-notice" role="status">{notice}</p>}{error&&<p className="dp-error" role="alert">{error}</p>}
-      {!detail?<><p className="dp-help">Customer type: New · Website Subscriptions. {count??'—'} customers across all subscriptions. Confirmation keeps the customer type unchanged.</p><label className="dp-search"><Search size={18}/><input aria-label="Search new customers on this page" placeholder="Search this page: customer, location or zone…" value={search} onChange={e=>setSearch(e.target.value)}/></label>
-        {loading?<p role="status">Loading current customer locations…</p>:<div className="dp-new-customer-list">{filtered.map(s=><button key={s.subscriptionId} disabled={busy} onClick={()=>select(s)}><span><strong>{s.customerName}</strong><small>CUS-{s.customerId} · SUB-{s.subscriptionId}</small><small><MapPin size={14}/>{s.zone||'Zone unavailable'}</small><small>{s.unavailable?'Location could not be loaded. Open to retry.':s.location||'Current delivery address is missing or ambiguous.'}</small></span><ArrowRight size={19}/></button>)}</div>}
-        {!loading&&!error&&!filtered.length&&<p className="dp-empty">No matching customers marked New.</p>}
+      {!detail?<><p className="dp-help">{count??'—'} new customers with a scheduled delivery today or later, awaiting their first completed delivery. Removed automatically after that delivery is completed.</p><label className="dp-search"><Search size={18}/><input aria-label="Search new customers on this page" placeholder="Search this page: customer, location or zone…" value={search} onChange={e=>setSearch(e.target.value)}/></label>
+        {loading?<p role="status">Loading current customer locations…</p>:<div className="dp-new-customer-list">{filtered.map(s=><button key={s.subscriptionId} disabled={busy} onClick={()=>select(s)}><span><strong>{s.customerName}</strong><small>CUS-{s.customerId} · SUB-{s.subscriptionId}</small>{s.nextDeliveryAt&&<small>Next delivery · {timestamp(s.nextDeliveryAt)}</small>}<small><MapPin size={14}/>{s.zone||'Zone unavailable'}</small><small>{s.unavailable?'Location could not be loaded. Open to retry.':s.location||'Current delivery address is missing or ambiguous.'}</small></span><ArrowRight size={19}/></button>)}</div>}
+        {!loading&&!error&&!filtered.length&&<p className="dp-empty">No new customers with an upcoming first delivery.</p>}
         <div className="dp-actions"><button disabled={loading||page<=1} onClick={()=>{setPage(p=>p-1);setSearch('');}}>Previous</button><span>Page {page} / {pages||1}</span><button disabled={loading||page>=pages} onClick={()=>{setPage(p=>p+1);setSearch('');}}>Next</button></div>
       </>:<><button disabled={busy} onClick={()=>{setDetail(null);setError('');setNotice('');attempt.current=null;}}>← Back to new customers</button>
-        <section className="dp-detail-section"><p className="dp-eyebrow">CUSTOMER TYPE: NEW</p><h3>{detail.customerName}</h3><p>CUS-{detail.customerId} · SUB-{detail.subscriptionId}</p><p>{detail.location||'Current delivery address is missing or ambiguous.'}</p><p><strong>Zone:</strong> {detail.zone||'Zone missing'}</p>{detail.addressDetails?.additional_details&&<p>{detail.addressDetails.additional_details}</p>}</section>
+        <section className="dp-detail-section"><p className="dp-eyebrow">CUSTOMER TYPE: NEW</p><h3>{detail.customerName}</h3><p>CUS-{detail.customerId} · SUB-{detail.subscriptionId}</p>{detail.nextDeliveryAt&&<p>Next delivery · {timestamp(detail.nextDeliveryAt)}</p>}<p>{detail.location||'Current delivery address is missing or ambiguous.'}</p><p><strong>Zone:</strong> {detail.zone||'Zone missing'}</p>{detail.addressDetails?.additional_details&&<p>{detail.addressDetails.additional_details}</p>}</section>
         <section className="dp-detail-section"><h3>Google Maps · saved pin</h3>{detail.pin?<><iframe className="dp-customer-map" title="New customer saved location in Google Maps" src={`https://www.google.com/maps?q=${detail.pin.lat},${detail.pin.lng}&output=embed`} loading="lazy"/><p>{detail.pin.lat.toFixed(6)}, {detail.pin.lng.toFixed(6)}</p><a className="dp-map-link" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${detail.pin.lat},${detail.pin.lng}`)}`} target="_blank" rel="noopener noreferrer">Open location in Google Maps ↗</a></>:<p className="dp-warning">No saved GPS pin. Give feedback to request the exact location.</p>}</section>
         {current&&<p className="dp-help">{current.action==='confirm'?'Confirmed':'Feedback recorded'} by {current.actorName} · {timestamp(current.timestamp)}</p>}
         {attempt.current&&<p className="dp-warning">Save could not be confirmed. Retry the same review before starting another.</p>}

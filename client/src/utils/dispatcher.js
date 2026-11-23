@@ -31,7 +31,7 @@ export function filterDispatchDeliveries(deliveries, {
   unassigned = false
 }) {
   const term = search.trim().toLowerCase();
-  return deliveries.filter(d => (formatBusinessDateInput(d.scheduledTime) === date || d.sundayOnlyCarriedOver && new Date(date + 'T12:00:00Z').getUTCDay() === 6 && formatBusinessDateInput(d.scheduledTime) === shiftDay(date, 1)) && (!collections || d.type === 'Collection') && (!unassigned || !driverId(d.driver)) && (!filters.zones.length || filters.zones.includes(d.zone || d.addressDetails?.area || '')) && (!filters.drivers.length || filters.drivers.includes(driverId(d.driver) || 'unassigned')) && (!filters.hours.length || filters.hours.includes(String(toBusinessComponents(d.scheduledTime)?.hours))) && (!filters.emirates.length || filters.emirates.includes(emirate(d))) && (!term || [d.customerName, d.customerId, d._id, d.address, d.zone, d.customerPhone].some(v => String(v || '').toLowerCase().includes(term)))).sort((a, b) => new Date(a.scheduledTime) - new Date(b.scheduledTime));
+  return deliveries.filter(d => (formatBusinessDateInput(d.scheduledTime) === date || d.sundayOnlyCarriedOver && new Date(date + 'T12:00:00Z').getUTCDay() === 6 && formatBusinessDateInput(d.scheduledTime) === shiftDay(date, 1)) && (!collections || d.type === 'Collection') && (!unassigned || !driverId(d.driver) && !isFinished(d)) && (!filters.zones.length || filters.zones.includes(d.zone || d.addressDetails?.area || 'No zone')) && (!filters.drivers.length || filters.drivers.includes(driverId(d.driver) || 'unassigned')) && (!filters.hours.length || filters.hours.includes(String(toBusinessComponents(d.scheduledTime)?.hours))) && (!filters.emirates.length || filters.emirates.includes(emirate(d))) && (!term || [d.customerName, d.customerId, d._id, d.address, d.zone, d.customerPhone].some(v => String(v || '').toLowerCase().includes(term)))).sort((a, b) => new Date(a.scheduledTime) - new Date(b.scheduledTime));
 }
 // Read every page: the server caps a request at 500 records.
 export async function loadDispatchDay(api, date) {
@@ -76,4 +76,9 @@ export function proofImageUrl(value, apiBaseUrl, origin = typeof window === 'und
   } catch {
     return null;
   }
+}
+
+export function dispatchZoneCounts(deliveries, options) {
+  const rows = filterDispatchDeliveries(deliveries, {...options, filters:{...options.filters,zones:[]}}).filter(d => !isFinished(d));
+  return rows.reduce((counts,d)=>{const zone=d.zone || d.addressDetails?.area || 'No zone';counts[zone]=(counts[zone]||0)+1;return counts;},Object.create(null));
 }

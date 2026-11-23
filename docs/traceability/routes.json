@@ -136,12 +136,12 @@
     "server/routes/customerServiceGallabox.js": "3354fe1f8961199ef30f8a185b35791aa89b40292d1fd19181ae2eb81637976d",
     "server/routes/customerServiceMedia.js": "3785cad8342516fc38821387de545ff6797a6428dcf361486b93925c5c7f6f5c",
     "server/routes/customerServiceWebhook.js": "6686529423049a843c097531aac2b170a25bb9f6b85f83c050c1ac2f12e75aee",
-    "server/routes/deliveries.js": "8a8d79aa6db56f5f3dbdb16e36b3706a66c3b70ab52c925d75ff44341e6f31d4",
+    "server/routes/deliveries.js": "b24e964de27c83339dca27dd549f5b197949db61902e94ea4f39002629e0a8e6",
     "server/routes/deliveryChanges.js": "57a773c8ad9f1c91327bd4a35cf35e6f0388cdb7e90810787130c1d66fa505af",
     "server/routes/deliveryIssues.js": "724c27d8f1b1c31a0c3c2d7d96f148c710d30e14e499f29f7bedbd10fab295cd",
     "server/routes/deliveryOrder.js": "9878c87a45a8e972e43bb4bba611aeec39dcfa4f7ae8822f2c3b01b442d145ba",
     "server/routes/dispatcherHandovers.js": "6a713a25e9e44833af23aedd6a910fc0e8fd1c545739aee2ca9df249f92115b9",
-    "server/routes/dispatcherLocationReviews.js": "2898b6d49c2bfe2e692721908df090d0e94e8e7b5def4dae29f028a952c54381",
+    "server/routes/dispatcherLocationReviews.js": "a4942d1f402514ca15745624a3fa787471f7990b4b4c7aaf85dd27354b78f3a9",
     "server/routes/drivers.js": "147fb9519b6be77f42f3402fefd843891c8e163444b83c9dbd3241a2e335a78d",
     "server/routes/employees.js": "ec4db79bcee3ad0581c5869d0aa2e548eb097fae6cabf10d5d36b9aeed988b6b",
     "server/routes/events.js": "32e740ac024915317cd2960dcef817e9aa8c973c49fd2a69c677e0d78de62005",
@@ -3902,7 +3902,7 @@
     {
       "id": "10760cf58bfd61cd",
       "method": "GET",
-      "source": "server/routes/dispatcherLocationReviews.js:23",
+      "source": "server/routes/dispatcherLocationReviews.js:29",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -3918,9 +3918,7 @@
         "query.page"
       ],
       "referencedCalls": [
-        "boundedMap",
-        "matterApiService.listAllSubscriptions",
-        "newSubscriptionCustomers"
+        "boundedMap"
       ],
       "path": "/api/dispatcher-location-reviews",
       "middlewareDeclarations": [
@@ -3931,7 +3929,7 @@
     {
       "id": "54be4e3ae26d7d05",
       "method": "GET",
-      "source": "server/routes/dispatcherLocationReviews.js:32",
+      "source": "server/routes/dispatcherLocationReviews.js:39",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3952,7 +3950,7 @@
     {
       "id": "4bf61bb508868dd0",
       "method": "POST",
-      "source": "server/routes/dispatcherLocationReviews.js:33",
+      "source": "server/routes/dispatcherLocationReviews.js:40",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [

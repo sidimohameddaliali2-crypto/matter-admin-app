@@ -1998,7 +1998,7 @@ router.patch('/assign-driver', [
 
     const { deliveryIds, driverId } = req.body;
 
-    const driver = await User.findOne({ _id: driverId, role: 'driver' });
+    const driver = await User.findOne({ _id: driverId, role: 'driver', isActive: true });
     if (!driver) {
       return res.status(404).json({
         success: false,

@@ -451,8 +451,8 @@ test('older delivery requests cannot overwrite a newer selected day', async () =
 test('driver status events refresh the delivery board and accepted handover history, then unsubscribe', async () => {
   const listeners = new Map();
   mockSocket = {
-    on: jest.fn((event, listener) => listeners.set(event, listener)),
-    off: jest.fn()
+    on: jest.fn((event, listener) => { if (!listeners.has(event)) listeners.set(event, new Set()); listeners.get(event).add(listener); }),
+    off: jest.fn((event, listener) => listeners.get(event)?.delete(listener))
   };
   let accepted = 1;
   const original = api.get.getMockImplementation();
@@ -473,7 +473,7 @@ test('driver status events refresh the delivery board and accepted handover hist
     deliveries = deliveries.map((d, i) => i === 0 ? { ...d, status: 'on_route' } : d);
     api.get.mockClear();
     await act(async () => {
-      listeners.get('delivery:statusUpdate')({ status: 'on_route' });
+      listeners.get('delivery:statusUpdate').forEach(listener => listener({ status: 'on_route' }));
       jest.advanceTimersByTime(351);
     });
     expect(api.get).toHaveBeenCalledWith('/dispatcher-handovers');
@@ -483,7 +483,7 @@ test('driver status events refresh the delivery board and accepted handover hist
     expect(container.querySelector('.dp-table-wrap').textContent).toContain('on route');
     deliveries = deliveries.map((d, i) => i === 0 ? { ...d, status: 'delivered' } : d);
     await act(async () => {
-      listeners.get('delivery:statusUpdate')({ status: 'delivered' });
+      listeners.get('delivery:statusUpdate').forEach(listener => listener({ status: 'delivered' }));
       jest.advanceTimersByTime(351);
     });
     expect(container.querySelector('.dp-table-wrap').textContent).toContain('delivered');
@@ -519,4 +519,28 @@ test('refresh clamps to a remaining later page and keeps its navigation usable',
   expect(container.querySelector('.dp-board-footer').textContent).toContain('2 / 2');
   await click('Previous');
   expect(container.querySelector('.dp-table-wrap').textContent).toContain('Fixture 0');
+});
+
+test('plain-array driver endpoint populates active drivers and permits bulk select-all assignment across pages',async()=>{
+ const original=api.get.getMockImplementation();api.get.mockImplementation(async(url,config)=>url==='/users/drivers'?{data:[...drivers,{_id:'inactive',name:'Inactive driver',isActive:false}]}:original(url,config));
+ deliveries=Array.from({length:35},(_,i)=>({...deliveries[0],_id:'delivery-'+i,customerName:'Bulk '+i}));
+ await click('Retry drivers').catch(()=>{});
+ // Remount to exercise the actual initial plain-array response.
+ await act(async()=>root.render(null));await act(async()=>root.render(<DispatcherWorkspace/>));
+ await click('Select all deliveries');expect(container.querySelector('.dp-selection').textContent).toContain('35 selected');await click('Assign / reassign');
+ expect(container.textContent).not.toContain('Inactive driver');await pickFirst();await click('Confirm assignment');
+ expect(api.patch).toHaveBeenCalledWith('/deliveries/assign-driver',expect.objectContaining({deliveryIds:deliveries.map(d=>d._id),driverId:drivers[0]._id}));
+});
+test('zone counts show available work and change to remaining unassigned work after assignment',async()=>{
+ await act(async()=>container.querySelector('.dp-filter-trigger').click());
+ expect(button('Marina').textContent).toContain('1 available');expect(button('JVC').textContent).toContain('1 available');await click('Close dialog');await click('Unassigned');
+ await act(async()=>container.querySelector('.dp-filter-trigger').click());expect(button('Marina').textContent).toContain('1 unassigned');expect(button('JVC').textContent).toContain('0 unassigned');await click('Close dialog');
+ deliveries=deliveries.map(d=>d._id==='delivery-1'?{...d,driver:drivers[0],status:'assigned'}:d);await click('Refresh deliveries');await act(async()=>container.querySelector('.dp-filter-trigger').click());expect(button('Marina').textContent).toContain('0 unassigned');
+});
+
+
+test('unassigning a driver increases the unassigned zone count and select-all excludes completed deliveries',async()=>{
+ const original=api.patch.getMockImplementation();api.patch.mockImplementation(async(url,body)=>{if(url==='/deliveries/unassign-driver')deliveries=deliveries.map(d=>body.deliveryIds.includes(d._id)?{...d,driver:null,status:'pending'}:d);return original(url,body);});
+ await select('Assigned customer');await click('Unassign');await click('Confirm unassign');await click('Unassigned');await act(async()=>container.querySelector('.dp-filter-trigger').click());expect(button('JVC').textContent).toContain('1 unassigned');await click('Close dialog');await click('Unassigned');
+ deliveries=[...deliveries,{...deliveries[0],_id:'finished',status:'delivered',customerName:'Finished customer'}];await click('Refresh deliveries');await click('Select all deliveries');expect(container.querySelector('.dp-selection').textContent).toContain('2 selected');
 });

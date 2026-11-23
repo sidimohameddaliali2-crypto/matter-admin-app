@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Search, Check, X } from 'lucide-react';
-import { staffName } from '../../utils/dispatcher';
+import { staffName, dispatchZoneCounts } from '../../utils/dispatcher';
 export function DispatcherDialog({
   title,
   onClose,
@@ -46,6 +46,7 @@ export default function DispatcherFilters({
   zones,
   drivers,
   emirates,
+  deliveries = [], date, searchTerm = '', collections = false, unassigned = false,
   onApply,
   onClose
 }) {
@@ -58,9 +59,11 @@ export default function DispatcherFilters({
     ...d,
     [key]: d[key].includes(value) ? d[key].filter(v => v !== value) : [...d[key], value]
   }));
+  const zoneCounts = dispatchZoneCounts(deliveries,{date,search:searchTerm,filters:draft,collections,unassigned});
   const groups = [['zones', 'Zones', zones.map(z => ({
     value: z,
-    label: z
+    label: z,
+    detail: `${zoneCounts[z] || 0} ${unassigned ? 'unassigned' : 'available'}`
   }))], ['drivers', 'Drivers', [{
     value: 'unassigned',
     label: 'Unassigned'
@@ -84,7 +87,7 @@ export default function DispatcherFilters({
       return <fieldset className="dp-filter-group" key={key}><legend>{label}<small>{draft[key].length} selected</small></legend>{searchable && <label className="dp-search"><Search size={17} /><input aria-label={`Search ${key}`} placeholder={`Search ${key}…`} value={search[key]} onChange={e => setSearch(s => ({
             ...s,
             [key]: e.target.value
-          }))} /></label>}<div className={searchable ? 'dp-filter-list' : 'dp-chips'} role="group" aria-label={`${label} options`} tabIndex={searchable ? 0 : undefined}>{matches.map(o => <button type="button" key={o.value} aria-pressed={draft[key].includes(o.value)} onClick={() => toggle(key, o.value)}><span>{o.label}{o.detail && <small>{o.detail}</small>}</span>{searchable && <i>{draft[key].includes(o.value) && <Check size={15} />}</i>}</button>)}{!matches.length && <p className="dp-empty">No {key} match your search.</p>}</div>{searchable && <small className="dp-help">{matches.length} of {options.length} {key} · scroll for more</small>}</fieldset>;
+          }))} /></label>}<div className={searchable ? 'dp-filter-list' : 'dp-chips'} role="group" aria-label={`${label} options`} tabIndex={searchable ? 0 : undefined}>{matches.map(o => <button type="button" key={o.value} aria-label={key === 'zones' ? o.label : undefined} aria-describedby={key === 'zones' ? `dp-zone-count-${encodeURIComponent(o.value)}` : undefined} aria-pressed={draft[key].includes(o.value)} onClick={() => toggle(key, o.value)}><span>{o.label}{o.detail && <small id={key === 'zones' ? `dp-zone-count-${encodeURIComponent(o.value)}` : undefined}>{o.detail}</small>}</span>{searchable && <i>{draft[key].includes(o.value) && <Check size={15} />}</i>}</button>)}{!matches.length && <p className="dp-empty">No {key} match your search.</p>}</div>{searchable && <small className="dp-help">{matches.length} of {options.length} {key} · scroll for more</small>}</fieldset>;
     })}<footer className="dp-dialog-footer"><p>{total ? `${total} filters selected · selections stay when you search` : 'No filters selected · show all deliveries'}</p><div className="dp-actions"><button onClick={() => {
           setDraft({
             zones: [],
