@@ -45,6 +45,34 @@ test('a range paper uses each date’s Core calendar across a subscription renew
   expect(() => assertKitchenExportReady(snapshot.entries)).not.toThrow();
 });
 
+test('a range paper uses the meals and notes from each verified date', async () => {
+  const dates = [day, '2026-10-23'];
+  const selectedMeal = (date, mealName) => ({ date, mealType: 'main', mealName });
+  const profile = { allergies: ['Peanuts'], allergiesAvailable: true };
+  const nutrition = { subscription_id: 'renewal', customer_id: '42', customer_email: 'website@example.invalid',
+    customer_name: 'Matter Customer', source_fetched_at: new Date().toISOString(), plan_name: 'Custom',
+    macros: { carbohydrates: 38, protein: 32, fat: 10 }, meal_frequency: 1, snacks_per_day: 0, breakfast_included: false,
+    exclusions: [], allergyProfile: profile, delivery_address_resolution: { status: 'resolved', address: { id: 'address' } } };
+  const api = { get: jest.fn(async (path, { params }) => {
+    if (!path.endsWith('/kitchen-state')) throw new Error('Do not reload unverified meal selections.');
+    expect(params.verifyAllergies).toBe(true);
+    const index = dates.indexOf(params.date);
+    return { data: { state: 'ready', data: { success: true, data: {
+      kitchenInputs: [nutrition], rosterComplete: true, kitchenRoster: prepared().roster,
+      kitchenBreakfastPreset: {}, kitchenSnackPreset: {},
+      kitchenSelections: [{ _id: 'record', matterCustomerId: '42', email: nutrition.customer_email,
+        selectedMeals: dates.map((date, position) => selectedMeal(date, position === index ? `Verified meal ${index}` : 'Peanut chicken')),
+        dayNotes: dates.map((date, position) => ({ date, note: position === index ? `Verified note ${index}` : 'Stale note' })),
+      }],
+    } } } };
+  }) };
+  const result = await loadKitchenSnapshot(api, 'menu', dates);
+  expect(result.entries).toHaveLength(1);
+  expect(result.entries[0].selectedMeals.map(meal => meal.mealName)).toEqual(['Verified meal 0', 'Verified meal 1']);
+  expect(result.entries[0].dayNotes.map(note => note.note)).toEqual(['Verified note 0', 'Verified note 1']);
+  expect(result.entries[0].allergyProfilesByDate).toEqual({ [dates[0]]: profile, [dates[1]]: profile });
+});
+
 test('immediate download uses the exact verified version and permanent Matter customer identity', async () => {
   const api = { get: jest.fn(), post: jest.fn() };
   const snapshot = await loadKitchenSnapshot(api, 'menu', [day], () => true, (entry) => entry, prepared());
@@ -70,10 +98,20 @@ test('fast downloads still reject missing roster portions', async () => {
   await expect(loadKitchenSnapshot({}, 'menu', [day], () => true, (entry) => entry, state)).rejects.toThrow('incomplete');
 });
 
+test.each(['selection-open', 'allergy-review'])('a fully covered date cannot export a recorded allergy conflict in %s', async state => {
+  const api = { get: jest.fn().mockResolvedValue({ data: { state, data: { success: true,
+    preparation: state, data: { kitchenAllergyReview: 'House bowl conflicts with recorded allergies (Peanuts).' } } } }) };
+  await expect(loadKitchenSnapshot(api, 'menu', [day])).rejects.toThrow('House bowl conflicts with recorded allergies');
+  expect(api.get).toHaveBeenCalledTimes(1);
+});
+
 test('a pinned production version cannot silently export newer or expired data', async () => {
   const state = prepared(); state.snapshotId = 'version';
   const api = { get: jest.fn().mockResolvedValue({ data: { state: 'stale' } }), post: jest.fn() };
   await expect(loadKitchenSnapshot(api, 'menu', [day], () => true, entry => entry, state)).rejects.toThrow('changed or expired');
+  expect(api.get).toHaveBeenCalledWith('/menus/menu/kitchen-state', {
+    params: { date: day, job: 'version', verifyAllergies: true }, timeout: 180000,
+  });
   expect(api.post).not.toHaveBeenCalled();
 });
 

@@ -18,4 +18,6 @@ test('missing or malformed Matter allergens are unknown, never a known empty lis
     assert.equal((await resolveMenuAllergyProfile({ allergens, exclusions: ['Milk'] })).allergiesAvailable, false);
   }
   assert.deepEqual(normalizeMatterAllergens([' Milk ', { name: 'Milk' }, 'Soy']), ['Milk', 'Soy']);
+  assert.deepEqual(normalizeMatterAllergens([{ title: ' ', name: 'Peanuts' }, { name: '', title: 'Milk' },
+    { allergen: { title: '', name: 'Tree Nuts' } }]), ['Peanuts', 'Milk', 'Tree Nuts']);
 });

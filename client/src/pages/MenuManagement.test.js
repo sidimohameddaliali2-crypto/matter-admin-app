@@ -1,7 +1,9 @@
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
+import { TextDecoder, TextEncoder } from 'util';
 import api from '../utils/api';
 import MenuManagement from './MenuManagement';
+import jsPDF from 'jspdf';
 import { mealCreationStore } from '../utils/mealCreationStore';
 import { recordActivityChange } from '../utils/activityCapture';
 jest.mock('../utils/activityCapture',()=>({...jest.requireActual('../utils/activityCapture'),recordActivityChange:jest.fn()}));
@@ -15,6 +17,8 @@ const mockExcelRows = jest.fn();
 const mockUploadRows = jest.fn();
 jest.mock('xlsx-js-style',()=>({read:()=>({Sheets:{Meals:{}},SheetNames:['Meals']}),utils:{sheet_to_json:()=>mockUploadRows(),book_new: () => ({}), aoa_to_sheet: rows => { mockExcelRows(rows); return {}; }, book_append_sheet: () => {} }, writeFile: jest.fn()}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
+global.TextEncoder ??= TextEncoder;
+global.TextDecoder ??= TextDecoder;
 
 test.each([false,true])('publishing immediately updates Preview to the copied short link (clipboard blocked: %s)',async blocked=>{
   const shortToken='Ab3dE6fG9hJ2kL5m',shareUrl=`https://matterapp.online/m/${shortToken}`;
@@ -171,6 +175,51 @@ test.each([
     await act(async()=>node.querySelector('.cursor-pointer.border-2').click());
     verify();
   } finally {await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
+});
+
+test('Menu Management Kitchen Paper marks only automatically assigned meals in the downloaded PDF', async () => {
+  const date = '2026-11-06';
+  const email = 'fixture@example.invalid';
+  const selectedMeals = [
+    { date, mealType: 'main', mealName: 'Fixture Bowl', isAutoAssigned: true },
+    { date, mealType: 'main', mealName: 'Manual Bowl', isAutoAssigned: false },
+  ];
+  const customer = { _id: 'person', matterCustomerId: 'person', firstName: 'Fixture', email, selectedMeals };
+  const nutrition = { customer_id: 'person', customer_name: 'Fixture Customer', customer_email: email, subscription_id: 'sub',
+    source_fetched_at: new Date().toISOString(), plan_name: 'Custom', meal_frequency: 2, breakfast_included: false, snacks_per_day: 0,
+    macros: { carbohydrates: 90, protein: 90, fat: 20 }, active_delivery_dates: [date], exclusions: ['Capsicum'],
+    allergyProfile: { allergiesAvailable: true, allergies: ['Shellfish'] },
+    delivery_address_resolution: { status: 'resolved', reason: 'current', address: { id: 'address' } } };
+  api.get.mockImplementation(async path => {
+    if (path === '/menus') return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', startDate: date, endDate: date, meals: [] }] } };
+    if (path.endsWith('/selections')) return { data: { success: true, data: [customer] } };
+    if (path.includes('kitchen-inputs')) return { data: { success: true, data: nutrition } };
+    if (path.endsWith('/kitchen-state')) return { data: { state: 'ready', data: { success: true, data: {
+      kitchenSelections: [customer], kitchenInputs: [nutrition], rosterComplete: true,
+      kitchenRoster: [{ customer_id: 'person', email, subscription_id: 'sub', plan_name: 'Custom', meal_frequency: 2 }],
+      kitchenBreakfastPreset: {}, kitchenSnackPreset: {},
+    } } } };
+    return { data: { success: true, data: {} } };
+  });
+  const PDF = jest.requireActual('jspdf').jsPDF;
+  const pdf = new PDF();
+  pdf.save = jest.fn();
+  jsPDF.mockImplementationOnce(() => pdf);
+  const node = document.createElement('div'); document.body.appendChild(node);
+  const root = createRoot(node);
+  const click = label => act(async () => [...node.querySelectorAll('button')].find(button => button.textContent.trim() === label).click());
+  try {
+    await act(async () => root.render(<MenuManagement />));
+    await click('View selections');
+    await act(async () => node.querySelector('.cursor-pointer.border-2').click());
+    await click('Kitchen Paper');
+    expect(pdf.save).toHaveBeenCalledWith(expect.stringMatching(/^Fixture_Customer_Kitchen_Paper_.*\.pdf$/));
+    const bytes = pdf.output();
+    expect(bytes).toContain('Fixture Bowl \\(main\\) [AUTO]');
+    expect(bytes).toContain('Manual Bowl \\(main\\)');
+    expect(bytes.match(/\[AUTO\]/g)).toHaveLength(1);
+    expect(bytes.indexOf('Allergies: Shellfish')).toBeGreaterThan(bytes.indexOf('Meal exclusion: Capsicum'));
+  } finally { await act(async () => root.unmount()); node.remove(); jest.clearAllMocks(); }
 });
 
 test('downloaded template includes a TRUE/FALSE Core Plan column and visible guidance', async () => {

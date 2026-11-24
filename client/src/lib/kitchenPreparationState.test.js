@@ -53,6 +53,19 @@ test('all views reuse the same ready version without starting a new assignment',
   expect(api.post).not.toHaveBeenCalled();
 });
 
+test('a download verifies Matter allergies even when another request completes preparation first', async () => {
+  const date = '2026-10-30';
+  const api = {
+    get: jest.fn().mockResolvedValueOnce({ data: { state: 'missing' } })
+      .mockResolvedValueOnce({ data: { state: 'stale', message: 'Matter allergies changed' } }),
+    post: jest.fn().mockResolvedValue({ data: { state: 'ready', data: { snapshotId: 'job' } } }),
+  };
+  await expect(loadPreparedKitchenState(api, 'menu', date, () => true, { verifyAllergies: true })).rejects.toThrow('Matter allergies changed');
+  expect(api.get).toHaveBeenLastCalledWith('/menus/menu/kitchen-state', {
+    params: { date, job: 'job', verifyAllergies: true }, timeout: 180000,
+  });
+});
+
 test('explicit Refresh bypasses a ready snapshot and returns freshly prepared data', async () => {
   const payload = { preparation: 'completed', data: { kitchenSelections: [] } };
   const api = { get: jest.fn().mockResolvedValue({ data: { state: 'ready', data: { obsolete: true } } }),

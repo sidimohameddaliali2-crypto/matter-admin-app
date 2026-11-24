@@ -8,6 +8,7 @@ import api from '../utils/api';
 import { activityReference, recordActivityChange } from '../utils/activityCapture';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
 import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
+import { kitchenPaperAllergyLine, kitchenPaperPdfAutoSuffix } from '../utils/kitchenPaperCustomer';
 import { copyManagedMenuItem, managedMenuPayload } from '../utils/managedMenuItems';
 import { importCycleMenu } from '../utils/cycleMenuImport';
 import { mealCreationStore } from '../utils/mealCreationStore';
@@ -1379,6 +1380,9 @@ const MenuManagement = () => {
       }
       currentY += addTextLines(`Submitted: ${submittedAt}`, margin, currentY);
       currentY += addTextLines(`Meal exclusion: ${exclusion}`, margin, currentY);
+      const allergyLines = sortedDateKeys.map(date => kitchenPaperAllergyLine(entry, date));
+      if (new Set(allergyLines).size <= 1) currentY += addTextLines(allergyLines[0] || kitchenPaperAllergyLine(entry), margin, currentY);
+      else sortedDateKeys.forEach((date, index) => { currentY += addTextLines(`${date} ${allergyLines[index]}`, margin, currentY); });
       currentY += addTextLines(`Total meals selected: ${totalSelectedMeals}`, margin, currentY);
       currentY += addTextLines(`Meals in profile: ${profileMeals}`, margin, currentY);
 
@@ -1419,7 +1423,7 @@ const MenuManagement = () => {
             const name = meal.mealName || meal.menuItemId?.mealName || 'Meal';
             const type = meal.mealType || meal.menuItemId?.mealType || 'Meal';
             const quantity = Number(meal.quantity) || 1;
-            const mealLine = `• ${name} (${type})${quantity > 1 ? ` x${quantity}` : ''}`;
+            const mealLine = `• ${name} (${type})${quantity > 1 ? ` x${quantity}` : ''}${kitchenPaperPdfAutoSuffix(meal)}`;
             const height = addTextLines(mealLine, margin + 2, currentY);
             currentY += height;
             currentY += addTextLines(`  P: ${meal.proteinWeight}g | C: ${meal.carbWeight}g | V: ${meal.vegWeight}g`, margin + 4, currentY);

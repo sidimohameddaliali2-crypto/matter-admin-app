@@ -1,5 +1,6 @@
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
+import { TextDecoder, TextEncoder } from 'util';
 import api from '../utils/api';
 import KitchenList from './KitchenList';
 import { installActivityCapture } from '../utils/activityCapture';
@@ -7,13 +8,23 @@ import { installActivityCapture } from '../utils/activityCapture';
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn(), patch: jest.fn(), put: jest.fn() } }));
 jest.mock('../lib/kitchenDayScope', () => ({ ...jest.requireActual('../lib/kitchenDayScope'), kitchenToday: () => '2026-10-22' }));
 global.IS_REACT_ACT_ENVIRONMENT = true;
+global.TextEncoder ??= TextEncoder;
+global.TextDecoder ??= TextDecoder;
 
 const mockPdfSave = jest.fn();
 const mockPdfText = jest.fn();
 const mockPdfTable = jest.fn();
+const mockPdfBytes = jest.fn();
 const mockExcelSave = jest.fn();
 const mockExcelRows = jest.fn((rows) => rows);
+let mockUseRealPdf = false;
 jest.mock('jspdf', () => ({ __esModule: true, default: function FixturePDF() {
+  if (mockUseRealPdf) {
+    const { jsPDF } = jest.requireActual('jspdf');
+    const doc = new jsPDF();
+    doc.save = filename => { mockPdfSave(filename); mockPdfBytes(doc.output()); };
+    return doc;
+  }
   const doc = { internal: { pageSize: { getWidth: () => 210, getHeight: () => 297 } },
     splitTextToSize: (text) => [String(text)], getTextWidth: () => 20, getNumberOfPages: () => 1,
     save: (...args) => mockPdfSave(...args),
@@ -22,8 +33,13 @@ jest.mock('jspdf', () => ({ __esModule: true, default: function FixturePDF() {
   doc.text = (...args) => mockPdfText(...args);
   return doc;
 } }));
-jest.mock('jspdf-autotable', () => ({ __esModule: true, default: (doc, options) => { mockPdfTable(options); doc.lastAutoTable = { finalY: 140 }; } }));
-jest.mock('xlsx', () => ({ utils: { book_new: () => ({}), json_to_sheet: (rows) => mockExcelRows(rows), book_append_sheet: () => {} }, writeFile: (...args) => mockExcelSave(...args) }));
+jest.mock('jspdf-autotable', () => ({ __esModule: true, default: (doc, options) => {
+  mockPdfTable(options);
+  if (mockUseRealPdf) jest.requireActual('jspdf-autotable').autoTable(doc, options);
+  else doc.lastAutoTable = { finalY: 140 };
+} }));
+jest.mock('xlsx', () => ({ utils: { ...jest.requireActual('xlsx').utils, json_to_sheet: rows => mockExcelRows(rows) },
+  writeFile: (...args) => mockExcelSave(...args) }));
 
 
 const thursday = '2026-10-22', friday = '2026-10-23';
@@ -46,20 +62,22 @@ const select = async (element, value) => {
 const dateSelect = () => [...container.querySelectorAll('h3')].find((node) => node.textContent === 'Missing Meal Selections').parentElement.querySelector('select');
 const paperSelect = () => [...container.querySelectorAll('label')].find((node) => node.textContent === 'Day kitchen paper').parentElement.querySelector('select');
 
-test('open date shows customer choices and deadline, disables auto assign and makes no assignment POST', async () => {
-  const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-01T00:00:00Z'));
+test.each(['selection-open', 'allergy-review'])('%s shows the conflicting saved choice without starting assignment', async state => {
+  const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse(state === 'selection-open' ? '2026-10-01T00:00:00Z' : '2026-10-24T00:00:00Z'));
   const originalGet = api.get.getMockImplementation();
   const writes = api.post.mock.calls.length;
   api.get.mockImplementation(async (path, options) => path.endsWith('/kitchen-state') ? { data: {
-    state: 'selection-open', data: { success: true, preparation: 'selection-open', data: {
+    state, data: { success: true, preparation: state, data: {
       kitchenSelections: [{ email, matterCustomerId: 'permanent', selectedMeals: [{ date: friday, mealType: 'main', mealName: 'Customer chosen beef' }] }],
+      kitchenAllergyReview: 'Customer chosen beef conflicts with recorded allergies.',
       kitchenInputs: [input()], rosterComplete: true, kitchenRoster: [{ customer_id: 'permanent', email, subscription_id: 'matter-current', meal_frequency: 1 }],
     } },
   } } : originalGet(path, options));
   try {
     await select(dateSelect(), friday);
     expect(container.textContent).toContain('Customer chosen beef');
-    expect(container.textContent).toContain('Customer selection is still open until');
+    if (state === 'selection-open') expect(container.textContent).toContain('Customer selection is still open until');
+    expect([...container.querySelectorAll('[role="alert"]')].some(alert => alert.textContent === 'Customer chosen beef conflicts with recorded allergies.')).toBe(true);
     expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Auto-Assign')).toBe(false);
     expect(api.post).toHaveBeenCalledTimes(writes);
   } finally { now.mockRestore(); }
@@ -300,6 +318,99 @@ test('PDF and Excel buttons generate files after Matter verification', async () 
   expect(mockExcelSave.mock.calls[0][1]).toBe(`kitchen-paper-${thursday}.xlsx`);
 });
 
+test('kitchen papers mark auto-assigned portions without marking saved choices of the same dish', async () => {
+  const originalGet = api.get.getMockImplementation();
+  const allergyProfile = { allergiesAvailable: true, allergies: ['Peanuts'] };
+  const selectedMeals = [
+    { date: friday, mealType: 'main', mealName: 'Bowl & rice', isAutoAssigned: false },
+    { date: friday, mealType: 'main', mealName: 'Bowl & rice', isAutoAssigned: true, quantity: 2, remark: 'veg & garnish' },
+    { date: friday, mealType: 'breakfast', mealName: 'Oats & berries', isAutoAssigned: true },
+    { date: friday, mealType: 'snack', mealName: 'Manual snack' },
+  ];
+  api.get.mockImplementation(async (path, options) => {
+    if (path.endsWith('/selections')) return { data: { success: true, data: [{ email, matterCustomerId: 'permanent', selectedMeals }] } };
+    if (path === '/menus/kitchen-breakfast-presets') return { data: { success: true,
+      data: { presetsByName: { 'oats & berries': { C: 26, P: 24, F: 18, isLargeBreakfast: true } } } } };
+    return originalGet(path, options);
+  });
+  api.post.mockResolvedValue({ data: { success: true, preparation: 'completed', data: {
+    kitchenInputs: [{ ...input(), exclusions: ['Cabbage'], allergyProfile }], rosterComplete: true,
+    kitchenRoster: [{ customer_id: 'permanent', email, subscription_id: 'matter-current', meal_frequency: 1 }],
+  } } });
+  await select(paperSelect(), friday);
+
+  const xlsx = jest.requireActual('xlsx');
+  mockExcelRows.mockImplementationOnce(xlsx.utils.json_to_sheet);
+  await act(async () => downloadButton('Download Day Excel').click());
+  expect(mockExcelSave).toHaveBeenCalledWith(expect.anything(), `kitchen-paper-${friday}.xlsx`);
+  const workbook = mockExcelSave.mock.calls.at(-1)[0];
+  const reopened = xlsx.read(xlsx.write(workbook, { type: 'array', bookType: 'xlsx' }), { type: 'array' }).Sheets['Kitchen Paper'];
+  expect(reopened['!autofilter'].ref).toBe(reopened['!ref']);
+  const rows = xlsx.utils.sheet_to_json(reopened);
+  expect(rows.filter(row => row.Meal === 'Bowl & rice').map(row => row['Auto Assigned']).sort()).toEqual(['', 'Auto', 'Auto']);
+  expect(rows.find(row => row.Meal === 'Oats & berries')['Auto Assigned']).toBe('Auto');
+  expect(rows.find(row => row.Meal === 'Manual snack')['Auto Assigned']).toBe('');
+  expect(rows[0]).toMatchObject({ Exclusions: 'Cabbage', Allergies: 'Peanuts' });
+
+  const assertPdfDownload = async (button, filename) => {
+    const tableIndex = mockPdfTable.mock.calls.length;
+    const saveIndex = mockPdfSave.mock.calls.length;
+    const bytesIndex = mockPdfBytes.mock.calls.length;
+    await act(async () => downloadButton(button).click());
+    expect(mockPdfSave.mock.calls.slice(saveIndex)).toEqual([[filename]]);
+    expect(mockPdfTable.mock.calls.slice(tableIndex)).toHaveLength(1);
+    const names = mockPdfTable.mock.calls[tableIndex][0].body.map(row => row[1]);
+    expect(names.filter(name => name.startsWith('Bowl & rice')).sort())
+      .toEqual(['Bowl & rice', 'Bowl & rice   [AUTO]\nChange veg & garnish', 'Bowl & rice   [AUTO]\nChange veg & garnish']);
+    expect(names).toContain('Oats & berries   [LARGE]   [AUTO]');
+    expect(names).toContain('Manual snack');
+    expect(mockPdfBytes.mock.calls.slice(bytesIndex)).toHaveLength(1);
+    const [pdf] = mockPdfBytes.mock.calls[bytesIndex];
+    expect(pdf.startsWith('%PDF')).toBe(true);
+    expect(pdf.match(/\[AUTO\]/g)).toHaveLength(3);
+    expect(pdf.indexOf('Allergies: Peanuts')).toBeGreaterThan(pdf.indexOf('Exclusions: Cabbage'));
+ };
+  const originalCreateUrl = URL.createObjectURL;
+  const createUrl = jest.fn(() => 'blob:fixture');
+  URL.createObjectURL = createUrl;
+  const downloads = [];
+  const click = jest.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () { downloads.push(this.download); });
+  const assertWordDownload = async (button, filename) => {
+    const blobIndex = createUrl.mock.calls.length;
+    const downloadIndex = downloads.length;
+    await act(async () => downloadButton(button).click());
+    expect(downloads.slice(downloadIndex)).toEqual([filename]);
+    expect(createUrl.mock.calls.slice(blobIndex)).toHaveLength(1);
+    const blob = createUrl.mock.calls[blobIndex][0];
+    const html = await new Promise(resolve => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.readAsText(blob);
+    });
+    const paper = new DOMParser().parseFromString(html, 'text/html');
+    expect(paper.body.textContent).toMatch(/Exclusions: Cabbage\s+Allergies: Peanuts/);
+    const mealCells = [...paper.querySelectorAll('tr > td:nth-child(2)')];
+    const tags = (cell) => [...cell.querySelectorAll('span')].map(tag => tag.textContent.trim());
+    expect(mealCells.filter(cell => cell.textContent.startsWith('Bowl & rice')).map(cell => tags(cell).join()).sort()).toEqual(['', 'AUTO', 'AUTO']);
+    expect(tags(mealCells.find(cell => cell.textContent.startsWith('Oats & berries')))).toEqual(['LARGE', 'AUTO']);
+    expect(tags(mealCells.find(cell => cell.textContent === 'Manual snack'))).toEqual([]);
+    expect(mealCells.some(cell => cell.querySelector('b')?.textContent === 'Change veg & garnish')).toBe(true);
+  };
+  try {
+    mockUseRealPdf = true;
+    await assertPdfDownload('Download Day PDF', `kitchen-paper-${friday}.pdf`);
+    await assertWordDownload('Download Day Word', `kitchen-paper-${friday}.doc`);
+    const customerSelect = [...container.querySelectorAll('select')].find((element) => [...element.options].some((option) => option.textContent === 'Select a customer...'));
+    await select(customerSelect, email);
+    for (const label of ['From', 'To']) {
+      const dateField = [...container.querySelectorAll('label')].find(element => element.textContent === label).parentElement.querySelector('select');
+      await select(dateField, friday);
+    }
+    await assertPdfDownload('Customer PDF', `kitchen-paper-matter-fixture-${friday}.pdf`);
+    await assertWordDownload('Customer Word', `kitchen-paper-matter-fixture-${friday}.doc`);
+  } finally { mockUseRealPdf = false; click.mockRestore(); URL.createObjectURL = originalCreateUrl; }
+});
+
 test('individual PDF includes saved choices when Matter has reactivated a previously skipped day', async () => {
   const customerSelect = [...container.querySelectorAll('select')].find((element) => [...element.options].some((option) => option.textContent === 'Select a customer...'));
   await select(customerSelect, email);
@@ -447,7 +558,7 @@ test.each([false, true])('independent partner papers outside all menus support e
   await act(async () => downloadButton('Download Day Excel').click());
   expect(mockExcelSave).toHaveBeenCalledWith(expect.anything(), `kitchen-paper-${outside}.xlsx`);
   expect(mockExcelRows.mock.calls.at(-1)[0]).toHaveLength(1);
-  expect(mockExcelRows.mock.calls.at(-1)[0][0]).toMatchObject({Section: 'Partner', Meal: 'Outside-menu bowl', Quantity: 4});
+  expect(mockExcelRows.mock.calls.at(-1)[0][0]).toMatchObject({Section: 'Partner', Meal: 'Outside-menu bowl', 'Auto Assigned': '', Quantity: 4});
   await act(async () => downloadButton('Download Day PDF').click());
   expect(mockPdfSave).toHaveBeenCalledWith(`kitchen-paper-${outside}.pdf`);
   expect(mockPdfTable.mock.calls.at(-1)[0].body[0]).toContain('Outside-menu bowl');

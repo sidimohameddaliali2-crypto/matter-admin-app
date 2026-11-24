@@ -54,39 +54,68 @@ export const exclusionMatchesTerm = (exclusionPhrase, term) => {
   return matchesTerm(ex, t);
 };
 
-// Allergy checks deliberately do not waive a match based on a "free" claim.
-// Declared allergen/ingredient metadata must still block a matching profile.
-// Ingredient-category aliases follow Food Standards Scotland/FSA guidance:
-// https://www.foodstandards.gov.scot/consumer-advice/food-safety/food-allergies/food-allergies-and-intolerances
-const MILK_TERMS = ['milk', 'dairy', 'butter', 'buttermilk', 'cheese', 'cream', 'yogurt', 'yoghurt', 'whey', 'casein', 'ghee', 'parmesan', 'mozzarella', 'cheddar', 'feta', 'paneer', 'ricotta'];
-const GLUTEN_TERMS = ['gluten', 'wheat', 'barley', 'rye', 'oat', 'oats', 'spelt', 'khorasan', 'kamut', 'semolina', 'bulgur', 'couscous', 'triticale'];
-const SOY_TERMS = ['soy', 'soya', 'soybean', 'soybeans', 'soya bean', 'soya beans', 'tofu', 'bean curd', 'beancurd', 'edamame', 'miso', 'tempeh', 'tamari'];
-const NUT_TERMS = [...EXCLUSION_GROUPS['all nuts'], 'brazil nut', 'brazil nuts', 'macadamia nuts'];
+// Known catalogue ingredients can have their own interpretation. A generic
+// "free" claim must never override a separate declared allergen.
+const DAIRY_ALLERGEN_TERMS = ['milk', 'dairy', 'butter', 'buttermilk', 'ghee', 'whey', 'casein', 'cheese', 'yogurt', 'yoghurt',
+  'cream', 'labneh', 'custard', 'creme fraiche', 'crème fraîche', 'paneer', 'halloumi', 'mozzarella', 'ricotta',
+  'feta', 'parmesan', 'cheddar', 'mascarpone', 'kefir'];
+const NUT_ALLERGEN_TERMS = [...EXCLUSION_GROUPS['all nuts'], 'brazil nut', 'brazil nuts', 'macadamia nuts'];
+const TREE_NUT_ALLERGEN_TERMS = NUT_ALLERGEN_TERMS.filter(name => !/^(?:peanut|nut)s?$/.test(name));
+const CRUSTACEAN_ALLERGEN_TERMS = ['crustacean', 'crustaceans', 'shellfish', 'shrimp', 'prawn', 'crab', 'lobster', 'crayfish', 'langoustine'];
+const MOLLUSC_ALLERGEN_TERMS = ['mollusc', 'mollusk', 'shellfish', 'seafood', 'sea food', 'mussel', 'scallop',
+  'clam', 'oyster', 'cockle', 'whelk', 'abalone', 'squid', 'calamari', 'octopus', 'cuttlefish'];
+const WHEAT_ALLERGEN_TERMS = ['wheat', 'spelt', 'durum', 'semolina', 'bulgur', 'couscous', 'seitan', 'farro', 'einkorn', 'emmer', 'kamut'];
+const ALLERGEN_PROFILE_ALIASES = {
+  soya: 'soy',
+  soybean: 'soy',
+  soybeans: 'soy',
+  'tree nut': 'tree nuts',
+  crustacean: 'crustaceans',
+  mollusk: 'mollusc',
+  'sesame seed': 'sesame',
+  'sesame seeds': 'sesame',
+  'cereals containing gluten': 'gluten',
+};
+const normalizeAllergenTerm = value => normalizeTerm(value)
+  .replace(/\b(?:ground[ -]?nuts?|arachis)\b/g, 'peanut')
+  .replace(/\b(?:metabisulphites?|metabisulfites?|bisulphites?|bisulfites?|sulphites?|sulfites?)\b/g, 'sulfite')
+  .replace(/\b(shrimps|crabs|lobsters|langoustines|macadamias|clams|oysters|cockles|whelks|sardines|squids|molluscs|mollusks)\b/g, word => word.slice(0, -1))
+  .replace(/\b(crayfishes|cuttlefishes)\b/g, word => word.slice(0, -2))
+  .replace(/\banchovies\b/g, 'anchovy');
 const ALLERGEN_GROUPS = {
-  milk: MILK_TERMS,
-  dairy: MILK_TERMS,
-  gluten: GLUTEN_TERMS,
-  'cereals containing gluten': GLUTEN_TERMS,
-  soy: SOY_TERMS,
-  soya: SOY_TERMS,
-  soybean: SOY_TERMS,
-  soybeans: SOY_TERMS,
-  nuts: NUT_TERMS,
-  'all nuts': NUT_TERMS,
-  'tree nuts': NUT_TERMS.filter(term => !['peanut', 'peanuts'].includes(term)),
-  fish: ['fish', 'cream dory', 'nile perch', 'salmon', 'tuna', 'cod', 'sea bass', 'sea bream'],
-  shellfish: ['shellfish', 'shrimp', 'prawn', 'crab', 'lobster', 'mussel', 'scallop', 'squid', 'calamari'],
+  milk: DAIRY_ALLERGEN_TERMS,
+  dairy: DAIRY_ALLERGEN_TERMS,
+  nuts: NUT_ALLERGEN_TERMS,
+  'all nuts': NUT_ALLERGEN_TERMS,
+  'tree nuts': TREE_NUT_ALLERGEN_TERMS,
+  soy: ['soy', 'soya', 'soybean', 'soybeans', 'soya bean', 'soya beans', 'edamame', 'tofu', 'bean curd', 'beancurd', 'miso', 'tempeh', 'tamari'],
+  egg: ['egg', 'mayonnaise', 'mayo', 'aioli', 'meringue', 'ovalbumin'],
+  sesame: ['sesame', 'tahini', 'tahina', 'tahine', 'zaatar', 'za\'atar'],
+  mustard: ['mustard', 'dijon'],
+  wheat: WHEAT_ALLERGEN_TERMS,
+  gluten: ['gluten', ...WHEAT_ALLERGEN_TERMS, 'barley', 'rye', 'oat', 'oats', 'khorasan', 'triticale', 'pasta', 'bread'],
+  fish: ['fish', 'seafood', 'sea food', 'cream dory', 'nile perch', 'salmon', 'tuna', 'cod', 'sea bass', 'sea bream',
+    'anchovy', 'sardine', 'herring', 'mackerel', 'trout', 'tilapia', 'haddock', 'pollock', 'halibut', 'snapper', 'grouper', 'barramundi', 'mahi mahi'],
+  shellfish: [...CRUSTACEAN_ALLERGEN_TERMS, ...MOLLUSC_ALLERGEN_TERMS],
+  crustaceans: CRUSTACEAN_ALLERGEN_TERMS,
+  mollusc: MOLLUSC_ALLERGEN_TERMS,
 };
 export const allergenMatchesAny = (allergy, terms) => {
-  const key = normalizeTerm(allergy);
+  const normalized = normalizeAllergenTerm(allergy);
+  const key = ALLERGEN_PROFILE_ALIASES[normalized] || normalized;
   const names = ALLERGEN_GROUPS[key] || [key];
-  return (terms || []).some((term) => {
-    let ingredient = normalizeTerm(term);
-    // Named plant ingredients are not mammalian milk. This does not waive a
-    // separate Milk/Dairy declaration or a generic "free" marketing claim.
-    if (['milk', 'dairy'].includes(key)) ingredient = ingredient.replace(/\b(?:peanut|almond|cashew|cocoa) butter|butter beans?|cream dory\b|\b(?:coconut|almond|soy|soya|oat|rice|cashew) (?:milk|cream)\b/g, '');
-    return names.some((name) => key === 'tree nuts' && ['nut', 'nuts'].includes(name)
-      ? containsWholePhrase(ingredient, name) : matchesTerm(name, ingredient));
+  const specificNut = NUT_ALLERGEN_TERMS.some(name => normalizeTerm(name) === key);
+  return (terms || []).some(term => {
+    const ingredient = normalizeAllergenTerm(term);
+    if (key === 'gluten' && /^gluten[ -]free flour$/.test(ingredient)) return false;
+    const declared = ingredient.replace(/^contains\s+/, '');
+    if (key === 'tree nuts' && /\bnuts?\b/.test(declared)) return true;
+    if (specificNut && ['nut', 'nuts', 'all nuts'].includes(declared)) return true;
+    if (specificNut && key !== 'peanut' && ['tree nut', 'tree nuts'].includes(declared)) return true;
+    const candidate = names === DAIRY_ALLERGEN_TERMS
+      ? ingredient.replace(/\b(?:peanut|almond|cashew|pistachio|hazelnut|cocoa|cacao|coconut|seed|oat|soy|soya|rice) (?:butter|milk|cream)\b|\b(?:cream dory|butter beans?)\b/g, '')
+      : ingredient;
+    return names.some(name => matchesTerm(name, candidate));
   });
 };
 
