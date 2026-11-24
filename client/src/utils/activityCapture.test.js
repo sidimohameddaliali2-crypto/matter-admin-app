@@ -68,7 +68,7 @@ test('unchanged custom selections and initial render do not claim a user edit', 
   recordActivityChange({ field: 'Days', before: ['Monday', 'Tuesday'], after: ['Monday', 'Tuesday'] });
   await deliver(); expect(sent()).toHaveLength(0);
 });
-test.each(['/traceability', '/login', '/menu-select/private-token'])('custom controls respect excluded credential and history pages at %s', async path => {
+test.each(['/traceability', '/login', '/menu-select/private-token', '/m/private-code'])('custom controls respect excluded credential and history pages at %s', async path => {
   window.history.replaceState({}, '', path);
   recordActivityChange({ field: 'Choice', before: 'Old', after: 'New' });
   await deliver(); expect(fetchMock).not.toHaveBeenCalled();
@@ -169,7 +169,7 @@ test('pagehide flushes pending input with keepalive without persisting form cont
   const storage = jest.spyOn(Storage.prototype, 'setItem'); edit(document.querySelector('input'), 'Unsent delivery note'); window.dispatchEvent(new Event('pagehide')); await settle();
   expect(sent()[0].changes[0].after).toBe('Unsent delivery note'); expect(fetchMock.mock.calls[0][1].keepalive).toBe(true); expect(storage).not.toHaveBeenCalled(); storage.mockRestore();
 });
-test.each(['/traceability', '/traceability/details', '/login', '/partner/login', '/menu-select/private-token', '/join/private-token'])('excludes diagnostic and public credential pages at %s', async path => {
+test.each(['/traceability', '/traceability/details', '/login', '/partner/login', '/menu-select/private-token', '/m/private-code', '/join/private-token'])('excludes diagnostic and public credential pages at %s', async path => {
   window.history.replaceState({}, '', path); edit(document.querySelector('input'), 'Private text', 'change'); document.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true })); await deliver(); expect(fetchMock).not.toHaveBeenCalled();
 });
 test('drops queued edits after a session switch', async () => {

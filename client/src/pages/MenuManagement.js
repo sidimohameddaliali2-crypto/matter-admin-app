@@ -761,13 +761,16 @@ const MenuManagement = () => {
         return exists ? prev.map((m) => (m._id === savedMenu._id ? savedMenu : m)) : [savedMenu, ...prev];
       });
 
+      let copyWarning = '';
       if (publish && savedMenu.shareLink?.token) {
-        const shareUrl = `${window.location.origin}/menu-select/${savedMenu.shareLink.token}`;
-        try { await navigator.clipboard.writeText(shareUrl); } catch (clipErr) { /* clipboard may be unavailable — link is still saved */ }
+        try {
+          const linkResponse = await api.get(`/menus/${savedMenu._id}/share-link`);
+          await navigator.clipboard.writeText(linkResponse.data.data.shareUrl);
+        } catch (clipErr) { copyWarning = 'Menu saved. Use Copy link to copy its customer link.'; }
       }
 
       closeCreateForm();
-      if (response.data.warnings?.length) setError(response.data.warnings.join(' '));
+      if (response.data.warnings?.length || copyWarning) setError([...(response.data.warnings || []), copyWarning].filter(Boolean).join(' '));
     } catch (err) {
       setError(err.response?.data?.message || (err.code === 'MENU_TITLE_REQUIRED' ? err.message : 'Failed to save menu'));
       if (err.code === 'MENU_TITLE_REQUIRED') document.querySelector('input[placeholder="Menu Title"]')?.focus();
@@ -902,19 +905,27 @@ const MenuManagement = () => {
     try {
       const response = await api.get(`/menus/${menuId}/share-link`);
       if (response.data?.success) {
+        const shortToken = response.data.data.shortToken;
+        if (shortToken) setMenus(current => current.map(menu => menu._id === menuId
+          ? { ...menu, shareLink: { ...menu.shareLink, shortToken } } : menu));
         return response.data.data.shareUrl;
       }
     } catch (err) {
       console.error('Error getting share link:', err);
+      setError(err.response?.data?.message || 'Could not create the customer link. Please try again.');
     }
   };
 
   const copyShareLink = async (menuId) => {
     const shareUrl = await getShareLink(menuId);
     if (shareUrl) {
-      navigator.clipboard.writeText(shareUrl);
-      setCopiedLink(menuId);
-      setTimeout(() => setCopiedLink(null), 2000);
+      try {
+        await navigator.clipboard.writeText(shareUrl);
+        setCopiedLink(menuId);
+        setTimeout(() => setCopiedLink(null), 2000);
+      } catch {
+        setError('Could not copy the link. Please allow clipboard access and try again.');
+      }
     }
   };
 
@@ -2458,7 +2469,7 @@ const MenuManagement = () => {
 
                   {menu.shareLink?.isActive !== false && (
                     <a
-                      href={`/menu-select/${menu.shareLink?.token}`}
+                      href={menu.shareLink?.shortToken ? `/m/${menu.shareLink.shortToken}` : `/menu-select/${menu.shareLink?.token}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-matter-neutral-100 text-matter-neutral-800 hover:bg-matter-neutral-200 transition"

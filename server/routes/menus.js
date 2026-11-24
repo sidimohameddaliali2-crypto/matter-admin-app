@@ -25,6 +25,7 @@ import { toKitchenOption, kitchenConflictList, kitchenConflictFields, mergeKitch
 import { missingCoreSnackSlots } from '../services/kitchenSnackSlots.js';
 import { kitchenUpload } from '../services/kitchenUpload.js';
 import { saveManagedMenu } from '../services/managedMenuSave.js';
+import { ensureShortMenuToken, menuShareFilter } from '../services/menuShareLinks.js';
 import { assertAssignmentMacros } from '../services/kitchenMacroValidation.js';
 import { readKitchenState, beginKitchenState } from '../services/kitchenProductionSnapshot.js';
 import { kitchenMenuDates } from '../services/kitchenMenuDates.js';
@@ -2781,9 +2782,7 @@ router.get('/share/:token', async (req, res) => {
       });
     }
 
-    const menu = await WeeklyMenu.findOne({
-      'shareLink.token': token
-    })
+    const menu = await WeeklyMenu.findOne(menuShareFilter(token))
       .populate({
         path: 'meals.items',
         model: 'MenuItem'
@@ -2886,7 +2885,10 @@ const saveMenuResponse = async (req, res, creating) => {
     });
     const warnings = [];
     if (menu.shareLink?.token) {
-      try { await cacheDelete(`menu:share:${menu.shareLink.token}`); }
+      try {
+        await cacheDelete(`menu:share:${menu.shareLink.token}`);
+        if (menu.shareLink.shortToken) await cacheDelete(`menu:share:${menu.shareLink.shortToken}`);
+      }
       catch { warnings.push('Menu saved, but its public cache could not be refreshed. Retry the public menu shortly.'); }
     }
     try {
@@ -2934,12 +2936,15 @@ router.get('/:id/share-link', protect, async (req, res) => {
     }
 
     const fallbackOrigin = req.get('origin') || `${req.protocol}://${req.get('host')}`;
-    const shareUrl = `${process.env.FRONTEND_URL || fallbackOrigin}/menu-select/${menu.shareLink.token}`;
+    const shortToken = await ensureShortMenuToken(menu);
+    const origin = (process.env.FRONTEND_URL || fallbackOrigin).replace(/\/$/, '');
+    const shareUrl = `${origin}/m/${shortToken}`;
 
     res.json({
       success: true,
       data: {
         shareLink: menu.shareLink.token,
+        shortToken,
         shareUrl,
         expiresAt: menu.shareLink.expiresAt
       }

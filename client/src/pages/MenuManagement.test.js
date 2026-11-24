@@ -16,6 +16,29 @@ const mockUploadRows = jest.fn();
 jest.mock('xlsx-js-style',()=>({read:()=>({Sheets:{Meals:{}},SheetNames:['Meals']}),utils:{sheet_to_json:()=>mockUploadRows(),book_new: () => ({}), aoa_to_sheet: rows => { mockExcelRows(rows); return {}; }, book_append_sheet: () => {} }, writeFile: jest.fn()}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
 
+test('Copy link uses the short URL and updates Preview without rotating the original link', async()=>{
+  const code='Ab3dE6fG9hJ2kL5m', shareUrl=`https://matterapp.online/m/${code}`;
+  const menu={_id:'short-link-menu',title:'Short link fixture',startDate:'2099-01-05',endDate:'2099-01-11',isPublished:true,meals:[],shareLink:{token:'original-long-token',isActive:true}};
+  api.get.mockImplementation(async url=>({data:{success:true,data:url==='/menus'?[menu]:{shareUrl,shortToken:code,shareLink:menu.shareLink.token}}}));
+  const clipboard=Object.getOwnPropertyDescriptor(navigator,'clipboard');
+  const writeText=jest.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText}});
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  try{
+    await act(async()=>root.render(<MenuManagement/>));
+    expect(node.querySelector('a[target="_blank"]').getAttribute('href')).toBe('/menu-select/original-long-token');
+    await act(async()=>[...node.querySelectorAll('button')].find(button=>button.textContent.trim()==='Copy link').click());
+    expect(writeText).toHaveBeenCalledWith(shareUrl);
+    expect(node.textContent).toContain('Copied!');
+    expect(node.querySelector('a[target="_blank"]').getAttribute('href')).toBe(`/m/${code}`);
+    expect(menu.shareLink.token).toBe('original-long-token');
+  }finally{
+    await act(async()=>root.unmount());node.remove();
+    if(clipboard)Object.defineProperty(navigator,'clipboard',clipboard);else delete navigator.clipboard;
+    jest.clearAllMocks();
+  }
+});
+
 test('menu meal duplication, removal and allergen choices are observed before saving', async()=>{
   const date='2099-01-05', menu={_id:'week',title:'Fixture menu',startDate:date,endDate:date,meals:[{date,mealType:'main',items:[{_id:'meal',mealName:'Roast chicken',mealType:'main',allergens:''}]}]};
   api.get.mockImplementation(async url=>({data:{success:true,data:url==='/menus'?[menu]:menu}}));

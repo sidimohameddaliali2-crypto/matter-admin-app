@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import api from '../../utils/api';
+import api from '../../utils/publicMenuApi';
 import { evaluateComponentSelection, selectionPreferenceFlags } from '../../constants/componentSelectionRules';
 import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
 import { isWithinRenewalWindow } from '../../utils/subscriptionRenewal';
@@ -289,6 +289,7 @@ const MenuSelectionLink = ({ token }) => {
   const [model, setModel] = useState(() => (preview ? buildDemoModel() : null));
   const [loadState, setLoadState] = useState(preview ? 'ready' : 'loading'); // loading | ready | error
   const [loadError, setLoadError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [rawMenu, setRawMenu] = useState(null); // real weeklyMenu (for submit)
 
   const [step, setStep] = useState('signin'); // signin | menu | done
@@ -363,8 +364,9 @@ const MenuSelectionLink = ({ token }) => {
     if (preview) return;
     let alive = true;
     setLoadState('loading');
+    const controller = new AbortController();
     api
-      .get(`/menus/share/${token}`)
+      .get(`/menus/share/${encodeURIComponent(token)}`, { signal: controller.signal, timeout: 45000 })
       .then((res) => {
         if (!alive) return;
         const menu = res.data?.data;
@@ -376,14 +378,15 @@ const MenuSelectionLink = ({ token }) => {
         if (!alive) return;
         setLoadError(
           err.response?.data?.message ||
-            'This menu selection link is invalid or has expired. Please contact support.'
+            'We could not load your menu. Please check your connection and try again.'
         );
         setLoadState('error');
       });
     return () => {
       alive = false;
+      controller.abort();
     };
-  }, [preview, token]);
+  }, [preview, token, loadAttempt]);
 
   const flash = useCallback((msg) => {
     clearTimeout(toastTimer.current);
@@ -1557,6 +1560,7 @@ const MenuSelectionLink = ({ token }) => {
           <MatterLogo height={24} style={{ marginBottom: 24 }} />
           <h2 style={{ margin: '0 0 10px' }}>Link unavailable</h2>
           <p className="text-muted" style={{ margin: 0, fontSize: 15, lineHeight: 1.6 }}>{loadError}</p>
+          <button className="btn" style={{ marginTop: 20 }} onClick={() => setLoadAttempt(value => value + 1)}>Try again</button>
         </div>
       );
     }
