@@ -41,3 +41,25 @@ test('Raw Onion requires the full phrase while Onion remains a general exclusion
   expect(exclusionMatchesAny('Onion', ['Raw Onion'])).toBe(true);
   expect(allergenMatchesAny('Onion', ['Raw Onion'])).toBe(true);
 });
+
+
+test.each([['Milk', 'Butter'], ['Gluten', 'Wheat flour'], ['Soy', 'Tofu'], ['All Nuts', 'Brazil nuts']])('%s matches its ingredient %s', (allergy, ingredient) => {
+  expect(allergenMatchesAny(allergy, [ingredient])).toBe(true);
+});
+
+test('milk category distinguishes named plant ingredients while respecting explicit declarations', () => {
+  expect(allergenMatchesAny('Milk', ['Peanut butter', 'Coconut milk'])).toBe(false);
+  expect(allergenMatchesAny('Milk', ['Coconut milk', 'Milk'])).toBe(true);
+});
+
+
+test.each(['Cream Dory', 'Butter beans'])('milk does not block the non-dairy ingredient %s', ingredient => {
+  expect(allergenMatchesAny('Milk', [ingredient])).toBe(false);
+  expect(allergenMatchesAny('Dairy', [ingredient, 'Milk'])).toBe(true);
+});
+
+test('tree nuts do not expand generic nut aliases back to peanuts', () => {
+  expect(allergenMatchesAny('Tree nuts', ['Peanut butter'])).toBe(false);
+  expect(allergenMatchesAny('Tree nuts', ['Almond flour'])).toBe(true);
+  expect(allergenMatchesAny('All Nuts', ['Peanut butter'])).toBe(true);
+});
