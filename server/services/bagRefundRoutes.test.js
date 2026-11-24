@@ -4,13 +4,16 @@ import router from '../routes/bagRefunds.js';
 import Bag from '../models/Bag.js';
 import Customer from '../models/Customer.js';
 import BagRefundCase from '../models/BagRefundCase.js';
+import Delivery from '../models/Delivery.js';
 import {refundEligibility} from './bagRefundPolicy.js';
 const staff={_id:'111111111111111111111111',role:'admin',permissions:{bags:true},permissionsConfigured:true};
 const caseId='aaaaaaaaaaaaaaaaaaaaaaaa',bagId='bbbbbbbbbbbbbbbbbbbbbbbb';
 const clone=value=>JSON.parse(JSON.stringify(value));
 const saved={find:Bag.collection.find,cases:BagRefundCase.find,one:BagRefundCase.findOne,byId:BagRefundCase.findById,create:BagRefundCase.create,update:BagRefundCase.findOneAndUpdate,customer:Customer.findOne};
+const savedDelivery={exists:Delivery.exists,distinct:Delivery.distinct};
 let bags,cases,commits;
 beforeEach(()=>{
+  Delivery.exists=async()=>false;Delivery.distinct=async()=>[];
   bags=[{_id:bagId,bagId:'BAG-0001',location:'warehouse',condition:'good',history:[{eventId:'collect-1',eventType:'collect',location:'driver',before:{assignedTo:{customer:{customerId:'C1',customerName:'Customer'}}},assignedBy:{user:staff._id},timestamp:'2026-10-22T06:00:00Z'},{eventId:'receive-1',eventType:'receive',location:'warehouse',before:{assignedTo:{customer:{customerId:'C1'}}},assignedBy:{user:staff._id},timestamp:'2026-10-22T07:00:00Z'}]}];
   cases=[];commits=0;
   Bag.collection.find=()=>({toArray:async()=>clone(bags)});
@@ -21,7 +24,7 @@ beforeEach(()=>{
   BagRefundCase.findOneAndUpdate=async(filter,update)=>{const value=cases.find(c=>c._id===String(filter._id)&&c.version===filter.version&&c.active===filter.active);if(!value)return null;Object.assign(value,clone(update.$set));for(const key of Object.keys(update.$unset||{}))delete value[key];value.version++;value.history.push(clone(update.$push.history));commits++;return clone(value);};
   Customer.findOne=()=>({select(){return this;},lean:async()=>({customerId:'C1'})});
 });
-afterEach(()=>{Bag.collection.find=saved.find;BagRefundCase.find=saved.cases;BagRefundCase.findOne=saved.one;BagRefundCase.findById=saved.byId;BagRefundCase.create=saved.create;BagRefundCase.findOneAndUpdate=saved.update;Customer.findOne=saved.customer;});
+afterEach(()=>{Delivery.exists=savedDelivery.exists;Delivery.distinct=savedDelivery.distinct;Bag.collection.find=saved.find;BagRefundCase.find=saved.cases;BagRefundCase.findOne=saved.one;BagRefundCase.findById=saved.byId;BagRefundCase.create=saved.create;BagRefundCase.findOneAndUpdate=saved.update;Customer.findOne=saved.customer;});
 const response=()=>({statusCode:200,body:null,set(){return this;},status(n){this.statusCode=n;return this;},json(value){this.body=value;return this;}});
 async function call(path,body={},user=staff,method='post'){
   const layer=router.stack.find(l=>l.route?.path===path&&l.route.methods[method]);
@@ -76,4 +79,10 @@ test('regular exchanges can be marked not due, with evidence and no payable case
 });
 test('schema enforces unique return ownership and one active customer case',()=>{
   const indexes=BagRefundCase.schema.indexes();assert.ok(indexes.some(([keys,options])=>keys['bags.returnKey']===1&&options.unique));assert.ok(indexes.some(([keys,options])=>keys.customerId===1&&options.unique&&options.partialFilterExpression.active===true));
+});
+test('collection tracker payments block a second case and approval in Bag Operations',async()=>{
+  await create();await inspect();
+  Delivery.exists=async()=>({_id:'recorded-collection'});
+  assert.equal((await act('approve')).statusCode,409);
+  assert.equal((await call('/',{requestId:'second-case-0001',customerId:'C1',note:'Final return',confirmedFinalReturn:true,confirmedDepositDue:true})).statusCode,409);
 });

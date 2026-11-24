@@ -5,6 +5,7 @@ import {effectivePermissions} from '../models/User.js';
 import Bag from '../models/Bag.js';
 import Customer from '../models/Customer.js';
 import BagRefundCase from '../models/BagRefundCase.js';
+import Delivery from '../models/Delivery.js';
 import {staffName} from '../services/bagOperationsService.js';
 import {BAG_DEPOSIT_MINOR,bagReturnSources,refundCandidates,refundEligibility,requireRefundApproval,refundFault} from '../services/bagRefundPolicy.js';
 
@@ -26,13 +27,15 @@ const view=(record,bags)=>({...record,eligibility:refundEligibility(record,bags)
 router.get('/',async(req,res)=>{
   try{
     const [bags,cases]=await Promise.all([readBags(),BagRefundCase.find({}).sort({createdAt:-1}).lean()]);
-    res.json({success:true,data:{amountMinor:BAG_DEPOSIT_MINOR,currency:'AED',canApprove:managers.has(req.user.role),candidates:refundCandidates(bags,cases),cases:cases.map(c=>view(c,bags))}});
+    const paidCustomers=await Delivery.distinct('customerId',{'collectionRefund.status':'refunded'});
+    res.json({success:true,data:{amountMinor:BAG_DEPOSIT_MINOR,currency:'AED',canApprove:managers.has(req.user.role),candidates:refundCandidates(bags,cases).filter(c=>!paidCustomers.includes(c.customerId)),cases:cases.map(c=>view(c,bags))}});
   }catch(e){fail(res,e);}
 });
 router.post('/',async(req,res)=>{
   const {requestId,customerId,note,subscriptionReference,confirmedFinalReturn,confirmedDepositDue,dismiss}=req.body||{};
   try{
     manager(req);
+    if(await Delivery.exists({customerId,'collectionRefund.status':'refunded'}))throw refundFault('A refund is already recorded in Collection refund tracking for this customer.');
     if(!eventId(requestId)||!text(customerId,160)||!text(note)||(dismiss!=null&&typeof dismiss!=='boolean')||(!dismiss&&(confirmedFinalReturn!==true||confirmedDepositDue!==true))||(subscriptionReference!=null&&typeof subscriptionReference!=='string'))throw refundFault('Confirm the final subscription return and outstanding AED 155 deposit, with review notes.',400);
     const prior=await BagRefundCase.findOne({requestId}).lean();
     if(prior){if(prior.customerId!==customerId||String(prior.createdBy)!==String(req.user._id))throw refundFault('Request ID already used.');return res.json({success:true,data:prior});}
@@ -52,6 +55,7 @@ router.post('/:id/actions',async(req,res)=>{
     if(action!=='inspect')manager(req);
     const record=await BagRefundCase.findById(req.params.id).lean();
     if(!record)throw refundFault('Refund case not found.',404);
+    if(['approve','complete'].includes(action)&&await Delivery.exists({customerId:record.customerId,'collectionRefund.status':'refunded'}))throw refundFault('A refund is already recorded in Collection refund tracking for this customer.');
     const prior=record.history.find(e=>e.eventId===requestEvent);
     if(prior){if(prior.action!==action||String(prior.actor)!==String(req.user._id))throw refundFault('Request ID used for another action.');return res.json({success:true,data:record,duplicate:true});}
     if(record.version!==version)throw refundFault('This case changed. Refresh before confirming.');
