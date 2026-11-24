@@ -1,9 +1,13 @@
 import { createHmac } from 'node:crypto';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import mongoose from 'mongoose';
 import { bulkWriteReportingDeliveries, isReportingWebhookReceipt, reportingCaptureEnabled, reportingChangesQuery, reportingEnvelope, reportingTransactionTopology, signReportingEvent, withReportingEvents } from './reportingOutbox.js';
 import { serializeHistoryPoint } from './vehicleLocationView.js';
 import { serializeDelivery } from '../routes/externalDeliveryApi.js';
+import reportingRouter from '../routes/externalReportingApi.js';
+import Delivery from '../models/Delivery.js';
+import { ReportingCounter } from '../models/ReportingOutbox.js';
 import { isReportingApiClient } from '../middleware/apiKeyAuth.js';
 
 const clock = new Date('2026-11-22T06:30:00.000Z');
@@ -55,6 +59,44 @@ test('changes bounds are canonical safe integers and permit a fixed high waterma
     { after: '8', through: '7' }, { through: '9007199254740992' }]) {
     assert.throws(() => reportingChangesQuery(query), { statusCode: 400 });
   }
+});
+
+test('the day roster returns the final snapshot rather than the Mongo commit receipt', async t => {
+  const mongoSession = {};
+  let attempt = 0;
+  t.mock.method(mongoose.connection, 'transaction', async (callback, options) => {
+    assert.equal(options.readConcern.level, 'snapshot');
+    await callback(mongoSession);
+    attempt++;
+    await callback(mongoSession);
+    return { ok: 1 };
+  });
+  t.mock.method(ReportingCounter, 'findById', () => ({
+    read() { return this; },
+    session(value) { assert.equal(value, mongoSession); return this; },
+    async lean() { return { lastVersion: 6 + attempt }; },
+  }));
+  t.mock.method(Delivery, 'find', () => ({
+    session(value) { assert.equal(value, mongoSession); return this; },
+    select() { return this; },
+    sort() { return this; },
+    limit() { return this; },
+    maxTimeMS() { return this; },
+    async lean() {
+      return [{ _id: '000000000000000000000001', status: attempt ? ' DELIVERED ' : 'assigned',
+        type: 'Delivery', updatedAt: clock, reportingVersion: 6 + attempt }];
+    },
+  }));
+  const route = reportingRouter.stack.find(layer => layer.route?.path === '/days/:day/ids').route;
+  let body;
+  await route.stack[0].handle({ params: { day: '2026-11-22' } }, {
+    json(value) { body = value; },
+    status(code) { assert.fail('Unexpected roster HTTP status ' + code); },
+  });
+  assert.deepEqual(body, { success: true, day: '2026-11-22', through: 7, data: [
+    { id: '000000000000000000000001', status: 'delivered', type: 'Delivery',
+      updatedAt: clock.toISOString(), reportingVersion: 7 },
+  ] });
 });
 
 test('only a durable inbox receipt acknowledges a webhook', async () => {
