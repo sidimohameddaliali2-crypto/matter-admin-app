@@ -39,7 +39,13 @@ const validateComponentChoices = (item, selection, staffOverride) => {
     const value = selection[field].trim();
     const canonical = [item[legacy], ...components.filter(component => types.includes(component.type)).map(component => component.name)]
       .filter(name => typeof name === 'string' && name.trim()).map(name => name.trim());
-    if (value && !canonical.includes(value)) throw failure();
+    if (item.cycleMeal?.isFixedMeal === true && ['proteinChoice', 'carbChoice', 'vegChoice'].includes(field)) {
+      const stored = typeof item[legacy] === 'string' && item[legacy].trim()
+        ? item[legacy].trim() : components.filter(component => types.includes(component.type)).map(component => component.name).filter(Boolean).join(' + ').trim();
+      // Empty choices mean no override. A fixed dish cannot select only one
+      // part of its stored combination, even if that part is a valid recipe.
+      if (value && value !== stored) throw failure();
+    } else if (value && !canonical.includes(value)) throw failure();
     checked[field] = value;
   }
   if (selection.manualProteinType !== undefined) {

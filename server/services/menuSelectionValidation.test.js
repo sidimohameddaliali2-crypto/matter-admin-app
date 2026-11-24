@@ -18,6 +18,22 @@ test('mixed carb/veg including salad conflicts classify whole-meal warnings', ()
     const i=item([c('v',type,'Peas')]);i.cycleMeal.carbCombined='Yes';assert.equal(evaluate(i,['Peas']).wholeMeal,true);
   }
 });
+
+test('fixed main meals and breakfasts keep protein, carb, veg and salad conflicts as whole-meal warnings', () => {
+  for (const mealKind of ['Main meal', 'Breakfast']) for (const componentType of ['Protein', 'Carb', 'Vegetable', 'Salad']) {
+    const dish = item([c('component', componentType, 'House component', ['Dairy'])]);
+    dish.cycleMeal = { ...dish.cycleMeal, isFixedMeal: true, mealKind };
+    const result = evaluate(dish, ['Dairy']); assert.equal(result.wholeMeal, true);
+    for (const preference of [undefined, 'kept', 'replace']) {
+      const flags = selectionPreferenceFlags(result, preference);
+      assert.equal(flags.carbVegAction, undefined); assert.equal(flags.carbVegPreference, undefined);
+      assert.deepEqual(flags.carbConflict, []); assert.deepEqual(flags.vegConflict, []);
+      assert.deepEqual(flags.keptCarbConflict, []); assert.deepEqual(flags.keptVegConflict, []);
+      assert.deepEqual(flags.preferenceConflict, ['Dairy']);
+    }
+    assert.deepEqual(evaluate(dish, [], ['Dairy']).allergies, ['Dairy']);
+  }
+});
 test('salad/Sauce2 flags are private veg changes even when repeated in legacy descriptions', () => {
   const i={...item([c('v','Salad','Slaw',['Coriander']),c('s','Sauce 2','Dressing',['Nuts'])]),intolerances:'Coriander, Nuts',ingredients:'Slaw, Dressing'};
   const r=evaluate(i,['Coriander','Nuts']);assert.equal(r.wholeMeal,false);assert.deepEqual(r.publicConflicts,[]);assert.deepEqual(r.matchedVeg,[]);assert.deepEqual(r.flags.vegConflict,['Coriander','Nuts']);assert.equal(r.flags.needsSauceChange,false);
@@ -74,6 +90,21 @@ const choicesMenu = { meals: [{ date: '2099-11-02', mealType: 'main', items: [{
   proteinSource: 'Beef roast', carbs: 'Rice + Quinoa', veg: 'Steamed vegetables', sauce: 'Lemon sauce',
   cycleMeal: { components: [c('p', 'Protein', 'Beef'), c('c1', 'Carb', 'Rice'), c('c2', 'Carb', 'Quinoa'), c('v', 'Vegetable', 'Broccoli'), c('s', 'Sauce', 'Lemon sauce')] },
 }] }] };
+
+test('fixed stored recipes reject component substitutions including partial combinations for staff and customers', () => {
+  const fixed = structuredClone(choicesMenu); fixed.meals[0].items[0].cycleMeal.isFixedMeal = true;
+  for (const staffOverride of [false, true]) {
+    for (const override of [{ proteinChoice: 'Beef' }, { carbChoice: 'Rice' }, { carbChoice: 'Quinoa' }, { vegChoice: 'Broccoli' }]) {
+      assert.throws(() => validateMenuSelections({ menu: fixed, selections: [{ ...selection, ...override }], staffOverride }), { statusCode: 409 });
+    }
+    const [saved] = validateMenuSelections({ menu: fixed, selections: [{ ...selection, proteinChoice: 'Beef roast', carbChoice: 'Rice + Quinoa', vegChoice: 'Steamed vegetables', carbVegPreference: 'replace' }], exclusions: ['Rice'], staffOverride });
+    assert.equal(saved.carbVegAction, undefined); assert.deepEqual(saved.carbConflict, []); assert.ok(saved.preferenceConflict.includes('Rice'));
+  }
+  const [metadataCorrection] = validateMenuSelections({ menu: fixed, selections: [{ ...selection, manualProteinType: 'chicken' }], staffOverride: true });
+  assert.equal(metadataCorrection.manualProteinType, 'chicken');
+  const snapshotOnly = structuredClone(fixed); delete snapshotOnly.meals[0].items[0].carbs;
+  assert.equal(validateMenuSelections({ menu: snapshotOnly, selections: [{ ...selection, carbChoice: 'Rice + Quinoa' }] })[0].carbChoice, 'Rice + Quinoa');
+});
 test('unchecked component overrides and protein-type overrides cannot bypass exclusions or allergies', () => {
   for (const field of ['proteinChoice', 'carbChoice', 'vegChoice', 'sauceChoice']) {
     for (const [value, profile] of [['Chicken', { exclusions: ['Chicken'] }], ['Nut butter', { allergies: ['Nuts'] }]]) {

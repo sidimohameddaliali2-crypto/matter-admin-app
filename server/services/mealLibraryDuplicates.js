@@ -34,6 +34,7 @@ export function mealFingerprint(meal, { ignoreQuantity = false } = {}) {
     ...without(meal, [...mealSource, 'components', 'qtyUnit', 'gramsPerPiece']), kind, protein: kind === 'Main' ? protein : '',
     notes: meal.notes || '', temperature: meal.temperature || '', tags: meal.tags || '', carbCombined: meal.carbCombined || 'Not specified', allergens: sortedTerms(meal.allergens),
     isOatmeal: meal.isOatmeal ?? meal.category === 'OATS', isSaladBase: !!meal.isSaladBase,
+    isFixedMeal: meal.isFixedMeal === true,
     components: components.map(component => JSON.stringify(signature(component))).sort(),
   });
   return JSON.stringify(ignoreQuantity ? recipe : { ...recipe, qtyUnit: meal.qtyUnit, gramsPerPiece: meal.gramsPerPiece });
