@@ -34,8 +34,9 @@ const click = async text => act(async () => {
 });
 const setInput = async (selector, value) => act(async () => {
   const input = container.querySelector(selector); expect(input).toBeTruthy();
-  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
-  input.dispatchEvent(new Event('input', {bubbles: true}));
+  const InputType = input.tagName === 'TEXTAREA' ? HTMLTextAreaElement : input.tagName === 'SELECT' ? HTMLSelectElement : HTMLInputElement;
+  Object.getOwnPropertyDescriptor(InputType.prototype, 'value').set.call(input, value);
+  input.dispatchEvent(new Event(input.tagName === 'SELECT' ? 'change' : 'input', {bubbles: true}));
 });
 const submit = async () => act(async () => container.querySelector('form').dispatchEvent(new Event('submit', {bubbles: true, cancelable: true})));
 
@@ -51,7 +52,7 @@ test('admin can save, view, reopen and clear optional partner contacts on a lega
   expect(formDetails.querySelector('summary').textContent.trim()).toBe('Details');
   await act(async () => formDetails.querySelector('summary').click());
   expect(formDetails.open).toBe(true);
-  expect(container.querySelectorAll('fieldset')).toHaveLength(4);
+  expect(container.querySelectorAll('fieldset')).toHaveLength(5);
   const values = {
     pointOfContact: {fullName: 'Service Person', email: 'service@example.com', phone: '+971 50 222 2222'},
     financeContact: {fullName: 'Finance Person', email: 'finance@example.com', phone: '+971 50 333 3333'},
@@ -79,8 +80,8 @@ test('creating a partner permits all three optional contacts to be blank', async
   const form = container.querySelector('form');
   expect(form.textContent).not.toContain('Menu Selection Partner');
   expect(form.querySelector('[name="menuSelectionEnabled"]')).toBeTruthy();
-  expect(form.querySelectorAll('fieldset input:not([type="checkbox"])')).toHaveLength(9);
-  for (const input of form.querySelectorAll('fieldset input:not([type="checkbox"])')) expect(input.required).toBe(false);
+  expect(form.querySelectorAll('fieldset input[id^="pointOfContact-"], fieldset input[id^="financeContact-"], fieldset input[id^="ownerContact-"]')).toHaveLength(9);
+  for (const input of form.querySelectorAll('fieldset input[id^="pointOfContact-"], fieldset input[id^="financeContact-"], fieldset input[id^="ownerContact-"]')) expect(input.required).toBe(false);
   await setInput('[name="businessName"]', 'New Cafe');
   await setInput('[name="contactName"]', 'Login Person');
   await setInput('[name="email"]', 'new@example.com');
@@ -149,4 +150,21 @@ test('new partner customer defaults are configurable before creation', async () 
   await setInput('#presetMacros-F', '50');
   await submit();
   expect(api.post.mock.calls[0][1]).toEqual(expect.objectContaining({menuSelectionEnabled: true, presetMacros: {C: 150, P: 90, F: 50}}));
+});
+
+test('admins configure per-partner weekends, editable time slots and optional business/delivery links', async () => {
+  await click('Edit');
+  await act(async()=>container.querySelector('form summary').click());
+  await setInput('[name="invoiceBusinessName"]','Cafe Company LLC');
+  await setInput('[name="deliveryAddress"]','Unit 2, Dubai');
+  await setInput('[name="deliveryRecipientPhone"]','+971501234567');
+  await setInput('[name="websiteUrl"]','https://example.com');
+  await setInput('[name="instagramUrl"]','https://instagram.com/cafe');
+  await setInput('[name="deliveryTimeSlots"]','Afternoon · 1–2pm\nEvening · 6–7pm');
+  await setInput('[name="defaultDeliveryTime"]','Afternoon · 1–2pm');
+  await act(async()=>container.querySelector('[name="weekendsDisabled"]').click());
+  await submit();
+  expect(api.patch.mock.calls[0][1]).toEqual(expect.objectContaining({invoiceBusinessName:'Cafe Company LLC',deliveryAddress:'Unit 2, Dubai',deliveryRecipientPhone:'+971501234567',websiteUrl:'https://example.com',instagramUrl:'https://instagram.com/cafe',weekendsDisabled:true,deliveryTimeSlots:['Afternoon · 1–2pm','Evening · 6–7pm'],defaultDeliveryTime:'Afternoon · 1–2pm'}));
+  await click('Edit');expect(container.querySelector('[name="weekendsDisabled"]').checked).toBe(true);
+  expect(container.querySelector('[name="deliveryTimeSlots"]').value).toContain('Evening · 6–7pm');
 });

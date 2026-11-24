@@ -1,3 +1,4 @@
+import jsPDF from 'jspdf';
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import PartnerPortal from './PartnerPortal';
@@ -7,7 +8,8 @@ jest.mock('react-redux', () => ({
     partnerAuth: {
       partner: {
         _id: 'partner',
-        businessName: 'Fixture'
+        businessName: 'Fixture',
+        invoiceBusinessName: 'Current Company LLC'
       }
     }
   }),
@@ -89,4 +91,18 @@ test.each([false, true])('existing-order edits preserve original duplicate lines
       ]}));
     }
   } finally {await act(async () => root.unmount()); el.remove();}
+});
+
+test.each([['Cafe Company LLC','Cafe Company LLC'],['','Fixture']])('invoice PDFs use the saved billing name or partner fallback (%s)',async(billedToName,expected)=>{
+ window.matchMedia=()=>({matches:true,addEventListener(){},removeEventListener(){}});
+ const doc={setFont:jest.fn(),setFontSize:jest.fn(),text:jest.fn(),line:jest.fn(),save:jest.fn()};jsPDF.mockImplementation(()=>doc);
+ const order={_id:'order',deliveryDate:'2099-01-05',status:'locked',lines:[],invoice:{_id:'invoice',invoiceNumber:'INV-1'}};
+ api.get.mockImplementation(async path=>({data:{success:true,data:path==='/partner/orders'?[order]:path==='/partner/invoices/invoice'?{invoiceNumber:'INV-1',billedToName,lines:[],totalRevenue:0}:[]}}));
+ const el=document.createElement('div');document.body.appendChild(el);const root=createRoot(el);
+ try {
+  await act(async()=>root.render(<PartnerPortal/>));
+  await act(async()=>[...el.querySelectorAll('button')].find(button=>button.textContent.trim()==='My Orders').click());
+  await act(async()=>[...el.querySelectorAll('button')].find(button=>button.textContent.startsWith('Download invoice')).click());
+  expect(doc.text).toHaveBeenCalledWith('Billed to: '+expected,40,120);expect(doc.save).toHaveBeenCalledWith('INV-1.pdf');
+ } finally {await act(async()=>root.unmount());el.remove();}
 });

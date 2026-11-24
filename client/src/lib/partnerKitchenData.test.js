@@ -14,3 +14,8 @@ test('Word partner sections escape all names and notes', () => {
   expect(html).toContain('Rice &amp; Chicken');
   expect(html).not.toContain('<Cafe>');
 });
+
+test('partner paper includes escaped delivery address and recipient phone',()=>{
+ const html=partnerPaperHtml({orders:[{partnerName:'Cafe',reference:'PO-1',deliveryTime:'Afternoon',deliveryAddress:'Unit <2>',deliveryRecipientPhone:'+971501234567',lines:[]}]});
+ expect(html).toContain('Unit &lt;2&gt;');expect(html).toContain('+971501234567');expect(html).not.toContain('Unit <2>');
+});

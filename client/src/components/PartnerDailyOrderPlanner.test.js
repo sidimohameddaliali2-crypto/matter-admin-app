@@ -530,3 +530,38 @@ test('Breakfast of the day follows Snack and can be selected independently from 
   await click('Add Egg Toast'); await click('Confirm day & continue'); await click('Place all daily orders');
   expect(api.post).toHaveBeenCalledWith('/partner/orders', expect.objectContaining({lines: [{menuItemId: 'breakfast', quantity: 1}]}));
 });
+
+test('weekend-disabled partners cannot select Saturday while other partners can', async () => {
+  await render({partner:{...partner,weekendsDisabled:true}});
+  expect(button('Delivery 2099-01-10').disabled).toBe(true);
+  expect(button('Delivery 2099-01-11').disabled).toBe(true);
+  await render({partner:{...partner,weekendsDisabled:false}});
+  expect(button('Delivery 2099-01-10').disabled).toBe(false);
+});
+
+test('daily ordering uses configured time slots and the preferred default', async () => {
+  await render({partner:{...partner,deliveryTimeSlots:['Afternoon','Evening'],defaultDeliveryTime:'Evening'}});
+  await begin(A);
+  const group=container.querySelector('[aria-label="Delivery window"]');
+  expect(group.textContent).not.toContain('Morning');
+  expect(button('Evening').getAttribute('aria-pressed')).toBe('true');
+  await click('Afternoon');await click('Add Meal A');await click('Confirm day & continue');await click('Place all daily orders');
+  expect(api.post).toHaveBeenCalledWith('/partner/orders',expect.objectContaining({deliveryTime:'Afternoon'}));
+});
+
+test('a saved day whose delivery time was removed can be discarded without a checkout dead end', async () => {
+  localStorage.setItem('partner-daily-plan:fixture',JSON.stringify({version:1,phase:'review',from:A,to:A,selectedDates:[A],index:0,days:[{date:A,items:{a:{id:'a',name:'Meal A',quantity:1,price:20}},window:'Retired time',reviewed:true,placed:false,skipped:false}]}));
+  await render({partner:{...partner,deliveryTimeSlots:['Afternoon']}});
+  await click('Place all daily orders');
+  expect(container.textContent).toContain('choose an available delivery time');
+  const remove=[...container.querySelectorAll('button')].find(b=>b.textContent.startsWith('Remove '));
+  expect(remove).toBeTruthy();await act(async()=>remove.click());
+  expect(container.textContent).toContain('0 order(s)');
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+test('a weekend-disabled account starts a new plan on the next permitted weekday', async () => {
+  await render({partner:{...partner,weekendsDisabled:true},earliestDate:'2099-01-10'});
+  expect(button('Delivery 2099-01-12').getAttribute('aria-pressed')).toBe('true');
+  expect(button('Delivery 2099-01-10').disabled).toBe(true);
+});

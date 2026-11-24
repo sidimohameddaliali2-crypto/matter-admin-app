@@ -5,6 +5,7 @@ const invoiceSchema = new mongoose.Schema({
   space: { type: mongoose.Schema.Types.ObjectId, ref: 'Partner', required: true },
   type: { type: String, enum: ['partner', 'matter'], required: true },
   status: { type: String, enum: ['draft', 'locked'], default: 'draft' },
+  billedToName: { type: String, trim: true, default: '' },
   invoiceNumber: { type: String, unique: true },
   totalRevenue: { type: Number, default: 0 }, // partner price total
   totalCost: { type: Number, default: 0 },    // COGS total (matter only)

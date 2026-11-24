@@ -1,3 +1,4 @@
+import {partnerProfileData} from '../services/partnerDeliverySettings.js';
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import Partner from '../models/Partner.js';
@@ -44,7 +45,8 @@ router.post('/login', async (req, res) => {
           minimumOrder: partner.minimumOrder ?? 0,
           defaultDeliveryTime: partner.defaultDeliveryTime || null,
           profilePicture: partner.profilePicture || '',
-          accountCategory: partner.accountCategory || 'partner'
+          accountCategory: partner.accountCategory || 'partner',
+          ...partnerProfileData(partner)
         }
       }
     });

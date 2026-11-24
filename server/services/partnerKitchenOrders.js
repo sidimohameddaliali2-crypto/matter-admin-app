@@ -10,7 +10,7 @@ export async function getPartnerKitchenOrders(date) {
   const start = new Date(`${date}T00:00:00Z`);
   const end = new Date(+start + 86400000);
   const orders = await SpaceOrder.find({ deliveryDate: { $gte: start, $lt: end }, status: { $in: ['submitted', 'locked'] } })
-    .populate('space', 'businessName').sort({ submittedAt: -1, createdAt: -1 });
+    .populate('space', 'businessName deliveryAddress deliveryRecipientPhone address phone').sort({ submittedAt: -1, createdAt: -1 });
   const lines = orders.length ? await OrderLine.find({ order: { $in: orders.map(o => o._id) } })
     .populate('menuItem', 'name mealType') : [];
   const byOrder = new Map();
@@ -29,7 +29,7 @@ export async function getPartnerKitchenOrders(date) {
   const rows = orders.map(order => ({
     id: String(order._id), reference: `PO-${String(order._id).slice(-4).toUpperCase()}`,
     partnerName: order.space?.businessName || 'Deleted partner — review order',
-    deliveryDate: date, deliveryTime: order.deliveryTime || '', notes: order.notes || '',
+    deliveryDate: date, deliveryTime: order.deliveryTime || '', deliveryAddress: order.deliveryAddress || order.space?.deliveryAddress || order.space?.address || '', deliveryRecipientPhone: order.deliveryRecipientPhone || order.space?.deliveryRecipientPhone || order.space?.phone || '', notes: order.notes || '',
     status: order.status, lines: byOrder.get(String(order._id)) || [],
   }));
   const counts = [...totals.values()].sort((a, b) => a.name.localeCompare(b.name));

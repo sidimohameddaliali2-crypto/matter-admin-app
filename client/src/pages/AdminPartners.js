@@ -1,3 +1,4 @@
+import {PARTNER_BUSINESS_FIELDS, partnerDeliveryWindows, partnerDefaultWindow} from '../utils/partnerProfileSettings';
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useSelector } from 'react-redux';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -82,13 +83,17 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
         menuSelectionEnabled: !!initial.menuSelectionEnabled,
         presetMacros: {C: initial.presetMacros?.C ?? 0, P: initial.presetMacros?.P ?? 0, F: initial.presetMacros?.F ?? 0},
         profilePicture: initial.profilePicture || '', accountCategory: initial.accountCategory || 'partner',
-        ...partnerContactFields(initial)
+        ...partnerContactFields(initial),
+        ...Object.fromEntries(PARTNER_BUSINESS_FIELDS.map(([key]) => [key, initial[key] || ''])),
+        weekendsDisabled: !!initial.weekendsDisabled, deliveryTimeSlots: partnerDeliveryWindows(initial).join('\n'), defaultDeliveryTime: partnerDefaultWindow(initial)
       }
     : {
         businessName: '', businessType: 'cafe', contactName: '', email: '', password: '', phone: '', address: '', minimumOrder: 0,
         profilePicture: '', accountCategory: 'partner',
         menuSelectionEnabled: false, presetMacros: {C: 0, P: 0, F: 0},
-        ...partnerContactFields()
+        ...partnerContactFields(),
+        ...Object.fromEntries(PARTNER_BUSINESS_FIELDS.map(([key]) => [key, ''])),
+        weekendsDisabled: false, deliveryTimeSlots: partnerDeliveryWindows().join('\n'), defaultDeliveryTime: partnerDefaultWindow()
       }
   );
   const [saving, setSaving] = useState(false);
@@ -119,7 +124,13 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
   const submit = async (e) => {
     e.preventDefault(); setSaving(true); setError('');
     try {
-      const {menuSelectionEnabled, presetMacros, ...payload} = form;
+      const {menuSelectionEnabled, presetMacros, deliveryTimeSlots, ...payload} = form;
+      const slots = deliveryTimeSlots.split('\n').map(slot => slot.trim()).filter(Boolean);
+      if (!isEdit || JSON.stringify(slots) !== JSON.stringify(partnerDeliveryWindows(initial))) payload.deliveryTimeSlots = slots;
+      for (const key of [...PARTNER_BUSINESS_FIELDS.map(([key]) => key), 'weekendsDisabled', 'defaultDeliveryTime']) {
+        const previous = key === 'weekendsDisabled' ? !!initial?.[key] : key === 'defaultDeliveryTime' ? partnerDefaultWindow(initial) : initial?.[key] || '';
+        if (isEdit && payload[key] === previous) delete payload[key];
+      }
       if (!isEdit || menuSelectionEnabled !== !!initial.menuSelectionEnabled) payload.menuSelectionEnabled = menuSelectionEnabled;
       if (!isEdit || ['C', 'P', 'F'].some(key => Number(presetMacros[key]) !== Number(initial.presetMacros?.[key] ?? 0))) {
         payload.presetMacros = Object.fromEntries(['C', 'P', 'F'].map(key => [key, Number(presetMacros[key]) || 0]));
@@ -226,6 +237,20 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
                   </div>
                 </fieldset>
               ))}
+              <fieldset className="col-span-2 border border-[#e3d9ca] rounded-2xl p-3.5">
+                <legend className="px-1 text-sm font-bold">Business and delivery</legend>
+                <div className="space-y-3">
+                  {PARTNER_BUSINESS_FIELDS.map(([key, label, type, placeholder]) => <label key={key} className="block text-sm">{label}
+                    <input name={key} type={type} value={form[key]} placeholder={placeholder} onChange={set} className={inputCls} />
+                  </label>)}
+                  <label className="flex gap-2 text-sm"><input name="weekendsDisabled" type="checkbox" checked={form.weekendsDisabled} onChange={e => setForm({...form, weekendsDisabled:e.target.checked})} />Disable weekend deliveries (Saturday and Sunday)</label>
+                  <label className="block text-sm">Delivery times (one per line)<textarea name="deliveryTimeSlots" value={form.deliveryTimeSlots} onChange={set} rows={3} className={inputCls + ' rounded-xl'} /></label>
+                  <label className="block text-sm">Default delivery time<select name="defaultDeliveryTime" value={form.defaultDeliveryTime} onChange={set} className={inputCls}>
+                    {!form.deliveryTimeSlots.split('\n').map(slot => slot.trim()).includes(form.defaultDeliveryTime) && <option value={form.defaultDeliveryTime}>{form.defaultDeliveryTime} (choose an available time)</option>}
+                    {form.deliveryTimeSlots.split('\n').map(slot => slot.trim()).filter(Boolean).map((slot, index) => <option key={index}>{slot}</option>)}
+                  </select></label>
+                </div>
+              </fieldset>
               <fieldset className="col-span-2 border border-[#e3d9ca] rounded-2xl p-3.5">
                 <legend className="px-1 text-sm font-bold text-[#0b1a3f]">Customer Menu Selection defaults</legend>
                 <label className="flex items-start gap-2 text-sm text-[#0b1a3f]">
@@ -600,7 +625,7 @@ const AdminPartners = () => {
     doc.setTextColor(11, 26, 63); doc.setFontSize(12); doc.setFont('helvetica', 'bold');
     doc.text(`${isMatter ? 'Statement' : 'Invoice'}: ${inv.invoiceNumber}`, m, y); y += 6;
     doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
-    doc.text(`Partner: ${inv.space?.businessName || ''}`, m, y); y += 5;
+    doc.text(`Partner: ${inv.billedToName || inv.space?.businessName || ''}`, m, y); y += 5;
     doc.text(`Delivery Date: ${fmtDate(inv.order?.deliveryDate)}`, m, y); y += 8;
     const lines = invoiceLines[inv._id] || [];
     const head = isMatter
@@ -794,6 +819,11 @@ const AdminPartners = () => {
                         <summary className="cursor-pointer flex items-center justify-between list-none text-sm font-bold text-[#0b1a3f]">
                           Details <ChevronDown className="w-4 h-4 transition-transform group-open:rotate-180" />
                         </summary>
+                        <div className="text-sm space-y-1 mt-2 break-words">
+                          {PARTNER_BUSINESS_FIELDS.map(([key, label]) => sel[key] ? <p key={key}><strong>{label}:</strong> {sel[key]}</p> : null)}
+                          <p><strong>Delivery times:</strong> {partnerDeliveryWindows(sel).join(', ')}</p>
+                          <p>{sel.weekendsDisabled ? 'Weekend deliveries disabled' : 'Sunday deliveries closed'}</p>
+                        </div>
                         <section aria-label="Partner contacts" className="mt-2 space-y-2">
                           {PARTNER_CONTACT_ROLES.map(([role, title]) => {
                             const contact = sel[role];
@@ -1081,7 +1111,8 @@ const AdminPartners = () => {
                               <span className="rounded-full px-2.5 py-1 text-[11px] font-bold" style={{ background: st.bg, color: st.color }}>{st.label}</span>
                               {order.isLocked && order.status === 'submitted' && <span className="text-[11px] text-[#c67139] flex items-center gap-1"><Lock className="w-3 h-3" />In lock window</span>}
                             </div>
-                            <div className="text-xs text-[#6b7894] mt-1">Delivery {fmtDate(order.deliveryDate)} · {order.lines?.length || 0} items</div>
+                            <div className="text-xs text-[#6b7894] mt-1">Delivery {fmtDate(order.deliveryDate)} · {order.deliveryTime || ''} · {order.lines?.length || 0} items</div>
+                            {(order.deliveryAddress || order.deliveryRecipientPhone) && <p className="text-xs text-[#6b7894] mt-1 break-words">{[order.deliveryAddress, order.deliveryRecipientPhone].filter(Boolean).join(' · ')}</p>}
                           </div>
                           <div className="flex items-center gap-2 flex-none">
                             {canInvoicePartnerOrder(order) && (
@@ -1145,7 +1176,7 @@ const AdminPartners = () => {
                       <div className="px-5 py-3.5 flex items-center gap-3">
                         <div className="flex-1 min-w-0">
                           <div className="font-bold text-[14px]">{inv.invoiceNumber}</div>
-                          <div className="text-xs text-[#6b7894] mt-0.5">{inv.space?.businessName} · Delivery {fmtDate(inv.order?.deliveryDate)}</div>
+                          <div className="text-xs text-[#6b7894] mt-0.5">{inv.billedToName || inv.space?.businessName} · Delivery {fmtDate(inv.order?.deliveryDate)}</div>
                         </div>
                         <div className="flex items-center gap-3 flex-none">
                           <div className="text-right hidden sm:block">

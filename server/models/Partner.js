@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
+import {validPartnerUrl} from '../services/partnerDeliverySettings.js';
 
 const partnerContactSchema = new mongoose.Schema({
   fullName: { type: String, trim: true, default: '' },
@@ -35,6 +36,16 @@ const partnerSchema = new mongoose.Schema({
   address: { type: String, default: '' },
   minimumOrder: { type: Number, default: 0, min: 0 },
   defaultDeliveryTime: { type: String, default: null },
+  weekendsDisabled: { type: Boolean, default: false },
+  deliveryTimeSlots: { type: [String], default: undefined, validate: {
+    validator: slots => slots == null || (slots.length > 0 && slots.length <= 20 && slots.every(slot => typeof slot === 'string' && slot.trim() === slot && slot.length > 0 && slot.length <= 80) && new Set(slots).size === slots.length),
+    message: 'Provide 1–20 unique delivery times (up to 80 characters each).'
+  } },
+  invoiceBusinessName: { type: String, trim: true, default: '', maxlength: 200 },
+  deliveryAddress: { type: String, trim: true, default: '', maxlength: 2000 },
+  deliveryRecipientPhone: { type: String, trim: true, default: '', maxlength: 80 },
+  websiteUrl: { type: String, trim: true, default: '', maxlength: 2000, validate: {validator: value => validPartnerUrl(value), message: 'Enter a valid http or https website URL.'} },
+  instagramUrl: { type: String, trim: true, default: '', maxlength: 2000, validate: {validator: value => validPartnerUrl(value, true), message: 'Enter a valid Instagram profile URL.'} },
   // Logo / profile picture URL (DigitalOcean Spaces, or local /uploads when
   // Spaces isn't configured) — uploaded via POST /api/admin/partners/upload-picture.
   profilePicture: { type: String, default: '' },
