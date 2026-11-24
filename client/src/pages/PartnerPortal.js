@@ -5,7 +5,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Loader2 } from 'lucide-react';
 import { QRCodeCanvas } from 'qrcode.react';
 import jsPDF from 'jspdf';
-import { partnerLogout } from '../store/slices/partnerAuthSlice';
+import PartnerProfileSettings from '../components/PartnerProfileSettings';
+import {partnerDeliveryWindows} from '../utils/partnerProfileSettings';
+import { partnerLogout, updatePartnerProfile } from '../store/slices/partnerAuthSlice';
 import partnerApi from '../utils/partnerApi';
 import PartnerDailyOrderPlanner from '../components/PartnerDailyOrderPlanner';
 import { FIXED_SELECTION_DEADLINES, isPastSelectionDeadline } from '../utils/selectionDeadlines';
@@ -50,7 +52,7 @@ const abbr = (s = '') => {
 };
 
 // Available delivery windows — partner picks one per order.
-const DELIVERY_WINDOWS = ['Morning · 5–6am', 'Morning · 7–10am'];
+
 
 const buildCalendar = (year, month) => {
   const first = new Date(year, month, 1);
@@ -118,6 +120,10 @@ const PartnerPortal = () => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const partner = useSelector((state) => state.partnerAuth.partner);
+  const DELIVERY_WINDOWS = partnerDeliveryWindows(partner);
+  useEffect(() => {
+    partnerApi.get('/partner/profile').then(response => {if (response.data?.data?.businessName) dispatch(updatePartnerProfile(response.data.data));}).catch(() => {});
+  }, [dispatch]);
   const minOrder = partner?.minimumOrder ?? 0;
   const isDesktop = useIsDesktop();
 
@@ -289,7 +295,7 @@ const PartnerPortal = () => {
     setSelectedDates(new Set([date]));
     setCart(next);
     setMenu([]);
-    setDeliveryWindow(DELIVERY_WINDOWS.includes(o.deliveryTime) ? o.deliveryTime : DELIVERY_WINDOWS[0]);
+    setDeliveryWindow(o.deliveryTime || DELIVERY_WINDOWS[0]);
     setOrderErr('');
     setSheet(null);
     setTab('order');
@@ -332,7 +338,7 @@ const PartnerPortal = () => {
       doc.text(`Invoice no: ${inv.invoiceNumber}`, right, 56, { align: 'right' });
       doc.text(`Order: PO-${String(o._id).slice(-4).toUpperCase()}`, right, 72, { align: 'right' });
       doc.text(`Delivery date: ${fmtDay(toISO(new Date(o.deliveryDate)))}`, right, 88, { align: 'right' });
-      doc.text(`Billed to: ${partner?.businessName || ''}`, 40, 120);
+      doc.text(`Billed to: ${inv.billedToName || partner?.invoiceBusinessName || partner?.businessName || ''}`, 40, 120);
 
       let y = 160;
       doc.setFont('helvetica', 'bold');
@@ -498,10 +504,10 @@ const PartnerPortal = () => {
       <div>
         <div className="text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5] mb-1.5">Window</div>
         <div className="flex gap-1.5">
-          {DELIVERY_WINDOWS.map((w) => {
+          {[...new Set([...(editing && !DELIVERY_WINDOWS.includes(deliveryWindow) ? [deliveryWindow] : []), ...DELIVERY_WINDOWS])].map((w) => {
             const on = deliveryWindow === w;
             return (
-              <button key={w} type="button" onClick={() => { recordActivityChange({ field: 'Delivery window', form: editing ? `Edit order ${editing.ref}` : 'Partner order draft', before: deliveryWindow, after: w }); setDeliveryWindow(w); }}
+              <button key={w} type="button" disabled={!DELIVERY_WINDOWS.includes(w)} onClick={() => { recordActivityChange({ field: 'Delivery window', form: editing ? `Edit order ${editing.ref}` : 'Partner order draft', before: deliveryWindow, after: w }); setDeliveryWindow(w); }}
                 className="flex-1 rounded-full px-3 py-2 text-[12px] font-bold border-[1.5px] transition-colors"
                 style={{
                   borderColor: on ? '#bcf679' : '#12275e',
@@ -651,6 +657,7 @@ const PartnerPortal = () => {
         <div className="text-[14.5px] font-bold mt-2">
           {fmtDay(toISO(new Date(o.deliveryDate)))}{o.deliveryTime ? ` · ${o.deliveryTime}` : ''}
         </div>
+        {(o.deliveryAddress || o.deliveryRecipientPhone) && <p className="text-[12px] text-[#a8ccf5] mt-1 break-words">{[o.deliveryAddress, o.deliveryRecipientPhone].filter(Boolean).join(' · ')}</p>}
         <div className="text-[12px] text-[#a8ccf5] mt-1 leading-relaxed">{orderItemsLine(o)}</div>
         <div className="flex items-center gap-2 mt-2.5 text-[13px] font-bold">
           <span>AED {fmtAED(orderTotal(o))}</span>
@@ -760,6 +767,7 @@ const PartnerPortal = () => {
         </div>
       </div>
 
+      <PartnerProfileSettings partner={partner} onSaved={data => dispatch(updatePartnerProfile(data))} />
       <div className="flex justify-between items-baseline mt-6 mb-2.5">
         <div className="text-[13px] tracking-[0.12em] uppercase text-[#a8ccf5]">Performance</div>
         <div className="text-[12.5px] text-[#a8ccf5]">All time</div>

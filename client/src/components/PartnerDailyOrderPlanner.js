@@ -1,9 +1,10 @@
+import {partnerDeliveryWindows, partnerDefaultWindow, partnerDateAllowed, assertPartnerPlanDelivery} from '../utils/partnerProfileSettings';
 import React, { useEffect, useRef, useState } from 'react';
 import partnerApi from '../utils/partnerApi';
 import PartnerOrderCalendar from './PartnerOrderCalendar';
 import PartnerDailyMenu from './PartnerDailyMenu';
 import { recordActivityChange, activityReference } from '../utils/activityCapture';
-import { DELIVERY_WINDOWS, deliveryDays, makePlanDay, dayTotal, dayQuantity, assertDayReady, assertAcceptedPlanDayMatches, quotePlanDay, submitPlanDay, dateClosed } from '../utils/partnerDailyPlan';
+import { deliveryDays, makePlanDay, dayTotal, dayQuantity, assertDayReady, assertAcceptedPlanDayMatches, quotePlanDay, submitPlanDay, dateClosed } from '../utils/partnerDailyPlan';
 
 const heading = { fontFamily: "'Archivo Black', sans-serif" };
 const box = 'rounded-2xl border border-[#12275e] bg-[#051747] p-4';
@@ -11,14 +12,18 @@ const primary = 'rounded-full bg-[#bcf679] text-[#051747] px-5 py-3 font-bold di
 const secondary = 'rounded-full border border-[#a8ccf5] px-4 py-2 text-sm disabled:opacity-40';
 const fmt = date => new Date(date + 'T00:00:00Z').toLocaleDateString('en-GB', { timeZone: 'UTC', weekday: 'short', day: 'numeric', month: 'short' });
 const money = value => Number(value || 0).toFixed(2);
-const initial = earliest => ({ version: 1, phase: 'dates', from: earliest, to: earliest, selectedDates: [earliest], days: [], index: 0 });
+const initial = (earliest, partner) => {
+  let first = earliest;
+  while (!partnerDateAllowed(first, partner)) first = new Date(Date.parse(first + 'T00:00:00Z') + 86400000).toISOString().slice(0, 10);
+  return {version: 1, phase: 'dates', from: first, to: first, selectedDates: [first], days: [], index: 0};
+};
 
 const validDeliveryDate = date => {
   try { return typeof date === 'string' && deliveryDays(date, date).length === 1; }
   catch { return false; }
 };
 
-function restore(key, earliest) {
+function restore(key, earliest, partner) {
   try {
     const saved = JSON.parse(localStorage.getItem(key));
     if (saved?.version === 1 && ['dates', 'days', 'review'].includes(saved.phase) && Array.isArray(saved.days)
@@ -36,12 +41,13 @@ function restore(key, earliest) {
       return { ...saved, selectedDates: [...new Set(selectedDates)].sort() };
     }
   } catch { /* A missing or corrupt local draft starts a new plan. */ }
-  return initial(earliest);
+  return initial(earliest, partner);
 }
 
 export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders = [], onPlaced, onViewOrders }) {
+  const windows = partnerDeliveryWindows(partner);
   const storageKey = 'partner-daily-plan:' + (partner?._id || partner?.id || partner?.email || 'unknown');
-  const [plan, setPlan] = useState(() => restore(storageKey, earliestDate));
+  const [plan, setPlan] = useState(() => restore(storageKey, earliestDate, partner));
   const [menuState, setMenuState] = useState({ date: '', items: [], loading: false, error: '' });
   const [error, setError] = useState('');
   const [placing, setPlacing] = useState(false);
@@ -89,10 +95,11 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
       const dates = [...new Set(plan.selectedDates)].sort();
       if (!dates.length) throw new Error('Choose at least one delivery day on the calendar.');
       deliveryDays(dates[0], dates[dates.length - 1]);
+      if (dates.some(date => !partnerDateAllowed(date, partner))) throw new Error('Remove dates without delivery from your selection.');
       const closed = dates.find(dateClosed);
       if (closed) throw new Error(fmt(closed) + ': cutoff has passed. Choose a later start date.');
       setPlan(p => {
-        const days = dates.map(date => p.days.find(d => d.date === date) || makePlanDay(date));
+        const days = dates.map(date => p.days.find(d => d.date === date) || {...makePlanDay(date), window: partnerDefaultWindow(partner)});
         const next = days.findIndex(d => !d.reviewed);
         return { ...p, days, index: Math.max(0, next), phase: next < 0 ? 'review' : 'days' };
       });
@@ -103,6 +110,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
     try {
       if (!skip && !menuReady) throw new Error('Wait for this day’s menu, or retry loading it.');
       let day = skip ? { ...active, items: {}, skipped: true } : quotePlanDay(active, currentMenu);
+      assertPartnerPlanDelivery(day, partner);
       assertDayReady(day, minimum);
       day = { ...day, reviewed: true, error: '' };
       const days = plan.days.map((d, i) => i === plan.index ? day : d);
@@ -128,7 +136,8 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
   const removeUnplacedDay = async date => {
     if (submitting.current) return;
     const target = plan.days.find(day => day.date === date);
-    if (!plan.days.some(day => day.placed) || !target || target.placed) return;
+    if (!target || target.placed) return;
+    if (!plan.days.some(day => day.placed) && partnerDateAllowed(target.date, partner) && windows.includes(target.window)) return;
     submitting.current = true;
     setCheckingRemoval(true);
     setError('');
@@ -180,6 +189,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
       if (!existingResponse.data?.success || !Array.isArray(existingResponse.data.data)) throw new Error('Could not verify existing orders. Please retry.');
       const pending = days.filter(d => !d.skipped && !d.placed);
       for (const day of pending) {
+        assertPartnerPlanDelivery(day, partner);
         assertDayReady(day, minimum);
         if (existingResponse.data.data.some(o => String(o.deliveryDate).slice(0, 10) === day.date
           && o.status !== 'cancelled' && String(o._id) !== String(day.orderId || ''))) {
@@ -230,7 +240,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
     {checkingRemoval && <p role="status">Checking saved order…</p>}
     {error && <p role="alert" className="rounded-xl border border-[#ff8a66] p-3 text-sm text-[#ff8a66]">{error}</p>}
     {plan.phase === 'dates' && <div className={box + ' space-y-4'}>
-      <PartnerOrderCalendar earliestDate={earliestDate} orders={orders}
+      <PartnerOrderCalendar earliestDate={earliestDate} orders={orders} partner={partner}
         selectedDates={plan.selectedDates}
         onChange={selectedDates => { setError(''); setPlan(p => ({ ...p, selectedDates })); }} />
       <button type="button" className={primary} onClick={start}>Start daily orders</button>
@@ -242,8 +252,8 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
         {existing && <p className="text-sm text-[#bcf679]">An order already exists for this day. Keep it below, or edit it in My Orders.</p>}
         <div role="group" aria-label="Delivery window" className="max-w-lg">
           <p className="text-[9.5px] font-bold tracking-[0.12em] uppercase text-[#a8ccf5] mb-1.5">Delivery window</p>
-          <div className="flex gap-1.5">{DELIVERY_WINDOWS.map(window => <button key={window} type="button" aria-pressed={active.window === window}
-            disabled={!!existing || active.placed} onClick={() => updateDay({ window })}
+          <div className="flex gap-1.5">{[...new Set([...(!windows.includes(active.window) ? [active.window] : []), ...windows])].map(window => <button key={window} type="button" aria-pressed={active.window === window}
+            disabled={!!existing || active.placed || !windows.includes(window)} onClick={() => updateDay({ window })}
             className="flex-1 rounded-full px-3 py-2 text-[12px] font-bold border-[1.5px] transition-colors disabled:opacity-40"
             style={{borderColor: active.window === window ? '#bcf679' : '#12275e', background: active.window === window ? '#bcf679' : '#0a1230', color: active.window === window ? '#051747' : '#ede5de'}}>{window}</button>)}</div>
         </div>
@@ -263,7 +273,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
         {previousIndex >= 0 && <button type="button" className={secondary} onClick={() => editDay(previousIndex)}>Previous day</button>}
         {!existing && <button type="button" className={primary} disabled={!menuReady || active.placed} onClick={() => confirmDay(false)}>Confirm day &amp; continue</button>}
         {existing && <button type="button" className={secondary} disabled={active.placed} onClick={() => confirmDay(true)}>Keep existing order &amp; continue</button>}
-        {!active.placed && plan.days.some(day => day.placed) && <button type="button" className={secondary} disabled={placing} onClick={() => removeUnplacedDay(active.date)}>Remove this unplaced day</button>}
+        {!active.placed && (plan.days.some(day => day.placed) || !partnerDateAllowed(active.date, partner) || !windows.includes(active.window)) && <button type="button" className={secondary} disabled={placing} onClick={() => removeUnplacedDay(active.date)}>Remove this unplaced day</button>}
       </div>
       <p className="text-xs text-[#a8ccf5]">Nothing is submitted to the kitchen until final checkout.</p>
     </div>}
@@ -272,7 +282,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
       {plan.days.map((day, index) => <article key={day.date} className={box}>
         <div className="flex flex-wrap items-center justify-between gap-2"><h4 className="font-bold">{fmt(day.date)} — {day.placed ? 'Placed' : day.skipped ? 'No new order' : 'AED ' + money(dayTotal(day))}</h4>
           {!day.placed && !placing && <button type="button" className={secondary} onClick={() => editDay(index)}>Edit {fmt(day.date)}</button>}
-          {!day.placed && plan.days.some(d => d.placed) && <button type="button" className={secondary} disabled={placing} onClick={() => removeUnplacedDay(day.date)}>Remove {fmt(day.date)}</button>}</div>
+          {!day.placed && (plan.days.some(d => d.placed) || !partnerDateAllowed(day.date, partner) || !windows.includes(day.window)) && <button type="button" className={secondary} disabled={placing} onClick={() => removeUnplacedDay(day.date)}>Remove {fmt(day.date)}</button>}</div>
         {!day.skipped && <><p className="mt-1 text-sm text-[#a8ccf5]">{day.window}</p><ul className="mt-2 space-y-1 text-sm">{Object.values(day.items).map(item => <li key={item.id}>{item.quantity} × {item.name} · AED {money(item.quantity * item.price)}</li>)}</ul></>}
         {day.error && <p role="alert" className="mt-2 text-sm text-[#ff8a66]">{day.error}</p>}
       </article>)}
@@ -283,7 +293,7 @@ export default function PartnerDailyOrderPlanner({ partner, earliestDate, orders
       <h3 style={heading} className="text-xl font-bold">Your daily orders are placed</h3>
       <p>{ordered.length} order(s) · AED {money(total)} total</p>
       <ul className="space-y-1 text-sm">{ordered.map(d => <li key={d.date}>{fmt(d.date)} · {d.window} · AED {money(dayTotal(d))}</li>)}</ul>
-      <div className="flex flex-wrap gap-3"><button type="button" className={primary} onClick={onViewOrders}>View my orders</button><button type="button" className={secondary} onClick={() => { setPlan(initial(earliestDate)); setError(''); }}>Start another plan</button></div>
+      <div className="flex flex-wrap gap-3"><button type="button" className={primary} onClick={onViewOrders}>View my orders</button><button type="button" className={secondary} onClick={() => { setPlan(initial(earliestDate, partner)); setError(''); }}>Start another plan</button></div>
     </div>}
     </fieldset>
   </section>;

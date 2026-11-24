@@ -1,10 +1,11 @@
+import {partnerDateAllowed} from '../utils/partnerProfileSettings';
 import React, { useState } from 'react';
 import { dateClosed } from '../utils/partnerDailyPlan';
 import { recordActivityChange } from '../utils/activityCapture';
 
 // Keep the original partner calendar's month navigation, lime selections and
 // existing-order dots. Use UTC dates so travelling never shifts a delivery day.
-export default function PartnerOrderCalendar({ earliestDate, selectedDates, orders, onChange }) {
+export default function PartnerOrderCalendar({ earliestDate, selectedDates, orders, onChange, partner }) {
   const [month, setMonth] = useState(() => (selectedDates[0] || earliestDate).slice(0, 7));
   const first = new Date(month + '-01T00:00:00Z');
   const count = new Date(Date.UTC(first.getUTCFullYear(), first.getUTCMonth() + 1, 0)).getUTCDate();
@@ -36,7 +37,7 @@ export default function PartnerOrderCalendar({ earliestDate, selectedDates, orde
         const selected = selectedDates.includes(date);
         // A saved selection may expire while the partner is away. Keep it
         // removable; once removed it cannot be selected again after cutoff.
-        const disabled = !selected && (new Date(date + 'T00:00:00Z').getUTCDay() === 0 || date < earliestDate || dateClosed(date));
+        const disabled = !selected && (!partnerDateAllowed(date, partner) || date < earliestDate || dateClosed(date));
         const hasOrder = orders.some(order => String(order.deliveryDate).slice(0, 10) === date && order.status !== 'cancelled');
         return <button key={date} type="button" aria-label={'Delivery ' + date} aria-pressed={selected} disabled={disabled}
           onClick={event => { const next = selected ? selectedDates.filter(d => d !== date) : [...selectedDates, date].sort(); recordActivityChange({ field: 'Delivery dates', form: 'Daily order plan', before: selectedDates, after: next, element: event.currentTarget }); onChange(next); }}

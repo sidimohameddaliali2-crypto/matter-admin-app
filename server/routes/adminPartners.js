@@ -1,3 +1,4 @@
+import {PARTNER_BUSINESS_FIELDS, partnerInvoiceName} from '../services/partnerDeliverySettings.js';
 import { partnerMenuView } from '../services/partnerMenuCatalog.js';
 import express from 'express';
 import mongoose from 'mongoose';
@@ -261,15 +262,17 @@ router.patch('/orders/:orderId/lock', admin, async (req, res) => {
     });
 
     // Partner invoice (no cost info)
+    const billedToName = partnerInvoiceName(order.space);
     let partnerInv = await Invoice.findOne({ order: order._id, type: 'partner' });
     if (partnerInv) {
       await InvoiceLine.deleteMany({ invoice: partnerInv._id });
+      partnerInv.billedToName ||= billedToName;
       partnerInv.totalRevenue = totalRevenue;
       partnerInv.status = 'locked';
       partnerInv.lockedAt = new Date();
       await partnerInv.save();
     } else {
-      partnerInv = await Invoice.create({ order: order._id, space: order.space._id, type: 'partner', totalRevenue, status: 'locked', lockedAt: new Date() });
+      partnerInv = await Invoice.create({ order: order._id, space: order.space._id, type: 'partner', billedToName, totalRevenue, status: 'locked', lockedAt: new Date() });
     }
     await InvoiceLine.insertMany(snapshots.map(s => ({ invoice: partnerInv._id, menuItem: s.menuItem, itemName: s.itemName, quantity: s.quantity, unitPrice: s.unitPrice, unitCost: 0, lineRevenue: s.lineRevenue, lineCost: 0, lineMargin: 0 })));
 
@@ -277,6 +280,7 @@ router.patch('/orders/:orderId/lock', admin, async (req, res) => {
     let matterInv = await Invoice.findOne({ order: order._id, type: 'matter' });
     if (matterInv) {
       await InvoiceLine.deleteMany({ invoice: matterInv._id });
+      matterInv.billedToName ||= billedToName;
       matterInv.totalRevenue = totalRevenue;
       matterInv.totalCost = totalCost;
       matterInv.totalMargin = totalRevenue - totalCost;
@@ -284,7 +288,7 @@ router.patch('/orders/:orderId/lock', admin, async (req, res) => {
       matterInv.lockedAt = new Date();
       await matterInv.save();
     } else {
-      matterInv = await Invoice.create({ order: order._id, space: order.space._id, type: 'matter', totalRevenue, totalCost, totalMargin: totalRevenue - totalCost, status: 'locked', lockedAt: new Date() });
+      matterInv = await Invoice.create({ order: order._id, space: order.space._id, type: 'matter', billedToName, totalRevenue, totalCost, totalMargin: totalRevenue - totalCost, status: 'locked', lockedAt: new Date() });
     }
     await InvoiceLine.insertMany(snapshots.map(s => ({ invoice: matterInv._id, ...s })));
 
@@ -312,7 +316,7 @@ router.get('/invoices/all', async (req, res) => {
     if (type) q.type = type;
     if (spaceId) q.space = spaceId;
     const invoices = await Invoice.find(q)
-      .populate('space', 'businessName businessType')
+      .populate('space', 'businessName businessType invoiceBusinessName')
       .populate('order', 'deliveryDate')
       .sort({ createdAt: -1 });
     res.json({ success: true, data: invoices });
@@ -324,7 +328,7 @@ router.get('/invoices/all', async (req, res) => {
 router.get('/invoices/:id', async (req, res) => {
   try {
     const invoice = await Invoice.findById(req.params.id)
-      .populate('space', 'businessName businessType email contactName address phone')
+      .populate('space', 'businessName businessType email contactName address phone invoiceBusinessName deliveryAddress deliveryRecipientPhone')
       .populate('order', 'deliveryDate notes');
     if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
     const lines = await InvoiceLine.find({ invoice: invoice._id });
@@ -598,7 +602,9 @@ router.post('/', admin, async (req, res) => {
       profilePicture: profilePicture || '',
       pointOfContact: req.body.pointOfContact,
       financeContact: req.body.financeContact,
-      ownerContact: req.body.ownerContact
+      ownerContact: req.body.ownerContact,
+      weekendsDisabled: req.body.weekendsDisabled, deliveryTimeSlots: req.body.deliveryTimeSlots, defaultDeliveryTime: req.body.defaultDeliveryTime,
+      ...Object.fromEntries(PARTNER_BUSINESS_FIELDS.filter(key => req.body[key] !== undefined).map(key => [key, req.body[key]]))
     });
     partner.password = undefined;
     // New partner should already have every master-menu item, not just
@@ -625,7 +631,7 @@ router.get('/:id', async (req, res) => {
 
 router.patch('/:id', admin, async (req, res) => {
   try {
-    const allowed = ['businessName', 'businessType', 'contactName', 'phone', 'address', 'isActive', 'minimumOrder', 'menuSelectionEnabled', 'presetMacros', 'profilePicture', 'accountCategory'];
+    const allowed = ['businessName', 'businessType', 'contactName', 'phone', 'address', 'isActive', 'minimumOrder', 'menuSelectionEnabled', 'presetMacros', 'profilePicture', 'accountCategory', 'weekendsDisabled', 'deliveryTimeSlots', 'defaultDeliveryTime', ...PARTNER_BUSINESS_FIELDS];
     const updates = {};
     allowed.forEach(k => { if (req.body[k] !== undefined) updates[k] = req.body[k]; });
     for (const role of ['pointOfContact', 'financeContact', 'ownerContact']) {

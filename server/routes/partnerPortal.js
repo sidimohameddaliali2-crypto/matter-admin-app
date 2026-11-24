@@ -1,3 +1,4 @@
+import {PARTNER_BUSINESS_FIELDS, assertPartnerDelivery, partnerDeliveryWindows, partnerProfileData} from '../services/partnerDeliverySettings.js';
 import { partnerMenuView, uniquePartnerMenuItems } from '../services/partnerMenuCatalog.js';
 import express from 'express';
 import crypto from 'crypto';
@@ -75,23 +76,24 @@ const decorateOrders = async (orders, spaceId) => {
 
 // ─── Profile ──────────────────────────────────────────────────────────────────
 
+router.get('/profile', (req, res) => res.json({success: true, data: partnerProfileData(req.partner)}));
+
 // PATCH /api/partner/profile — update partner's own profile fields
 router.patch('/profile', async (req, res) => {
   try {
-    const allowed = ['defaultDeliveryTime'];
+    const allowed = ['defaultDeliveryTime', ...PARTNER_BUSINESS_FIELDS];
     const updates = {};
     for (const key of allowed) {
       if (req.body[key] !== undefined) updates[key] = req.body[key];
     }
-    const partner = await Partner.findByIdAndUpdate(req.partner._id, updates, { new: true });
+    if (updates.defaultDeliveryTime != null && !partnerDeliveryWindows(req.partner).includes(updates.defaultDeliveryTime)) return res.status(400).json({success:false,message:'Choose one of your available delivery times.'});
+    const partner = await Partner.findByIdAndUpdate(req.partner._id, updates, { new: true, runValidators: true });
     res.json({
       success: true,
-      data: {
-        defaultDeliveryTime: partner.defaultDeliveryTime
-      }
+      data: partnerProfileData(partner)
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(400).json({ success: false, message: err.message });
   }
 });
 
@@ -234,9 +236,7 @@ router.post('/orders', async (req, res) => {
     const changes = normalizePartnerLines(lines);
 
     const spaceId = req.partner._id;
-    if (deliveryDay.getUTCDay() === 0) {
-      return res.status(400).json({ success: false, message: 'There is no delivery on Sunday — pick another date.' });
-    }
+    assertPartnerDelivery(req.partner, deliveryDay, deliveryTime);
     if (isInLockWindow(deliveryDay)) {
       return res.status(400).json({ success: false, message: 'This delivery date is past its ordering deadline and can no longer be ordered for.' });
     }
@@ -246,6 +246,10 @@ router.post('/orders', async (req, res) => {
     if (order && !['draft', 'submitted'].includes(order.status)) {
       return res.status(400).json({ success: false, message: 'Order is locked and cannot be edited.' });
     }
+    const slots = partnerDeliveryWindows(req.partner);
+    const defaultTime = slots.includes(req.partner.defaultDeliveryTime) ? req.partner.defaultDeliveryTime : slots[0];
+    const nextTime = deliveryTime ?? order?.deliveryTime ?? defaultTime;
+    assertPartnerDelivery(req.partner, deliveryDay, nextTime);
     const existingLines = order ? await OrderLine.find({ order: order._id }) : [];
     const proposed = new Map(existingLines.map(l => [String(l.menuItem), l.quantity]));
     changes.forEach(l => l.quantity > 0 ? proposed.set(l.menuItemId, l.quantity) : proposed.delete(l.menuItemId));
@@ -259,13 +263,15 @@ router.post('/orders', async (req, res) => {
       order = await SpaceOrder.create({
         space: spaceId, deliveryDate: deliveryDay, createdBy: spaceId,
         notes: notes || '',
-        deliveryTime: deliveryTime || null,
+        deliveryTime: nextTime,
+        deliveryAddress: req.partner.deliveryAddress || req.partner.address || '',
+        deliveryRecipientPhone: req.partner.deliveryRecipientPhone || req.partner.phone || '',
         orderType: orderType || 'single',
         weekGroupId: weekGroupId || null
       });
     } else {
       if (notes !== undefined) order.notes = notes;
-      if (deliveryTime !== undefined) order.deliveryTime = deliveryTime;
+      if (deliveryTime !== undefined) order.deliveryTime = nextTime;
       await order.save();
     }
 
@@ -303,6 +309,11 @@ router.post('/orders/:id/submit', async (req, res) => {
     if (order.status !== 'draft') return res.status(400).json({ success: false, message: 'Only draft orders can be submitted.' });
     if (isInLockWindow(order.deliveryDate)) return res.status(400).json({ success: false, message: 'Delivery date is past its ordering deadline.' });
 
+    const slots = partnerDeliveryWindows(req.partner);
+    order.deliveryTime ||= slots.includes(req.partner.defaultDeliveryTime) ? req.partner.defaultDeliveryTime : slots[0];
+    assertPartnerDelivery(req.partner, order.deliveryDate, order.deliveryTime);
+    order.deliveryAddress = req.partner.deliveryAddress || req.partner.address || '';
+    order.deliveryRecipientPhone = req.partner.deliveryRecipientPhone || req.partner.phone || '';
     const lines = await OrderLine.find({ order: order._id });
     const { pricedLines, totalAmount } = await validatePartnerOrder({
       spaceId: req.partner._id, deliveryDate: order.deliveryDate,

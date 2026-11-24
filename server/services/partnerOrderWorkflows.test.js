@@ -248,6 +248,8 @@ test('deadline locking still prevents cancellation when reading orders no longer
 test('legacy auto-locked orders can be invoiced, and a failed snapshot write can be retried', async t => {
   const f = fixtures(t, 'locked');
   Line.find.mock.mockImplementation(() => query([doc({ menuItem: f.item, quantity: 5 })]));
+  f.order.space.businessName = 'Partner Cafe';
+  f.order.space.invoiceBusinessName = 'Cafe Company LLC';
   const invoices = [];
   const snapshotIds = new Set();
   Invoice.find.mock.mockImplementation(() => query(invoices));
@@ -266,9 +268,12 @@ test('legacy auto-locked orders can be invoiced, and a failed snapshot write can
   });
   const first = await call(adminRouter, 'patch', '/orders/:orderId/lock');
   assert.equal(first.code, 500);
+  assert.ok(invoices.every(invoice => invoice.billedToName === 'Cafe Company LLC'));
+  f.order.space.invoiceBusinessName = 'Renamed Company';
   const retry = await call(adminRouter, 'patch', '/orders/:orderId/lock');
   assert.equal(retry.code, 200);
   assert.equal(invoices.length, 2);
+  assert.ok(invoices.every(invoice => invoice.billedToName === 'Cafe Company LLC'));
   assert.deepEqual([...snapshotIds].sort(), ['matter', 'partner']);
   assert.equal(f.order.status, 'locked');
   assert.equal((await call(adminRouter, 'patch', '/orders/:orderId/lock')).code, 400);
@@ -425,4 +430,11 @@ test('master-menu breakfast selling prices can be edited without losing their se
   const res = await call(adminRouter, 'patch', '/menu/:itemId', {params: {itemId: ITEM}, body: {sellingPrice: 18}});
   assert.equal(res.code, 200); assert.equal(current.sellingPrice, 18);
   assert.equal(current.availableDates[0].toISOString().slice(0, 10), DAY);
+});
+
+test('submitted orders retain delivery address and recipient snapshots', async t => {
+  const f=fixtures(t,'draft');
+  const response=await call(partnerRouter,'post','/orders/:id/submit',{partner:{_id:SPACE,minimumOrder:0,deliveryAddress:'Unit 2, Dubai',deliveryRecipientPhone:'+971501234567'}});
+  assert.equal(response.code,200);
+  assert.equal(f.order.deliveryAddress,'Unit 2, Dubai');assert.equal(f.order.deliveryRecipientPhone,'+971501234567');
 });

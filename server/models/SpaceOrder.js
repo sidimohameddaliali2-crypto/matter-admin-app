@@ -13,6 +13,8 @@ const spaceOrderSchema = new mongoose.Schema({
   acknowledgedAt: Date,
   lockedAt: Date,
   notes: { type: String, default: '' },
+  deliveryAddress: { type: String, default: '' },
+  deliveryRecipientPhone: { type: String, default: '' },
   deliveryTime: { type: String, default: null },
   orderType: { type: String, enum: ['single', 'weekly'], default: 'single' },
   weekGroupId: { type: String, default: null }
