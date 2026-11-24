@@ -220,8 +220,9 @@ export async function syncCustomerTrackerVisits({ now = new Date(), io } = {}) {
 async function saveVisit(delivery, visit, io) {
   // If proof, pin, or assignment changed during the external calls, retry next
   // cycle instead of attaching a verdict based on an obsolete snapshot.
-  const filter = { _id: delivery._id, updatedAt: delivery.updatedAt };
   const previous = delivery.trackerVisit;
+  const filter = { _id: delivery._id, updatedAt: delivery.updatedAt,
+    'trackerVisit.checkedAt': previous?.checkedAt ?? null };
   // Keep the pre-migration GPS result once, rather than growing history every poll.
   // This is server-owned evidence and is saved atomically with the replacement.
   const updates = { trackerVisit: visit };
@@ -229,7 +230,9 @@ async function saveVisit(delivery, visit, io) {
     && !delivery.trackerVisitGpsBaseline?.evidence) {
     updates.trackerVisitGpsBaseline = { recordedAt: visit.checkedAt, evidence: previous };
   }
-  const result = await Delivery.updateOne(filter, { $set: updates });
+  // Tracker refreshes use their own clock. Keep the delivery clock for changes
+  // to its business fields and proof, which the reporting source reads.
+  const result = await Delivery.updateOne(filter, { $set: updates }, { timestamps: false });
   // A tracker refresh must not trigger the normal "delivery completed" toasts.
   if (result.modifiedCount && io) io.emit('delivery:trackerVisit', { _id: delivery._id, trackerVisit: visit });
 }

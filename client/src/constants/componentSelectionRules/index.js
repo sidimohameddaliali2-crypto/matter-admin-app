@@ -38,12 +38,12 @@ export function evaluateComponentSelection(item, exclusions = [], allergies = []
   add('general', item?.intolerances, item?.ingredients);
   const ex = terms(exclusions);
   const matched = Object.fromEntries(Object.entries(groups).map(([group, values]) => [group, matching(values, ex)]));
-  const allTerms = [...Object.values(groups).flat(), ...terms(item?.allergens)];
+  const allTerms = [...Object.values(groups).flat(), ...terms(item?.allergens), ...terms(item?.mealName), ...terms(item?.name)];
   const allergyMatches = terms(allergies).filter(allergy => allergenMatchesAny(allergy, allTerms));
   const combined = snapshot.carbCombined === true || String(snapshot.carbCombined || '').trim().toLowerCase() === 'yes';
   const classifiedTerms = Object.entries(groups).filter(([group]) => group !== 'general').flatMap(([, values]) => values);
   const generalOnly = ex.filter(exclusion => groups.general.some(value => exclusionMatchesTerm(exclusion, value)) && !classifiedTerms.some(value => exclusionMatchesTerm(exclusion, value)));
-  const wholeMeal = !!(matched.portion.length || generalOnly.length || combined && (matched.carb.length || matched.veg.length || matched.salad.length));
+  const wholeMeal = !!(matched.portion.length || generalOnly.length || (combined || snapshot.isFixedMeal === true) && (matched.carb.length || matched.veg.length || matched.salad.length));
   const vegConflict = unique([...matched.veg, ...matched.salad]);
   const carbVegConflict = unique([...matched.carb, ...vegConflict]);
   const publicTerms = [...groups.portion, ...groups.carb, ...groups.veg];

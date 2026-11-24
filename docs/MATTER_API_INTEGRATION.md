@@ -24,6 +24,12 @@ The Upcoming plan filter and badge use `upcoming_plan.starting_date` against tod
 
 Scope check: this changes the existing logistics Customer Management page (`client/src/pages/Customers.js`) and MongoDB customer labels. It does not change the separate Customer Service components, Supabase directory, conversation identity, actions or reports; the shared Customer Service review pack remains applicable to that unchanged journey. Local acceptance covers persistence, pagination failures, identity/renewal ambiguity, date rules, filters, profiles and saved-data recovery. Live provider reads verified these list fields; deployment and real staff acceptance remain separate.
 
+## Upcoming profile section (24 November 2026)
+
+Website Customer Management includes a keyboard-accessible, collapsible **Upcoming** section below the customer header. The upcoming plan name and `starting_date` remain visible when collapsed. Expanding shows the nested subscription's plan/status, dates, meal and delivery counts, breakfast/snacks, calories/macros, red allergen badges, exclusions, delivery window, every supplied address and coordinate, delivery schedule/pauses, prices/discount/VAT and payments. Matter Core portions are labelled as food weights.
+
+Every value comes from the selected current subscription response's `upcoming_plan`. The view does not fetch the scheduled ID directly, write data, or fill missing upcoming fields from current-plan/internal records. Empty and unavailable sections are explicit. Changing customers resets the disclosure. Current plan controls remain separate; the upcoming details have no pause or invoice actions.
+
 This app reads live subscription/nutrition/delivery data from Matter's own
 backend (the website people subscribe through) and, in one place, writes to
 it (pausing a subscription's deliveries). It's the source of truth for a
@@ -326,8 +332,15 @@ adjustments supply the food calculations. Ordinary meal frequency includes
 breakfast; Core main meals and extra breakfast use the existing separate rules.
 Core protein/carbohydrate targets are food weights; its missing fat target is
 normal, and final meal macros come from the approved weight lookup. Required
-missing fields cannot be replaced with Internal defaults. Allergies absent from
-Matter are shown as unavailable. Legacy partner assignment based on Internal
+missing fields cannot be replaced with Internal defaults. Subscription detail's
+`allergens: [{id, name}]` is the only customer-menu allergy source; `exclusions`
+remains a separate preference list. An explicit empty allergen array means none
+recorded. Missing or malformed allergen data is unavailable and blocks customer
+meal selection/submission until Matter can be verified. Both the browser and
+server check stored recipe/component metadata, including private ingredients;
+customer-submitted flags cannot waive an allergen block. Internal Customer
+allergy profiles are never queried or merged in this flow.
+Legacy partner assignment based on Internal
 Customer membership is disabled; these members need verified Matter accounts.
 
 `GET /api/matter/subscriptions/kitchen-inputs` requires staff authentication and

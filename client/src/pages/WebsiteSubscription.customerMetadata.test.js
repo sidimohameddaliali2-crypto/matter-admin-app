@@ -62,6 +62,11 @@ test('the actual Customer Management page has a type dropdown below search and c
   try {
     await act(async () => root.render(<WebsiteSubscription />));
     const list = node.querySelector('[aria-label="Customer list"]');
+    const upcomingSection = node.querySelector('details[aria-label="Upcoming plan"]');
+    expect(upcomingSection.open).toBe(false);
+    await act(async () => upcomingSection.querySelector('summary').click());
+    expect(upcomingSection.open).toBe(true);
+    expect(api.get).not.toHaveBeenCalledWith('/matter/subscriptions/102');
     expect(node.querySelector('h1').textContent).toBe('Customer Management');
     const type = list.querySelector('select[aria-label="Customer type"]');
     expect([...type.options].map(option => option.textContent)).toEqual(['All customer types', 'New', 'Returning', 'Not provided']);

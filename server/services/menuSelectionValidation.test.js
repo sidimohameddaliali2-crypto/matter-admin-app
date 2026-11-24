@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateComponentSelection as evaluate, selectionPreferenceFlags } from '../../client/src/constants/componentSelectionRules/index.js';
-import { validateMenuSelections } from './menuSelectionValidation.js';
+import Menu from '../models/WeeklyMenu.js';
+import { buildNutritionResult } from './matterApiService.js';
+import { validatedMenuSelections, validateMenuSelections } from './menuSelectionValidation.js';
 const c = (id, type, name, exclusions = [], extra = {}) => ({ id, type, name, exclusions, ...extra });
 const item = components => ({ _id: 'dish', mealName: 'Fixture', mealType: 'main', itemDate: '2099-11-02', cycleMeal: { components, carbCombined: 'No' } });
 
@@ -14,6 +16,22 @@ test('portion conflicts classify whole-meal warnings while separate carb/veg ret
 test('mixed carb/veg including salad conflicts classify whole-meal warnings', () => {
   for(const type of ['Vegetable','Salad']) {
     const i=item([c('v',type,'Peas')]);i.cycleMeal.carbCombined='Yes';assert.equal(evaluate(i,['Peas']).wholeMeal,true);
+  }
+});
+
+test('fixed main meals and breakfasts keep protein, carb, veg and salad conflicts as whole-meal warnings', () => {
+  for (const mealKind of ['Main meal', 'Breakfast']) for (const componentType of ['Protein', 'Carb', 'Vegetable', 'Salad']) {
+    const dish = item([c('component', componentType, 'House component', ['Dairy'])]);
+    dish.cycleMeal = { ...dish.cycleMeal, isFixedMeal: true, mealKind };
+    const result = evaluate(dish, ['Dairy']); assert.equal(result.wholeMeal, true);
+    for (const preference of [undefined, 'kept', 'replace']) {
+      const flags = selectionPreferenceFlags(result, preference);
+      assert.equal(flags.carbVegAction, undefined); assert.equal(flags.carbVegPreference, undefined);
+      assert.deepEqual(flags.carbConflict, []); assert.deepEqual(flags.vegConflict, []);
+      assert.deepEqual(flags.keptCarbConflict, []); assert.deepEqual(flags.keptVegConflict, []);
+      assert.deepEqual(flags.preferenceConflict, ['Dairy']);
+    }
+    assert.deepEqual(evaluate(dish, [], ['Dairy']).allergies, ['Dairy']);
   }
 });
 test('salad/Sauce2 flags are private veg changes even when repeated in legacy descriptions', () => {
@@ -72,6 +90,21 @@ const choicesMenu = { meals: [{ date: '2099-11-02', mealType: 'main', items: [{
   proteinSource: 'Beef roast', carbs: 'Rice + Quinoa', veg: 'Steamed vegetables', sauce: 'Lemon sauce',
   cycleMeal: { components: [c('p', 'Protein', 'Beef'), c('c1', 'Carb', 'Rice'), c('c2', 'Carb', 'Quinoa'), c('v', 'Vegetable', 'Broccoli'), c('s', 'Sauce', 'Lemon sauce')] },
 }] }] };
+
+test('fixed stored recipes reject component substitutions including partial combinations for staff and customers', () => {
+  const fixed = structuredClone(choicesMenu); fixed.meals[0].items[0].cycleMeal.isFixedMeal = true;
+  for (const staffOverride of [false, true]) {
+    for (const override of [{ proteinChoice: 'Beef' }, { carbChoice: 'Rice' }, { carbChoice: 'Quinoa' }, { vegChoice: 'Broccoli' }]) {
+      assert.throws(() => validateMenuSelections({ menu: fixed, selections: [{ ...selection, ...override }], staffOverride }), { statusCode: 409 });
+    }
+    const [saved] = validateMenuSelections({ menu: fixed, selections: [{ ...selection, proteinChoice: 'Beef roast', carbChoice: 'Rice + Quinoa', vegChoice: 'Steamed vegetables', carbVegPreference: 'replace' }], exclusions: ['Rice'], staffOverride });
+    assert.equal(saved.carbVegAction, undefined); assert.deepEqual(saved.carbConflict, []); assert.ok(saved.preferenceConflict.includes('Rice'));
+  }
+  const [metadataCorrection] = validateMenuSelections({ menu: fixed, selections: [{ ...selection, manualProteinType: 'chicken' }], staffOverride: true });
+  assert.equal(metadataCorrection.manualProteinType, 'chicken');
+  const snapshotOnly = structuredClone(fixed); delete snapshotOnly.meals[0].items[0].carbs;
+  assert.equal(validateMenuSelections({ menu: snapshotOnly, selections: [{ ...selection, carbChoice: 'Rice + Quinoa' }] })[0].carbChoice, 'Rice + Quinoa');
+});
 test('unchecked component overrides and protein-type overrides cannot bypass exclusions or allergies', () => {
   for (const field of ['proteinChoice', 'carbChoice', 'vegChoice', 'sauceChoice']) {
     for (const [value, profile] of [['Chicken', { exclusions: ['Chicken'] }], ['Nut butter', { allergies: ['Nuts'] }]]) {
@@ -180,5 +213,27 @@ test('portion warnings drop old or forged side choices and kept-side claims', ()
     assert.deepEqual(saved.keptCarbConflict,[]);assert.deepEqual(saved.keptVegConflict,[]);
     assert.deepEqual(saved.preferenceConflict,['Dairy']);
     assert.deepEqual(validateMenuSelections({menu:portionMenu,selections:[saved],exclusions:['Dairy']})[0],saved);
+  }
+});
+
+
+test('fresh Matter allergens block stored hidden ingredients despite forged browser claims', async t => {
+  const stored = { meals: [{ date: '2099-11-02', mealType: 'main', items: [item([c('s', 'Sauce', 'Butter')])] }] };
+  t.mock.method(Menu, 'findById', () => ({ populate: () => ({ lean: async () => stored }) }));
+  const args = { menuId: '507f1f77bcf86cd799439011', selections: [{ ...selection, allergies: [], allergyOverride: true, carbVegAction: 'kept' }] };
+  await assert.rejects(validatedMenuSelections({ ...args, nutrition: buildNutritionResult({ allergens: [{ id: 1, name: 'Milk' }] }) }), { statusCode: 409 });
+  assert.equal((await validatedMenuSelections({ ...args, nutrition: { allergens: [] } })).length, 1);
+});
+
+test('unverified Matter allergy data rejects submissions before querying menu', async t => {
+  const find = t.mock.method(Menu, 'findById', () => { throw new Error('Must fail before database lookup'); });
+  await assert.rejects(validatedMenuSelections({ menuId: '507f1f77bcf86cd799439011', selections: [selection], nutrition: { exclusions: [] } }), { statusCode: 502, code: 'MATTER_ALLERGENS_UNAVAILABLE' });
+  assert.equal(find.mock.callCount(), 0);
+});
+
+test('allergy matching checks ingredient aliases and dish names', () => {
+  for (const [allergy, ingredient] of [['Milk', 'Butter'], ['Gluten', 'Wheat flour'], ['Soy', 'Tofu'], ['All Nuts', 'Brazil nuts']]) {
+    assert.deepEqual(evaluate({ sauceIngredients: [{ name: ingredient, visible: false }] }, [], [allergy]).allergies, [allergy]);
+    assert.deepEqual(evaluate({ mealName: ingredient }, [], [allergy]).allergies, [allergy]);
   }
 });

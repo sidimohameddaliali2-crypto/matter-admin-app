@@ -8,7 +8,7 @@ import WeeklyMenu from '../models/WeeklyMenu.js';
 
 const source = {
   subscription_id: 'current', customer_name: 'Customer', customer_id: 'matter-person',
-  customer_email: 'customer@example.com', active_delivery_dates: ['2026-11-16'], exclusions: [],
+  customer_email: 'customer@example.com', active_delivery_dates: ['2026-11-16'], exclusions: [], allergens: [],
 };
 const savedRecord = () => ({ _id: 'record', weeklyMenuId: 'menu', matterSubscriptionId: 'current', selectedMeals: [],
   skippedDays: [{ date: '2026-11-16', pauseStatus: 'success', subscriptionId: 'current', resumeDate: '2026-12-11' }],
@@ -104,11 +104,11 @@ test('the menu profile restores a submission consisting entirely of skipped days
   const customer = { _id: 'customer', email: 'customer@example.com', selectedMeals: [], weekend: false };
   t.mock.method(matter, 'getKitchenNutrition', async () => ({
     subscription_id: 'current', customer_name: 'Customer', customer_id: 'matter-person', customer_email: 'customer@example.com', active_delivery_dates: [],
-    weekend_enabled: true, exclusions: [],
+    weekend_enabled: true, exclusions: [], allergens: ['Milk'],
   }));
   t.mock.method(Customer, 'findOne', () => ({ select: async () => customer }));
   t.mock.method(Customer, 'findById', async () => customer);
-  t.mock.method(Customer, 'find', () => ({ select: () => ({ lean: async () => [{ ...customer, allergies: ['Milk'] }] }) }));
+  t.mock.method(Customer, 'find', () => assert.fail('Internal allergies must never be read'));
   t.mock.method(MenuSelectionRecord, 'findOne', () => ({ lean: async () => ({ selectedMeals: [], skippedDays }) }));
   const handler = router.stack.find((layer) => layer.route?.path === '/customers/:email/subscription-profile').route.stack[0].handle;
   let response;

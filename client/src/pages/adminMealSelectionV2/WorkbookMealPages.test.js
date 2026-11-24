@@ -24,6 +24,33 @@ const setInput = (input, value) => act(() => {
 });
 const component = (id, type, name, exclusions, notes = '') => ({ id, type, name, exclusions, notes, adaptation: 'Not reviewed' });
 
+test.each(['Main meal', 'Breakfast'])('Fixed meal can be enabled, reopened and disabled for %s without losing components', async mealKind => {
+  const meal = { id: 'fixed-test', name: 'House dish', mealKind, mealType: 'Chicken', components: [component('p', 'Protein', 'House portion', ['Dairy']), component('c', 'Carb', 'Rice', ['Gluten']), component('v', 'Vegetable', 'Broccoli', [])] };
+  const onSave = render(meal);
+  const checkbox = () => [...host.querySelectorAll('label')].find(label => label.textContent.startsWith('Fixed meal')).querySelector('input');
+  expect(checkbox().checked).toBe(false);
+  await act(async () => checkbox().click()); await click('Save draft');
+  const saved = onSave.mock.calls[0][0]; expect(saved.isFixedMeal).toBe(true); expect(saved.components).toEqual(meal.components);
+  await act(async () => root.render(<MealComposer key="reopened-fixed" meal={saved} onSave={onSave}/>));
+  expect(checkbox().checked).toBe(true);
+  await act(async () => checkbox().click()); await click('Save draft');
+  expect(onSave.mock.calls[1][0].isFixedMeal).toBe(false); expect(onSave.mock.calls[1][0].components).toEqual(meal.components);
+});
+
+test('snacks do not offer Fixed meal or save an inherited fixed setting', async () => {
+  const onSave = render({ id: 'snack', name: 'House snack', mealKind: 'Snack', isFixedMeal: true, components: [component('s', 'Snack', 'House snack', ['Nuts'])] });
+  expect(host.textContent).not.toContain('Fixed meal'); await click('Save draft');
+  expect(onSave.mock.calls[0][0].isFixedMeal).toBe(false);
+});
+
+test('a Fixed meal-only edit preserves an imported recipe, conversion, exclusions and draft revision', async () => {
+  const meal = { id: 'legacy-fixed', name: 'Imported salad', category: 'SUB', qtyUnit: 'PCS', gramsPerPiece: 55, components: [component('p', 'Protein', 'Patty', ['Dairy']), component('v', 'Vegetable', 'Salad', ['Nuts']), component('s', 'Sauce 2', 'Dressing', ['Soy'])] };
+  const onSave = jest.fn(); await act(async () => root.render(<MealComposer meal={meal} revision={12} onSave={onSave}/>));
+  const checkbox = [...host.querySelectorAll('label')].find(label => label.textContent.startsWith('Fixed meal')).querySelector('input');
+  await act(async () => checkbox.click()); await click('Save draft');
+  expect(onSave).toHaveBeenCalledWith({ ...meal, isFixedMeal: true }, 12);
+});
+
 test('a QTY-only save keeps the original imported salad and dressing snapshot', async () => {
   const imported = { id: 'salad', name: 'Imported bowl', category: 'MAIN CHX', mealType: 'Chicken', components: [
     component('p', 'Protein', 'Chicken', []), component('v1', 'Vegetable', 'Leaves', []),

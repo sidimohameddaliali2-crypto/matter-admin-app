@@ -27,6 +27,15 @@ test('different exclusions, components, notes, adaptations and protein kinds rem
   }
 });
 
+test('fixed and adaptable recipes stay distinct, while an absent fixed setting equals false', () => {
+  const ordinary = recipe('a'), unchecked = recipe('b', { isFixedMeal: false }), fixed = recipe('c', { isFixedMeal: true });
+  assert.equal(mealFingerprint(ordinary), mealFingerprint(unchecked));
+  assert.equal(deduplicateMeals([ordinary, unchecked, fixed]).meals.length, 2);
+  const saved = changeMealCreationState(state([ordinary]), { catalogue: { meals: [fixed] }, skipDuplicates: true });
+  assert.equal(saved.catalogue.meals.find(meal => meal.id === 'c').isFixedMeal, true);
+  assert.throws(() => changeMealCreationState(state([]), { catalogue: { meals: [recipe('bad', { isFixedMeal: 'true' })] } }), { statusCode: 400 });
+});
+
 test('attachment IDs are normalized by component meaning, while a different attachment is a different recipe',()=>{
   const a=recipe('a'),b=recipe('b');
   for(const meal of [a,b])meal.components.push({id:meal.id+'-extra',type:'Extra sauce / topping',name:'Topping',exclusions:['Nuts'],attachedComponentId:meal.id+'-c'});

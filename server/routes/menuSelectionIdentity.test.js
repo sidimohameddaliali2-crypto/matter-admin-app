@@ -15,10 +15,10 @@ test('submission stores a Matter customer selection without using Internal ident
   const customer = { _id: '507f1f77bcf86cd799439011', customerId: 'internal', email: 'internal@example.invalid', firstName: 'Internal', selectedMeals: [], save: async function () { return this; } };
   matter.getKitchenNutrition = async (params) => {
     assert.deepEqual(params, { email: 'website@example.invalid' });
-    return { subscription_id: 'verified-subscription', customer_id: 'permanent', customer_email: 'website@example.invalid', customer_name: 'Website', exclusions: [] };
+    return { subscription_id: 'verified-subscription', customer_id: 'permanent', customer_email: 'website@example.invalid', customer_name: 'Website', exclusions: [], allergens: [] };
   };
   Customer.findOne = () => assert.fail('Internal identity profiles must not be read');
-  Customer.find = () => ({ select: () => ({ lean: async () => [] }) });
+  Customer.find = () => assert.fail('Internal allergies must not be read');
   Menu.findById = () => ({ populate: () => ({ lean: async () => ({ meals: [{ date: '2026-10-22', mealType: 'main', items: [{ _id: '507f1f77bcf86cd799439013', mealName: 'Fixture', itemDate: '2026-10-22', mealType: 'main' }] }] }) }) });
   Customer.findById = async () => customer;
   Record.findOne = () => ({ select: () => ({ lean: async () => null }) });
@@ -60,9 +60,9 @@ const adminHandler = router.stack.find(layer => layer.route?.path === '/:menuId/
 const menuId = '507f1f77bcf86cd799439012', dishId = '507f1f77bcf86cd799439013';
 async function withSelectionFixtures(run) {
   const original = { lookup: matter.getKitchenNutrition, allergies: Customer.find, menu: Menu.findById, prior: Record.findOne, save: Record.findOneAndUpdate, count: Record.countDocuments, menuCount: Menu.findByIdAndUpdate, log: console.log, error: console.error };
-  const state = { writes: [], nutrition: { subscription_id: 'sub', customer_id: 'permanent', customer_email: 'website@example.invalid', exclusions: ['Nuts'] }, allergies: [], item: { _id: dishId, mealName: 'Fixture', mealType: 'main', itemDate: '2026-10-22', cycleMeal: { components: [{ id: 'p', type: 'Protein', name: 'Chicken', exclusions: [] }], carbCombined: 'No' } } };
+  const state = { writes: [], nutrition: { subscription_id: 'sub', customer_id: 'permanent', customer_email: 'website@example.invalid', exclusions: ['Nuts'], allergens: [] }, item: { _id: dishId, mealName: 'Fixture', mealType: 'main', itemDate: '2026-10-22', cycleMeal: { components: [{ id: 'p', type: 'Protein', name: 'Chicken', exclusions: [] }], carbCombined: 'No' } } };
   matter.getKitchenNutrition = async ({ email }) => { state.profileEmail = email; return state.nutrition; };
-  Customer.find = () => ({ select: () => ({ lean: async () => state.allergies }) });
+  Customer.find = () => assert.fail('Internal allergies must not be read');
   Menu.findById = () => { const menu = { _id: menuId, meals: [{ date: '2026-10-22', mealType: 'main', items: [state.item] }] }; return { populate() { return this; }, lean: async () => menu, then: (yes, no) => Promise.resolve(menu).then(yes, no) }; };
   Record.findOne = () => ({ select() { return this; }, lean: async () => ({ matterEmail: 'website@example.invalid', email: 'storage@example.invalid', matterCustomerId: 'permanent', skippedDays: [], selectedMeals: state.savedMeals || [] }) });
   Record.findOneAndUpdate = async (filter, update) => { state.writes.push({ filter, update }); return {}; };
@@ -86,7 +86,7 @@ test('customer save recomputes private salad replacement flags', () => withSelec
   assert.equal(saved.carbVegAction, 'replace'); assert.deepEqual(saved.vegConflict, ['Nuts']); assert.equal(saved.needsSauceChange, false);
 }));
 test('customer save rejects a known allergy including hidden sauce ingredients', () => withSelectionFixtures(async state => {
-  state.allergies = [{ matterCustomerId: 'permanent', allergies: ['Dairy'] }]; state.item.sauceIngredients = [{ name: 'Milk', visible: false }];
+  state.nutrition.allergens = ['Dairy']; state.item.sauceIngredients = [{ name: 'Milk', visible: false }];
   const res = await post([submitted()]); assert.equal(res.statusCode, 409); assert.equal(state.writes.length, 0);
 }));
 test('customer save rejects forged dish identity/date/name and malformed selections', () => withSelectionFixtures(async state => {
@@ -108,7 +108,7 @@ test('admin cannot save against a mismatched verified Matter identity', () => wi
 
 test('customer and admin save reject unchecked component overrides before writing', () => withSelectionFixtures(async state => {
   state.nutrition.exclusions = ['Chicken'];
-  state.allergies = [{ matterCustomerId: 'permanent', allergies: ['Nuts'] }];
+  state.nutrition.allergens = ['Nuts'];
   state.item = { ...state.item, portionType: 'beef', proteinSource: 'Beef roast', carbs: 'Rice', veg: 'Broccoli', sauce: 'Lemon sauce', cycleMeal: { components: [{ id: 'p', type: 'Protein', name: 'Beef', exclusions: [] }] } };
   for (const override of [
     { proteinChoice: 'Chicken' }, { carbChoice: 'Chicken rice' }, { vegChoice: 'Nut topping' }, { sauceChoice: 'Nut butter' }, { sauceChoice: {} },
@@ -186,5 +186,13 @@ test('customer and admin allow Keep for separate public carb but reject malforme
   for(const write of state.writes){const saved=write.update.$set.selectedMeals[0];assert.equal(saved.carbVegAction,'kept');assert.equal(saved.carbVegPreference,'kept');assert.deepEqual(saved.carbConflict || [],[]);assert.deepEqual(saved.vegConflict || [],[]);assert.deepEqual(saved.carbVegConflict || [],[]);assert.deepEqual(saved.preferenceConflict,['Dairy']);assert.deepEqual(saved.exclusionConflict || [],[]);}
   const before=state.writes.length;
   assert.equal((await post([submitted({carbVegPreference:{}})])).statusCode,409);
-  state.allergies=[{matterCustomerId:'permanent',allergies:['Dairy']}];assert.equal((await post([choices])).statusCode,409);assert.equal(state.writes.length,before);
+  state.nutrition.allergens=['Dairy'];assert.equal((await post([choices])).statusCode,409);assert.equal(state.writes.length,before);
+}));
+
+
+test('missing Matter allergens reject a customer submission without saving', () => withSelectionFixtures(async state => {
+  delete state.nutrition.allergens;
+  const res = await post([{ date: '2026-10-22', mealType: 'main', menuItemId: dishId, mealName: 'Fixture' }]);
+  assert.equal(res.statusCode, 502);
+  assert.equal(state.writes.length, 0);
 }));
