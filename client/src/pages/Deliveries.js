@@ -5,6 +5,7 @@ import * as XLSX from 'xlsx';
 import api from '../utils/api';
 import PrintConfigModal from '../components/deliveries/PrintConfigModal';
 import MatterImportControl, { canImportMatter } from '../components/deliveries/MatterImportControl';
+import SatoStickerPrintModal from '../components/stickers/SatoStickerPrintModal';
 import DeliveryDetailModal from '../components/deliveries/DeliveryDetailModal';
 import { toBusinessComponents, businessComponentsToUtcDate, formatBusinessDateInput } from '../utils/businessTime';
 import { useSocket } from '../contexts/SocketContext';
@@ -133,6 +134,7 @@ const Deliveries = () => {
   const [isPrintConfigOpen, setIsPrintConfigOpen] = useState(false);
   // Keep receipts above the loading/error branches that can unmount the control.
   const handledMatterImportJobs = React.useRef(new Set());
+  const [isSatoPrintOpen, setIsSatoPrintOpen] = useState(false);
   const [isDeletingSelected, setIsDeletingSelected] = useState(false);
   // Owner (2026-10-10): clicking a delivery opens its details in a modal,
   // in place, instead of navigating to a separate page — closing it must
@@ -542,6 +544,14 @@ const Deliveries = () => {
             {hasSelections ? `Print (${selectedCount})` : `Print (${filteredDeliveries.length})`}
           </button>
           <button
+            onClick={() => setIsSatoPrintOpen(true)}
+            disabled={getPrintTargets().length === 0}
+            className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <span className="material-symbols-outlined text-[18px]">print</span>
+            SATO stickers ({getPrintTargets().length})
+          </button>
+          <button
             onClick={handleDownloadExcel}
             disabled={filteredDeliveries.length === 0}
             title="Download the delivery sheet as Excel"
@@ -914,6 +924,9 @@ const Deliveries = () => {
         )}
       </div>
 
+      {isSatoPrintOpen && (
+        <SatoStickerPrintModal deliveries={getPrintTargets()} onClose={() => setIsSatoPrintOpen(false)} />
+      )}
       {isPrintConfigOpen && (
         <PrintConfigModal
           deliveries={getPrintTargets()}

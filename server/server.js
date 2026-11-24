@@ -378,13 +378,16 @@ app.use('/api/*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
+// Local UI testing may use shared credentials without running scheduled jobs
+// or joining the production Socket.IO Redis adapter.
+const localPreviewMode = process.env.LOCAL_PREVIEW_MODE === '1';
 
 // Initialize Redis for caching. Awaited (unlike the old fire-and-forget
 // call) so the Socket.io Redis adapter below can attach before the server
 // starts accepting connections — initRedis() has its own 5s connectTimeout
 // and try/catch, so this resolves within a bounded time either way, it
 // just delays startup slightly rather than risking a startup crash.
-await initRedis().catch((error) => {
+if (!localPreviewMode) await initRedis().catch((error) => {
   console.warn('⚠️  Redis initialization failed:', error.message);
   console.log('💡 Continuing without cache. Install Redis for production optimization.');
 });
@@ -436,6 +439,7 @@ server.listen(PORT, () => {
 });
 
 // Start background jobs
+if (!localPreviewMode) {
 startFlaggedNotifier();
 startMoveUncollectedCollectionsJob();
 startRecalculateDriverKpisJob();
@@ -460,6 +464,10 @@ if (process.env.ENABLE_FLAGGED_ALERTS === '1') {
   } catch (err) {
     console.error('Failed to start flagged notifier:', err.message);
   }
+}
+
+} else {
+  console.log('Local preview mode: background jobs, cache warm-up, and Redis disabled.');
 }
 
 // Handle unhandled promise rejections
