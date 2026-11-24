@@ -185,8 +185,15 @@ adjustments supply the food calculations. Ordinary meal frequency includes
 breakfast; Core main meals and extra breakfast use the existing separate rules.
 Core protein/carbohydrate targets are food weights; its missing fat target is
 normal, and final meal macros come from the approved weight lookup. Required
-missing fields cannot be replaced with Internal defaults. Allergies absent from
-Matter are shown as unavailable. Legacy partner assignment based on Internal
+missing fields cannot be replaced with Internal defaults. Subscription detail's
+`allergens: [{id, name}]` is the only customer-menu allergy source; `exclusions`
+remains a separate preference list. An explicit empty allergen array means none
+recorded. Missing or malformed allergen data is unavailable and blocks customer
+meal selection/submission until Matter can be verified. Both the browser and
+server check stored recipe/component metadata, including private ingredients;
+customer-submitted flags cannot waive an allergen block. Internal Customer
+allergy profiles are never queried or merged in this flow.
+Legacy partner assignment based on Internal
 Customer membership is disabled; these members need verified Matter accounts.
 
 `GET /api/matter/subscriptions/kitchen-inputs` requires staff authentication and

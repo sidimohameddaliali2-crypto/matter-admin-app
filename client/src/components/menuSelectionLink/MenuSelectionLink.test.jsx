@@ -235,3 +235,24 @@ test('a Sunday restored by a Matter admin is not implicitly skipped again by a s
   // A fresh explicit Sunday skip is still permitted.
   expect(expandSaturdaySkips(dates, dates, [dates[1]])).toEqual(dates);
 });
+
+
+test.each([false, undefined])('unknown Matter allergy availability (%s) blocks meal selection until retry succeeds', async allergiesAvailable => {
+  const item = cycleItem([privateComponent('portion', 'Protein')]);
+  await signIn(item, { allergiesAvailable });
+  expect(node.textContent).toContain('Allergy information unavailable');
+  expect(button('Submit my week')).toBeUndefined();
+  expect(button('+')).toBeUndefined();
+  expect(api.post).not.toHaveBeenCalled();
+  api.get.mockResolvedValue({ data: { success: true, data: { firstName: 'Test', email: 'subscriber@example.invalid', allergies: [], allergiesAvailable: true, deliveryDates: [DELIVERY_DATE], mealPerDay: 1 } } });
+  await click(button('Try again'));
+  expect(node.textContent).not.toContain('Allergy information unavailable');
+  expect(button('+', card())).toBeDefined();
+});
+
+test('Matter milk allergy blocks butter hidden in recipe ingredients', async () => {
+  await signIn(cycleItem([privateComponent('portion', 'Protein')], { sauceIngredients: [{ name: 'Butter', visible: false }] }), { allergies: ['Milk'] });
+  expect(card().textContent).toContain('allergen');
+  expect(button('+', card())).toBeUndefined();
+  expect(api.post).not.toHaveBeenCalled();
+});
