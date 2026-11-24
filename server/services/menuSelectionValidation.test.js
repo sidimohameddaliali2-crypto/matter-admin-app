@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { evaluateComponentSelection as evaluate, selectionPreferenceFlags } from '../../client/src/constants/componentSelectionRules/index.js';
-import { validateMenuSelections } from './menuSelectionValidation.js';
+import Menu from '../models/WeeklyMenu.js';
+import { buildNutritionResult } from './matterApiService.js';
+import { validatedMenuSelections, validateMenuSelections } from './menuSelectionValidation.js';
 const c = (id, type, name, exclusions = [], extra = {}) => ({ id, type, name, exclusions, ...extra });
 const item = components => ({ _id: 'dish', mealName: 'Fixture', mealType: 'main', itemDate: '2099-11-02', cycleMeal: { components, carbCombined: 'No' } });
 
@@ -180,5 +182,27 @@ test('portion warnings drop old or forged side choices and kept-side claims', ()
     assert.deepEqual(saved.keptCarbConflict,[]);assert.deepEqual(saved.keptVegConflict,[]);
     assert.deepEqual(saved.preferenceConflict,['Dairy']);
     assert.deepEqual(validateMenuSelections({menu:portionMenu,selections:[saved],exclusions:['Dairy']})[0],saved);
+  }
+});
+
+
+test('fresh Matter allergens block stored hidden ingredients despite forged browser claims', async t => {
+  const stored = { meals: [{ date: '2099-11-02', mealType: 'main', items: [item([c('s', 'Sauce', 'Butter')])] }] };
+  t.mock.method(Menu, 'findById', () => ({ populate: () => ({ lean: async () => stored }) }));
+  const args = { menuId: '507f1f77bcf86cd799439011', selections: [{ ...selection, allergies: [], allergyOverride: true, carbVegAction: 'kept' }] };
+  await assert.rejects(validatedMenuSelections({ ...args, nutrition: buildNutritionResult({ allergens: [{ id: 1, name: 'Milk' }] }) }), { statusCode: 409 });
+  assert.equal((await validatedMenuSelections({ ...args, nutrition: { allergens: [] } })).length, 1);
+});
+
+test('unverified Matter allergy data rejects submissions before querying menu', async t => {
+  const find = t.mock.method(Menu, 'findById', () => { throw new Error('Must fail before database lookup'); });
+  await assert.rejects(validatedMenuSelections({ menuId: '507f1f77bcf86cd799439011', selections: [selection], nutrition: { exclusions: [] } }), { statusCode: 502, code: 'MATTER_ALLERGENS_UNAVAILABLE' });
+  assert.equal(find.mock.callCount(), 0);
+});
+
+test('allergy matching checks ingredient aliases and dish names', () => {
+  for (const [allergy, ingredient] of [['Milk', 'Butter'], ['Gluten', 'Wheat flour'], ['Soy', 'Tofu'], ['All Nuts', 'Brazil nuts']]) {
+    assert.deepEqual(evaluate({ sauceIngredients: [{ name: ingredient, visible: false }] }, [], [allergy]).allergies, [allergy]);
+    assert.deepEqual(evaluate({ mealName: ingredient }, [], [allergy]).allergies, [allergy]);
   }
 });

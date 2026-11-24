@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { cacheGet, cacheSet } from '../config/cache.js';
 import { boundedMap } from './boundedMap.js';
+import { normalizeMatterAllergens } from './matterAllergens.js';
 import { readMatterGet } from './matterReadRetry.js';
 import { resolveMatterDeliveryAddress, matterMealContract, matterWeekendEnabled, matterDoubleDeliveryDates } from './matterSubscriptionContract.js';
 
@@ -109,6 +110,7 @@ export const buildNutritionResult = (subscription) => ({
   // Dietary restrictions — surfaced so the Kitchen List customer card can
   // display them.
   exclusions: Array.isArray(subscription.exclusions) ? subscription.exclusions.map((ex) => ex.title).filter(Boolean) : null,
+  allergens: normalizeMatterAllergens(subscription.allergens),
   // Used to cross-reference this subscription against internal Customer
   // records (customerMatchService) when the subscription's own email
   // doesn't match anything internally.
@@ -168,7 +170,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionByEmail(email) {
     const normalizedEmail = String(email || '').trim().toLowerCase();
-    const cacheKey = `matter:nutrition:v3:email:${normalizedEmail}`;
+    const cacheKey = `matter:nutrition:v4:email:${normalizedEmail}`;
     const cached = normalizedEmail ? await cacheGet(cacheKey) : null;
     if (cached) return cached;
 
@@ -196,7 +198,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionBySubscriptionId(subscriptionId) {
     if (!subscriptionId) return null;
-    const cacheKey = `matter:nutrition:v3:sub:${subscriptionId}`;
+    const cacheKey = `matter:nutrition:v4:sub:${subscriptionId}`;
     const cached = await cacheGet(cacheKey);
     if (cached) return cached;
 
@@ -217,7 +219,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionByCustomerId(customerId) {
     if (!customerId) return null;
-    const cacheKey = `matter:nutrition:v3:cust:${customerId}`;
+    const cacheKey = `matter:nutrition:v4:cust:${customerId}`;
     const cached = await cacheGet(cacheKey);
     if (cached) return cached;
 

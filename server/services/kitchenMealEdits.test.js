@@ -17,11 +17,11 @@ const fixture = t => {
   const item = { _id: itemId, itemDate: date, mealName: 'Core chicken', mealType: 'main', usedForCorePlan: true };
   const row = { _id: 'record', matterCustomerId: '42', updatedAt: new Date(), selectedMeals: [{ _id: 'meal', date, mealType: 'main', mealName: 'Chosen chicken', quantity: 2 }], kitchenAutoHolds: [] };
   const nutrition = { customer_id: '42', customer_email: 'customer@example.invalid', customer_name: 'Customer', subscription_id: 'renewed',
-    active_delivery_dates: [date], plan_name: 'Matter Core', meal_frequency: 3, double_delivery_dates: [], exclusions: [] };
+    active_delivery_dates: [date], plan_name: 'Matter Core', meal_frequency: 3, double_delivery_dates: [], exclusions: [], allergens: [] };
   t.mock.method(Menu, 'findById', () => ({ ...query(menu), populate() {
     return query({ ...menu, meals: [{ date, mealType: 'main', items: [item] }] });
   } }));
-  t.mock.method(Customer, 'find', () => ({ select() { return this; }, lean: async () => [] }));
+  t.mock.method(Customer, 'find', () => assert.fail('Internal allergies must not be read'));
   t.mock.method(Item, 'find', () => query([item])); t.mock.method(Item, 'findById', () => query(item));
   t.mock.method(Record, 'find', () => query([row]));
   t.mock.method(matter, 'getKitchenNutrition', async () => nutrition);
@@ -108,11 +108,10 @@ test('Core main additions cannot exceed dated entitlement and a first selection 
 });
 
 for (const action of ['add', 'change']) {
-  test(`${action} rejects a stored peanut allergy with empty Matter exclusions before any selection/audit write`, async t => {
+  test(`${action} rejects a Matter peanut allergy with empty Matter exclusions before any selection/audit write`, async t => {
     const f = fixture(t);
     f.item.cycleMeal = { components: [{ id: 'portion', type: 'Protein', name: 'Chicken', exclusions: ['Peanuts'] }] };
-    const profile = { matterCustomerId: '42', allergies: ['Peanuts'] };
-    t.mock.method(Customer, 'find', () => ({ select() { return this; }, lean: async () => [profile] }));
+    f.nutrition.allergens = ['Peanuts'];
     assert.deepEqual(f.nutrition.exclusions, []);
     const args = { menuId, customerId: '42', date, user,
       body: { action, mealId: 'meal', menuItemId: itemId, quantity: 1, token: mealEditToken(f.row) } };
@@ -120,19 +119,19 @@ for (const action of ['add', 'change']) {
     assert.equal(f.write.mock.callCount(), 0);
     assert.equal(f.logs.mock.callCount(), 0);
     assert.equal(f.committed.length, 0);
-    // The same dish and request succeeds when the stored profile confirms no
+    // The same dish and request succeeds when the Matter profile confirms no
     // peanut allergy, demonstrating that the rejection came from that profile.
-    profile.allergies = [];
+    f.nutrition.allergens = [];
     await editKitchenMeals(args);
     assert.equal(f.write.mock.callCount(), 1);
     assert.equal(f.logs.mock.callCount(), 1);
   });
 }
 
-test('stored allergy protection cannot be bypassed by browser flags and does not prevent deleting unsafe saved choices', async t => {
+test('Matter allergy protection cannot be bypassed by browser flags and does not prevent deleting unsafe saved choices', async t => {
   const f = fixture(t);
   f.item.cycleMeal = { components: [{ id: 'sauce', type: 'Sauce', name: 'Peanut sauce', exclusions: ['Peanuts'] }] };
-  t.mock.method(Customer, 'find', () => ({ select() { return this; }, lean: async () => [{ matterCustomerId: '42', allergies: ['Peanuts'] }] }));
+  f.nutrition.allergens = ['Peanuts'];
   await assert.rejects(() => editKitchenMeals({ menuId, customerId: '42', date, user, body: { action: 'add', menuItemId: itemId,
     quantity: 1, token: mealEditToken(f.row), allergies: [], exclusionAcknowledged: true, needsSauceChange: false } }), { statusCode: 409 });
   assert.equal(f.write.mock.callCount(), 0);
