@@ -7,6 +7,14 @@ export const shiftDay = (date, days) => {
   return d.toISOString().slice(0, 10);
 };
 export const businessToday = () => formatBusinessDateInput(new Date());
+export function dispatchDateWindow(now = new Date()) {
+  const today = formatBusinessDateInput(now);
+  const cutoff = businessComponentsToUtcDate(today, '09:00');
+  if (now < cutoff) return { today, defaultDate: today, nextBoundary: cutoff };
+
+  const tomorrow = shiftDay(today, 1);
+  return { today, defaultDate: tomorrow, nextBoundary: businessComponentsToUtcDate(tomorrow, '00:00') };
+}
 export function dayRange(date) {
   const start = businessComponentsToUtcDate(date, '00:00'),
     end = businessComponentsToUtcDate(shiftDay(date, 1), '00:00');
@@ -22,6 +30,12 @@ export const emptyFilters = () => ({
   hours: [],
   emirates: []
 });
+export function dispatchAddress(delivery) {
+  const address = delivery.address?.trim();
+  if (address) return address;
+  const { building, unit, apartment, street, area, city } = delivery.addressDetails || {};
+  return [building, unit ?? apartment, street, area, city].filter(value => value != null && String(value).trim()).join(', ');
+}
 export const isFinished = d => ['delivered', 'completed', 'collected', 'failed'].includes(d.status);
 export function filterDispatchDeliveries(deliveries, {
   date,
@@ -31,7 +45,7 @@ export function filterDispatchDeliveries(deliveries, {
   unassigned = false
 }) {
   const term = search.trim().toLowerCase();
-  return deliveries.filter(d => (formatBusinessDateInput(d.scheduledTime) === date || d.sundayOnlyCarriedOver && new Date(date + 'T12:00:00Z').getUTCDay() === 6 && formatBusinessDateInput(d.scheduledTime) === shiftDay(date, 1)) && (!collections || d.type === 'Collection') && (!unassigned || !driverId(d.driver) && !isFinished(d)) && (!filters.zones.length || filters.zones.includes(d.zone || d.addressDetails?.area || 'No zone')) && (!filters.drivers.length || filters.drivers.includes(driverId(d.driver) || 'unassigned')) && (!filters.hours.length || filters.hours.includes(String(toBusinessComponents(d.scheduledTime)?.hours))) && (!filters.emirates.length || filters.emirates.includes(emirate(d))) && (!term || [d.customerName, d.customerId, d._id, d.address, d.zone, d.customerPhone].some(v => String(v || '').toLowerCase().includes(term)))).sort((a, b) => new Date(a.scheduledTime) - new Date(b.scheduledTime));
+  return deliveries.filter(d => (formatBusinessDateInput(d.scheduledTime) === date || d.sundayOnlyCarriedOver && new Date(date + 'T12:00:00Z').getUTCDay() === 6 && formatBusinessDateInput(d.scheduledTime) === shiftDay(date, 1)) && (!collections || d.type === 'Collection') && (!unassigned || !driverId(d.driver) && !isFinished(d)) && (!filters.zones.length || filters.zones.includes(d.zone || d.addressDetails?.area || 'No zone')) && (!filters.drivers.length || filters.drivers.includes(driverId(d.driver) || 'unassigned')) && (!filters.hours.length || filters.hours.includes(String(toBusinessComponents(d.scheduledTime)?.hours))) && (!filters.emirates.length || filters.emirates.includes(emirate(d))) && (!term || [d.customerName, d.customerId, d._id, dispatchAddress(d), d.zone, d.customerPhone].some(v => String(v || '').toLowerCase().includes(term)))).sort((a, b) => new Date(a.scheduledTime) - new Date(b.scheduledTime));
 }
 // Read every page: the server caps a request at 500 records.
 export async function loadDispatchDay(api, date) {

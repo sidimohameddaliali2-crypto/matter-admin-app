@@ -33,6 +33,16 @@ test('customers with only a New tag and no upcoming job are absent, while existi
 test('list and badge use identical delivery eligibility before pagination and expose the next delivery',async()=>{
  const r=await call('get','/',input(),{query:{details:'true'}});assert.equal(r.body.data.count,1);assert.equal(r.body.data.rows.length,1);assert.equal(r.body.data.rows[0].subscriptionId,'7');assert.equal(r.body.data.rows[0].nextDeliveryAt,jobs[0].scheduledTime.toISOString());
 });
+test('badge and list share a queue revision that changes when delivery time changes at the same count',async()=>{
+ const badge=await call('get','/');
+ const list=await call('get','/',input(),{query:{details:'true'}});
+ assert.match(badge.body.data.queueRevision,/^[0-9a-f]{64}$/);
+ assert.equal(list.body.data.queueRevision,badge.body.data.queueRevision);
+ jobs[0].scheduledTime=new Date(+jobs[0].scheduledTime+60000);
+ const updated=await call('get','/');
+ assert.equal(updated.body.data.count,badge.body.data.count);
+ assert.notEqual(updated.body.data.queueRevision,badge.body.data.queueRevision);
+});
 test('unavailable delivery history fails visibly instead of returning a fabricated empty queue',async()=>{
  Delivery.find=()=>({select(){return this;},lean:async()=>{throw new Error('History unavailable');}});assert.equal((await call('get','/')).code,502);
 });

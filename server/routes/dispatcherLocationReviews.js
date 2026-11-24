@@ -1,4 +1,5 @@
 import express from 'express';
+import { createHash } from 'node:crypto';
 import { protect, dispatcher } from '../middleware/auth.js';
 import { effectivePermissions } from '../models/User.js';
 import Customer from '../models/Customer.js';
@@ -31,9 +32,10 @@ router.get('/',async(req,res)=>{
   const page=Number(req.query.page||1);if(!Number.isInteger(page)||page<1)return res.status(400).json({success:false,message:'Invalid page.'});
   const eligible=await queue();
   const {subscriptions,count}=eligible;
+  const queueRevision = createHash('sha256').update(JSON.stringify(subscriptions.map(s => [s.subscription_id, s.customer_id, s.nextDeliveryAt]))).digest('hex');
   const selected=subscriptions.slice((page-1)*20,page*20);
   const rows=req.query.details==='true'?await boundedMap(selected,4,async s=>{try{return await current(String(s.subscription_id),eligible);}catch{return {customerId:String(s.customer_id),subscriptionId:String(s.subscription_id),customerName:s.name||'Unnamed customer',unavailable:true};}}):[];
-  res.json({success:true,data:{count,rows,page,pages:Math.ceil(subscriptions.length/20),subscriptions:subscriptions.length}});
+  res.json({success:true,data:{count,rows,page,pages:Math.ceil(subscriptions.length/20),subscriptions:subscriptions.length,queueRevision}});
  }catch(e){fail(res,e);}
 });
 router.get('/:id',async(req,res)=>{try{res.json({success:true,data:await withHistory(await current(req.params.id))});}catch(e){fail(res,e);}});
