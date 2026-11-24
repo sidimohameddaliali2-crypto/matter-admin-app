@@ -12,6 +12,7 @@ on:
       - 'server/models/Delivery.js'
       - 'server/models/ReportingOutbox.js'
       - 'server/services/reportingOutbox*.js'
+      - 'server/services/truckoomVisitSync*.js'
       - 'server/services/vehicleLocationCaptureStore.js'
       - 'server/services/matterDeliveryImportService.js'
       - 'server/services/matterDeliveryInsert*.js'
@@ -65,4 +66,4 @@ jobs:
         working-directory: server
         env:
           REPORTING_TEST_MONGO_URI: mongodb://127.0.0.1:27017/driver_reports_ci?directConnection=true
-        run: node --test services/reportingOutbox.test.js services/reportingOutbox.integration.test.js services/matterDeliveryInsert.test.js
+        run: node --test services/reportingOutbox.test.js services/reportingOutbox.integration.test.js services/matterDeliveryInsert.test.js services/truckoomVisitSync.test.js
