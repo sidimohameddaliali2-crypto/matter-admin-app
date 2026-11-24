@@ -762,9 +762,12 @@ const MenuManagement = () => {
       });
 
       let copyWarning = '';
-      if (publish && savedMenu.shareLink?.token) {
+      if (publish) {
         try {
           const linkResponse = await api.get(`/menus/${savedMenu._id}/share-link`);
+          const shortToken = linkResponse.data.data.shortToken;
+          if (shortToken) setMenus(current => current.map(menu => menu._id === savedMenu._id
+            ? { ...menu, shareLink: { ...menu.shareLink, shortToken } } : menu));
           await navigator.clipboard.writeText(linkResponse.data.data.shareUrl);
         } catch (clipErr) { copyWarning = 'Menu saved. Use Copy link to copy its customer link.'; }
       }

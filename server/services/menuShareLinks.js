@@ -4,6 +4,11 @@ import WeeklyMenu from '../models/WeeklyMenu.js';
 export const createShortMenuToken = () => crypto.randomBytes(12).toString('base64url');
 export const menuShareFilter = token => ({ $or: [{ 'shareLink.token': token }, { 'shareLink.shortToken': token }] });
 
+export async function invalidateMenuShareCache(menu, remove) {
+  const tokens = new Set([menu.shareLink?.token, menu.shareLink?.shortToken].filter(Boolean));
+  for (const token of tokens) await remove(`menu:share:${token}`);
+}
+
 // Add a stable alias without rotating the existing token or invalidating sent links.
 export async function ensureShortMenuToken(menu, { Model = WeeklyMenu, makeToken = createShortMenuToken } = {}) {
   if (menu.shareLink?.shortToken) return menu.shareLink.shortToken;

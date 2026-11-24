@@ -23,7 +23,7 @@ import { reconcileCoreMainMeals } from '../services/kitchenCoreEntitlement.js';
 import { toKitchenOption, kitchenConflictList, kitchenConflictFields, mergeKitchenMetadata } from '../services/kitchenExclusions.js';
 import { kitchenUpload } from '../services/kitchenUpload.js';
 import { saveManagedMenu } from '../services/managedMenuSave.js';
-import { ensureShortMenuToken, menuShareFilter } from '../services/menuShareLinks.js';
+import { ensureShortMenuToken, menuShareFilter, invalidateMenuShareCache } from '../services/menuShareLinks.js';
 import { assertAssignmentMacros } from '../services/kitchenMacroValidation.js';
 import { readKitchenState, beginKitchenState } from '../services/kitchenProductionSnapshot.js';
 import { kitchenMenuDates } from '../services/kitchenMenuDates.js';
@@ -2851,13 +2851,8 @@ const saveMenuResponse = async (req, res, creating) => {
       buildMealName, mergeUploadedSnackPools,
     });
     const warnings = [];
-    if (menu.shareLink?.token) {
-      try {
-        await cacheDelete(`menu:share:${menu.shareLink.token}`);
-        if (menu.shareLink.shortToken) await cacheDelete(`menu:share:${menu.shareLink.shortToken}`);
-      }
-      catch { warnings.push('Menu saved, but its public cache could not be refreshed. Retry the public menu shortly.'); }
-    }
+    try { await invalidateMenuShareCache(menu, cacheDelete); }
+    catch { warnings.push('Menu saved, but its public cache could not be refreshed. Retry the public menu shortly.'); }
     try {
       if (menu.isPublished) await syncMenuSelectionMainMealsToPartnerMenu(menu);
       // A saved withdrawal must remove its breakfast dates as well.
