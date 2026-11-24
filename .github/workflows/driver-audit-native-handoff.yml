@@ -9,6 +9,29 @@ on:
         options:
           - inspect
           - inspect-bindings
+          - inspect-database-config
+          - inspect-supabase-host
+          - inspect-supabase-routing
+          - inspect-supabase-storage
+          - inspect-supabase-disk-usage
+          - plan-supabase-log-archive
+          - archive-supabase-closed-logs
+          - inspect-supabase-root-access
+          - prepare-supabase-host
+          - prepare-supabase-serving
+          - start-supabase-report
+          - qualify-supabase-source-held
+          - run-supabase-report-once
+          - probe-supabase-canary
+          - plan-supabase-canary
+          - enable-supabase-canary
+          - seal-supabase-canary-entry
+          - restore-supabase-canary
+          - promote-supabase-report
+          - export-supabase-release-inputs
+          - export-supabase-previous-manifest
+          - stage-supabase-source-release
+          - start-supabase-source-sync
           - pause-builder
           - resume-builder
           - prepare-transfer
@@ -19,8 +42,22 @@ on:
           - verify-import
           - stage-builder
           - stage-source
+          - stage-lineage
+          - qualify-source
+          - disable-pruning
+          - prepare-native-settings
+          - swap-builder-held
+          - verify-native-parity
+          - activate-native
+          - start-native
+          - stage-native-proofs
+          - export-native-controls
           - diagnose-roots
-        default: inspect
+          - plan-native-cleanup
+          - apply-native-cleanup
+          - prepare-object-store
+          - externalize-native-archive
+        default: inspect-supabase-host
       expected_deployed_sha:
         description: Exact current application commit on the host
         type: string
@@ -32,13 +69,19 @@ on:
         description: Prepared encrypted transfer session UUID
         type: string
       import_template_sha256:
-        description: SHA-256 of the received private import template
+        description: SHA-256 of the private import, supplement or activation template; final closure SHA for parity
         type: string
       import_profile_sha256:
         description: SHA-256 of the host-created native import profile
         type: string
+      qualification_fixture_sha256:
+        description: SHA-256 of the original saved native source replay fixture
+        type: string
       diagnostic_page:
         description: Page of RSA-sealed private metadata, starting at zero; all returns at most sixteen pages
+        type: string
+      supabase_bootstrap_sha256:
+        description: SHA-256 of the private code-only Supabase host bootstrap
         type: string
 
 concurrency:
@@ -55,16 +98,58 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        if: inputs.operation != 'inspect-supabase-root-access'
+      - name: Inspect existing root SSH access
+        if: inputs.operation == 'inspect-supabase-root-access'
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: root
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          timeout: 30s
+          command_timeout: 30s
+          script: |
+            set -euo pipefail
+            root_uid="$(id -u)"
+            test "$root_uid" = 0
+            printf '%s%s%s\n' '{' '"status":"supabase-root-access-verified","readOnly":true,"effectiveUid":0,"applicationInspected":false,"databaseAccessed":false,"filesWritten":false' '}'
       - name: Prepare reviewed operator
+        if: inputs.operation != 'inspect-supabase-root-access'
         id: prepare
         env:
           EXPECTED_DEPLOYED_SHA: ${{ inputs.expected_deployed_sha }}
+          OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
           [[ "$EXPECTED_DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ ]]
-          printf 'code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-handoff.mjs)" >> "$GITHUB_OUTPUT"
-          printf 'import_code=%s\n' "$(base64 -w0 .github/scripts/driver-audit-native-import.mjs)" >> "$GITHUB_OUTPUT"
+          printf 'code=%s\n' "$(gzip -cn .github/scripts/driver-audit-native-handoff.mjs | base64 -w0)" >> "$GITHUB_OUTPUT"
+          case "$OPERATION" in
+            inspect-supabase-host|prepare-supabase-host) operator=supabase-handoff ;;
+            inspect-supabase-routing|inspect-supabase-storage|inspect-supabase-disk-usage) operator=supabase-routing ;;
+            plan-supabase-log-archive) operator=supabase-log-archive ;;
+            archive-supabase-closed-logs) operator=supabase-log-compact ;;
+            prepare-supabase-serving|start-supabase-report|qualify-supabase-source-held|run-supabase-report-once) operator=supabase-control ;;
+            probe-supabase-canary|plan-supabase-canary|enable-supabase-canary|seal-supabase-canary-entry|restore-supabase-canary|promote-supabase-report) operator=supabase-canary-control ;;
+            export-supabase-release-inputs|export-supabase-previous-manifest|stage-supabase-source-release|start-supabase-source-sync) operator=supabase-release-control ;;
+            inspect-database-config) operator=database-check ;;
+            prepare-object-store|externalize-native-archive) operator=object-store ;;
+            plan-native-cleanup|apply-native-cleanup) operator=cleanup ;;
+            disable-pruning|prepare-native-settings) operator=settings ;;
+            swap-builder-held) operator=builder ;;
+            verify-native-parity) operator=parity ;;
+            activate-native|start-native) operator=activation ;;
+            stage-native-proofs|export-native-controls) operator=proofs ;;
+            *) operator=import ;;
+          esac
+          if [[ "$operator" == supabase-* ]]; then
+            operator_file=".github/scripts/driver-audit-$operator.mjs"
+          else
+            operator_file=".github/scripts/driver-audit-native-$operator.mjs"
+          fi
+          printf 'import_code=%s\n' "$(gzip -cn "$operator_file" | base64 -w0)" >> "$GITHUB_OUTPUT"
       - name: Run reviewed handoff operation
+        if: inputs.operation != 'inspect-supabase-root-access'
         uses: appleboy/ssh-action@v1.2.0
         env:
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
@@ -74,17 +159,20 @@ jobs:
           NATIVE_TRANSFER_PLAN_B64: ${{ inputs.transfer_plan_b64 }}
           NATIVE_TRANSFER_SESSION_ID: ${{ inputs.transfer_session_id }}
           NATIVE_IMPORT_CODE: ${{ steps.prepare.outputs.import_code }}
+          NATIVE_IMPORT_COMPRESSION: gzip-v1
           NATIVE_IMPORT_TEMPLATE_SHA256: ${{ inputs.import_template_sha256 }}
           NATIVE_IMPORT_PROFILE_SHA256: ${{ inputs.import_profile_sha256 }}
           NATIVE_DIAGNOSTIC_PAGE: ${{ inputs.diagnostic_page }}
+          NATIVE_QUALIFICATION_FIXTURE_SHA256: ${{ inputs.qualification_fixture_sha256 }}
+          SUPABASE_BOOTSTRAP_SHA256: ${{ inputs.supabase_bootstrap_sha256 }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
           command_timeout: 60m
-          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,NATIVE_HANDOFF_OPERATION,NATIVE_HANDOFF_CODE,NATIVE_TRANSFER_PLAN_B64,NATIVE_TRANSFER_SESSION_ID,NATIVE_IMPORT_CODE,NATIVE_IMPORT_TEMPLATE_SHA256,NATIVE_IMPORT_PROFILE_SHA256,NATIVE_DIAGNOSTIC_PAGE
+          envs: DO_APP_PATH,EXPECTED_DEPLOYED_SHA,NATIVE_HANDOFF_OPERATION,NATIVE_HANDOFF_CODE,NATIVE_TRANSFER_PLAN_B64,NATIVE_TRANSFER_SESSION_ID,NATIVE_IMPORT_CODE,NATIVE_IMPORT_COMPRESSION,NATIVE_IMPORT_TEMPLATE_SHA256,NATIVE_IMPORT_PROFILE_SHA256,NATIVE_DIAGNOSTIC_PAGE,NATIVE_QUALIFICATION_FIXTURE_SHA256,SUPABASE_BOOTSTRAP_SHA256
           script: |
-            set -e
+            set -euo pipefail
             cd -- "$DO_APP_PATH"
-            printf '%s' "$NATIVE_HANDOFF_CODE" | base64 -d | node --input-type=module - --run
+            printf '%s' "$NATIVE_HANDOFF_CODE" | base64 -d | gzip -dc | node --input-type=module - --run

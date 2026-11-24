@@ -836,12 +836,14 @@ export const calculateKitchenListEntry = ({ customer, selectedMeals: rawSelected
       // see isMatterCoreDoubleDay) the day carries twice the meals, but each
       // meal keeps its normal size: divide by the plan's meals per day, not by
       // the doubled row count.
-      const coreDoubleDay = isMatterCoreDoubleDay(dayKey, customer?.deliveryDates, customer?.doubleDeliveryDates);
+      const datedCoreInputs = customer?.coreInputsByDate?.[dayKey];
+      const coreDoubleDay = datedCoreInputs?.doubleDelivery
+        ?? isMatterCoreDoubleDay(dayKey, customer?.deliveryDates, customer?.doubleDeliveryDates);
       const coreMealCount = coreDoubleDay
-        ? Math.max(1, Number(customer?.mealsPerDay) || Math.round(dayMealCount / 2))
+        ? Math.max(1, datedCoreInputs?.mealsPerDay || Number(customer?.mealsPerDay) || Math.round(dayMealCount / 2))
         : dayMealCount;
-      const perMealCarbWeight = normalizedMacros.C / coreMealCount;
-      const perMealProteinWeight = normalizedMacros.P / coreMealCount;
+      const perMealCarbWeight = (datedCoreInputs?.carbs ?? normalizedMacros.C) / coreMealCount;
+      const perMealProteinWeight = (datedCoreInputs?.protein ?? normalizedMacros.P) / coreMealCount;
       const tableMatch = lookupMatterCoreMacros(perMealCarbWeight, perMealProteinWeight);
 
       const proteinWeight = Math.round(perMealProteinWeight);

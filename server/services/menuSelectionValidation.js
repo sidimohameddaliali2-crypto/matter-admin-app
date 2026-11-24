@@ -119,9 +119,9 @@ export function validateStaffMenuSelections({ menu, selections, existingSelectio
 
 export async function validatedMenuSelections({ menuId, selections, nutrition, staffRecord }) {
   if (!mongoose.isValidObjectId(menuId) || !nutrition) throw failure();
-  const menu = await Menu.findById(menuId).populate({ path: 'meals.items', model: 'MenuItem' }).lean();
   const profile = await resolveMenuAllergyProfile(nutrition);
-  // Unknown remains unknown: we do not create or confirm a missing allergy profile.
-  const inputs = { menu, selections, exclusions: nutrition.exclusions || [], allergies: profile.allergiesAvailable ? profile.allergies : [] };
+  if (!profile.allergiesAvailable) throw Object.assign(new Error('Allergy information is unavailable from Matter. Please retry or contact customer service before selecting meals.'), { statusCode: 502, code: 'MATTER_ALLERGENS_UNAVAILABLE' });
+  const menu = await Menu.findById(menuId).populate({ path: 'meals.items', model: 'MenuItem' }).lean();
+  const inputs = { menu, selections, exclusions: nutrition.exclusions || [], allergies: profile.allergies };
   return staffRecord ? validateStaffMenuSelections({ ...inputs, existingSelections: staffRecord.selectedMeals || [] }) : validateMenuSelections(inputs);
 }

@@ -4,7 +4,8 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { gunzipSync } from 'node:zlib';
-import { driverAuditSourceHash, readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory, writeDriverAuditSourceState } from '../services/driverAuditSource.js';
+import { driverAuditSourceHash, readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory, writeDriverAuditSourceState,
+  driverAuditSourceUsesAppBackend, driverAuditSourceBackendEnvironment, requireDriverAuditSourceBackend } from '../services/driverAuditSource.js';
 import { withDriverAuditHeavyWork } from '../services/driverAuditHeavyWork.js';
 import { hasDriverAuditBuildSpace } from '../services/driverAuditWorkspace.js';
 import { createBudgetedAuditArchive } from '../vendor/driver-audits/integration/cloud/driver-audit-archive.mjs';
@@ -24,9 +25,41 @@ const memorySafetyReserve = 512 * MiB;
 const priorSourcePeak = 4_086_464_512;
 const archiveDownloadLimit = 192 * MiB;
 const exec = promisify(execFile);
+const heldQualificationLeases = new WeakSet();
 
 function requireQualification(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+const sidiSupabase = config => (config.dataStore ?? config.environment?.DRIVER_AUDIT_DATA_STORE ?? 'supabase') === 'supabase'
+  && (config.executionHost ?? config.environment?.DRIVER_AUDIT_EXECUTION_HOST) === 'sidi';
+
+export function validateDriverAuditSourceTransferUsage(value) {
+  const exact = (item, fields) => item && typeof item === 'object' && !Array.isArray(item)
+    && Object.keys(item).length === fields.length && fields.every(field => Object.hasOwn(item, field));
+  const integer = (number, max = Number.MAX_SAFE_INTEGER) => Number.isSafeInteger(number) && number >= 0 && number <= max;
+  requireQualification(exact(value, ['version', 'basis', 'month', 'day', 'activeReservations', 'uncertainReservations'])
+    && value.version === 1 && value.basis === 'supabase-http-bytes-v1'
+    && integer(value.activeReservations, 4) && integer(value.uncertainReservations), 'Invalid Supabase transfer usage.');
+  for (const [name, limit, period] of [['month', 8 * 1024 ** 3, /^\d{4}-(?:0[1-9]|1[0-2])$/],
+    ['day', 512 * MiB, /^\d{4}-(?:0[1-9]|1[0-2])-\d{2}$/]]) {
+    const row = value[name];
+    requireQualification(exact(row, ['period', 'usedBytes', 'reservedBytes', 'limitBytes']) && period.test(row.period)
+      && row.limitBytes === limit && integer(row.usedBytes, limit) && integer(row.reservedBytes, limit)
+      && row.usedBytes + row.reservedBytes <= limit, 'Invalid Supabase transfer bounds.');
+  }
+  requireQualification(value.day.period.startsWith(value.month.period + '-')
+    && new Date(value.day.period + 'T00:00:00Z').toISOString().slice(0, 10) === value.day.period,
+  'Invalid Supabase transfer period.');
+  return structuredClone(value);
+}
+
+function requireSidiTransferUsage(receipt) {
+  const before = validateDriverAuditSourceTransferUsage(receipt.transferUsage?.before);
+  const after = validateDriverAuditSourceTransferUsage(receipt.transferUsage?.after);
+  requireQualification(['month', 'day'].every(name => after[name].period >= before[name].period
+    && (after[name].period !== before[name].period || after[name].usedBytes >= before[name].usedBytes)),
+  'Supabase transfer counters changed during qualification.');
 }
 
 async function readArchiveBytes(archive, key, maxBytes, signal) {
@@ -149,6 +182,7 @@ export function runDriverAuditQualificationChild({ mode, inputFile, executable, 
       root, path.join(serverRoot, 'package.json'), path.join(serverRoot, 'services', 'driverAuditSource.js'),
       path.join(serverRoot, 'services', 'driverAuditFixedHostBudget.js'),
       path.join(serverRoot, 'services', 'driverAuditReadCache.js'),
+      path.join(serverRoot, 'services', 'driverAuditPollProgress.js'),
       path.join(serverRoot, 'vendor', 'driver-audits', 'integration', 'hosted', 'worker-lock.mjs'),
       ...(archiveCacheDirectory ? [archiveCacheDirectory] : []), ...readRoots,
     ].map(file => '--allow-fs-read=' + file)],
@@ -203,18 +237,113 @@ export function runDriverAuditQualificationChild({ mode, inputFile, executable, 
   return { result, pid: child.pid, async stop() { stop(); await stopped; await pendingReads; } };
 }
 
-function checkedWorkers(rows) {
-  return ['matter-delivery-api', 'matter-driver-audit-sync'].map(name => {
+export function driverAuditSourceQualificationWorkers(rows, config) {
+  const sidi = config && sidiSupabase(config);
+  const workers = [sidi ? 'matter-driver-reports-api' : 'matter-delivery-api', 'matter-driver-audit-sync'].map(name => {
     const matches = rows.filter(row => row.name === name);
     const row = matches[0];
     requireQualification(matches.length === 1 && row.pm2_env?.status === 'online'
       && Number.isSafeInteger(row.pid) && row.pid > 0, 'Matching online API and audit sync are required.');
     return row;
   });
+  if (sidi) {
+    const api = workers[0], env = api.pm2_env;
+    requireQualification(Number.isInteger(api.pm_id) && env.pm_exec_path === path.join(serverRoot, 'scripts/driverAuditHttp.js')
+      && env.pm_cwd === serverRoot && (env.args === undefined || Array.isArray(env.args) && env.args.length === 0)
+      && path.isAbsolute(env.exec_interpreter ?? '') && env.exec_interpreter === config.nodeExecutable,
+    'Sidi qualification requires the exact managed report HTTP script and interpreter.');
+  }
+  return workers;
+}
+
+async function checkedWorkers(rows, config) {
+  const workers = driverAuditSourceQualificationWorkers(rows, config);
+  if (config && sidiSupabase(config)) {
+    const actual = await fs.realpath('/proc/' + workers[0].pid + '/exe');
+    requireQualification(actual === await fs.realpath(config.nodeExecutable)
+      && actual === await fs.realpath(workers[0].pm2_env.exec_interpreter),
+    'The actual report HTTP process differs from its qualified Node executable.');
+  }
+  return workers;
 }
 
 const noSourceActive = rows => requireQualification(rows.filter(row => row.name === 'matter-driver-audit-source')
   .every(row => row.pm2_env?.status === 'stopped'), 'Stop the source worker before pre-switch qualification.');
+
+function qualificationHeavyRoot(config) {
+  requireQualification(typeof config?.root === 'string' && path.isAbsolute(config.root), 'A private source qualification root is required.');
+  return path.join(path.dirname(path.dirname(config.root)), 'driver-audit-heavy-work');
+}
+
+function checkedStoppedSync(rows, expectedRoot) {
+  requireQualification(Array.isArray(rows), 'Managed worker inspection is unavailable.');
+  noSourceActive(rows);
+  const matches = rows.filter(row => row.name === 'matter-driver-audit-sync');
+  requireQualification(matches.length === 1 && matches[0].pm2_env?.status === 'stopped',
+    'A stopped managed audit sync is required.');
+  const { root } = managedSyncConfig(matches[0]);
+  requireQualification(expectedRoot === undefined || root === expectedRoot, 'Managed sync configuration changed during qualification.');
+  return root;
+}
+
+// The sync process must be real and online for the existing PID/RSS checks,
+// while its build/publication work stays queued behind this actual source
+// lease. The private token is never supplied to lifecycle callbacks or JSON.
+async function runDriverAuditHeldQualificationSync({ config, supervisor, startSync, stopSync, signal }, operation) {
+  requireQualification(typeof supervisor === 'function' && typeof startSync === 'function' && typeof stopSync === 'function',
+    'Managed qualification lifecycle callbacks are required.');
+  requireQualification(typeof operation === 'function', 'A held qualification operation is required.');
+  const root = qualificationHeavyRoot(config);
+  const controller = new AbortController();
+  const interrupt = () => controller.abort(Object.assign(new Error('Host qualification interrupted.'), { code: 'interrupted' }));
+  const interrupts = ['SIGTERM', 'SIGINT', 'SIGHUP'];
+  const lifecycleSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+  // Persistent handlers also protect startup and repeated interruption during
+  // cleanup. Remove only these handlers after observed stop AND lock release.
+  for (const event of interrupts) process.on(event, interrupt);
+  try {
+    const result = await withDriverAuditHeavyWork({ root, owner: 'source',
+      signal: AbortSignal.any([lifecycleSignal, AbortSignal.timeout(120_000)]) }, async () => {
+      const syncRoot = checkedStoppedSync(await supervisor());
+      lifecycleSignal.throwIfAborted();
+      const heldQualificationLease = Object.freeze({ root });
+      heldQualificationLeases.add(heldQualificationLease);
+      try {
+        await startSync();
+        lifecycleSignal.throwIfAborted();
+        const result = await operation(heldQualificationLease, lifecycleSignal);
+        lifecycleSignal.throwIfAborted();
+        return result;
+      } finally {
+        heldQualificationLeases.delete(heldQualificationLease);
+        // A failed pause/inspection must not release admission to the queued
+        // worker. Cancellation ends qualification, but never cancels this stop.
+        for (;;) {
+          let pauseCompleted = false;
+          try { await stopSync(); pauseCompleted = true; } catch { /* Inspect below, then retry the durable pause. */ }
+          try { checkedStoppedSync(await supervisor(), syncRoot); if (pauseCompleted) break; }
+          catch { /* Retain admission while a process is online or inspection fails. */ }
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+    });
+    lifecycleSignal.throwIfAborted();
+    return result;
+  } finally { for (const event of interrupts) process.off(event, interrupt); }
+}
+
+// Existing online host-verification callbacks may share the safe lifecycle,
+// but receive no capability to bypass qualification's nested heavy admission.
+export function withDriverAuditHeldQualificationSync(options, operation) {
+  requireQualification(typeof operation === 'function', 'A held qualification operation is required.');
+  return runDriverAuditHeldQualificationSync(options, () => operation());
+}
+
+export function qualifyDriverAuditSourceWhileHeld({ config, commit, fixtureSha256, supervisor, startSync, stopSync, signal }) {
+  return runDriverAuditHeldQualificationSync({ config, supervisor, startSync, stopSync, signal },
+    (heldQualificationLease, externalSignal) => qualifyDriverAuditSource({ config, commit, fixtureSha256, supervisor,
+      heldQualificationLease, externalSignal }));
+}
 
 function managedSyncConfig(sync) {
   const [flag, file, ...extra] = sync.pm2_env.args ?? [];
@@ -231,7 +360,7 @@ export function driverAuditSyncArchiveCacheDirectory(sync) {
   return path.join(managedSyncConfig(sync).work, 'archive-cache');
 }
 
-async function builderInputs(sync, { native = false } = {}) {
+async function builderInputs(sync, { managedArchiveCache = false } = {}) {
   const { root, work, file } = managedSyncConfig(sync);
   const config = await readJson(file);
   requireQualification(config.version === 1 && config.root === root && config.codeRoot === path.join(root, 'builder')
@@ -239,9 +368,9 @@ async function builderInputs(sync, { native = false } = {}) {
     && config.journals?.path === path.join(root, 'validation-journals.private.json')
     && config.rendererBuild?.path === path.join(config.baselineRoot, 'build.private.json'), 'Pinned builder configuration differs.');
   await verifyAuditBuilder(config.codeRoot, config.builderSha256);
-  if (native) {
+  if (managedArchiveCache) {
     const { supportsManagedArchiveCache } = await import(pathToFileURL(path.join(config.codeRoot, 'integration/cloud/automatic-release-source.mjs')).href);
-    requireQualification(supportsManagedArchiveCache === true, 'The builder must delegate native cache ownership.');
+    requireQualification(supportsManagedArchiveCache === true, 'The builder must delegate managed cache ownership.');
   }
   const { compactDirectBuildVersion } = await import(pathToFileURL(path.join(config.codeRoot, 'integration/cloud/automatic-release-build.mjs')).href);
   const compact = compactDirectBuildVersion === 1;
@@ -347,11 +476,15 @@ function archiveForBuilder({ archive, root, signal }) {
   return { read, stats: () => ({ objects: files.size, bytes }) };
 }
 
-export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, supervisor }) {
+export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, supervisor, heldQualificationLease, externalSignal }) {
+  requireQualification(heldQualificationLease === undefined || heldQualificationLeases.has(heldQualificationLease)
+    && heldQualificationLease.root === qualificationHeavyRoot(config), 'An owned qualification lease is required.');
+  externalSignal?.throwIfAborted();
   requireQualification(process.platform === 'linux' && hashPattern.test(fixtureSha256 ?? ''), 'Exact Linux host qualification is required.');
   const first = await supervisor();
+  externalSignal?.throwIfAborted();
   noSourceActive(first);
-  const [api, sync] = checkedWorkers(first);
+  const [api, sync] = await checkedWorkers(first, config);
   if (config.archiveCacheDirectory) {
     requireQualification(config.archiveCacheDirectory === driverAuditSyncArchiveCacheDirectory(sync),
       'Source and builder archive cache directories differ.');
@@ -361,17 +494,21 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
   requireQualification(entrypoint, 'Saved source collector schedule is unavailable.');
   const secret = config.environment.MATTER_SUPABASE_SECRET;
   const native = config.environment.DRIVER_AUDIT_DATA_STORE === 'mongo';
-  const backend = native ? await openDriverAuditDataBackend({
-    env: { ...process.env, DRIVER_AUDIT_DATA_STORE: 'mongo' }, staging: true,
+  const sidi = sidiSupabase(config), appBackend = driverAuditSourceUsesAppBackend(config);
+  const backend = appBackend ? await openDriverAuditDataBackend({
+    env: driverAuditSourceBackendEnvironment(config), staging: true,
   }) : null;
   try {
+    if (backend) requireDriverAuditSourceBackend({ ...config, dataStore: native ? 'mongo' : 'supabase' }, backend);
+    externalSignal?.throwIfAborted();
     const rpc = backend?.rpc || createHostedRpc({ secret });
     const remote = backend?.archive || createSupabaseArchiveTransport({ secret });
     await remote.assertPrivate();
+    externalSignal?.throwIfAborted();
     const { readBounded } = createBudgetedAuditArchive({ rpc, state: createCloudState({ rpc }), remote, receiptRoot: config.root,
       requestBytes: 4096 + 2 * Buffer.byteLength(secret || ''), approvedNovemberRelease: true,
       approvedNovemberSync: true, approvedNovemberRecovery: true, approvedNovemberOvernight: true,
-      budgetOverride: native ? driverAuditLocalReaderBudget : undefined });
+      budgetOverride: sidi ? backend.archiveReadBudget : native ? driverAuditLocalReaderBudget : undefined });
     const archive = { readObject: readBounded };
     const directory = await fs.mkdtemp(path.join(config.root, 'host-qualification-'));
     const privateRoot = path.dirname(path.dirname(config.root));
@@ -379,9 +516,11 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
     const receipt = { version: 1, verified: false, status: 'partial', commit, configSha256: config.configSha256,
       manifestSha256: config.manifestSha256, environmentSha256: config.environmentReference.sha256,
       fixtureSha256, nodeExecutable: config.nodeExecutable, nodeVersion: config.nodeVersion,
-      source: null, builder: null, sourceAfterBuilder: null, measurements: observations };
+      source: null, builder: null, sourceAfterBuilder: null, measurements: observations,
+      ...(sidi ? { dataStore: 'supabase', executionHost: 'sidi', transferAccounting: 'supabase-http-bytes-v1',
+        transferUsage: { before: validateDriverAuditSourceTransferUsage(await backend.readTransferUsage()) } } : {}) };
     const controller = new AbortController();
-    const { signal } = controller;
+    const signal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
     const interrupt = () => controller.abort(Object.assign(new Error('Host qualification interrupted.'), { code: 'interrupted' }));
     const interrupts = ['SIGTERM', 'SIGINT', 'SIGHUP'];
     for (const event of interrupts) process.once(event, interrupt);
@@ -409,7 +548,8 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
         await fs.mkdir(root, { mode: 0o700 });
         const inputFile = path.join(root, 'input.private.json');
         await writeDriverAuditSourceState(inputFile, { root, ...saved, runtimeRoot: config.runtimeRoot, entrypoint,
-          failPublication, archiveCacheDirectory, nativeReplay: native });
+          failPublication, archiveCacheDirectory, nativeReplay: native, sidiReplay: sidi,
+          nativePollProgress: appBackend && config.runtime.files.some(file => file.path === 'source/integration/cloud/native-poll-progress.mjs') });
         const child = await measureChild({ phase, retained, measure, signal, specification: { mode: 'source', root, inputFile,
           executable: process.execPath, args: ['--max-old-space-size=3072'], readRoots: [directory, config.runtimeRoot],
           timeoutMs: entrypoint.maxDurationSeconds * 1000, archiveCacheDirectory } });
@@ -418,8 +558,7 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
           return { root, result: child.result };
         } finally { await child.stop(); }
       }
-      await withDriverAuditHeavyWork({ root: path.join(privateRoot, 'driver-audit-heavy-work'), owner: 'source',
-        signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]) }, async () => {
+      const replay = async () => {
         const source = await runSource('source', [], true);
         receipt.source = source.result;
         const available = await freeDisk(directory);
@@ -428,7 +567,7 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
           return;
         }
         let builderConfiguration;
-        try { builderConfiguration = await builderInputs(sync, { native }); }
+        try { builderConfiguration = await builderInputs(sync, { managedArchiveCache: appBackend }); }
         catch { receipt.blocked = { phase: 'builder', reason: 'configuration' }; return; }
         const { builder, compact, executable, nodeVersion, args } = builderConfiguration;
         const diskReserve = { start: (compact ? 1024 : 2560) * MiB, inProgress: (compact ? 256 : 2560) * MiB };
@@ -450,7 +589,7 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
           await stageBuilderBaseline(builder.baselineRoot, workingBaseline, builder.baselineManifestSha256, diskReserve.start, signal);
           await writeDriverAuditSourceState(inputFile, { root, objectsRoot: saved.objectsRoot, sourceRoot: source.root,
             builder: { ...builder, baselineRoot: workingBaseline, archiveBaseline: builder.baselineRoot }, diskReserve,
-            nativeReplay: native, archiveCacheDirectory });
+            nativeReplay: native, sidiReplay: sidi, archiveCacheDirectory });
           builderChild = await measureChild({ phase: 'builder', measure, signal, specification: { mode: 'builder', root, inputFile, executable, args,
             readRoots: [directory, builder.codeRoot, builder.baselineRoot, builder.cacheRoot, builder.initialBaseline, builder.journals.path],
             archiveCacheDirectory,
@@ -461,17 +600,27 @@ export async function qualifyDriverAuditSource({ config, commit, fixtureSha256, 
           receipt.sourceAfterBuilder = (await runSource('source-after-builder', [['builder', builderChild.pid]], false, source.result.peakRssBytes)).result;
           requireQualification(await memoryForProcess(builderChild.pid), 'Builder exited before retained-memory qualification.');
           requireSharedArchiveCache(config, builder, receipt);
+          if (sidi) {
+            receipt.transferUsage.after = validateDriverAuditSourceTransferUsage(await backend.readTransferUsage());
+            requireSidiTransferUsage(receipt);
+          }
           receipt.verified = true;
           receipt.status = 'verified';
         } catch (error) {
           receipt.blocked = { phase: receipt.builder ? 'source-after-builder' : 'builder',
             reason: ['disk', 'memory', 'budget', 'timeout', 'interrupted'].includes(error.code) ? error.code : 'replay' };
         } finally { await builderChild?.stop(); }
-      });
+      };
+      if (heldQualificationLease) {
+        requireQualification(heldQualificationLeases.has(heldQualificationLease)
+          && heldQualificationLease.root === path.join(privateRoot, 'driver-audit-heavy-work'), 'An owned qualification lease is required.');
+        await replay();
+      } else await withDriverAuditHeavyWork({ root: path.join(privateRoot, 'driver-audit-heavy-work'), owner: 'source',
+        signal: AbortSignal.any([signal, AbortSignal.timeout(120_000)]) }, replay);
       signal.throwIfAborted();
       const after = await supervisor();
       noSourceActive(after);
-      const workers = checkedWorkers(after);
+      const workers = await checkedWorkers(after, config);
       requireQualification([api, sync].every((row, i) => workers[i].pid === row.pid
         && workers[i].pm2_env.pm_uptime === row.pm2_env.pm_uptime), 'Managed API or audit sync changed during qualification.');
     } catch (error) {
@@ -495,12 +644,13 @@ function requireSharedArchiveCache(config, builder, receipt) {
   if (!config.archiveCacheDirectory) return;
   const cold = receipt.source?.archiveReads;
   const warm = receipt.sourceAfterBuilder?.archiveReads;
+  const sidi = sidiSupabase(config), managed = driverAuditSourceUsesAppBackend(config);
+  const cacheFlag = sidi ? 'managedArchiveCache' : 'nativeManagedArchiveCache';
+  const enabledFlag = sidi ? 'archiveCacheEnabled' : 'nativeArchiveCacheEnabled';
   requireQualification(config.archiveCacheDirectory === builder.cacheRoot
     && receipt.sourceArchiveCacheDirectory === builder.cacheRoot
-    && (config.environment?.DRIVER_AUDIT_DATA_STORE !== 'mongo'
-      || [receipt.source, receipt.sourceAfterBuilder].every(row => row.nativeManagedArchiveCache === true
-        && row.nativeArchiveCacheEnabled === true)
-        && receipt.builder.nativeArchiveCacheEnabled === true)
+    && (!managed || [receipt.source, receipt.sourceAfterBuilder, receipt.builder].every(row => row?.[cacheFlag] === true
+      && row[enabledFlag] === true))
     && [cold, warm].every(item => Number.isSafeInteger(item?.requests) && item.requests >= 0
       && Number.isSafeInteger(item?.bytes) && item.bytes >= 0)
     && warm.requests < cold.requests && warm.bytes < cold.bytes,
@@ -514,6 +664,8 @@ export async function verifyDriverAuditSourceHostQualification({ config, commit,
   const raw = await readPrivateDriverAuditSource(file);
   requireQualification(driverAuditSourceHash(raw) === reference.receiptSha256, 'Host qualification receipt integrity failure.');
   const receipt = JSON.parse(raw);
+  const sidi = sidiSupabase(config), managed = driverAuditSourceUsesAppBackend(config);
+  const cacheFlag = sidi ? 'managedArchiveCache' : 'nativeManagedArchiveCache';
   requireQualification(receipt.version === 1 && receipt.status === 'verified' && receipt.verified === true
     && Number.isFinite(Date.parse(receipt.checkedAt)) && Date.parse(receipt.checkedAt) <= Date.now()
     && receipt.fixtureSha256 === reference.fixtureSha256 && receipt.commit === commit && receipt.configSha256 === config.configSha256
@@ -521,13 +673,12 @@ export async function verifyDriverAuditSourceHostQualification({ config, commit,
     && receipt.nodeExecutable === config.nodeExecutable && receipt.nodeVersion === config.nodeVersion
     && [receipt.source, receipt.sourceAfterBuilder].every(row => row?.status === 'verified' && row.platform === 'linux'
       && row.nodeVersion === config.nodeVersion && row.networkAttempts === 0
-      && (config.environment?.DRIVER_AUDIT_DATA_STORE !== 'mongo'
+      && (!managed
         || row.executionAdmission === 'fixed-host-v1' && row.executionLedgersPreserved === true
-          && row.nativeManagedArchiveCache === true))
+          && row[cacheFlag] === true))
     && receipt.source.failureRetry === true && receipt.builder?.status === 'verified' && receipt.builder.platform === 'linux'
-    && (config.environment?.DRIVER_AUDIT_DATA_STORE !== 'mongo' || receipt.builder.nativeManagedArchiveCache === true)
+    && (!managed || receipt.builder[cacheFlag] === true)
     && receipt.builder.networkAttempts === 0 && receipt.builder.builderSha256 === builder.builderSha256
-    && (config.environment?.DRIVER_AUDIT_DATA_STORE !== 'mongo' || receipt.builder.nativeManagedArchiveCache === true)
     && receipt.builder.rendererSha256 === builder.rendererBuild.sha256 && receipt.builder.journalsSha256 === builder.journals.sha256
     && receipt.builder.nodeExecutable === nodeExecutable && receipt.builder.nodeVersion === nodeVersion
     && JSON.stringify(receipt.builder.nodeArgs) === JSON.stringify(nodeArgs)
@@ -535,6 +686,22 @@ export async function verifyDriverAuditSourceHostQualification({ config, commit,
       && receipt.measurements[phase].peakApiRssBytes > 0 && receipt.measurements[phase].peakSyncRssBytes > 0
       && receipt.measurements[phase].minimumAvailableBytes >= memorySafetyReserve),
   'Host qualification is incomplete or the reviewed runtime changed.');
+  if (sidi) {
+    requireQualification(receipt.dataStore === 'supabase' && receipt.executionHost === 'sidi'
+      && receipt.transferAccounting === 'supabase-http-bytes-v1'
+      && [receipt.source, receipt.sourceAfterBuilder, receipt.builder].every(row => row.dataStore === 'supabase'
+        && row.executionHost === 'sidi')
+      && [receipt.source, receipt.sourceAfterBuilder].every(row => row.transferAccounting === 'supabase-http-bytes-v1'),
+    'The exact Sidi Supabase qualification is incomplete or changed.');
+    requireSidiTransferUsage(receipt);
+  }
+  if (managed
+      && config.runtime?.files?.some(file => file.path === 'source/integration/cloud/native-poll-progress.mjs')) {
+    requireQualification([receipt.source, receipt.sourceAfterBuilder].every(row => row[sidi ? 'pollProgressDuplicateFree' : 'nativeNoChangeDuplicateFree'] === true
+      && row.outputObjects === 0) && receipt.source.failureKind === 'progress'
+      && receipt.sourceAfterBuilder.failureKind === null,
+    'App polling progress needs exact original replay, zero new evidence objects and a verified interrupted retry.');
+  }
   requireSharedArchiveCache(config, builder, receipt);
   return receipt;
 }
@@ -542,9 +709,9 @@ export async function verifyDriverAuditSourceHostQualification({ config, commit,
 export async function requireDriverAuditSourceHostQualification({ config, commit, reference, supervisor }) {
   const rows = await supervisor();
   noSourceActive(rows);
-  const [, sync] = checkedWorkers(rows);
+  const [, sync] = await checkedWorkers(rows, config);
   const { builder, compact, executable, nodeVersion, args } = await builderInputs(sync,
-    { native: config.environment?.DRIVER_AUDIT_DATA_STORE === 'mongo' });
+    { managedArchiveCache: driverAuditSourceUsesAppBackend(config) });
   if (config.archiveCacheDirectory) {
     await requirePrivateDriverAuditSourceDirectory(builder.cacheRoot);
     requireQualification(hasDriverAuditBuildSpace(await freeDisk(builder.cacheRoot), { compact }),

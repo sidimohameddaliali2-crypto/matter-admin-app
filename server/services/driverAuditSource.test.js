@@ -14,7 +14,9 @@ import {
   writeDriverAuditSourceState,
   readDriverAuditSourceConfig,
   verifyDriverAuditSourceRelease,
+  driverAuditReportingFunctionCatalogSha256,
   runDriverAuditSourceChild,
+  driverAuditSourceBackendEnvironment,
 } from './driverAuditSource.js';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -293,6 +295,20 @@ test('source configuration pins its qualified executable path', async t => {
   await assert.rejects(readDriverAuditSourceConfig(f.configFile), /executable|Node/i);
 });
 
+test('Sidi Supabase backend selection excludes inherited native connection settings without changing either input', () => {
+  const config = { executionHost: 'sidi', dataStore: 'supabase', environment: {
+    DRIVER_AUDIT_EXECUTION_HOST: 'sidi', MATTER_SUPABASE_SECRET: 'fictional-staged-source' } };
+  const app = { DRIVER_AUDIT_DATA_STORE: 'mongo', MONGODB_URI: 'mongodb://fixture.invalid/never-open',
+    DRIVER_AUDIT_NATIVE_CAPACITY_BYTES: '17179869184', DRIVER_AUDIT_SUPABASE_SECRET: 'fictional-inherited-alias' };
+  const before = structuredClone({ config, app });
+  const environment = driverAuditSourceBackendEnvironment(config, app);
+  assert.equal(environment.DRIVER_AUDIT_DATA_STORE, 'supabase');
+  assert.equal(environment.MONGODB_URI, undefined);
+  assert.equal(environment.DRIVER_AUDIT_NATIVE_CAPACITY_BYTES, undefined);
+  assert.equal(environment.DRIVER_AUDIT_SUPABASE_SECRET, 'fictional-staged-source');
+  assert.deepEqual({ config, app }, before);
+});
+
 test('cutover requires fresh hash-pinned recovery, parity, credential and stopped-source receipts', async t => {
   const f = await configuredFixture(t);
   const now = new Date(minute);
@@ -408,6 +424,294 @@ test('native cutover accepts identified database capability evidence without cla
   assert.equal(checked.release.initialCursor, f.release.initialCursor);
   assert.equal(f.fence.writersStopped, false);
   assert.equal(f.proofs.drainAudit.uncertainAttempts.afterCount, 5);
+});
+
+async function hostingAdmissionFixture(t) {
+  const f = await capabilityFenceFixture(t), cap = f.proofs.capabilityAudit;
+  Object.assign(f.config, { dataStore: 'supabase', executionHost: 'sidi', environment: { DRIVER_AUDIT_EXECUTION_HOST: 'sidi' } });
+  Object.assign(f.release, { verifiedAt: '2026-11-16T04:15:00.000Z' });
+  Object.assign(f.fence, { mode: 'reporting-hosting-admission-v1', oldHostingAdmissionsFenced: true,
+    sharedReportingRpcWritesUsable: true, checkedAt: '2026-11-16T04:14:30.000Z' });
+  for (const row of cap.functions) {
+    row.aclSha256 = row.beforeAclSha256;
+    row.apiExecutableRoles = [...row.beforeApiExecutableRoles];
+  }
+  const internal = cap.functions.find(row => row.identity.startsWith('matter_reporting_hosted.state_cas_internal('));
+  internal.definitionSha256 = hash('fictional-hosting-admission-guard');
+  Object.assign(f.fence, { hostingAdmissionSqlSha256: hash('hosting-sql'), hostingGuardDefinitionSha256: internal.definitionSha256 });
+  Object.assign(cap, { kind: 'reporting-hosting-admission-audit', checkedAt: f.fence.checkedAt,
+    oldHostingAdmissionsFenced: true, sharedReportingRpcWritesUsable: true, paidGradingPolicyUnchanged: true });
+  const origin = { version: 1, verified: true, kind: 'reporting-hosting-admission-origin-v1',
+    sourceProjectRef: f.fence.sourceProjectRef, executionId: 'hosting-origin-1', sqlSha256: hash('hosting-sql'),
+    transactionId: '234567', backendPid: 321, commitBeforeAt: f.fence.admissionBlockedAt,
+    commitAfterAt: '2026-11-16T04:00:11.000Z', admissionBlockedAt: f.fence.admissionBlockedAt,
+    beforeObservationAt: '2026-11-16T04:00:09.000Z', afterObservationAt: '2026-11-16T04:00:12.000Z',
+    beforeObservationSha256: hash('hosting-before'), afterObservationSha256: hash('hosting-after'),
+    legacyRuntimeSha256: f.fence.legacyRuntimeSha256, legacyEntrypointsSha256: f.fence.legacyEntrypointsSha256,
+    originalInternalDefinitionSha256: internal.beforeDefinitionSha256, hostingGuardDefinitionSha256: internal.definitionSha256,
+    guardFunctionIdentity: internal.identity, oldHostingAdmissionsFenced: true, sharedReportingRpcWritesUsable: true,
+    paidGradingPolicyUnchanged: true, originalRolesSchemasRelationsAndGallaboxPreserved: true,
+    cronJobsDisabled: [4, 5], hostingBudgetPolicyCount: 11, applied: true, alreadyClosed: false, reapplied: false };
+  origin.appRpcFunctions = ['progress_read(text)', 'progress_cas(text,uuid,bigint,bigint,text,text,text,text)',
+    'photo_alias_read(text)', 'photo_alias_register(text,jsonb)', 'read_egress_read()',
+    'read_egress_reserve(uuid,bigint,bigint)', 'read_egress_settle(uuid,bigint,bigint)'].map(signature => ({
+    identity: 'public.matter_hosted_app_' + signature, owner: 'postgres', definitionSha256: hash('definition-' + signature),
+    aclSha256: hash('acl-' + signature), apiExecutableRoles: ['service_role'] }));
+  const appCatalog = hash(JSON.stringify([...origin.appRpcFunctions].sort((left, right) => left.identity < right.identity ? -1 : 1)));
+  Object.assign(origin, { appRpcCatalogSha256: appCatalog, beforeAppRpcCatalogSha256: appCatalog, afterAppRpcCatalogSha256: appCatalog });
+  f.fence.appRpcCatalogSha256 = cap.appRpcCatalogSha256 = appCatalog;
+  origin.appHelperFunctions = ['compact_json(json,integer)', 'deny_alias_change()', 'egress_summary(timestamp with time zone)',
+    'matches_schema(jsonb,jsonb)', 'progress_schema(boolean)', 'prune_egress(timestamp with time zone)',
+    'valid_alias(text,jsonb)', 'valid_key(text)', 'valid_scalar(jsonb,text,integer)', 'validate_progress(text,text)',
+    'validation_progress_schema()'].map(signature => ({ identity: 'matter_reporting_app.' + signature, owner: 'postgres',
+    definitionSha256: hash('private-definition-' + signature), aclSha256: hash('private-acl-' + signature), apiExecutableRoles: [] }));
+  const appHelperCatalog = hash(JSON.stringify([...origin.appHelperFunctions].sort((left, right) => left.identity < right.identity ? -1 : 1)));
+  Object.assign(origin, { appHelperCatalogSha256: appHelperCatalog, beforeAppHelperCatalogSha256: appHelperCatalog,
+    afterAppHelperCatalogSha256: appHelperCatalog });
+  f.fence.appHelperCatalogSha256 = cap.appHelperCatalogSha256 = appHelperCatalog;
+  f.config.runtime.entrypoints = Array.from({ length: 13 }, (_, index) => ({ ...f.config.runtime.entrypoints[0], id: 'original-job-' + index }));
+  const requestHandlers = ['collector', 'index', 'morning-gps', 'private-validation', 'qualify-publication', 'qualify']
+    .map(name => ({ module: 'source/api/' + name + '.mjs', exportName: 'default', maxDurationSeconds: 300 }));
+  const directPaths = [
+    ...['/api/collector', '/api/collector?task=auto', '/api/collector?verify=1', '/api/collector?verify=photo']
+      .map(path => ({ module: 'source/api/collector.mjs', method: 'GET', path, admission: 'worker-or-reader-budget-before-operation' })),
+    { module: 'source/api/qualify.mjs', method: 'POST', path: '/api/qualify', admission: 'worker-budget-before-qualification' },
+    { module: 'source/api/qualify-publication.mjs', method: 'POST', path: '/api/qualify-publication', admission: 'permanently-closed-503' },
+    ...['delivery-identities', 'fresh-run', 'api-refresh', 'reviews/migrate'].map(name => ({ module: 'source/api/index.mjs',
+      method: 'POST', path: '/api/reporting/' + name, admission: 'reader-budget-before-service-initialization' })),
+    { module: 'source/api/index.mjs', method: 'POST', path: '/api/reporting/reviews', admission: 'intentionally-preserved-human-review-write' }];
+  const graph = { version: 1, kind: 'legacy-hosting-admission-review', verified: true, sourceProjectRef: f.fence.sourceProjectRef,
+    legacyRuntimeSha256: f.fence.legacyRuntimeSha256, legacyEntrypointsSha256: f.fence.legacyEntrypointsSha256,
+    coveredEntrypoints: 13, maximumRuntimeMs: 300000, graceMs: 60000,
+    allProviderNetworkRequiresCommittedAdmission: true, paidModelCallsAdditionallyRequireUniquePaidAttempt: true,
+    gradeResultDurableBeforePaidSettlement: true, sharedHumanReviewWritesRemainAllowed: true,
+    actualWorkDrainedByThisReview: false, cronProcessesStopped: false, allDatabaseWritesFenced: false,
+    paidLedgerFrozen: false, productionSqlExecuted: false, sourceMutations: 0,
+    entrypoints: structuredClone(f.config.runtime.entrypoints), requestHandlers, directPaths,
+    originalFiles: Array.from({ length: 131 }, (_, index) => ({ path: 'source/original-' + index + '.mjs', bytes: 1, sha256: hash('original-' + index) })),
+    localFixture: { fixtureSha256: hash('graph-fixture'), logSha256: hash('graph-log'), groups: 5, scheduleCases: 13,
+      manualAndPreviewCases: 11, sourceCalls: 0, providerCalls: 0, actualDatabaseCalls: 0 } };
+  const fingerprints = Object.fromEntries(['hostingLedgers', 'admissionGraph', 'providerWork', 'leases'].map(key => [key, hash('hosting-' + key)]));
+  origin.afterHostingControlSha256 = cap.hostingControlSha256 = fingerprints.admissionGraph;
+  const uncertain = { ...f.proofs.drainAudit.uncertainAttempts, scope: 'baseline-subset', beforeTotalCount: 6, afterTotalCount: 6 };
+  Object.assign(f.proofs.drainAudit, { kind: 'reporting-hosting-drain-audit', checkedAt: '2026-11-16T04:06:20.000Z',
+    possibleReportingHttpQueue: 0, uncertainAttempts: uncertain, hostingControlSha256: fingerprints.admissionGraph });
+  Object.assign(f.proofs.quietAudit, { kind: 'reporting-hosting-quiet-window', checkedAt: '2026-11-16T04:11:30.000Z',
+    samples: [{ id: 'hosting-sample-before', sha256: hash('hosting-sample-before'), at: '2026-11-16T04:06:30.000Z', fingerprints },
+      { id: 'hosting-sample-after', sha256: hash('hosting-sample-after'), at: '2026-11-16T04:11:30.000Z', fingerprints: { ...fingerprints } }] });
+  Object.assign(f.backup.uncertainAttemptsBaseline, { sha256: hash('original-whole-paid-ledger'), subsetSha256: 'c'.repeat(64) });
+  f.release.backup = await f.save('backup', f.backup);
+  const checkpoint = f.proofs.checkpoint;
+  Object.assign(checkpoint, { checkedAt: '2026-11-16T04:14:00.000Z', capturedAt: '2026-11-16T04:12:00.000Z',
+    uncertainAttempts: { ...uncertain }, hostingFingerprints: fingerprints,
+    collectorBodySha256: hash('actual-collector'), reviewBodySha256: hash('actual-review'),
+    sourceReadback: { checkedAt: '2026-11-16T04:14:00.000Z', collectorRevision: 7, reviewRevision: 1,
+      collectorBodySha256: hash('actual-collector'), reviewBodySha256: hash('actual-review') } });
+  checkpoint.backupReceiptSha256 = f.release.backup.sha256;
+  const parity = { version: 1, verified: true, kind: 'supabase-sidi-source-parity-v1', dataStore: 'supabase',
+    configSha256: f.config.configSha256, runtimeManifestSha256: f.config.manifestSha256,
+    environmentSha256: f.config.environmentReference.sha256, collectorRevision: 7, reviewRevision: 1,
+    collectorBodySha256: checkpoint.collectorBodySha256, reviewBodySha256: checkpoint.reviewBodySha256,
+    hostQualification: { fixtureSha256: hash('original-fixture'), receiptSha256: hash('actual-linux-receipt') } };
+  f.release.parity = await f.save('parity', parity);
+  checkpoint.parityReceiptSha256 = f.release.parity.sha256;
+  const credentialEvidence = { version: 1, verified: true, environmentSha256: f.config.environmentReference.sha256 };
+  const evidence = await f.save('credentialEvidence', credentialEvidence);
+  f.release.credentials = await f.save('credentials', { version: 1, verified: true,
+    environmentSha256: f.config.environmentReference.sha256, evidenceSha256: evidence.sha256, evidence });
+  const verify = async (now = new Date(f.release.verifiedAt)) => {
+    const graphBytes = Buffer.from(JSON.stringify(graph)), graphSha256 = hash(graphBytes);
+    cap.admissionGraph = { sha256: graphSha256, dataBase64: graphBytes.toString('base64') };
+    f.fence.hostingAdmissionGraphSha256 = graphSha256;
+    f.proofs.drainAudit.admissionGraphSha256 = graphSha256;
+    f.proofs.quietAudit.admissionGraphSha256 = graphSha256;
+    const project = row => ({ identity: row.identity, owner: row.owner, definitionSha256: row.definitionSha256,
+      aclSha256: row.aclSha256, apiExecutableRoles: row.apiExecutableRoles });
+    origin.functions = cap.functions.map(project);
+    origin.beforeCatalogSha256 = driverAuditReportingFunctionCatalogSha256(cap.functions.map(row => project({ ...row,
+      definitionSha256: row.beforeDefinitionSha256, aclSha256: row.beforeAclSha256, apiExecutableRoles: row.beforeApiExecutableRoles })));
+    origin.afterCatalogSha256 = driverAuditReportingFunctionCatalogSha256(origin.functions);
+    cap.baselineCatalogSha256 = origin.beforeCatalogSha256;
+    const bytes = Buffer.from(JSON.stringify(origin));
+    cap.hostingAdmissionReceipt = { sha256: hash(bytes), dataBase64: bytes.toString('base64') };
+    f.fence.hostingAdmissionReceiptSha256 = hash(bytes);
+    f.proofs.drainAudit.hostingAdmissionReceiptSha256 = f.proofs.quietAudit.hostingAdmissionReceiptSha256 = hash(bytes);
+    f.proofs.quietAudit.drainAuditSha256 = (await f.save('drainAudit', f.proofs.drainAudit)).sha256;
+    return f.verify(now);
+  };
+  return { ...f, origin, graph, parity, credentialEvidence, evidence, verify };
+}
+
+test('Sidi Supabase handoff fences only old hosting admissions and retains the original uncertain subset', async t => {
+  const f = await hostingAdmissionFixture(t);
+  const checked = await f.verify();
+  assert.equal(checked.release.initialCursor, f.release.initialCursor);
+  assert.equal(checked.validatedFence, undefined);
+  assert.equal(f.fence.writersStopped, false);
+  assert.equal(f.proofs.drainAudit.uncertainAttempts.afterTotalCount, 6);
+});
+
+test('Supabase hosting handoff rejects broadened revocation, stale origins, shortened drain and changed backup heads', async t => {
+  for (const change of [f => { f.config.executionHost = null; }, f => { f.config.dataStore = 'mongo'; },
+    f => { f.fence.writersStopped = true; }, f => { f.origin.sharedReportingRpcWritesUsable = false; },
+    f => { f.fence.mode = 'stopped-process'; f.fence.writersStopped = true; f.fence.leasesDrained = true; },
+    f => { f.origin.reapplied = true; }, f => { f.origin.admissionBlockedAt = '2026-11-16T04:01:00.000Z'; },
+    f => { f.origin.commitAfterAt = '2026-11-16T04:04:00.000Z'; },
+    f => { f.proofs.drainAudit.checkedAt = '2026-11-16T04:06:10.000Z'; },
+    f => { f.proofs.quietAudit.samples[0].at = '2026-11-16T04:05:00.000Z'; },
+    f => { f.proofs.quietAudit.samples[1].fingerprints.hostingLedgers = hash('changed-hosting-ledger'); },
+    f => { f.proofs.checkpoint.sourceReadback.collectorRevision++; },
+    f => { f.proofs.checkpoint.uncertainAttempts.afterSha256 = hash('lost-original-uncertain'); },
+    f => { f.release.validUntil = f.fence.validUntil = '2026-11-16T04:30:10.001Z'; },
+    f => { f.origin.hostingBudgetPolicyCount = 10; },
+    f => { f.origin.appRpcFunctions[0].apiExecutableRoles = ['PUBLIC', 'service_role']; },
+    f => { f.origin.beforeAppRpcCatalogSha256 = hash('different-app-rpc-before'); },
+    f => { f.fence.appRpcCatalogSha256 = hash('wrong-reviewed-app-rpcs'); },
+    f => { f.proofs.capabilityAudit.hostingControlSha256 = hash('different-physical-control-state'); },
+    f => { const row = f.proofs.capabilityAudit.functions.find(row => row.identity.startsWith('public.matter_hosted_collector_cas(')); row.apiExecutableRoles = []; },
+    f => { const row = f.proofs.capabilityAudit.functions.find(row => row.identity.startsWith('public.matter_hosted_state_read(')); row.definitionSha256 = hash('unrelated-edit'); }]) {
+    const f = await hostingAdmissionFixture(t); await change(f);
+    await assert.rejects(f.verify(), /hosting|Supabase|drain|quiet|origin|checkpoint|window|scope|catalog|uncertain/i);
+  }
+});
+
+test('the hosting credential wrapper cannot relink a verified evidence file from another environment', async t => {
+  const f = await hostingAdmissionFixture(t);
+  const evidence = await f.save('credentialEvidence', { ...f.credentialEvidence, environmentSha256: hash('foreign-environment') });
+  f.release.credentials = await f.save('credentials', { version: 1, verified: true,
+    environmentSha256: f.config.environmentReference.sha256, evidenceSha256: evidence.sha256, evidence });
+  await assert.rejects(f.verify(), /credential|environment/i);
+});
+
+test('hosting admission binds the complete owner-only app helper schema independently of public RPCs', async t => {
+  for (const change of [f => { delete f.fence.appHelperCatalogSha256; },
+    f => { f.fence.appHelperCatalogSha256 = hash('wrong-reviewed-helper-catalog'); },
+    f => { f.proofs.capabilityAudit.appHelperCatalogSha256 = hash('different-audit-helpers'); },
+    f => { f.origin.beforeAppHelperCatalogSha256 = hash('old-private-schema'); },
+    f => { f.origin.afterAppHelperCatalogSha256 = hash('drifted-private-schema'); },
+    f => { f.origin.appHelperFunctions[0].definitionSha256 = hash('changed-private-schema'); },
+    f => { f.origin.appHelperFunctions.pop(); },
+    f => { f.origin.appHelperFunctions[0].identity = f.origin.appHelperFunctions[1].identity; },
+    f => { f.origin.appHelperFunctions[0].identity = 'matter_reporting_app.unknown_helper()'; },
+    f => { f.origin.appHelperFunctions[0].owner = 'service_role'; },
+    f => { f.origin.appHelperFunctions[0].apiExecutableRoles = ['service_role']; }]) {
+    const f = await hostingAdmissionFixture(t); change(f);
+    await assert.rejects(f.verify(), /hosting|helper|catalog|scope/i);
+  }
+});
+
+test('hosting admission requires complete exact original schedule and direct-path coverage', async t => {
+  for (const change of [f => { f.graph.coveredEntrypoints = 12; }, f => { f.graph.entrypoints.pop(); },
+    f => { f.graph.entrypoints[0].schedule = '0 0 * * *'; },
+    f => { f.graph.directPaths.find(row => row.path.endsWith('/reviews')).admission = 'blocked'; },
+    f => { f.graph.requestHandlers.pop(); }, f => { f.graph.allProviderNetworkRequiresCommittedAdmission = false; },
+    f => { f.graph.actualWorkDrainedByThisReview = true; }, f => { f.graph.originalFiles.pop(); }]) {
+    const f = await hostingAdmissionFixture(t); change(f);
+    await assert.rejects(f.verify(), /hosting|graph|coverage|entrypoint|scope/i);
+  }
+});
+
+async function twoPhaseCapabilityFixture(t) {
+  const f = await capabilityFenceFixture(t), cap = f.proofs.capabilityAudit;
+  const admissionBlockedAt = '2026-11-16T03:35:00.000Z', dataWritesBlockedAt = '2026-11-16T04:00:00.000Z';
+  for (const proof of Object.values(f.proofs)) Object.assign(proof, { admissionBlockedAt, dataWritesBlockedAt });
+  Object.assign(f.fence, { mode: 'reporting-database-capability-v2', admissionBlockedAt, dataWritesBlockedAt,
+    initialCursor: '2026-11-16T03:34:00.000Z' });
+  f.release.initialCursor = f.proofs.checkpoint.initialCursor = f.fence.initialCursor;
+  const original = cap.functions.map(row => ({ identity: row.identity, owner: row.owner,
+    definitionSha256: row.beforeDefinitionSha256, aclSha256: row.beforeAclSha256, apiExecutableRoles: row.beforeApiExecutableRoles }));
+  const internal = original.find(row => row.identity.startsWith('matter_reporting_hosted.state_cas_internal('));
+  const functions = structuredClone(original);
+  functions.find(row => row.identity === internal.identity).definitionSha256 = hash('fictional-admission-guard');
+  const phase1 = { version: 1, kind: 'provider-admission-fence-phase1', verified: true, sourceProjectRef: f.fence.sourceProjectRef,
+    executionId: 'actual-phase1-execution', sqlSha256: hash('phase1-sql'), legacyRuntimeSha256: f.fence.legacyRuntimeSha256,
+    legacyEntrypointsSha256: f.fence.legacyEntrypointsSha256, transactionId: '123456', backendPid: 123,
+    commitBeforeAt: '2026-11-16T03:34:59.000Z', commitAfterAt: admissionBlockedAt, admissionBlockedAt,
+    beforeObservationAt: '2026-11-16T03:34:58.000Z', afterObservationAt: '2026-11-16T03:35:02.000Z',
+    beforeObservationSha256: hash('phase1-before'), afterObservationSha256: hash('phase1-after'),
+    beforeCatalogSha256: driverAuditReportingFunctionCatalogSha256(original),
+    afterCatalogSha256: driverAuditReportingFunctionCatalogSha256(functions), baselineCatalogSha256: cap.baselineCatalogSha256,
+    internalDefinitionSha256: hash('fictional-admission-guard'), functions, applied: true, alreadyClosed: false, reapplied: false,
+    providerAdmissionsBlocked: true, downstreamSettlementsPreserved: true, all11ProviderBudgetPoliciesGuarded: true,
+    originalRoleSchemaRoadAndGallaboxControlsPreserved: true, cronJobsDisabled: [4, 5] };
+  const prePhase2Drain = { ...structuredClone(f.proofs.drainAudit), id: 'pre-phase2-drain', sha256: hash('phase2-before'),
+    checkedAt: '2026-11-16T03:59:00.000Z', possibleReportingHttpQueue: 0 };
+  const phase2 = { version: 1, kind: 'reporting-data-write-fence-phase2', verified: true, sourceProjectRef: phase1.sourceProjectRef,
+    executionId: 'actual-phase2-execution', sqlSha256: hash('phase2-sql'), legacyRuntimeSha256: phase1.legacyRuntimeSha256,
+    legacyEntrypointsSha256: phase1.legacyEntrypointsSha256, transactionId: '123457', backendPid: 124,
+    commitBeforeAt: dataWritesBlockedAt, commitAfterAt: '2026-11-16T04:00:01.000Z', admissionBlockedAt, dataWritesBlockedAt,
+    beforeObservationAt: prePhase2Drain.checkedAt, afterObservationAt: '2026-11-16T04:00:02.000Z',
+    beforeObservationSha256: prePhase2Drain.sha256, afterObservationSha256: hash('phase2-after'),
+    beforeCatalogSha256: phase1.afterCatalogSha256, afterCatalogSha256: driverAuditReportingFunctionCatalogSha256(cap.functions),
+    phase1ExecutionId: phase1.executionId, phase1SQLSha256: phase1.sqlSha256, originalInternalDefinitionSha256: internal.definitionSha256,
+    originalDefinitionRestored: true, reportingFunctions: 47, revokedMutators: 26,
+    applied: true, alreadyClosed: false, reapplied: false, prePhase2Drain };
+  const refreshOrigins = () => {
+    phase1.afterCatalogSha256 = driverAuditReportingFunctionCatalogSha256(phase1.functions);
+    const raw1 = Buffer.from(JSON.stringify(phase1)); phase2.phase1ReceiptSha256 = hash(raw1);
+    cap.phase1Receipt = { sha256: hash(raw1), dataBase64: raw1.toString('base64') };
+    const raw2 = Buffer.from(JSON.stringify(phase2)); cap.phase2Receipt = { sha256: hash(raw2), dataBase64: raw2.toString('base64') };
+    f.fence.phase1ReceiptSha256 = hash(raw1); f.fence.phase2ReceiptSha256 = hash(raw2);
+  };
+  refreshOrigins();
+  return { ...f, phase1, phase2, refreshOrigins };
+}
+
+test('native two-phase v2 retains the old admission clock and uses the real full-closure bound for its window', async t => {
+  const f = await twoPhaseCapabilityFixture(t), result = await f.verify();
+  assert.equal(result.validatedFence.mode, 'reporting-database-capability-v2');
+  assert.equal(result.validatedFence.admissionBlockedAt, f.phase1.commitAfterAt);
+  assert.equal(result.validatedFence.dataWritesBlockedAt, f.phase2.commitBeforeAt);
+  assert.equal(result.validatedFence.commitObservedAt, f.phase2.commitAfterAt);
+  assert(Date.parse(f.release.validUntil) - Date.parse(f.fence.admissionBlockedAt) > 30 * 60000);
+  assert.deepEqual((await f.verify()).validatedFence, result.validatedFence);
+});
+
+test('v2 rejects clock relabeling, replayed closure, mismatched catalogs, missing drain and changed paid evidence', async t => {
+  for (const change of [
+    f => { f.phase2.reapplied = true; }, f => { f.phase2.alreadyClosed = true; },
+    f => { f.phase2.executionId = f.phase1.executionId; }, f => { f.phase2.transactionId = f.phase1.transactionId; },
+    f => { f.phase2.commitAfterAt = '2026-11-16T04:01:00.000Z'; },
+    f => { f.phase2.beforeObservationAt = f.phase2.commitAfterAt; },
+    f => { f.phase2.beforeCatalogSha256 = f.phase2.afterCatalogSha256; },
+    f => { f.phase2.originalDefinitionRestored = false; },
+    f => { f.phase2.prePhase2Drain.activeProviderWork = 1; },
+    f => { f.phase2.prePhase2Drain.uncertainAttempts.afterSha256 = hash('changed-paid-ledger'); },
+    f => { f.phase2.prePhase2Drain.checkedAt = '2026-11-16T03:40:59.000Z'; f.phase2.beforeObservationAt = f.phase2.prePhase2Drain.checkedAt; },
+    f => { f.phase1.functions[0].apiExecutableRoles = []; },
+    f => { f.fence.validUntil = f.release.validUntil = '2026-11-16T04:30:00.001Z'; },
+    f => { f.phase2.commitBeforeAt = f.fence.dataWritesBlockedAt = '2026-11-16T03:35:01.000Z'; },
+    f => { f.phase1.commitAfterAt = '2026-11-16T03:36:00.000Z'; },
+  ]) {
+    const f = await twoPhaseCapabilityFixture(t); change(f); f.refreshOrigins();
+    await assert.rejects(f.verify(), /phase|capability|closure|drain|catalog|fence|window/i);
+  }
+});
+
+test('fresh v2 audits cannot renew an expired full-closure clock even when all receipt identities and clocks agree', async t => {
+  const f = await twoPhaseCapabilityFixture(t);
+  const admission = '2026-11-16T03:00:00.000Z', closure = '2026-11-16T03:35:00.000Z';
+  Object.assign(f.phase1, { admissionBlockedAt: admission, commitBeforeAt: '2026-11-16T02:59:59.000Z', commitAfterAt: admission,
+    beforeObservationAt: '2026-11-16T02:59:58.000Z', afterObservationAt: '2026-11-16T03:00:02.000Z' });
+  Object.assign(f.phase2, { admissionBlockedAt: admission, dataWritesBlockedAt: closure, commitBeforeAt: closure,
+    commitAfterAt: '2026-11-16T03:35:01.000Z', beforeObservationAt: '2026-11-16T03:34:00.000Z', afterObservationAt: '2026-11-16T03:35:02.000Z' });
+  f.phase2.prePhase2Drain.checkedAt = f.phase2.beforeObservationAt;
+  for (const proof of Object.values(f.proofs)) Object.assign(proof, { admissionBlockedAt: admission, dataWritesBlockedAt: closure });
+  Object.assign(f.fence, { admissionBlockedAt: admission, dataWritesBlockedAt: closure, initialCursor: '2026-11-16T02:59:00.000Z' });
+  f.release.initialCursor = f.proofs.checkpoint.initialCursor = f.fence.initialCursor;
+  f.refreshOrigins();
+  await assert.rejects(f.verify(), /phase2 full-closure window|fresh validated/i);
+});
+
+test('v2 origin bytes are independently pinned and capability mode remains native only', async t => {
+  for (const reason of ['missing', 'tampered', 'legacy', 'scope']) {
+    const f = await twoPhaseCapabilityFixture(t);
+    if (reason === 'missing') delete f.proofs.capabilityAudit.phase1Receipt;
+    if (reason === 'tampered') f.proofs.capabilityAudit.phase2Receipt.dataBase64 = Buffer.from('{}').toString('base64');
+    if (reason === 'legacy') f.config.dataStore = 'supabase';
+    if (reason === 'scope') { f.phase1.originalRoleSchemaRoadAndGallaboxControlsPreserved = false; f.refreshOrigins(); }
+    await assert.rejects(f.verify(), /phase|capability|native|embedded|catalog/i);
+  }
 });
 
 test('database capability mode cannot replace the legacy stopped-process proof', async t => {

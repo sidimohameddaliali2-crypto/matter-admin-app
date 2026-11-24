@@ -8,6 +8,7 @@ import { planManagedMenu, saveManagedMenu } from './managedMenuSave.js';
 import router from '../routes/menus.js';
 import PartnerItem from '../models/PartnerMenuItem.js';
 import Partner from '../models/Partner.js';
+import { invalidateMenuShareCache } from './menuShareLinks.js';
 
 const startDate = '2026-10-26', endDate = '2026-11-01';
 const menuId = '507f1f77bcf86cd799439011', itemId = '507f1f77bcf86cd799439012';
@@ -24,6 +25,44 @@ test('an unchanged selected dish retains its ID and leaves quantity-two customer
   const result = plan({ days: baseDays(), existingItems: [existing()], selections: records });
   assert.equal(String(result[0].existingId), itemId);
   assert.equal(JSON.stringify(records), before);
+});
+
+test('a selected dish can retain an existing legacy conversion but rejects a new invalid conversion', () => {
+  const snapshot = { id: 'recipe', name: 'Chosen Chicken', qtyUnit: 'PCS',
+    components: [{ id: 'protein', type: 'Protein', name: 'Chicken', exclusions: [] }] };
+  const item = { ...existing(), cycleMeal: snapshot };
+  const days = baseDays();
+  days[0].items[0].cycleMeal = { ...snapshot };
+  const retained = plan({ days, existingItems: [item], selections: [selection()] })[0];
+  assert.equal(String(retained.existingId), itemId);
+  assert.deepEqual(retained.fields.cycleMeal, snapshot);
+  assert.throws(() => plan({ days }), /grams per piece/);
+  days[0].items[0].cycleMeal.gramsPerPiece = 0;
+  assert.throws(() => plan({ days, existingItems: [item] }), /grams per piece/);
+});
+
+test('new PCS snapshots must be compatible with the dated meal type', () => {
+  const days = baseDays();
+  const snapshot = { id: 'recipe', name: 'Chosen Chicken', mealKind: 'Breakfast', qtyUnit: 'PCS',
+    components: [{ id: 'protein', type: 'Protein', name: 'Chicken', exclusions: [] }] };
+  days[0].items[0].cycleMeal = snapshot;
+  assert.throws(() => plan({ days }), /PCS quantity must match the dated meal type/);
+  const saved = { ...existing(), cycleMeal: snapshot };
+  assert.equal(String(plan({ days, existingItems: [saved], selections: [selection()] })[0].existingId), itemId);
+});
+
+test('an unselected dish can be reclassified without carrying an incompatible inherited QTY rule', () => {
+  const snapshot = { id: 'recipe', name: 'Chosen Chicken', mealKind: 'Main meal', qtyUnit: 'PCS', gramsPerPiece: 50,
+    components: [{ id: 'protein', type: 'Protein', name: 'Chicken', exclusions: [] }] };
+  const original = { ...existing(), cycleMeal: snapshot };
+  const days = baseDays();
+  Object.assign(days[0].items[0], { menuItemId: itemId, mealType: 'breakfast', cycleMeal: snapshot });
+  const revised = plan({ days, existingItems: [original] })[0].fields;
+  assert.equal(revised.mealType, 'breakfast');
+  assert.equal(revised.cycleMeal.qtyUnit, undefined);
+  assert.deepEqual(revised.cycleMeal.components, snapshot.components);
+  assert.equal(original.cycleMeal.gramsPerPiece, 50);
+  assert.throws(() => plan({ days, existingItems: [original], selections: [selection()] }), /Existing customer selections are protected/);
 });
 
 test('Core eligibility alone can be toggled on a selected dish, keeping its ID and saved choices', () => {
@@ -95,7 +134,8 @@ const fixture = t => {
   let active, operations;
   const writes = [], deleted = [], tags = [];
   const query = value => ({ session() { return this; }, select() { return this; }, lean: async () => value });
-  t.mock.method(mongoose.connection, 'transaction', async callback => {
+  t.mock.method(mongoose.connection, 'transaction', async (callback, options) => {
+    if (options?.readPreference === 'primary') return callback({breakfastSync: true});
     active = { transaction: true }; operations = []; store.committed = false;
     const result = await callback(active);
     for (const operation of operations) operation();
@@ -136,6 +176,31 @@ test('tag-only saves update the existing item atomically without creating dishes
   assert.equal(store.items[0].usedForCorePlan, true);
   assert.equal(String(store.menu.meals[0].items[0]), itemId);
   assert.equal(JSON.stringify(store.selections), before);
+});
+
+test('stop and reopen preserve a legacy short-only link, its dates and customer selections', async t => {
+  const {store}=fixture(t);
+  const code='Ab3dE6fG9hJ2kL5m';
+  const createdAt=new Date('2026-10-01'),expiresAt=new Date('2099-01-01');
+  store.menu.shareLink={shortToken:code,createdAt,expiresAt,isActive:true};
+  store.selections=[selection()];const originalSelections=JSON.stringify(store.selections);
+  const cached=new Map([[`menu:share:${code}`,{isActive:true}]]);
+  await saveManagedMenu({menuId,body:{shareLinkActive:false},buildMealName,mergeUploadedSnackPools:()=>{}});
+  assert.equal(store.menu.shareLink.shortToken,code);
+  assert.match(store.menu.shareLink.token,/^[a-f0-9]{64}$/);
+  assert.equal(store.menu.shareLink.isActive,false);
+  assert.equal(+store.menu.shareLink.createdAt,+createdAt);
+  assert.equal(+store.menu.shareLink.expiresAt,+expiresAt);
+  await invalidateMenuShareCache(store.menu,async key=>cached.delete(key));
+  assert.equal(cached.size,0);
+  t.mock.method(Menu,'findOne',()=>({populate:async()=>Menu.hydrate(store.menu)}));
+  const stopped=response();await handler('/share/:token','get')({params:{token:code}},stopped);
+  assert.equal(stopped.statusCode,410);
+  const token=store.menu.shareLink.token;
+  await saveManagedMenu({menuId,body:{shareLinkActive:true},buildMealName,mergeUploadedSnackPools:()=>{}});
+  assert.equal(store.menu.shareLink.shortToken,code);assert.equal(store.menu.shareLink.token,token);
+  assert.equal(store.menu.shareLink.isActive,true);
+  assert.equal(JSON.stringify(store.selections),originalSelections);
 });
 
 test('a failed final menu save rolls back a Core tag update as well', async t => {
@@ -238,6 +303,7 @@ test('the API synchronizes partner dishes only after a published menu commits, a
   const { store } = fixture(t);
   const events = [];
   t.mock.method(PartnerItem, 'findOne', () => ({ sort: async () => { assert.equal(store.committed, true); events.push('partner-read-after-commit'); return null; } }));
+  t.mock.method(PartnerItem, 'find', () => ({lean: async () => {assert.equal(store.committed, true); events.push('breakfast-read-after-commit'); return [];}}));
   t.mock.method(PartnerItem, 'create', async () => ({ _id: new mongoose.Types.ObjectId() }));
   t.mock.method(Partner, 'find', () => ({ select() { return this; }, lean: async () => [] }));
   t.mock.method(console, 'error', () => {});
@@ -245,12 +311,12 @@ test('the API synchronizes partner dishes only after a published menu commits, a
   const res = response();
   await handler('/:id', 'put')(request, res);
   assert.equal(res.statusCode, 200); assert.deepEqual(res.body.warnings, []);
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
   t.mock.method(Menu.prototype, 'save', async () => { throw new Error('Database save failed'); });
   const failed = response();
   await handler('/:id', 'put')(request, failed);
   assert.equal(failed.statusCode, 503); assert.equal(failed.body.success, false);
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
 });
 
 test('partner-sync failure after commit reports a saved-menu warning instead of implying the menu rolled back', async (t) => {
@@ -365,4 +431,29 @@ test('publish-only updates preserve an existing title, and explicit titles are t
   assert.equal(store.menu.title,'Original');assert.equal(store.menu.isPublished,true);
   await saveManagedMenu({menuId,body:{title:'  Revised menu  '},buildMealName,mergeUploadedSnackPools:()=>{}});
   assert.equal(store.menu.title,'Revised menu');
+});
+
+test('the unpublish API removes breakfast dates only after commit and preserves other menus', async t => {
+  const {store} = fixture(t);
+  store.menu.isPublished = true;
+  t.mock.method(Menu, 'findOneAndUpdate', () => ({lean: async () => structuredClone(store.menu)}));
+  const item = {_id: 'breakfast', name: 'Egg Toast', breakfastScheduleRevision: 0,
+    menuSelectionDatesByMenu: {[menuId]: [new Date('2026-10-30')], other: [new Date('2026-11-10')]}};
+  t.mock.method(PartnerItem, 'findOne', () => assert.fail('Unpublish must not create dishes'));
+  t.mock.method(PartnerItem, 'find', () => ({lean: async () => {
+    assert.equal(store.committed, true); return [structuredClone(item)];
+  }}));
+  t.mock.method(PartnerItem, 'findById', () => ({session() {return this;}, lean: async () => structuredClone(item)}));
+  t.mock.method(PartnerItem, 'updateOne', async (filter, update) => {
+    assert.equal(store.committed, true);
+    assert.equal(filter.breakfastScheduleRevision, item.breakfastScheduleRevision);
+    Object.assign(item, update.$set); item.breakfastScheduleRevision++;
+    return {matchedCount: 1};
+  });
+  const res = response();
+  await handler('/:id', 'put')({params: {id: menuId}, user: {_id: new mongoose.Types.ObjectId()}, body: {isPublished: false}}, res);
+  assert.equal(res.statusCode, 200); assert.deepEqual(res.body.warnings, []);
+  assert.equal(store.menu.isPublished, false);
+  assert.deepEqual(Object.keys(item.menuSelectionDatesByMenu), ['other']);
+  assert.deepEqual(item.availableDates.map(date => date.toISOString().slice(0, 10)), ['2026-11-10']);
 });

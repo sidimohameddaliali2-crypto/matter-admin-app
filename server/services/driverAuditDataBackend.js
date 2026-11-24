@@ -4,6 +4,8 @@ import { createSupabaseArchiveTransport } from '../vendor/driver-audits/integrat
 import { createDriverAuditMongoArchive } from './driverAuditMongoArchive.js';
 import { createDriverAuditMongoRpc, initializeDriverAuditMongoRpc } from './driverAuditMongoRpc.js';
 import { createDriverAuditReviewContexts } from './driverAuditReviewContexts.js';
+import { createDriverAuditPollProgress } from './driverAuditPollProgress.js';
+import { createDriverAuditNativeObjectStore } from './driverAuditNativeObjectStore.js';
 
 export const driverAuditNativeBackendSymbol = Symbol.for('matter.driver-audit.native-backend');
 
@@ -15,6 +17,16 @@ export const driverAuditLocalReaderBudget = Object.freeze({
 });
 
 export async function createDriverAuditDataBackend({ db, env = process.env, staging = false }) {
+  if (env.DRIVER_AUDIT_EXECUTION_HOST !== undefined) {
+    if (!['sidi', 'off-host'].includes(env.DRIVER_AUDIT_EXECUTION_HOST)) throw Error('Unknown Driver Reports execution host');
+    // Sidi-hosted reporting explicitly keeps the existing Supabase data. An
+    // inherited setting from the parked migration must not open MongoDB.
+    const selected = { ...env, DRIVER_AUDIT_DATA_STORE: 'supabase' };
+    delete selected.MONGODB_URI;
+    delete selected.DRIVER_AUDIT_NATIVE_CAPACITY_BYTES;
+    const { createDriverAuditSupabaseAppBackend } = await import('./driverAuditSupabaseAppBackend.js');
+    return createDriverAuditSupabaseAppBackend({ env: selected });
+  }
   const kind = env.DRIVER_AUDIT_DATA_STORE || 'supabase';
   if (kind === 'supabase') {
     const secret = env.DRIVER_AUDIT_SUPABASE_SECRET || env.MATTER_SUPABASE_SECRET;
@@ -31,8 +43,13 @@ export async function createDriverAuditDataBackend({ db, env = process.env, stag
       throw Error('The verified native reporting import and writer handoff are required');
     }
   }
+  const objectStore = await createDriverAuditNativeObjectStore({ env });
+  const storage = await db.collection('driverAuditNativeControl').findOne({ _id: 'archive-object-store' });
+  if (storage && (Object.keys(storage).length !== 4 || storage.version !== 1 || storage.provider !== 'spaces'
+      || !objectStore || storage.identitySha256 !== objectStore.identitySha256)
+      || !staging && objectStore && !storage) throw Error('The qualified native archive object store is required');
   const archive = createDriverAuditMongoArchive({
-    db, client: db.client, capacityBytes: Number(env.DRIVER_AUDIT_NATIVE_CAPACITY_BYTES),
+    db, client: db.client, capacityBytes: Number(env.DRIVER_AUDIT_NATIVE_CAPACITY_BYTES), objectStore,
   });
   await initializeDriverAuditMongoRpc({ db, client: db.client });
   const { createDriverAuditFixedHostBudgetFactory } = await import('./driverAuditFixedHostBudget.js');
@@ -41,7 +58,9 @@ export async function createDriverAuditDataBackend({ db, env = process.env, stag
   if (!staging && !archiveCacheDirectory) throw Error('The qualified shared native archive cache directory is required');
   const cachedArchive = createDriverAuditReadCache({ archive,
     cacheDirectory: archiveCacheDirectory, cacheEnabled: Boolean(archiveCacheDirectory) });
-  return { kind, archive: cachedArchive, archiveCacheDirectory, rpc: createDriverAuditMongoRpc({ db, client: db.client, objects: archive }),
+  const rpc = createDriverAuditMongoRpc({ db, client: db.client, objects: archive });
+  return { kind, archive: cachedArchive, archiveCacheDirectory, rpc, objectStoreIdentitySha256: objectStore?.identitySha256,
+    pollProgress: createDriverAuditPollProgress({ rpc }),
     reviewContexts: createDriverAuditReviewContexts({ db, archive: cachedArchive }),
     createExecutionBudget: createDriverAuditFixedHostBudgetFactory() };
 }
@@ -49,7 +68,7 @@ export async function createDriverAuditDataBackend({ db, env = process.env, stag
 // CLI workers use the same MongoDB setting as the app. It stays out of the
 // recovered source environment and private runtime bundle.
 export async function openDriverAuditDataBackend({ env = process.env, staging = false } = {}) {
-  if ((env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase') {
+  if (env.DRIVER_AUDIT_EXECUTION_HOST !== undefined || (env.DRIVER_AUDIT_DATA_STORE || 'supabase') === 'supabase') {
     return { ...await createDriverAuditDataBackend({ env }), close: async () => {} };
   }
   if (!env.MONGODB_URI) throw Error('The app MongoDB connection is unavailable');

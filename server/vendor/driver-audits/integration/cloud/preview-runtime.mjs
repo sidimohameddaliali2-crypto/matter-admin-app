@@ -11,9 +11,11 @@ import {connectPreviewOrderTiming} from './preview-order-timing.mjs';
 import {connectPreviewCorrections} from './preview-corrections.mjs';
 import {createPreviewRoads} from './preview-roads.mjs';
 import {createPreviewReadView} from './preview-read-view.mjs';
+import {createPreviewSourceHistory,previewSourceHistoryLink} from './preview-source-history.mjs';
 import {previewArchiveTransport} from './preview-archive-cache.mjs';
 import {extractPreviewFonts} from './preview-fonts.mjs';
 import {addDriverAuditSyncStatus} from './driver-audit-status.mjs';
+import {decodeGpsEvidenceFile,decodePackedGpsAvailability,gpsAvailabilityFile,packedGpsAvailabilityFile} from './remote-preview-package.mjs';
 import fs from 'node:fs';import path from 'node:path';import {gunzipSync} from 'node:zlib';import {createHash} from 'node:crypto';
 import {createHostedIdentities} from './hosted-identities.mjs';
 import {createImmutableEvidenceCache} from './immutable-evidence-cache.mjs';
@@ -48,25 +50,48 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
  const has=name=>packageOverride?packageOverride.has(name):Object.hasOwn(manifest,name);
  const read=name=>{if(!has(name)||!Object.hasOwn(manifest,name))throw Error('File outside preview manifest');const bytes=packageOverride?packageOverride.read(name):fs.readFileSync(path.join(privateRoot,name));if(!Buffer.isBuffer(bytes)||sha(bytes)!==manifest[name])throw Error('Preview file integrity failure');return bytes;};
  const readAsync=async name=>{if(!has(name)||!Object.hasOwn(manifest,name))throw Error('File outside preview manifest');const bytes=packageOverride?await packageOverride.readAsync(name):read(name);if(!Buffer.isBuffer(bytes)||sha(bytes)!==manifest[name])throw Error('Preview file integrity failure');return bytes;};
- const json=name=>JSON.parse(read(name)),publication=json('publication.private.json'),identity=json('identities.private.json'),index=JSON.parse(gunzipSync(read('gps-index.private.json.gz'))),maps=json('maps.private.json');
+ const prepared=staffIntegration?packageOverride?.takeVerifiedRuntime?.():null;
+ const json=name=>JSON.parse(read(name)),publication=prepared?.publication??json('publication.private.json'),
+  identity=json('identities.private.json'),index=prepared?.gps??JSON.parse(gunzipSync(read('gps-index.private.json.gz'))),maps=json('maps.private.json');
  if(packageOverride&&(packageOverride.generation&&packageOverride.generation!==publication.head.manifest.sha256||packageOverride.reportHash&&packageOverride.reportHash!==publication.head.reportHash))throw Error('Preview package head mismatch');
  const rpc=rpcOverride||createHostedRpc({secret}),rawState=stateOverride||createCloudState({rpc}),state=namespaceState(rawState,reviewNamespace),transport=previewArchiveTransport({remote:transportOverride||createSupabaseArchiveTransport({secret}),has,read,readAsync});
  const pinnedRepository=await createCloudRepository({stateStore:{read:async()=>({revision:publication.revision||0,body:JSON.stringify(publication)})},transport,key:'frozen-preview',cacheBytes:96*1024*1024}).pin();
  const repository=reviewContextOverride?reviewContextOverride(pinnedRepository):pinnedRepository,head=await repository.getHead();
  const access=createHostedAccess({rpc}),auth=authOverride||createHostedAuth({supabaseUrl:'https://trhhjfgfmxofxhnzocks.supabase.co',publishableKey,cookieKey,membership:access.membership,sessionActive:access.sessionActive,cookieName:'__Host-matter_preview'});
  const login=createPasswordLogin({supabaseUrl:'https://trhhjfgfmxofxhnzocks.supabase.co',publishableKey,allowedEmail,additionalAllowedEmails,throttle:createLoginThrottle({stateStore:state})});
- const readView=JSON.parse(gunzipSync(read('preview-read-view.private.json.gz')));
+ const readView=prepared?.view??JSON.parse(gunzipSync(read('preview-read-view.private.json.gz')));
+ const sourceHistory=staffIntegration&&packageOverride?.staffSnapshot===true&&packageOverride.directSnapshot!==true
+  ?createPreviewSourceHistory({sourceManifest:publication.privateRelease?.currentHead?.manifest,staffManifest:readView.browser,
+   rows:readView.gpsRows,readStaffBrowser:()=>read('browser-data.private.json.gz'),async readRetained(file,maxBytes){
+    try{return await repository.readFile('state',file,{maxBytes});}
+    catch(error){if(error.code!=='ENOENT')throw error;return repository.readFile('archive',file,{maxBytes});}
+   }})
+  :undefined;
  let report;const reviews=createHostedReviews({stateStore:state,snapshotFor:hash=>report.snapshotFor(hash)}),identities=createHostedIdentities({stateStore:{read:async()=>identity,compareAndSwap:async()=>{throw Object.assign(Error('Preview is read-only for identities'),{status:403});}},config:JSON.parse(identity.body).config,rows:async()=>(await report.gpsSnapshotFor(head.reportHash)).rows});
  report=createCloudReportService({repository,reviewStore:reviews,identityStore:identities,evidenceCache:createImmutableEvidenceCache({maxBytes:96*1024*1024,maxEntries:96}),photoBindingRegistry:has('preview-photo-bindings.private.json')?json('preview-photo-bindings.private.json'):null,deferredPhotoProgress:staffIntegration&&remoteReadsBudgeted});
  report=createPreviewReadView({service:report,repository,read,readAsync,view:readView,gpsIndex:index,has});
+ if(sourceHistory)report.sourceHistory=sourceHistory;
  if(staffIntegration&&remoteReadsBudgeted){
   const proposalPage=report.photoProposals;
   // Each page verifies its own cases. A staff request never downloads the image archive to count other cases.
   report.photoProposals=(params,actor)=>proposalPage(params,actor,{includeProgress:false});
  }
- if(Object.hasOwn(manifest,'corrections.private.json'))report=connectPreviewCorrections(report,readView,{...json('corrections.private.json'),...(Object.hasOwn(manifest,'release-gps-availability.private.json')?{gpsAvailability:json('release-gps-availability.private.json')}:{})});
+ if(has('corrections.private.json')){
+  const gpsAvailability=has(packedGpsAvailabilityFile)?prepared?.availability??decodePackedGpsAvailability(read(packedGpsAvailabilityFile)):
+   has(gpsAvailabilityFile)?json(gpsAvailabilityFile):undefined;
+  report=connectPreviewCorrections(report,readView,{...json('corrections.private.json'),...(gpsAvailability?{gpsAvailability}:{})});
+ }
  report=connectPreviewOrderTiming(report,readView,index,{frozen:true,households:createHouseholdStore(state),decisions:Object.hasOwn(manifest,'case-decisions.private.json')?json('case-decisions.private.json'):undefined});
- const streams=new Map();const gps=createPreviewGps({snapshotFor:report.gpsSnapshotFor,index,readStream:async key=>{const file=index.streamFiles[key];if(!file)throw Error('GPS stream unavailable');if(!streams.has(key)){streams.set(key,JSON.parse(gunzipSync(await readAsync(file))));while(streams.size>8)streams.delete(streams.keys().next().value);}return streams.get(key);}});
+ const projections=createImmutableEvidenceCache({maxBytes:24*1024*1024,maxEntries:4});
+ const streams=new Map();const gps=createPreviewGps({snapshotFor:report.gpsSnapshotFor,index,readStream:async key=>{const file=index.streamFiles[key];if(!file)throw Error('GPS stream unavailable');if(!streams.has(key)){streams.set(key,JSON.parse(gunzipSync(await readAsync(file))));while(streams.size>8)streams.delete(streams.keys().next().value);}return streams.get(key);},async readProjection(file,key){
+  const records=await projections.getOrLoad(file,async()=>{
+   const {records,bytes}=decodeGpsEvidenceFile(await readAsync(file));
+   return {value:records,bytes};
+  });
+  const projection=records.get(key);
+  if(!projection)throw Error('GPS evidence missing from its verified file');
+  return projection;
+ }});
  const build=json('build.private.json');
  let renderer=read('renderer.private.html').toString();
  if(staffIntegration&&staffRenderer?.templateSnapshotSha256===build.snapshot.sha256){
@@ -108,7 +133,8 @@ async function buildPreviewRuntime({origin,secret,publishableKey,cookieKey,allow
  return createCloudHttp({auth,service:report,origin,login,loginPage:passwordLoginHtml,compressPreviewReads:true,frozenEvidenceOverlay:staffIntegration,localFontAssets:staffIntegration,staffReportFrame,afterResponse,onAuthenticatedRequest,isRetiredAuditGeneration,mapsEnabled:maps.enabled===true,readerBudget:local||remoteReadsBudgeted?undefined:createReaderBudgetPool({stateStore:rawState}),renderer:async(_actor,_service,url,framed)=>{
   if(!html){let source=fonts.html.replace(build.snapshot.path,'report-data/snapshot-'+build.snapshot.sha256+'.json');source=cloudHtml({html:initializeReportTab(source),priorManifest:build.snapshot,head:{...head,manifest:await report.browserManifest()},generation:head.manifest.sha256,publicPathPrefix});html=addCasePrefetch(addBrowserReadCache(addBrowserRequestQueue(addPrivateEvidenceCache(source.replace('</head>','<script>window.__matterPrivatePreview=true;window.__matterGpsPreview=true;window.__matterAutomaticPreview='+JSON.stringify(automaticRefresh||automaticFeed)+';</script></head>')))));html=addPreviewStartup(addStatusFlight(html),{...(await report.browserManifest()),generation:head.manifest.sha256,publicPathPrefix});}
   const document=(framed?html.replace('<head>','<head>'+frameHead):html).replace('</head>',selectionStyle+'</head>');
-  const page=prioritizePreviewStartup(addPreviewPhotoPrime(document,photoHints,url));
+  let page=prioritizePreviewStartup(addPreviewPhotoPrime(document,photoHints,url));
+  if(framed&&sourceHistory)page=page.replace(/<body\b[^>]*>/i,body=>body+previewSourceHistoryLink);
   return auditSyncStatus?addDriverAuditSyncStatus(page,framed?null:await syncStatus()):page;
  }});
 }

@@ -15,7 +15,8 @@ import { classifyUploadRow } from '../services/customerUploadIdentity.js';
 import { nextCustomerId, isEmailDerivedCustomerId } from '../services/customerIdSequence.js';
 import { relinkSubscription, LinkTargetNotFoundError } from '../services/subscriptionLink.js';
 import { parsePinInput, isPlausibleCoordinate } from '../services/geocoding.js';
-import { protect } from '../middleware/auth.js';
+import { protect, authorize } from '../middleware/auth.js';
+import { refreshCustomerMetadata } from '../services/matterCustomerMetadata.js';
 import { effectivePermissions } from '../models/User.js';
 
 const router = express.Router();
@@ -550,6 +551,15 @@ router.post('/', async (req, res) => {
  * Get all customers
  * GET /api/customers
  */
+router.post('/matter-metadata/refresh', authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
+  try {
+    res.json({ success: true, data: await refreshCustomerMetadata() });
+  } catch (error) {
+    console.error('Matter customer metadata refresh failed:', error.code || error.name);
+    res.status(502).json({ success: false, message: 'Matter details could not be refreshed. Previously saved labels are still available. Retry the refresh.' });
+  }
+});
+
 router.get('/', async (req, res) => {
   try {
     const { search, limit } = req.query;
@@ -569,7 +579,7 @@ router.get('/', async (req, res) => {
     const maxLimit = Math.min(parseInt(limit, 10) || 10000, 10000);
 
     const customers = await Customer.find(query)
-      .select('customerId email cpf macros firstName lastName phone company address gpsLocation matterCustomerId planStartDate cycleDuration amountPaid discount')
+      .select('customerId email cpf macros firstName lastName phone company address gpsLocation matterCustomerId matterSubscriptionId matterMetadata planStartDate cycleDuration amountPaid discount')
       .sort({ createdAt: -1 })
       .limit(maxLimit);
 

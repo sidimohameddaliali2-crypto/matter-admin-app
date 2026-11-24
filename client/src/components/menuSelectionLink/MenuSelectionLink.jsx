@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import api from '../../utils/api';
+import api from '../../utils/publicMenuApi';
 import { evaluateComponentSelection, selectionPreferenceFlags } from '../../constants/componentSelectionRules';
 import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
 import { isWithinRenewalWindow } from '../../utils/subscriptionRenewal';
@@ -289,6 +289,7 @@ const MenuSelectionLink = ({ token }) => {
   const [model, setModel] = useState(() => (preview ? buildDemoModel() : null));
   const [loadState, setLoadState] = useState(preview ? 'ready' : 'loading'); // loading | ready | error
   const [loadError, setLoadError] = useState('');
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [rawMenu, setRawMenu] = useState(null); // real weeklyMenu (for submit)
 
   const [step, setStep] = useState('signin'); // signin | menu | done
@@ -363,8 +364,9 @@ const MenuSelectionLink = ({ token }) => {
     if (preview) return;
     let alive = true;
     setLoadState('loading');
+    const controller = new AbortController();
     api
-      .get(`/menus/share/${token}`)
+      .get(`/menus/share/${encodeURIComponent(token)}`, { signal: controller.signal, timeout: 45000 })
       .then((res) => {
         if (!alive) return;
         const menu = res.data?.data;
@@ -376,14 +378,15 @@ const MenuSelectionLink = ({ token }) => {
         if (!alive) return;
         setLoadError(
           err.response?.data?.message ||
-            'This menu selection link is invalid or has expired. Please contact support.'
+            'We could not load your menu. Please check your connection and try again.'
         );
         setLoadState('error');
       });
     return () => {
       alive = false;
+      controller.abort();
     };
-  }, [preview, token]);
+  }, [preview, token, loadAttempt]);
 
   const flash = useCallback((msg) => {
     clearTimeout(toastTimer.current);
@@ -432,7 +435,7 @@ const MenuSelectionLink = ({ token }) => {
       if (!profile) throw new Error('not found');
 
       const built = buildRealModel(rawMenu, profile);
-      const allergensDisplay = (profile.allergies || []).map((x) => titleCase(String(x)));
+      const allergensDisplay = (Array.isArray(profile.allergies) ? profile.allergies : []).map((x) => titleCase(String(x)));
       // Same parser the live component uses — turns the stored mealExclusion
       // string into canonical exclusion phrases.
       const exclusionPhrases = groupExclusions(profile.mealExclusion);
@@ -441,7 +444,7 @@ const MenuSelectionLink = ({ token }) => {
         name: `${profile.firstName || ''} ${profile.lastName || ''}`.trim() || profile.email || v,
         email: profile.email || v,
         matterCustomerId: profile.matterCustomerId || profile.customerId || null,
-        allergensKnown: profile.allergiesAvailable !== false,
+        allergensKnown: profile.allergiesAvailable === true && Array.isArray(profile.allergies),
         plan: profile.mealPlan || 'Meal plan',
         perDay: Number(profile.mealPerDay) || 1,
         weekend: !!profile.weekend,
@@ -635,6 +638,7 @@ const MenuSelectionLink = ({ token }) => {
   // and stashed per meal key so doSubmit can attach them to the selection.
   const addWithCap = useCallback(
     (m, extraFlags = {}) => {
+      if (!preview && account?.allergensKnown !== true) return false;
       const rule = !preview && evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []);
       if (rule && rule.allergies.length) return false;
       const dayTotal = (model?.meals || [])
@@ -754,6 +758,10 @@ const MenuSelectionLink = ({ token }) => {
   // about pausing is ever recomputed server-side from this; the server
   // applies these decisions verbatim (routes/menus.js select-meals).
   const doSubmit = useCallback(async (pauseDecisions) => {
+    if (!preview && account?.allergensKnown !== true) {
+      flash('Allergy information is unavailable from Matter. Please retry or contact customer service.');
+      return;
+    }
     // Recheck restored selections too: a customer's allergy profile may have
     // changed since their previous submission, without going through tryAdd.
     const blockedMeal = (model?.meals || []).find((m) => qty[m.key] > 0 && !skipped[m.dayIndex] && conflictOf(m)?.kind === 'allergen');
@@ -1179,7 +1187,15 @@ const MenuSelectionLink = ({ token }) => {
     </div>
   );
 
-  const renderMenu = () => (
+  const renderMenu = () => (!preview && account?.allergensKnown !== true ? (
+    <main style={{ padding: '40px 28px', maxWidth: 520, margin: 'auto', textAlign: 'center' }}>
+      <MatterLogo height={24} />
+      <h2>Allergy information unavailable</h2>
+      <p>We could not verify your allergy information. Please retry or contact customer service before choosing meals.</p>
+      <button className="btn btn-primary" onClick={signIn}>Try again</button>
+      <button className="btn btn-secondary" onClick={() => { setAccount(null); setStep('signin'); }} style={{ marginTop: 12 }}>Sign out</button>
+    </main>
+  ) : (
     <div style={{ padding: '0 0 20px' }}>
       <div style={{ position: 'sticky', top: 0, zIndex: 20, background: '#fff', padding: '18px 22px 14px', borderBottom: '1px solid var(--color-divider)' }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
@@ -1213,7 +1229,7 @@ const MenuSelectionLink = ({ token }) => {
               <div style={{ fontSize: 10, letterSpacing: '0.09em', textTransform: 'uppercase', color: 'var(--color-neutral-600)', marginBottom: 6 }}>Allergens</div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
                 {customer.allergenFlags.length === 0 ? (
-                  <span className="text-muted" style={{ fontSize: 12 }}>{account?.allergensKnown === false ? 'No internal allergy profile found' : 'None on file'}</span>
+                  <span className="text-muted" style={{ fontSize: 12 }}>{account?.allergensKnown === false ? 'Unavailable from Matter' : 'None on file'}</span>
                 ) : (
                   customer.allergenFlags.map((f, i) => (
                     <span key={i} className="tag" style={{ fontSize: 11, padding: '3px 9px', background: f.bg, color: f.fg }}>{f.label}</span>
@@ -1457,7 +1473,7 @@ const MenuSelectionLink = ({ token }) => {
         </button>
       </div>
     </div>
-  );
+  ));
 
   const renderDone = () => (
     <div style={{ minHeight: preview ? 844 : '100vh', display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '40px 28px' }}>
@@ -1557,6 +1573,7 @@ const MenuSelectionLink = ({ token }) => {
           <MatterLogo height={24} style={{ marginBottom: 24 }} />
           <h2 style={{ margin: '0 0 10px' }}>Link unavailable</h2>
           <p className="text-muted" style={{ margin: 0, fontSize: 15, lineHeight: 1.6 }}>{loadError}</p>
+          <button className="btn" style={{ marginTop: 20 }} onClick={() => setLoadAttempt(value => value + 1)}>Try again</button>
         </div>
       );
     }

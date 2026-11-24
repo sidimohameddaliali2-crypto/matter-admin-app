@@ -56,18 +56,38 @@ export const exclusionMatchesTerm = (exclusionPhrase, term) => {
 
 // Allergy checks deliberately do not waive a match based on a "free" claim.
 // Declared allergen/ingredient metadata must still block a matching profile.
+// Ingredient-category aliases follow Food Standards Scotland/FSA guidance:
+// https://www.foodstandards.gov.scot/consumer-advice/food-safety/food-allergies/food-allergies-and-intolerances
+const MILK_TERMS = ['milk', 'dairy', 'butter', 'buttermilk', 'cheese', 'cream', 'yogurt', 'yoghurt', 'whey', 'casein', 'ghee', 'parmesan', 'mozzarella', 'cheddar', 'feta', 'paneer', 'ricotta'];
+const GLUTEN_TERMS = ['gluten', 'wheat', 'barley', 'rye', 'oat', 'oats', 'spelt', 'khorasan', 'kamut', 'semolina', 'bulgur', 'couscous', 'triticale'];
+const SOY_TERMS = ['soy', 'soya', 'soybean', 'soybeans', 'soya bean', 'soya beans', 'tofu', 'bean curd', 'beancurd', 'edamame', 'miso', 'tempeh', 'tamari'];
+const NUT_TERMS = [...EXCLUSION_GROUPS['all nuts'], 'brazil nut', 'brazil nuts', 'macadamia nuts'];
 const ALLERGEN_GROUPS = {
-  milk: ['milk', 'dairy'],
-  dairy: ['dairy', 'milk'],
-  nuts: EXCLUSION_GROUPS['all nuts'],
-  'all nuts': EXCLUSION_GROUPS['all nuts'],
+  milk: MILK_TERMS,
+  dairy: MILK_TERMS,
+  gluten: GLUTEN_TERMS,
+  'cereals containing gluten': GLUTEN_TERMS,
+  soy: SOY_TERMS,
+  soya: SOY_TERMS,
+  soybean: SOY_TERMS,
+  soybeans: SOY_TERMS,
+  nuts: NUT_TERMS,
+  'all nuts': NUT_TERMS,
+  'tree nuts': NUT_TERMS.filter(term => !['peanut', 'peanuts'].includes(term)),
   fish: ['fish', 'cream dory', 'nile perch', 'salmon', 'tuna', 'cod', 'sea bass', 'sea bream'],
   shellfish: ['shellfish', 'shrimp', 'prawn', 'crab', 'lobster', 'mussel', 'scallop', 'squid', 'calamari'],
 };
 export const allergenMatchesAny = (allergy, terms) => {
   const key = normalizeTerm(allergy);
   const names = ALLERGEN_GROUPS[key] || [key];
-  return (terms || []).some((term) => names.some((name) => matchesTerm(name, normalizeTerm(term))));
+  return (terms || []).some((term) => {
+    let ingredient = normalizeTerm(term);
+    // Named plant ingredients are not mammalian milk. This does not waive a
+    // separate Milk/Dairy declaration or a generic "free" marketing claim.
+    if (['milk', 'dairy'].includes(key)) ingredient = ingredient.replace(/\b(?:peanut|almond|cashew|cocoa) butter|butter beans?|cream dory\b|\b(?:coconut|almond|soy|soya|oat|rice|cashew) (?:milk|cream)\b/g, '');
+    return names.some((name) => key === 'tree nuts' && ['nut', 'nuts'].includes(name)
+      ? containsWholePhrase(ingredient, name) : matchesTerm(name, ingredient));
+  });
 };
 
 /** True if `exclusionPhrase` matches any term in `terms` — see exclusionMatchesTerm. */

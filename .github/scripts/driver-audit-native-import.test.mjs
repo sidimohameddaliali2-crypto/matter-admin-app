@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { gzipSync } from 'node:zlib';
 import { gunzipSync } from 'node:zlib';
@@ -12,8 +13,12 @@ import { readPrivateDriverAuditSource, requirePrivateDriverAuditSourceDirectory,
 import { stageDriverAuditSource } from '../../server/scripts/driverAuditSourceStage.js';
 import { readDriverAuditImportRows } from '../../server/services/driverAuditLiveImport.js';
 import { verifyAuditBuilder } from '../../server/vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
+import { createDriverAuditNativeObjectStore } from '../../server/services/driverAuditNativeObjectStore.js';
+import { validateDriverAuditSpacesArchiveReference } from '../../server/services/driverAuditSpacesArchive.js';
+import { captureNativeDriverAuditArchiveMetadata, createDriverAuditNativeCliByteAttestation,
+  nativeDriverAuditTargetIdentity, driverAuditArchiveImplementationSha256 } from './driver-audit-native-parity.mjs';
 import { runDriverAuditNativeImport, NATIVE_IMPORT_FILES, NATIVE_IMPORT_SOURCE_MANIFEST,
-  NATIVE_IMPORT_CAPACITY_BYTES } from './driver-audit-native-import.mjs';
+  NATIVE_IMPORT_CAPACITY_BYTES, NATIVE_BUILDER_TO } from './driver-audit-native-import.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const commit = 'a'.repeat(40), censusSha = 'b'.repeat(64), sessionId = '00000000-0000-4000-8000-000000000001';
@@ -25,6 +30,17 @@ async function fixture(t) {
   const folder = path.join(root, sessionId), syncRoot = path.join(server, '.private/driver-audits', 'c'.repeat(64));
   const sourceRoot = path.join(server, '.private/driver-audit-source', NATIVE_IMPORT_SOURCE_MANIFEST);
   for (const directory of [folder, syncRoot, sourceRoot]) await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  const nativeObject = Buffer.from('fictional immutable archive original'), nativeObjectKey = hash(nativeObject) + '.gz';
+  for (const [original, target] of [
+    ['./driver-audit-native-parity.mjs', path.join(appRoot, '.github/scripts/driver-audit-native-parity.mjs')],
+    ['../../server/services/driverAuditMongoArchive.js', path.join(server, 'services/driverAuditMongoArchive.js')],
+    ['../../server/services/driverAuditSpacesArchive.js', path.join(server, 'services/driverAuditSpacesArchive.js')],
+    ['../../server/services/driverAuditNativeObjectStore.js', path.join(server, 'services/driverAuditNativeObjectStore.js')],
+    ['../../server/scripts/driverAuditMongoMigrate.js', path.join(server, 'scripts/driverAuditMongoMigrate.js')],
+  ]) {
+    await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+    await fs.copyFile(fileURLToPath(new URL(original, import.meta.url)), target);
+  }
   const save = (name, value) => fs.writeFile(path.join(folder, name), JSON.stringify(value), { mode: 0o600 });
   await fs.writeFile(path.join(syncRoot, 'sync.json'), JSON.stringify({ version: 1, root: syncRoot,
     codeRoot: path.join(syncRoot, 'builder'), baselineRoot: path.join(syncRoot, 'baseline'),
@@ -36,7 +52,8 @@ async function fixture(t) {
   for (const [key, file] of Object.entries(NATIVE_IMPORT_FILES)) {
     const bytes = key === 'bookkeepingBackup' ? Buffer.from('{"verified":true}')
       : gzipSync(Buffer.from(JSON.stringify(key === 'documents'
-        ? { key: 'collector-state', revision: 7, body_text: '{"fictional":"private body"}' } : { fixture: key }) + '\n'));
+        ? { key: 'collector-state', revision: 7, body_text: '{"fictional":"private body"}' }
+        : key === 'objects' ? { key: nativeObjectKey, bytes: nativeObject.length } : { fixture: key }) + '\n'));
     await fs.writeFile(path.join(folder, file), bytes, { mode: 0o600 });
     template[key] = { file, sha256: hash(bytes) };
   }
@@ -61,8 +78,20 @@ async function fixture(t) {
       pm_exec_path: path.join(server, 'scripts/driverAuditSync.js'), args: ['--config', path.join(syncRoot, 'sync.json')] } }];
   let authority = null, stage = null, locked = false, closes = 0, actualCensus = censusSha;
   const cli = [], calls = [];
-  const db = { databaseName: targetDatabase, collection: name => ({ findOne: async query => name === 'driverAuditNativeControl'
-    ? query._id === 'authority' ? authority : { limitBytes: NATIVE_IMPORT_CAPACITY_BYTES, usedBytes: 0 } : stage }) };
+  const nativeFiles = [{ _id: nativeObjectKey, reference: { version: 1, sha256: hash(nativeObject), size: nativeObject.length,
+    chunks: [{ sha256: hash(nativeObject), size: nativeObject.length }] } }];
+  const nativeChunks = [{ _id: hash(nativeObject), size: nativeObject.length }];
+  const db = { databaseName: targetDatabase, collection: name => ({
+    findOne: async query => name === 'driverAuditNativeControl'
+      ? query._id === 'authority' ? authority : query._id === 'capacity' ? { limitBytes: NATIVE_IMPORT_CAPACITY_BYTES, usedBytes: 0 } : null : stage,
+    find(query, options) {
+      assert(['driverAuditNativeFiles', 'driverAuditNativeChunks'].includes(name));
+      assert.equal(options?.projection?.bytes, undefined);
+      return { toArray: async () => (name === 'driverAuditNativeFiles' ? nativeFiles : nativeChunks)
+        .filter(row => query._id.$in.includes(row._id)) };
+    },
+    async countDocuments() { assert.equal(name, 'driverAuditNativeFiles'); return nativeFiles.length; },
+  }) };
   const archivedCode = new Map();
   const connection = { db, getClient: () => ({ fixture: true }), async asPromise() {}, async close() { closes++; } };
   const adapters = { platform: 'linux', env: { MONGODB_URI: 'mongodb://fictional.invalid/fictional_existing' },
@@ -79,11 +108,14 @@ async function fixture(t) {
       return { stdout: JSON.stringify({ status, importSha256: args[3], collectorRootsSha256: actualCensus,
         objects: 2, missingObjects: 0, missingBytes: 0, availableAllowanceBytes: NATIVE_IMPORT_CAPACITY_BYTES,
         activationPending: true, archiveClosurePending: true, resultsEqual: true,
+        reportIdentityEqual: true, assessmentHistoryEqual: true, archiveObjects: 1, archiveBytesRead: nativeObject.length,
         privateBodyMustNeverLeak: 'fictional private payload' }) };
     },
     async load(name) {
       if (name === 'loadEnv.js') return {};
       if (name === 'services/driverAuditTransferCodec.js') return { sealTransferSecrets };
+      if (name === 'services/driverAuditNativeObjectStore.js') return { createDriverAuditNativeObjectStore };
+      if (name === 'services/driverAuditSpacesArchive.js') return { validateDriverAuditSpacesArchiveReference };
       if (name === 'scripts/driverAuditSourceStage.js') return { stageDriverAuditSource };
       if (name === 'services/driverAuditMongoArchive.js') return { createDriverAuditMongoArchive({ capacityBytes }) {
         assert.equal(capacityBytes, NATIVE_IMPORT_CAPACITY_BYTES);
@@ -113,6 +145,7 @@ async function fixture(t) {
   const run = async (operation, extra = {}) => runDriverAuditNativeImport({ operation, appRoot, sessionId,
     expectedSha: commit, templateSha256: extra.templateSha256 ?? hash(await fs.readFile(path.join(folder, 'profile-template.private.json'))), ...extra }, adapters);
   return { appRoot, folder, syncRoot, sourceRoot, state, receipt, template, entries, adapters, run, save, refresh, cli, calls, archivedCode,
+    db, nativeFiles, nativeChunks, nativeObjectKey,
     authority: value => { authority = value; }, stage: value => { stage = value; }, census: value => { actualCensus = value; },
     locked: () => locked, closes: () => closes };
 }
@@ -220,6 +253,110 @@ test('the same profile may retry a staging import and only an exact prior import
   forward.authority({ status: 'staging', importSha256: 'f'.repeat(64) });
   const next = await forward.run('create-profile');
   assert.equal((await forward.run('stage-import', { profileSha256: next.profileSha256 })).status, 'staged');
+});
+
+test('exact CLI verification saves a real profile-bound full-byte attestation that parity can reuse without another object scan', async t => {
+  const f = await fixture(t), created = await f.run('create-profile');
+  const result = await f.run('verify-import', { profileSha256: created.profileSha256 });
+  assert.match(result.archiveAttestationSha256, /^[a-f0-9]{64}$/);
+  const root = path.dirname(f.folder), names = (await fs.readdir(root)).filter(name => name.startsWith('archive-bytes-'));
+  assert.equal(names.length, 1);
+  const bytes = await fs.readFile(path.join(root, names[0])), attestation = JSON.parse(bytes);
+  assert.equal(hash(bytes), result.archiveAttestationSha256); assert.equal(attestation.method, 'migration-cli-full-object-read');
+  assert.equal(attestation.sourceProfileSha256, created.profileSha256);
+  assert.equal(attestation.sourceObjectsSha256, f.template.objects.sha256);
+  assert.equal(attestation.cliReceipt.archiveObjects, 1); assert.equal(attestation.bytesRead, attestation.cliReceipt.archiveBytesRead);
+  assert.equal(attestation.targetDatabase, 'fictional_existing');
+  assert.equal((await fs.stat(path.join(root, names[0]))).mode & 0o777, 0o600);
+  assert(!JSON.stringify(result).includes('fictional private payload'));
+  assert.equal((await f.run('verify-import', { profileSha256: created.profileSha256 })).archiveAttestationSha256, result.archiveAttestationSha256);
+  assert.deepEqual(await fs.readFile(path.join(root, names[0])), bytes);
+});
+
+test('a current CLI verification preserves an independently valid earlier-profile or fresh-method proof of the same physical union', async t => {
+  for (const method of ['earlier-profile', 'fresh-full-object-read']) await t.test(method, async t => {
+    const f = await fixture(t), created = await f.run('create-profile');
+    await f.run('verify-import', { profileSha256: created.profileSha256 });
+    const root = path.dirname(f.folder), filename = (await fs.readdir(root)).find(name => name.startsWith('archive-bytes-'));
+    const file = path.join(root, filename), initial = JSON.parse(await fs.readFile(file));
+    const implementationIdentities = { verifierSha256: hash(await fs.readFile(path.join(f.appRoot, '.github/scripts/driver-audit-native-parity.mjs'))),
+      archiveSha256: driverAuditArchiveImplementationSha256(Object.fromEntries(await Promise.all([
+        'services/driverAuditMongoArchive.js', 'services/driverAuditSpacesArchive.js', 'services/driverAuditNativeObjectStore.js',
+      ].map(async file => [file, await fs.readFile(path.join(f.appRoot, 'server', file))])))),
+      migrationCliSha256: hash(await fs.readFile(path.join(f.appRoot, 'server/scripts/driverAuditMongoMigrate.js'))) };
+    let prior;
+    if (method === 'earlier-profile') {
+      const sourceProfile = JSON.parse(await fs.readFile(path.join(f.folder, 'profile.private.json')));
+      sourceProfile.previousImportSha256 = 'f'.repeat(64);
+      const sourceProfileBytes = Buffer.from(JSON.stringify(sourceProfile)), sourceObjectsBytes = await fs.readFile(path.join(f.folder, sourceProfile.objects.file));
+      const metadata = await captureNativeDriverAuditArchiveMetadata({ db: f.db,
+        objects: gunzipSync(sourceObjectsBytes).toString('utf8').trim().split('\n').map(JSON.parse),
+        targetIdentitySha256: nativeDriverAuditTargetIdentity(f.adapters.env.MONGODB_URI, f.db.databaseName) });
+      prior = createDriverAuditNativeCliByteAttestation({ before: metadata, after: metadata,
+        cliReceipt: { ...initial.cliReceipt, importSha256: hash(sourceProfileBytes) }, sourceProfileSha256: hash(sourceProfileBytes),
+        sourceProfileBytes, sourceObjectsBytes, implementationIdentities, completedAt: initial.completedAt });
+      assert.notEqual(prior.sourceProfileSha256, created.profileSha256);
+    } else {
+      prior = { ...initial, method, sourceImplementationSha256: implementationIdentities.verifierSha256 };
+      delete prior.cliReceipt; delete prior.cliReceiptSha256;
+    }
+    const bytes = Buffer.from(JSON.stringify(prior, null, 2) + '\n'); await fs.writeFile(file, bytes, { mode: 0o600 });
+    const result = await f.run('verify-import', { profileSha256: created.profileSha256 });
+    assert.equal(result.archiveAttestationSha256, hash(bytes)); assert.deepEqual(await fs.readFile(file), bytes);
+    assert.equal(f.cli.filter(args => args[1] === 'verify').length, 2);
+  });
+});
+
+test('a changed or code-incompatible prior archive proof is preserved and rejected after the actual new verification', async t => {
+  for (const reason of ['metadata', 'archive-code', 'cli-code', 'fresh-code', 'receipt', 'inventory', 'input', 'future', 'new-result']) await t.test(reason, async t => {
+    const f = await fixture(t), created = await f.run('create-profile'); await f.run('verify-import', { profileSha256: created.profileSha256 });
+    const root = path.dirname(f.folder), file = path.join(root, (await fs.readdir(root)).find(name => name.startsWith('archive-bytes-')));
+    const prior = JSON.parse(await fs.readFile(file));
+    if (reason === 'metadata') prior.metadataSha256 = 'f'.repeat(64);
+    if (reason === 'archive-code') prior.archiveImplementationSha256 = 'f'.repeat(64);
+    if (reason === 'cli-code') prior.sourceImplementationSha256 = 'f'.repeat(64);
+    if (reason === 'fresh-code') { prior.method = 'fresh-full-object-read'; prior.sourceImplementationSha256 = 'f'.repeat(64); }
+    if (reason === 'receipt') prior.cliReceipt.archiveObjects++;
+    if (reason === 'inventory') prior.sourceObjectsInventorySha256 = 'f'.repeat(64);
+    if (reason === 'input') prior.sourceObjectsSha256 = 'not-an-input-digest';
+    if (reason === 'future') prior.completedAt = new Date(Date.now() + 60000).toISOString();
+    const bytes = Buffer.from(JSON.stringify(prior, null, 2) + '\n'); await fs.writeFile(file, bytes, { mode: 0o600 });
+    if (reason === 'new-result') {
+      const execute = f.adapters.exec;
+      f.adapters.exec = async (command, args, options) => {
+        const result = await execute(command, args, options);
+        if (command !== process.execPath || args[1] !== 'verify') return result;
+        return { stdout: JSON.stringify({ ...JSON.parse(result.stdout), resultsEqual: false }) };
+      };
+    }
+    await assert.rejects(f.run('verify-import', { profileSha256: created.profileSha256 }));
+    assert.deepEqual(await fs.readFile(file), bytes); assert.equal(f.cli.filter(args => args[1] === 'verify').length, 2);
+  });
+});
+
+test('verification drift or unreviewed code never mints an archive byte attestation', async t => {
+  for (const reason of ['metadata', 'objects', 'tracked', 'dirty', 'missing-verifier', 'symlink-verifier', 'reader', 'byte-count', 'constructor-input', 'unequal-results']) await t.test(reason, async t => {
+    const f = await fixture(t), created = await f.run('create-profile'), execute = f.adapters.exec;
+    const verifier = path.join(f.appRoot, '.github/scripts/driver-audit-native-parity.mjs');
+    if (reason === 'missing-verifier') await fs.unlink(verifier);
+    if (reason === 'symlink-verifier') { await fs.rename(verifier, verifier + '.preserved'); await fs.symlink(verifier + '.preserved', verifier); }
+    f.adapters.exec = async (file, args, options) => {
+      if (file === 'git' && args[0] === 'ls-files' && reason === 'tracked') throw Error('fictional private untracked module');
+      if (file === 'git' && args[0] === 'diff' && reason === 'dirty') throw Error('fictional private unreviewed code');
+      const result = await execute(file, args, options);
+      if (file !== process.execPath || args[1] !== 'verify') return result;
+      if (reason === 'metadata') f.nativeFiles[0].reference.sha256 = '9'.repeat(64);
+      if (reason === 'objects') await fs.appendFile(path.join(f.folder, f.template.objects.file), 'changed');
+      if (reason === 'reader') await fs.appendFile(path.join(f.appRoot, 'server/services/driverAuditMongoArchive.js'), '\n// independent change');
+      if (reason === 'byte-count') { const value = JSON.parse(result.stdout); value.archiveBytesRead = 0; return { stdout: JSON.stringify(value) }; }
+      if (reason === 'constructor-input') { const value = JSON.parse(result.stdout); value.archiveObjects = 2; return { stdout: JSON.stringify(value) }; }
+      if (reason === 'unequal-results') { const value = JSON.parse(result.stdout); value.resultsEqual = false; return { stdout: JSON.stringify(value) }; }
+      return result;
+    };
+    await assert.rejects(f.run('verify-import', { profileSha256: created.profileSha256 }), error => !String(error).includes('fictional private'));
+    assert.equal((await fs.readdir(path.dirname(f.folder))).some(name => name.startsWith('archive-bytes-')), false);
+    if (['tracked', 'dirty', 'missing-verifier', 'symlink-verifier'].includes(reason)) assert.equal(f.cli.length, 0);
+  });
 });
 
 test('the host operator lock excludes concurrent imports from the encrypted-transfer directory', async t => {
@@ -401,7 +538,7 @@ test('orphan probes are capped at eight and never follow an invalid reference pa
 async function sourceStageFixture(t) {
   const f = await fixture(t), files = [];
   const paths = ['source/api/collector.mjs', 'source/integration/hosted/native-backend.mjs',
-    'source/integration/hosted/archive-read-cache.mjs', ...Array.from({ length: 131 }, (_, i) => 'source/fixture-' + i + '.mjs')];
+    'source/integration/hosted/archive-read-cache.mjs', ...Array.from({ length: 133 }, (_, i) => 'source/fixture-' + i + '.mjs')];
   const manifest = { schemaVersion: 1, files: paths.map(file => {
     const bytes = Buffer.from('export const fictional = true;\n'); files.push({ path: file, dataBase64: bytes.toString('base64') });
     return { path: file, bytes: bytes.length, sha256: hash(bytes) };
@@ -425,7 +562,7 @@ async function sourceStageFixture(t) {
     await f.save('received.private.json', f.receipt); await f.save('session.private.json', f.state);
     return { compressed, environmentBytes, sha256: hash(compressed) };
   };
-  f.adapters.sourcePins = { manifest: manifestSha256, files: 134 };
+  f.adapters.sourcePins = { manifest: manifestSha256, files: 136 };
   const runSource = async () => f.run('stage-source', { templateSha256: (await refresh()).sha256 });
   return { ...f, bundle, environment, refresh, runSource, target: path.join(f.appRoot, 'server/.private/driver-audit-source', manifestSha256) };
 }
@@ -434,7 +571,7 @@ test('source staging verifies exact code/runtime, retains credentials privately 
   const f = await sourceStageFixture(t);
   await fs.unlink(path.join(f.folder, 'profile-template.private.json'));
   const result = await f.runSource();
-  assert.equal(result.status, 'source-staged'); assert.equal(result.files, 134);
+  assert.equal(result.status, 'source-staged'); assert.equal(result.files, 136);
   assert.equal(result.authorityChanged, false); assert.equal(result.activationPending, true);
   const record = JSON.parse(await fs.readFile(path.join(f.target, 'stage.private.json')));
   assert.equal(record.bundleSha256, result.bundleSha256);
@@ -505,6 +642,143 @@ test('source staging accepts only the two verified fixed-name inputs', async t =
   });
 });
 
+async function lineageStageFixture(t) {
+  const f = await fixture(t), name = 'historical-source-lineage.private.json';
+  const proof = { version: 1, entries: [{ fixture: 'fictional-private-source-receipt' }] };
+  const raw = Buffer.from(JSON.stringify(proof)), originalLoad = f.adapters.load;
+  await fs.writeFile(path.join(f.folder, name), raw, { mode: 0o600 });
+  f.receipt.inputFiles = [{ name, sha256: hash(raw), bytes: raw.length }];
+  f.receipt.objects = 1; f.receipt.bytes = raw.length; f.state.plan.objectCount = 1; f.state.plan.objectBytes = raw.length;
+  await f.save('received.private.json', f.receipt); await f.save('session.private.json', f.state);
+  f.adapters.env.DRIVER_AUDIT_SUPABASE_SECRET = 'fictional-private-source-key';
+  const source = { revision: 7, body: '{"fictional":"source body"}' };
+  let reads = 0, advance = false, invalid = false;
+  f.adapters.load = async module => {
+    if (module === 'services/driverAuditOriginalSourceLineage.js') return { DRIVER_AUDIT_HISTORICAL_SOURCE_FILE: name,
+      async validateDriverAuditHistoricalSourceProof({ proof: value, config }) {
+        assert.deepEqual(value, proof); assert.equal(config.root, f.syncRoot);
+        if (invalid) throw Error('fictional-private-source-receipt');
+      } };
+    if (module === 'vendor/driver-audits/integration/cloud/rpc.mjs') return { createHostedRpc({ secret }) {
+      assert.equal(secret, f.adapters.env.DRIVER_AUDIT_SUPABASE_SECRET); return { fixture: true };
+    } };
+    if (module === 'vendor/driver-audits/integration/cloud/cloud-state.mjs') return { createCloudState() {
+      return { async read(key) { assert.equal(key, 'collector-state'); reads++;
+        return advance && reads > 1 ? { ...source, revision: 8 } : source; } };
+    } };
+    if (module === 'services/driverAuditLiveImport.js') return { async collectDriverAuditReceiptRoots({ db, syncRoot, documents }) {
+      assert.equal(syncRoot, f.syncRoot); assert(db); assert.deepEqual(documents, [{ key: 'collector-state', revision: 7, body_text: source.body }]);
+      assert.deepEqual(await fs.readFile(path.join(syncRoot, name)), raw);
+      return { sha256: censusSha, collectorRevisions: [2, 3, 7], receiptBindings: [{ key: 'collector-state', revision: 3, receiptSha256: hash('original') }] };
+    } };
+    return originalLoad(module);
+  };
+  return { ...f, name, raw, runLineage: () => f.run('stage-lineage', { templateSha256: hash(raw) }),
+    advance: () => { advance = true; }, invalidate: () => { invalid = true; } };
+}
+
+test('historical source retention stages only immutable proof metadata and checks the actual unchanged source census', async t => {
+  const f = await lineageStageFixture(t), config = await fs.readFile(path.join(f.syncRoot, 'sync.json'));
+  const result = await f.runLineage();
+  assert.equal(result.status, 'historical-source-retained'); assert.equal(result.collectorRootsSha256, censusSha);
+  assert.equal(result.renderedWorkspaceRecovered, false); assert.equal(result.sourceRecordsChanged, false);
+  assert.equal(result.authorityChanged, false); assert.equal(result.activationPending, true);
+  assert.deepEqual(await fs.readFile(path.join(f.syncRoot, 'sync.json')), config);
+  assert.equal((await f.runLineage()).status, 'historical-source-already-retained');
+  assert(!JSON.stringify(result).includes('fictional-private')); assert.equal(f.cli.length, 0);
+  assert(f.calls.every(call => call.file === 'git' || call.file === 'pm2' && call.args.join() === 'jlist'));
+});
+
+test('historical source retention rejects input, source, proof or existing-target drift without changing source records', async t => {
+  for (const reason of ['name', 'extra', 'hash', 'conflict', 'advanced', 'secret', 'proof']) await t.test(reason, async sub => {
+    const f = await lineageStageFixture(sub);
+    if (reason === 'name') f.receipt.inputFiles[0].name = 'other.private.json';
+    if (reason === 'extra') f.receipt.inputFiles.push(f.receipt.inputFiles[0]);
+    if (reason === 'hash') await fs.appendFile(path.join(f.folder, f.name), 'changed');
+    if (reason === 'conflict') await fs.writeFile(path.join(f.syncRoot, f.name), 'preserve-existing', { mode: 0o600 });
+    if (reason === 'advanced') f.advance();
+    if (reason === 'secret') delete f.adapters.env.DRIVER_AUDIT_SUPABASE_SECRET;
+    if (reason === 'proof') f.invalidate();
+    await f.save('received.private.json', f.receipt);
+    await assert.rejects(f.runLineage(), error => !String(error).includes('fictional-private'));
+    if (reason === 'conflict') assert.equal(await fs.readFile(path.join(f.syncRoot, f.name), 'utf8'), 'preserve-existing');
+    assert.equal(f.cli.length, 0); assert.equal(f.locked(), false);
+  });
+});
+
+async function qualificationFixture(t) {
+  const f = await fixture(t), created = await f.run('create-profile'), file = path.join(f.syncRoot, 'sync.json');
+  const sync = JSON.parse(await fs.readFile(file));
+  await fs.writeFile(file, JSON.stringify({ ...sync, builderSha256: NATIVE_BUILDER_TO }), { mode: 0o600 });
+  const local = path.join(f.appRoot, 'server/.env.local');
+  await fs.writeFile(local, 'DRIVER_AUDIT_REPLICA_GC_ENABLED=0\n', { mode: 0o600 });
+  f.adapters.env.DRIVER_AUDIT_REPLICA_GC_ENABLED = '0';
+  const source = { root: f.sourceRoot, manifestSha256: NATIVE_IMPORT_SOURCE_MANIFEST, configSha256: 'e'.repeat(64),
+    dataStore: 'mongo', environment: { DRIVER_AUDIT_DATA_STORE: 'mongo' }, archiveCacheDirectory: path.join(f.syncRoot, 'work/archive-cache') };
+  const fixtureSha256 = 'f'.repeat(64), originalLoad = f.adapters.load, originalExec = f.adapters.exec;
+  const result = { status: 'verified', verified: true, receiptSha256: hash('original host receipt'), commit,
+    configSha256: source.configSha256, fixtureSha256, source: { peakRssBytes: 300 }, builder: { peakRssBytes: 400 },
+    sourceAfterBuilder: { peakRssBytes: 350 } };
+  let fail = false, calls = 0;
+  f.adapters.load = async name => {
+    if (name === 'node_modules/dotenv/lib/main.js') return import('../../server/node_modules/dotenv/lib/main.js');
+    if (name === 'services/driverAuditSource.js') return { ...await originalLoad(name), async readDriverAuditSourceConfig(file) {
+      assert.equal(file, path.join(f.sourceRoot, 'source.json')); return source;
+    } };
+    if (name === 'scripts/driverAuditSourceQualify.js') return { async qualifyDriverAuditSourceWhileHeld(input) {
+      calls++; assert.equal(input.commit, commit); assert.equal(input.fixtureSha256, fixtureSha256); assert.equal(input.config, source);
+      assert.equal((await input.supervisor())[1].pm2_env.status, 'stopped');
+      try { await input.startSync(); assert.equal((await input.supervisor())[1].pm2_env.status, 'online');
+        if (fail) throw Error('fictional-private-replay-failure'); return result;
+      } finally { await input.stopSync(); assert.equal((await input.supervisor())[1].pm2_env.status, 'stopped'); }
+    } };
+    return originalLoad(name);
+  };
+  f.adapters.exec = async (file, args, options) => {
+    if (file === process.execPath && args[0] === path.join(f.appRoot, 'server/scripts/driverAuditDeploy.js')) {
+      assert.equal(options.env.DRIVER_AUDIT_DEPLOY_SHA, commit);
+      if (args[1] === 'deploy-worker-resume') { f.entries[1].pm2_env.status = 'online'; return { stdout: 'resumed' }; }
+      assert.equal(args[1], 'deploy-worker-pause'); f.entries[1].pm2_env.status = 'stopped'; return { stdout: 'paused' };
+    }
+    if (file === 'pm2' && args[0] === 'save') return { stdout: 'saved' };
+    return originalExec(file, args, options);
+  };
+  return { ...f, source, result, local, fixtureSha256, profileSha256: created.profileSha256, calls: () => calls,
+    fail: () => { fail = true; }, runQualification: extra => f.run('qualify-source', { profileSha256: created.profileSha256,
+      qualificationFixtureSha256: fixtureSha256, ...extra }) };
+}
+
+test('native source rehearsal uses exact profile and real held lifecycle with no authority or publishing switch', async t => {
+  const f = await qualificationFixture(t), result = await f.runQualification();
+  assert.equal(result.status, 'source-qualified'); assert.equal(result.verified, true);
+  assert.equal(result.qualificationReceiptSha256, f.result.receiptSha256); assert.equal(result.reportWorkersHeld, true);
+  assert.equal(result.authorityChanged, false); assert.equal(f.entries[1].pm2_env.status, 'stopped');
+  assert.equal(f.cli.length, 0); assert.equal(f.locked(), false); assert(!JSON.stringify(result).includes(f.appRoot));
+});
+
+test('qualification refuses unsafe gates and exposes a partial original host result without calling it verified', async t => {
+  for (const reason of ['fixture', 'profile', 'durable-pruning', 'effective-pruning', 'cache', 'backend', 'failure', 'partial']) await t.test(reason, async sub => {
+    const f = await qualificationFixture(sub), extra = {};
+    if (reason === 'fixture') extra.qualificationFixtureSha256 = undefined;
+    if (reason === 'profile') extra.profileSha256 = '0'.repeat(64);
+    if (reason === 'durable-pruning') await fs.writeFile(f.local, 'DRIVER_AUDIT_REPLICA_GC_ENABLED=1\n');
+    if (reason === 'effective-pruning') f.adapters.env.DRIVER_AUDIT_REPLICA_GC_ENABLED = '1';
+    if (reason === 'cache') f.source.archiveCacheDirectory = '/unapproved';
+    if (reason === 'backend') f.source.dataStore = 'supabase';
+    if (reason === 'failure') f.fail();
+    if (reason === 'partial') {
+      f.result.status = 'partial'; f.result.verified = false; f.result.blocked = { phase: 'builder', reason: 'memory',
+        privateError: 'fictional-private-source-value' };
+      const value = await f.runQualification(extra);
+      assert.equal(value.status, 'source-qualification-partial'); assert.equal(value.verified, false);
+      assert.deepEqual(value.blocked, { phase: 'builder', reason: 'memory' });
+      assert(!JSON.stringify(value).includes('fictional-private'));
+    } else await assert.rejects(f.runQualification(extra), error => !String(error).includes('fictional-private'));
+    assert.equal(f.entries[1].pm2_env.status, 'stopped'); assert.equal(f.locked(), false);
+    if (!['failure', 'partial'].includes(reason)) assert.equal(f.calls(), 0);
+  });
+});
+
 async function builderFixture(t) {
   const f = await fixture(t), originalLoad = f.adapters.load;
   f.adapters.load = name => name === 'vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs'
@@ -540,6 +814,66 @@ async function builderFixture(t) {
   return { ...f, source, pins, bundle, saveBundle, bundleSha256, changed,
     target: path.join(f.syncRoot, 'builder-staged-' + pins.to) };
 }
+
+async function retainBuilderCodeArchives(f) {
+  const original = await fs.readFile(path.join(f.source, 'runtime-manifest.json'));
+  const manifests = { from: original, to: Buffer.from(f.bundle.manifest, 'base64') }, envelopes = {};
+  f.pins.codeArchives = {};
+  const save = (side, envelope) => {
+    const bytes = gzipSync(JSON.stringify(envelope)), key = hash(bytes) + '.gz';
+    f.archivedCode.set(key, bytes); f.pins.codeArchives[side] = { key, bytes: bytes.length }; return bytes;
+  };
+  for (const side of ['from', 'to']) {
+    const files = [{ path: 'runtime-manifest.json', dataBase64: manifests[side].toString('base64') }];
+    for (const name of Object.keys(JSON.parse(manifests[side]).files)) {
+      const bytes = side === 'to' && name === f.changed ? Buffer.from(f.bundle.delta[name], 'base64')
+        : await fs.readFile(path.join(f.source, name));
+      files.push({ path: name, dataBase64: bytes.toString('base64') });
+    }
+    envelopes[side] = { version: 1, manifestSha256: f.pins[side], files }; save(side, envelopes[side]);
+  }
+  return { envelopes, save };
+}
+
+test('builder staging verifies both complete native code envelopes before staging and keeps them unchanged on retry', async t => {
+  const f = await builderFixture(t); await retainBuilderCodeArchives(f);
+  const retained = new Map([...f.archivedCode].map(([key, bytes]) => [key, Buffer.from(bytes)]));
+  const run = () => f.run('stage-builder', { templateSha256: f.bundleSha256 });
+  const result = await run();
+  assert.deepEqual(result.builderCodeArchives, { previous: f.pins.codeArchives.from.key, current: f.pins.codeArchives.to.key });
+  assert.equal(result.status, 'builder-staged'); await verifyAuditBuilder(f.target, f.pins.to);
+  assert.equal((await run()).status, 'builder-already-staged');
+  assert.deepEqual(f.archivedCode, retained); await verifyAuditBuilder(f.source, f.pins.from);
+  f.archivedCode.delete(f.pins.codeArchives.to.key);
+  await assert.rejects(run(), error => error.phase === 'builder-staging');
+  await verifyAuditBuilder(f.target, f.pins.to); assert.equal(f.cli.length, 0);
+});
+
+test('builder staging rejects absent, corrupted or incomplete maintenance archives before creating any target', async t => {
+  for (const reason of ['missing-original', 'missing-candidate', 'compressed-hash', 'compressed-size', 'version',
+    'manifest-pin', 'manifest-bytes', 'file-count', 'duplicate', 'unlisted', 'file-bytes', 'base64', 'extra-field']) {
+    await t.test(reason, async t => {
+      const f = await builderFixture(t), { envelopes, save } = await retainBuilderCodeArchives(f), code = envelopes.to;
+      if (reason === 'missing-original') f.archivedCode.delete(f.pins.codeArchives.from.key);
+      if (reason === 'missing-candidate') f.archivedCode.delete(f.pins.codeArchives.to.key);
+      if (reason === 'compressed-hash') f.archivedCode.set(f.pins.codeArchives.to.key, Buffer.alloc(f.pins.codeArchives.to.bytes));
+      if (reason === 'compressed-size') f.pins.codeArchives.to.bytes++;
+      if (reason === 'version') code.version = 2;
+      if (reason === 'manifest-pin') code.manifestSha256 = 'f'.repeat(64);
+      if (reason === 'manifest-bytes') code.files[0].dataBase64 = Buffer.from('{}').toString('base64');
+      if (reason === 'file-count') code.files.pop();
+      if (reason === 'duplicate') code.files[1] = { ...code.files[0] };
+      if (reason === 'unlisted') code.files[1].path = '../outside.mjs';
+      if (reason === 'file-bytes') code.files[1].dataBase64 = Buffer.from('different original').toString('base64');
+      if (reason === 'base64') code.files[1].dataBase64 += '=';
+      if (reason === 'extra-field') code.unreviewed = true;
+      if (!['missing-original', 'missing-candidate', 'compressed-hash', 'compressed-size'].includes(reason)) save('to', code);
+      await assert.rejects(f.run('stage-builder', { templateSha256: f.bundleSha256 }), error => error.phase === 'builder-staging');
+      await assert.rejects(fs.stat(f.target), { code: 'ENOENT' }); await verifyAuditBuilder(f.source, f.pins.from);
+      assert.equal(f.cli.length, 0); assert.equal(f.locked(), false);
+    });
+  }
+});
 
 test('builder staging copies the exact reviewed 73-file delta without source/profile requirements or worker restart', async t => {
   const f = await builderFixture(t);

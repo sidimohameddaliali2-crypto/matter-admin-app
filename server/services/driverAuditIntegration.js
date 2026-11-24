@@ -1,7 +1,9 @@
 import {loadStaffAuditRenderer} from './driverAuditStaffRenderer.js';
 import {createDriverAuditAuth} from './driverAuditAuth.js';
 import {createDriverAuditReplica} from './driverAuditReplica.js';
+import {createDriverAuditSupabaseReplica} from './driverAuditSupabaseReplica.js';
 import {readDriverAuditSyncStatus} from './driverAuditSyncStatus.js';
+import {createDriverAuditLightReader} from './driverAuditLightReader.js';
 import {createDriverAuditDataBackend,driverAuditLocalReaderBudget} from './driverAuditDataBackend.js';
 import {createHostedRpc} from '../vendor/driver-audits/integration/cloud/rpc.mjs';
 import {createCloudState} from '../vendor/driver-audits/integration/cloud/cloud-state.mjs';
@@ -34,24 +36,36 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    const verified=req&&verifiedRequests.get(req);
    return verified&&verified.cookie===cookie?verified.session:auth.authenticate(cookie);
   }};
-  const backend=env.DRIVER_AUDIT_DATA_STORE
-   ?await createDriverAuditDataBackend({db:db(),env}):null;
+  const supabaseReader=env.DRIVER_AUDIT_SERVING_STORE==='supabase';
+  if(env.DRIVER_AUDIT_SERVING_STORE!==undefined&&(!supabaseReader||env.DRIVER_AUDIT_IMPORT_ENABLED!=='0'))
+   throw Error('Explicit Supabase report serving requires the legacy importer disabled');
+  // This selection applies only to staff routes. The scheduled worker owns a
+  // separate environment and the business app keeps its operational store.
+  const backendEnv=supabaseReader?{...env,DRIVER_AUDIT_EXECUTION_HOST:'sidi',DRIVER_AUDIT_DATA_STORE:'supabase'}:env;
+  const backend=dependencies.backend||(backendEnv.DRIVER_AUDIT_DATA_STORE||backendEnv.DRIVER_AUDIT_EXECUTION_HOST
+   ?await createDriverAuditDataBackend({db:backendEnv.DRIVER_AUDIT_EXECUTION_HOST==='sidi'?undefined:db(),env:backendEnv}):null);
   const state=dependencies.state||createCloudState({rpc:backend?.rpc||createHostedRpc({secret:env.DRIVER_AUDIT_SUPABASE_SECRET})});
   const rawArchive=dependencies.archive||backend?.archive||createSupabaseArchiveTransport({secret:env.DRIVER_AUDIT_SUPABASE_SECRET});
-  const store=dependencies.store||createDriverAuditReplica(db(),{capacityBytes:Number(env.DRIVER_AUDIT_CAPACITY_BYTES)});
+  const supabaseHost=backend?.kind==='supabase'&&backend.executionHost==='sidi';
+  const pointerState=supabaseHost&&!dependencies.state&&backend.rpcForResponseLimit
+   ?createCloudState({rpc:backend.rpcForResponseLimit(768*1024)}):state;
+  const store=dependencies.store||(supabaseHost?createDriverAuditSupabaseReplica({state:pointerState,archive:rawArchive})
+   :createDriverAuditReplica(db(),{capacityBytes:Number(env.DRIVER_AUDIT_CAPACITY_BYTES)}));
   async function isRetiredAuditGeneration(generation){
    const active=await store.head();
-   if(active?.directImport?.version!==1||!isGenerationDigest(active.generation)||
+   if(!(active?.directImport?.version===1||active?.servingPackage?.version===1&&active.servingPackage.dataStore==='supabase')||!isGenerationDigest(active.generation)||
      (active.previous!=null&&!isGenerationDigest(active.previous.generation)))throw Error('Audit generation pair unavailable');
    const servingGeneration=coordinator.status().active?.generation;
    return generation!==servingGeneration&&generation!==active.generation&&generation!==active.previous?.generation;
   }
   let budget=dependencies.budget;
-  const getBudget=()=>budget??=backend?.kind==='mongo'?driverAuditLocalReaderBudget:createReaderBudgetPool({stateStore:state,approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true,approvedNovemberOvernight:true});
+  const getBudget=()=>budget??=backend?.archiveReadBudget||(backend?.kind==='mongo'?driverAuditLocalReaderBudget:createReaderBudgetPool({stateStore:state,approvedNovemberRelease:true,approvedNovemberSync:true,approvedNovemberRecovery:true,approvedNovemberOvernight:true}));
   const archive=createBudgetedArchiveReader({transport:rawArchive,maxConcurrent:4,requestBytes:2048+2*Buffer.byteLength(env.DRIVER_AUDIT_SUPABASE_SECRET||''),budget:{
    reserve:options=>getBudget().reserve(options),
    settle:(reservation,measurement)=>getBudget().settle(reservation,measurement),
   }});
+  const light=supabaseHost&&env.DRIVER_AUDIT_LIGHT_READER==='1'
+   ?createDriverAuditLightReader({store,archive,rpcForResponseLimit:backend.rpcForResponseLimit,clock}):null;
   async function budgetedImport(){
    getBudget();
    const usage={responseBytes:0,requestBytes:0},chargeRequest=()=>{usage.requestBytes+=2048+2*Buffer.byteLength(env.DRIVER_AUDIT_SUPABASE_SECRET||'');if(usage.requestBytes>MAX_READER_REQUEST_BYTES)throw Error('Audit request allowance exceeded');},chargeBytes=n=>{usage.responseBytes+=n;if(usage.responseBytes>MAX_READER_BODY_BYTES)throw Error('Audit transfer allowance exceeded');};
@@ -66,11 +80,14 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
   };
   const createCoordinator=dependencies.createCoordinator||createAutomaticHostedPreview;
   const createRuntime=dependencies.createRuntime||createImportedAuditRuntime;
-  const staffRenderer=await loadStaffAuditRenderer(env.DRIVER_AUDIT_STAFF_RENDERER_DIR,env.DRIVER_AUDIT_STAFF_RENDERER_SHA256);
+  let staffRenderer,rendererFlight;
+  const getStaffRenderer=()=>rendererFlight??=loadStaffAuditRenderer(env.DRIVER_AUDIT_STAFF_RENDERER_DIR,env.DRIVER_AUDIT_STAFF_RENDERER_SHA256);
+  if(!light)staffRenderer=await getStaffRenderer();
   let preload,preloadFailed=false;
-  const coordinator=createCoordinator({clock,refreshOnRequest:false,restorePrevious:true,loadPointer:async()=>await store.head(),async loadPackage({descriptor,pointer}){
+  const coordinator=createCoordinator({clock,refreshOnRequest:false,restorePrevious:true,maxHandlers:supabaseHost?2:3,limitPreparation:supabaseHost,loadPointer:async()=>await store.head(),async loadPackage({descriptor,pointer}){
    const directSnapshot=pointer?.directImport?.version===1;
-   let localOnly=Boolean(preload);
+   const staffSnapshot=directSnapshot||pointer?.servingPackage?.version===1&&pointer.servingPackage.dataStore==='supabase';
+   let localOnly=Boolean(preload)&&!supabaseHost;
    if(localOnly&&!directSnapshot)throw Error('Startup requires a direct Mongo audit');
    const restore=pointer?.restore;
    const recoverable=directSnapshot&&restore?.verified===true&&restore.archive==='matter-report-archive'&&
@@ -79,14 +96,18 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
     try{return await store.readObject(key,options);}
     catch(error){if(localOnly||!recoverable||error.code!=='AUDIT_OBJECT_MISSING')throw error;return archive.readObject(key,options);}
    }};
-   const loaded=await loadRemotePreviewPackage({descriptor,transport,parallelCoreReads:directSnapshot});
+   const loaded=await loadRemotePreviewPackage({descriptor,transport,parallelCoreReads:staffSnapshot});
    localOnly=false; // Lazy evidence reads on the published handler retain the normal fallback.
-   return {...loaded,directSnapshot};
-  },createRuntime:({packageOverride,automaticFeed})=>createRuntime({origin,publicPathPrefix:reportApi,packageOverride,automaticFeed,
-   staffRenderer:packageOverride.directSnapshot?staffRenderer:undefined,auditImportStatus:health,auditSyncStatus:packageOverride.directSnapshot?()=>readDriverAuditSyncStatus(db(),packageOverride.generation,clock):undefined,
-   isRetiredAuditGeneration:packageOverride.directSnapshot?isRetiredAuditGeneration:undefined,
+   return {...loaded,directSnapshot,staffSnapshot};
+  },createRuntime:({packageOverride,automaticFeed})=>{
+   const staffSnapshot=packageOverride.staffSnapshot||packageOverride.directSnapshot;
+   const start=renderer=>createRuntime({origin,publicPathPrefix:reportApi,packageOverride,automaticFeed,
+   staffRenderer:renderer,auditImportStatus:health,auditSyncStatus:staffSnapshot?()=>supabaseHost?backend.readSyncStatus(packageOverride.generation,clock):readDriverAuditSyncStatus(db(),packageOverride.generation,clock):undefined,
+   isRetiredAuditGeneration:staffSnapshot?isRetiredAuditGeneration:undefined,
    reviewContextOverride:backend?.reviewContexts?.attach,
-   authOverride:requestAuth,staffReportFrame:true,stateOverride:state,rpcOverride:backend?.rpc,transportOverride:archive,remoteReadsBudgeted:true,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})}),fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Driver audits are not imported yet. Existing delivery reports remain available.');}});
+   authOverride:requestAuth,staffReportFrame:true,stateOverride:state,rpcOverride:backend?.rpc,transportOverride:archive,remoteReadsBudgeted:true,secret:env.DRIVER_AUDIT_SUPABASE_SECRET||'local-fixture',publishableKey:'staff-session',cookieKey:Buffer.alloc(32),allowedEmail:'staff@invalid.example',...(dependencies.runtimeOptions||{})});
+   return staffSnapshot&&light?getStaffRenderer().then(start):start(staffSnapshot?staffRenderer:undefined);
+  },fallback:async(_req,res)=>{res.writeHead(503,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end(supabaseHost?'Driver Reports is unavailable right now. Please try again shortly.':'Driver audits are not imported yet. Existing delivery reports remain available.');}});
   function health(){const runtime=coordinator.status();return {status:runtime.status==='stale'?'failed':runtime.status==='refreshing'?'checking':env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'?'disabled':importStatus,checkedAt:attempt===null?null:new Date(attempt).toISOString(),servingGeneration:runtime.active?.generation||null};}
   function prewarm(){
    if(preload)return preload;
@@ -106,7 +127,8 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    }
    return coordinator.poll();
   }
-  return {origin,auth,verifiedRequests,coordinator,refresh,prewarm,pollForStaff,getImportStatus:()=>health().status};
+  return {origin,auth,verifiedRequests,coordinator,refresh,prewarm,pollForStaff,light,
+   deliveryReviewIsCurrent:async()=>!supabaseHost||!(await store.head())?.deliveryView,getImportStatus:()=>health().status};
  }
  function getContext(){
   if(!pending)pending=initialize().catch(error=>{pending=null;throw error;});
@@ -125,12 +147,15 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
      req.resume();res.writeHead(428,{'Cache-Control':'no-store','Content-Type':'text/plain'});res.end('Reload the app to open driver audits.');return;
     }
     const session=await context.auth.issue(req.headers.authorization);
-    if(env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'&&!context.coordinator.status().active)void context.pollForStaff().catch(()=>{});
+    if(!context.light&&env.DRIVER_AUDIT_IMPORT_ENABLED!=='1'&&!context.coordinator.status().active)void context.pollForStaff().catch(()=>{});
     req.resume();res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store','Set-Cookie':session.cookie});res.end(JSON.stringify({url:auditView+'?screen=reports&view=1&tab=mirror'}));return;
    }
    const cookie=req.headers.cookie;
    const session=await context.auth.authenticate(cookie);
-   if(session?.activityActor)req.activityActor=Object.freeze({...session.activityActor});
+   if(session?.activityActor){
+    req.activityActor=Object.freeze({...session.activityActor});
+    dependencies.onStaffAuthenticated?.(res,req.activityActor);
+   }
    // The existing audit client probes its session before enabling review/maps.
    // Staff identity stays with this app; never invoke the Supabase login flow.
    if(path==='/api/session/refresh'){
@@ -140,6 +165,19 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
    if(path==='/api/session'){
     if(!['GET','HEAD'].includes(req.method))throw Object.assign(Error('Staff sign-in required'),{status:403});
     res.writeHead(200,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(req.method==='HEAD'?undefined:'{"connected":true}');return;
+   }
+   if(context.light?.handles(url)){
+    try{return await context.light.handle(req,res,url,session,context.auth);}
+    catch(error){
+     if(res.headersSent){res.destroy();return;}
+     const code=[400,401,403,404,405,409,429].includes(error.status)?error.status:503;
+     res.writeHead(code,{'Content-Type':'application/json','Cache-Control':'private, no-store'});
+     res.end(JSON.stringify({error:code===503?'Saved report evidence is temporarily unavailable.':'The requested report data could not be opened.'}));return;
+    }
+   }
+   if(path==='/api/reporting/reviews'&&req.method==='POST'&&!await context.deliveryReviewIsCurrent()){
+    req.resume();res.writeHead(409,{'Cache-Control':'private, no-store','Content-Type':'application/json'});
+    res.end(JSON.stringify({error:'Open the current delivery in Driver Reports to save a review.'}));return;
    }
    const isDocument=path===auditView||path==='/driver-audit-view';
    const update=async()=>{await context.refresh();await context.pollForStaff();};
@@ -156,7 +194,13 @@ export function createDriverAuditIntegration({db,authenticateStaffToken,env=proc
  };
  middleware.prewarm=async()=>{
   if(env.DRIVER_AUDIT_ENABLED!=='1'||env.DRIVER_AUDIT_IMPORT_ENABLED!=='0')return;
-  return (await getContext()).prewarm();
+  const context=await getContext();
+  return context.light?context.light.prewarm():context.prewarm();
+ };
+ middleware.isPreparedFor=async head=>{
+  const context=await getContext();
+  if(head?.deliveryView&&!context.light)return false;
+  return context.light?context.light.isPreparedFor(head):context.coordinator.isPreparedFor(head);
  };
  return middleware;
 }

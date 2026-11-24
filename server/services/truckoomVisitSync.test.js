@@ -33,7 +33,7 @@ function setup(t, overrides = {}) {
   t.mock.method(TrackerSyncLease, 'updateOne', async () => ({ matchedCount: 1 }));
   t.mock.method(TrackerSyncLease, 'deleteOne', async () => ({}));
   t.mock.method(Delivery, 'find', () => ({ populate: () => ({ lean: async () => [row] }) }));
-  t.mock.method(Delivery, 'updateOne', async (filter, update) => { writes.push({ filter, update }); return { modifiedCount: 1 }; });
+  t.mock.method(Delivery, 'updateOne', async (filter, update, options) => { writes.push({ filter, update, options }); return { modifiedCount: 1 }; });
   t.mock.method(CustomerGeofence, 'findOne', () => ({ lean: async () => fence }));
   t.mock.method(CustomerGeofence, 'find', () => ({ sort: () => ({ limit: () => ({ lean: async () => [] }) }) }));
   t.mock.method(TrackerGeofenceEvent, 'bulkWrite', async () => ({}));
@@ -65,11 +65,27 @@ test('sync stores tracker, shutter and departure evidence and checks both UTC da
   assert.equal(fixture.dates.length, 2);
   assert.ok(fixture.dates.every(({from,to})=>Number.isSafeInteger(from)&&Number.isSafeInteger(to)&&to-from<86400000));
   assert.equal(TrackerGeofenceEvent.bulkWrite.mock.calls[0].arguments[0][0].updateOne.update.$setOnInsert.source,'truckoom_alert_data');
-  const { filter, update } = fixture.writes[0];
+  const { filter, update, options } = fixture.writes[0];
   assert.equal(+filter.updatedAt, +fixture.row.updatedAt);
+  assert.equal(filter['trackerVisit.checkedAt'], null);
+  assert.deepEqual(options, { timestamps: false });
+  assert.equal(+update.$set.trackerVisit.checkedAt, +fixture.now);
   assert.equal(update.$set.trackerVisit.status, 'inside_window');
   assert.equal(update.$set.trackerVisit.vehicleNo, 'V1');
   assert.equal(update.$set.trackerVisit.radiusMetres, 60);
+});
+
+test('refresh holds the previous tracker clock and emits only on a successful update', async t => {
+  const earlier = new Date('2026-11-06T07:00:00.000Z');
+  const fixture = setup(t, { trackerVisit: { checkedAt: earlier } });
+  const io = { emit: t.mock.fn() };
+  await syncCustomerTrackerVisits({ now: fixture.now, io });
+  assert.equal(fixture.writes[0].filter['trackerVisit.checkedAt'], earlier);
+  assert.equal(io.emit.mock.calls[0].arguments[0], 'delivery:trackerVisit');
+  const write = Delivery.updateOne;
+  write.mock.mockImplementation(async () => ({ modifiedCount: 0 }));
+  await syncCustomerTrackerVisits({ now: fixture.now, io });
+  assert.equal(io.emit.mock.callCount(), 1);
 });
 
 test('wrong vehicle or geofence alerts never verify a photo', async t => {

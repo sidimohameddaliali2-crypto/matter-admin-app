@@ -21,9 +21,11 @@ import { PartnerKitchenCounts } from '../components/PartnerKitchenOrders';
 import usePartnerKitchenOrders from '../lib/usePartnerKitchenOrders';
 import { loadPartnerKitchenOrders, partnerCountingRows } from '../lib/partnerKitchenData';
 import { calculateKitchenListEntry } from '../utils/kitchenListCalculations';
+import { buildKitchenCountRows, kitchenCountMeals, kitchenComponentNames, componentWeightText } from '../utils/kitchenCountingComponents';
+import { buildCookingLog, cookingLogWorkbook } from '../utils/kitchenCookingLog';
+import { useSocket } from '../contexts/SocketContext';
 import { toSentenceCase } from '../utils/textFormat';
 import {
-  getDateKey,
   formatDateLabel,
   fetchBreakfastPresets,
   fetchSnackPresets,
@@ -35,17 +37,9 @@ import {
 } from '../lib/kitchenData';
 
 const CATEGORY_LABEL = { breakfast: 'Breakfast', meal: 'Meal', snack: 'Snack' };
-const CATEGORY_ORDER = { breakfast: 0, meal: 1, snack: 2 };
-
-// Owner (2026-10-09): a breakfast tagged Large (auto-upgraded, or a large preset)
-// is counted on its own row, apart from the normal breakfast of the same name
-// — it is cooked at a bigger portion, so the two must not be summed together.
-const countingMealName = (meal) => {
-  const base = meal.mealName || meal.menuItemName || 'Unnamed meal';
-  return meal.category === 'breakfast' && meal.flags?.isLargeBreakfast ? `${base} (LARGE)` : base;
-};
 
 const KitchenCounting = () => {
+  const { socket } = useSocket();
   const [menus, setMenus] = useState([]);
   const [loadingMenus, setLoadingMenus] = useState(false);
   const [selectedMenuId, setSelectedMenuId] = useState('');
@@ -60,6 +54,11 @@ const KitchenCounting = () => {
   const [loadProgress, setLoadProgress] = useState({ done: 0, total: 0 });
   const [error, setError] = useState('');
   const [customerEntries, setCustomerEntries] = useState([]);
+  const [componentCatalog, setComponentCatalog] = useState([]);
+  const [componentWarning, setComponentWarning] = useState('');
+  const [componentsReady, setComponentsReady] = useState(false);
+  const componentRequest = useRef(0);
+  const refreshComponentSettings = useRef(null);
   const nutritionCacheRef = useRef(new Map());
   const requestGuard = useRef(createKitchenRequestGuard());
   const activeScope = useRef('');
@@ -213,102 +212,106 @@ const KitchenCounting = () => {
 
   useEffect(() => { loadCounts(); return () => requestGuard.current.cancel(); }, [loadCounts]);
 
+  // A return from Meal Details refreshes the quantity rules without rerunning
+  // preparation or downloading the customer roster again.
+  useEffect(() => {
+    const scope = `${selectedMenuId}:${selectedDate}`;
+    setComponentCatalog([]);
+    setComponentWarning('');
+    setComponentsReady(false);
+    if (partnerOnlyDate || !selectedMenuId || !selectedDate) return;
+    let controller;
+    const refreshComponents = async () => {
+      const version = ++componentRequest.current;
+      setComponentsReady(false);
+      setComponentWarning('');
+      controller?.abort();
+      const request = new AbortController();
+      controller = request;
+      try {
+        const response = await api.get(`/menus/${selectedMenuId}/kitchen-components`, {
+          params: { date: selectedDate }, signal: request.signal, timeout: 30000,
+        });
+        if (request.signal.aborted || activeScope.current !== scope) return;
+        if (!response.data?.success || !Array.isArray(response.data?.data)) throw new Error('Invalid component response.');
+        setComponentCatalog(response.data.data);
+        setComponentWarning('');
+        setComponentsReady(true);
+        return { catalog: response.data.data, version };
+      } catch {
+        if (!request.signal.aborted && activeScope.current === scope) setComponentWarning('Component settings could not be loaded. Refresh to retry.');
+      }
+    };
+    refreshComponentSettings.current = refreshComponents;
+    refreshComponents();
+    window.addEventListener('focus', refreshComponents);
+    socket?.on('kitchen:mealLibraryChanged', refreshComponents);
+    socket?.on('connect', refreshComponents);
+    return () => {
+      refreshComponentSettings.current = null;
+      window.removeEventListener('focus', refreshComponents);
+      socket?.off('kitchen:mealLibraryChanged', refreshComponents);
+      socket?.off('connect', refreshComponents);
+      controller?.abort();
+    };
+  }, [partnerOnlyDate, selectedDate, selectedMenuId, socket]);
+
   // The whole point of this page: cook-counts must exactly match what
   // Kitchen List shows for the same menu+date — guaranteed here because both
   // pages run the identical selection data through the identical
   // calculateKitchenListEntry function; this step is pure aggregation, no
   // recalculation of macros/weights.
-  const countRows = useMemo(() => {
-    const grouped = new Map();
-
-    (loadedScope === `${selectedMenuId}:${selectedDate}` ? customerEntries : []).forEach((entry) => {
-      (entry.selectedMeals || [])
-        .filter((meal) => getDateKey(meal?.date) === selectedDate)
-        .forEach((meal) => {
-          const category = meal.category || 'meal';
-          const mealName = countingMealName(meal);
-          const proteinWeight = Number(meal.proteinWeight) || 0;
-          const carbWeight = Number(meal.carbWeight) || 0;
-          const vegWeight = Number(meal.vegWeight) || 0;
-          // A customer who picked the same dish twice (quantity: 2) needs
-          // two portions cooked, each counted and weighed separately — not
-          // folded into one.
-          const qty = Number(meal.quantity) || 1;
-
-          // Grouped by dish name only (per category) — portions are
-          // macro-personalized per customer, so two customers eating
-          // "Chicken Shawarma" can have slightly different portion weights.
-          // The kitchen needs one number for "how many Chicken Shawarma" and
-          // one running total for "how much protein/carb/veg across all of
-          // them" — customer 1's weight + customer 2's + customer 3's ... —
-          // not a separate row per slightly-different portion size.
-          const key = `${category}||${mealName}`;
-          const existing = grouped.get(key);
-          if (existing) {
-            existing.count += qty;
-            existing.totalProteinWeight += proteinWeight * qty;
-            existing.totalCarbWeight += carbWeight * qty;
-            existing.totalVegWeight += vegWeight * qty;
-          } else {
-            grouped.set(key, {
-              category,
-              mealName,
-              count: qty,
-              totalProteinWeight: proteinWeight * qty,
-              totalCarbWeight: carbWeight * qty,
-              totalVegWeight: vegWeight * qty
-            });
-          }
-        });
-    });
-
-    return Array.from(grouped.values()).sort((a, b) => {
-      const catDiff = (CATEGORY_ORDER[a.category] ?? 9) - (CATEGORY_ORDER[b.category] ?? 9);
-      if (catDiff !== 0) return catDiff;
-      if (a.mealName !== b.mealName) return a.mealName.localeCompare(b.mealName);
-      return b.count - a.count;
-    });
-  }, [customerEntries, selectedDate, selectedMenuId, loadedScope]);
+  const countRows = useMemo(() => buildKitchenCountRows(
+    loadedScope === `${selectedMenuId}:${selectedDate}` ? customerEntries : [], selectedDate, componentCatalog, Boolean(componentWarning)
+  ), [customerEntries, selectedDate, selectedMenuId, loadedScope, componentCatalog, componentWarning]);
 
   const totalMealCount = countRows
     .filter((r) => r.category === 'meal')
     .reduce((sum, r) => sum + r.count, 0);
+  const customerDownloadsReady = componentsReady || Boolean(componentWarning);
+  const hasCustomerCountRows = !partnerOnlyDate && countRows.length > 0;
+  const countingExportReady = partnerOnlyDate
+    || (!loading && !error && loadedScope === `${selectedMenuId}:${selectedDate}` && (!hasCustomerCountRows || componentsReady));
 
   // Per-meal drill-down: every customer who has THIS specific meal (same
   // category + name) on the selected date, with their own portion weight —
   // a customer who picked the same dish twice (quantity: 2) gets two rows
   // here, one per portion, not one row with a quantity column, so the
   // kitchen can tick off physical portions one by one.
-  const downloadMealCustomerList = async (category, mealName) => {
-    if (loading || error || loadedScope !== `${selectedMenuId}:${selectedDate}`) return;
+  const downloadMealCustomerList = async ({ key, mealName }) => {
+    const scope = `${selectedMenuId}:${selectedDate}`;
+    if (!customerDownloadsReady || loading || error || loadedScope !== scope) return;
+    const componentVersion = componentRequest.current;
     assertKitchenExportReady(customerEntries);
     const rows = [];
-    (loadedScope === `${selectedMenuId}:${selectedDate}` ? customerEntries : []).forEach((entry) => {
-      (entry.selectedMeals || [])
-        .filter((meal) => getDateKey(meal?.date) === selectedDate)
-        .filter((meal) => (meal.category || 'meal') === category && countingMealName(meal) === mealName)
-        .forEach((meal) => {
-          const qty = Number(meal.quantity) || 1;
-          for (let i = 0; i < qty; i += 1) {
-            rows.push({
-              'Customer ID': entry.customerId || '',
-              Name: getCustomerName(entry),
-              Email: entry.email || '',
-              'Protein Weight (g)': Math.round(Number(meal.proteinWeight) || 0),
-              'Carb Weight (g)': Math.round(Number(meal.carbWeight) || 0),
-              'Veg Weight (g)': Math.round(Number(meal.vegWeight) || 0),
-              'Total Weight (g)': Math.round(Number(meal.weight) || 0),
-              C: Math.round(Number(meal.macros?.C) || 0),
-              P: Math.round(Number(meal.macros?.P) || 0),
-              F: Math.round(Number(meal.macros?.F) || 0)
-            });
-          }
-        });
-    });
+    kitchenCountMeals(customerEntries, selectedDate, componentCatalog, Boolean(componentWarning))
+      .filter(portion => portion.key === key)
+      .forEach(({ entry, meal, item }) => {
+        const names = kitchenComponentNames(meal, componentCatalog, item);
+        const qty = Number(meal.quantity) || 1;
+        for (let i = 0; i < qty; i += 1) {
+          rows.push({
+            'Customer ID': entry.customerId || '',
+            Name: getCustomerName(entry),
+            Email: entry.email || '',
+            'Protein Component': names.protein,
+            'Protein Weight (g)': Math.round(Number(meal.proteinWeight) || 0),
+            'Carb Component': names.carb,
+            'Carb Weight (g)': Math.round(Number(meal.carbWeight) || 0),
+            'Veg Component': names.veg,
+            'Veg Weight (g)': Math.round(Number(meal.vegWeight) || 0),
+            'Total Weight (g)': Math.round(Number(meal.weight) || 0),
+            C: Math.round(Number(meal.macros?.C) || 0),
+            P: Math.round(Number(meal.macros?.P) || 0),
+            F: Math.round(Number(meal.macros?.F) || 0)
+          });
+        }
+      });
 
     if (rows.length === 0) return;
 
     const XLSX = await loadXLSX();
+    if (activeScope.current !== scope || componentRequest.current !== componentVersion) return;
     const worksheet = XLSX.utils.json_to_sheet(rows);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Customers');
@@ -317,24 +320,52 @@ const KitchenCounting = () => {
   };
 
   const exportToExcel = async () => {
-    if (exportInFlight.current || !productionDate || (!partnerOnlyDate && (loading || error || loadedScope !== `${selectedMenuId}:${selectedDate}`))) return;
+    if (exportInFlight.current || !productionDate || !countingExportReady) return;
     const scope = partnerOnlyDate ? `partner:${productionDate}` : `${selectedMenuId}:${productionDate}`;
     exportInFlight.current = true; setExporting(true); setExportError('');
     try {
       if (!partnerOnlyDate) assertKitchenExportReady(customerEntries);
-      const partnerData = await loadPartnerKitchenOrders(api, productionDate, () => activeScope.current === scope);
-      const rows = (partnerOnlyDate ? [] : countRows).map(r => ({Category: CATEGORY_LABEL[r.category] || r.category, 'Meal Name': r.mealName, Count: r.count,
-        'Total Protein Weight (g)': Math.round(r.totalProteinWeight), 'Total Carb Weight (g)': Math.round(r.totalCarbWeight), 'Total Veg Weight (g)': Math.round(r.totalVegWeight)}));
+      const [settings, partnerData, XLSX] = await Promise.all([
+        hasCustomerCountRows ? refreshComponentSettings.current?.() : null,
+        loadPartnerKitchenOrders(api, productionDate, () => activeScope.current === scope),
+        loadXLSX(),
+      ]);
+      if (activeScope.current !== scope) return;
+      if (hasCustomerCountRows && (!settings || componentRequest.current !== settings.version)) {
+        throw new Error('Component settings could not be verified for this download. Please try again.');
+      }
+      const rows = (hasCustomerCountRows ? buildKitchenCountRows(customerEntries, selectedDate, settings.catalog) : []).map(r => ({Category: CATEGORY_LABEL[r.category] || r.category, 'Meal Name': r.mealName, Count: r.count,
+        'Total Protein Weight (g)': Math.round(r.totalProteinWeight), 'Protein Components': componentWeightText(r.components.protein),
+        'Total Carb Weight (g)': Math.round(r.totalCarbWeight), 'Carb Components': componentWeightText(r.components.carb),
+        'Total Veg Weight (g)': Math.round(r.totalVegWeight), 'Veg Components': componentWeightText(r.components.veg)}));
       rows.push(...partnerCountingRows(partnerData));
       if (!rows.length) return;
-      const XLSX = await loadXLSX();
-      if (activeScope.current !== scope) return;
       const worksheet = XLSX.utils.json_to_sheet(rows);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Kitchen Counting');
       XLSX.writeFile(workbook, `kitchen-counting-${productionDate}.xlsx`);
     } catch (err) { if (activeScope.current === scope) setExportError(err.response?.data?.message || err.message || 'Download failed. Please retry.'); }
     finally { exportInFlight.current = false; setExporting(false); }
+  };
+
+  const exportCookingLog = async () => {
+    const scope = `${selectedMenuId}:${selectedDate}`;
+    if (exportInFlight.current || partnerOnlyDate || !componentsReady || loading || error || !selectedDate || loadedScope !== scope) return;
+    exportInFlight.current = true; setExporting(true); setExportError('');
+    try {
+      assertKitchenExportReady(customerEntries);
+      const [settings, module] = await Promise.all([refreshComponentSettings.current?.(), import('xlsx-js-style')]);
+      if (activeScope.current !== scope) return;
+      if (!settings || componentRequest.current !== settings.version) {
+        throw new Error('Component settings could not be verified for this download. Please try again.');
+      }
+      const blocks = buildCookingLog(customerEntries, selectedDate, settings.catalog);
+      if (!blocks.length) return;
+      const XLSX = module.default || module;
+      XLSX.writeFile(cookingLogWorkbook(XLSX, blocks, selectedDate), `cooking-and-eod-${selectedDate}.xlsx`);
+    } catch (err) {
+      if (activeScope.current === scope) setExportError(err.message || 'Cooking & EOD download failed.');
+    } finally { exportInFlight.current = false; setExporting(false); }
   };
 
   return (
@@ -375,7 +406,7 @@ const KitchenCounting = () => {
               </select>
               <button
                 type="button"
-                onClick={() => { nutritionCacheRef.current.clear(); loadCounts(); partnerOrders.refresh(); }}
+                onClick={() => { nutritionCacheRef.current.clear(); refreshComponentSettings.current?.(); loadCounts(); partnerOrders.refresh(); }}
                 disabled={!selectedMenuId || !selectedDate}
                 title="Reload counts"
                 className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
@@ -400,6 +431,7 @@ const KitchenCounting = () => {
         <div className="kitchen-date-chips" aria-label="Delivery dates">{menuDateKeys.map(date => <button type="button" key={date} aria-pressed={selectedDate === date} onClick={() => { recordActivityChange({ field: 'Delivery date', form: 'Kitchen counting', before: selectedDate, after: date }); recordActivityChange({ field: 'Partner-only delivery date', form: 'Kitchen counting', before: partnerOnlyDate, after: '' }); changeKitchenDate(date); }}>{formatDateLabel(date)}</button>)}</div>
 
         {error && <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">{error}</div>}
+        {componentWarning && <div role="status" className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">{componentWarning}</div>}
 
         {loading && (
           <div className="flex items-center gap-3 rounded-2xl bg-white p-6 text-slate-600 shadow-sm ring-1 ring-slate-200">
@@ -420,24 +452,34 @@ const KitchenCounting = () => {
                 </h2>
                 {!partnerOnlyDate && <p className="text-xs text-slate-400 mt-1">{totalMealCount} main meal(s) total, matching Kitchen List.</p>}
               </div>
+              <div className="flex flex-wrap gap-2">
+              {!partnerOnlyDate && <button type="button" onClick={exportCookingLog}
+                disabled={exporting || !componentsReady || loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}` || !countRows.length}
+                className="kitchen-button-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold disabled:opacity-50">
+                <Download size={16} /> Cooking & EOD Excel
+              </button>}
               <button
                 type="button"
                 onClick={exportToExcel}
-                disabled={exporting || (!partnerOnlyDate && (loading || !!error || loadedScope !== `${selectedMenuId}:${selectedDate}`)) || (!(partnerOnlyDate ? 0 : countRows.length) && !partnerOrders.data?.counts.length)}
+                disabled={exporting || !countingExportReady || (!hasCustomerCountRows && !partnerOrders.data?.counts.length)}
                 className="kitchen-button-primary inline-flex items-center gap-2 px-4 py-2.5 text-sm font-semibold disabled:opacity-50"
               >
                 <Download size={16} /> Export Excel
               </button>
+              </div>
             </div>
 
             {!partnerOnlyDate && (countRows.length === 0 ? (
               <p className="text-sm text-slate-400">{loading ? 'Preparing kitchen counts...' : error ? 'Counts are unavailable until preparation succeeds.' : 'No meals assigned for this date yet.'}</p>
             ) : (
-              <KitchenCountingGroups rows={countRows} onDownload={downloadMealCustomerList} />
+              <>
+                {!componentsReady && !componentWarning && <p role="status">Loading component quantities…</p>}
+                <KitchenCountingGroups rows={countRows} onDownload={downloadMealCustomerList} componentsReady={componentsReady} customerDownloadsReady={customerDownloadsReady} />
+              </>
             ))}
             <PartnerKitchenCounts state={partnerOrders} />
             {exportError && <p role="alert" className="text-sm text-red-700">{exportError}</p>}
-            <p className="kitchen-table-note">Weights are displayed in kg; Excel exports retain grams. Bars show each dish’s share of its category total. Large breakfasts have their own row.</p>
+            <p className="kitchen-table-note">Kitchen Counting and Standard Excel show assigned weights and buffered main PCS quantities. Cooking &amp; EOD adds 5% to main protein, carb and vegetable weights. Sauces, garnish and salad bases are counted in pieces without a buffer. Breakfasts and snacks also have no buffer, and use pieces by default. Cooking &amp; EOD combines normal and Large breakfasts and labels the Large count.</p>
           </div>
         )}
       </div>

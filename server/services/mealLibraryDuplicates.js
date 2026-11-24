@@ -4,7 +4,7 @@ const stable = value => typeof value === 'string' ? text(value) : Array.isArray(
   : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().filter(key => value[key] !== undefined).map(key => [key, stable(value[key])])) : value;
 const without = (value, keys) => Object.fromEntries(Object.entries(value).filter(([key]) => !keys.includes(key)));
 const componentSource = ['id','sourceCell','sourceRow','sourceRows','originalText','relationship','attachedComponentId','saladComponentId'];
-const mealSource = ['id','importedMealId','day','cycleDays','category','mealKind','mealFormat','mealType','status','sourceRows','sourceRow','workbookRow','cycleSource','absentSlots'];
+const mealSource = ['id','importedMealId','day','cycleDays','category','mealKind','mealFormat','mealType','status','sourceRows','sourceRow','workbookRow','cycleSource','absentSlots','preserveLibraryId'];
 
 export const libraryMealKind = meal => {
   if (meal.mealKind === 'Main meal') return 'Main';
@@ -16,7 +16,7 @@ export const libraryMealKind = meal => {
 // IDs, workbook locations and cycle days identify occurrences, not recipes.
 // Preserve all operational fields (including notes/adaptations and attachments)
 // so different dietary/preparation variants can never be collapsed by name.
-export function mealFingerprint(meal) {
+export function mealFingerprint(meal, { ignoreQuantity = false } = {}) {
   const base = component => stable({ ...without(component, componentSource), type: ['Protein','Portion','Breakfast','Snack'].includes(component.type) ? 'Portion' : component.type, exclusions: sortedTerms(component.exclusions), allergens: sortedTerms(component.allergens), ingredients: component.ingredients || [], notes: component.notes || '', adaptation: component.adaptation || 'Not reviewed', replacement: component.replacement || '' });
   const components = meal.components || [], byId = new Map(components.map(component => [component.id, component]));
   const signature = (component, visited = new Set()) => {
@@ -30,20 +30,22 @@ export function mealFingerprint(meal) {
   const kind = libraryMealKind(meal);
   const explicitProtein = text(meal.mealType);
   const protein = ['chicken','beef','fish'].includes(explicitProtein) ? explicitProtein : /\b(CHX|CHICKEN)\b/i.test(meal.category || '') ? 'Chicken' : /\bBEEF\b/i.test(meal.category || '') ? 'Beef' : /\bFISH\b/i.test(meal.category || '') ? 'Fish' : '';
-  return JSON.stringify(stable({
-    ...without(meal, [...mealSource,'components']), kind, protein: kind === 'Main' ? protein : '',
+  const recipe = stable({
+    ...without(meal, [...mealSource, 'components', 'qtyUnit', 'gramsPerPiece']), kind, protein: kind === 'Main' ? protein : '',
     notes: meal.notes || '', temperature: meal.temperature || '', tags: meal.tags || '', carbCombined: meal.carbCombined || 'Not specified', allergens: sortedTerms(meal.allergens),
     isOatmeal: meal.isOatmeal ?? meal.category === 'OATS', isSaladBase: !!meal.isSaladBase,
     isFixedMeal: meal.isFixedMeal === true,
     components: components.map(component => JSON.stringify(signature(component))).sort(),
-  }));
+  });
+  return JSON.stringify(ignoreQuantity ? recipe : { ...recipe, qtyUnit: meal.qtyUnit, gramsPerPiece: meal.gramsPerPiece });
 }
 
 const days = meal => [...new Set([meal.day, ...(meal.cycleDays || [])].filter(Boolean))];
 export function deduplicateMeals(meals, previousAliases = []) {
   const fingerprints = new Map(), kept = [], aliases = new Map(previousAliases.map(alias => [alias.from, alias.to]));
   for (const meal of meals) {
-    const fingerprint = mealFingerprint(meal), index = fingerprints.get(fingerprint);
+    const fingerprint = meal.preserveLibraryId === true ? `id:${meal.id}` : `recipe:${mealFingerprint(meal)}`;
+    const index = fingerprints.get(fingerprint);
     if (index !== undefined) {
       const canonical = kept[index], cycleDays = [...new Set([...days(canonical), ...days(meal)])];
       if (JSON.stringify(cycleDays) !== JSON.stringify(days(canonical))) kept[index] = { ...canonical, cycleDays };

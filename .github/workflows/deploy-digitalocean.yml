@@ -9,6 +9,8 @@ on:
         default: deploy
         options:
           - deploy
+          - deploy-supabase-reader
+          - check-supabase-reader
           - audit-preflight
           - audit-seed-enable
           - audit-sync-start
@@ -25,6 +27,10 @@ on:
           - audit-source-pause
           - audit-source-resume
           - audit-source-rollback
+          - reporting-readiness
+          - reporting-preview-stage
+          - reporting-preview-enable
+          - reporting-preview-disable
       audit_source_manifest_sha256:
         description: SHA-256 of the reviewed private source runtime manifest
         type: string
@@ -53,7 +59,16 @@ on:
         description: SHA-256 of the reviewed replacement builder
         type: string
       expected_sha:
-        description: Exact reviewed application commit for audit operations
+        description: Exact deployed application commit for audit and reporting operations
+        type: string
+      app_reader_previous_sha:
+        description: Exact currently deployed app commit for the report-only release
+        type: string
+      app_reader_head_sha256:
+        description: Exact verified Supabase serving-head body SHA-256
+        type: string
+      app_reader_generation:
+        description: Exact verified Supabase report generation
         type: string
       audit_manifest_sha256:
         description: SHA-256 of the approved private audit handoff
@@ -85,12 +100,16 @@ on:
     # A diagnostics-only release must not restart the worker it is inspecting.
     paths-ignore:
       - '.github/workflows/deploy-digitalocean.yml'
+      - '.github/workflows/reporting-vercel-identity-checks.yml'
+      - 'server/scripts/reporting-source-operator.mjs'
+      - 'server/scripts/reporting-source-operator.test.mjs'
       - '.github/workflows/audit-sync-status.yml'
       - '.github/scripts/audit-sync-status.mjs'
       - '.github/scripts/audit-sync-status.test.mjs'
       - '.github/workflows/driver-audit-native-handoff.yml'
       - '.github/scripts/driver-audit-native-handoff.mjs'
       - '.github/scripts/driver-audit-native-*.mjs'
+      - '.github/scripts/driver-audit-supabase-*.mjs'
 
 concurrency:
   group: production-deploy
@@ -101,7 +120,7 @@ permissions:
 
 jobs:
   deploy:
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && !startsWith(inputs.operation || '', 'reporting-')
     environment: production
     runs-on: ubuntu-latest
 
@@ -153,6 +172,9 @@ jobs:
           SOURCE_PROOF_SHA: ${{ inputs.audit_source_proof_sha256 }}
           SOURCE_QUALIFICATION_SHA: ${{ inputs.audit_source_qualification_sha256 }}
           REPORTING_SECRET: ${{ inputs.operation != 'audit-rollback' && secrets.DRIVER_AUDIT_SUPABASE_SECRET || '' }}
+          READER_PREVIOUS_SHA: ${{ inputs.app_reader_previous_sha }}
+          READER_HEAD_SHA: ${{ inputs.app_reader_head_sha256 }}
+          READER_GENERATION: ${{ inputs.app_reader_generation }}
         run: |
           set -euo pipefail
           if [[ ! "$EXPECTED_SHA" =~ ^[a-f0-9]{40}$ || "$EXPECTED_SHA" != "$GITHUB_SHA" ]]; then
@@ -168,6 +190,12 @@ jobs:
             exit 1
           fi
           case "$OPERATION" in
+            deploy-supabase-reader|check-supabase-reader)
+              if [[ ! "$READER_PREVIOUS_SHA" =~ ^[a-f0-9]{40}$ || "$READER_PREVIOUS_SHA" = "$GITHUB_SHA" || ! "$READER_HEAD_SHA" =~ ^[a-f0-9]{64}$ || ! "$READER_GENERATION" =~ ^[a-f0-9]{64}$ ]]; then
+                echo "The old app and exact verified Supabase report identities are required."
+                exit 1
+              fi
+              exit 0 ;;
             audit-source-host-check) exit 0 ;;
             audit-source-*)
               if [[ ! "$SOURCE_MANIFEST" =~ ^[a-f0-9]{64}$ ]]; then
@@ -214,6 +242,52 @@ jobs:
             exit 1
           fi
 
+      - name: Set up website build runtime
+        if: (github.event_name == 'push' || inputs.operation == 'deploy') && vars.ATOMIC_WEBSITE_DEPLOY == '1'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Build and seal website away from the live server
+        id: website
+        if: (github.event_name == 'push' || inputs.operation == 'deploy') && vars.ATOMIC_WEBSITE_DEPLOY == '1'
+        shell: bash
+        env:
+          REACT_APP_2GIS_API_KEY: ${{ vars.REACT_APP_2GIS_API_KEY }}
+          REACT_APP_API_URL: ${{ vars.REACT_APP_API_URL }}
+          REACT_APP_SOCKET_URL: ${{ vars.REACT_APP_SOCKET_URL }}
+          REACT_APP_LOCAL_TIMEZONE_OFFSET_MINUTES: ${{ vars.REACT_APP_LOCAL_TIMEZONE_OFFSET_MINUTES }}
+          REACT_APP_ENABLE_EARLY_NEXT_DAY: ${{ vars.REACT_APP_ENABLE_EARLY_NEXT_DAY }}
+          REACT_APP_NEXT_DAY_AVAILABLE_HOUR: ${{ vars.REACT_APP_NEXT_DAY_AVAILABLE_HOUR }}
+          REACT_APP_MENU_SELECTION_V2_TOKENS: ${{ vars.REACT_APP_MENU_SELECTION_V2_TOKENS }}
+          REACT_APP_GOOGLE_MAPS_API_KEY: ${{ vars.REACT_APP_GOOGLE_MAPS_API_KEY }}
+          REACT_APP_GOOGLE_GEOCODING_API_KEY: ${{ vars.REACT_APP_GOOGLE_GEOCODING_API_KEY }}
+        run: |
+          set -euo pipefail
+          node --test .github/scripts/website-release.test.mjs
+          release_id="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          cd client
+          npm ci
+          PUBLIC_URL="/website-releases/$release_id" npm run build
+          cd ..
+          node .github/scripts/website-release.mjs seal client/build "$release_id"
+          tar -czf website-build.tar.gz -C client/build .
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum website-build.tar.gz | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload immutable website candidate
+        if: (github.event_name == 'push' || inputs.operation == 'deploy') && vars.ATOMIC_WEBSITE_DEPLOY == '1'
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          source: website-build.tar.gz
+          target: ${{ secrets.DO_APP_PATH }}/.website/incoming/${{ steps.website.outputs.release_id }}
+
       - name: Deploy over SSH
         if: github.event_name == 'push' || inputs.operation == 'deploy'
         uses: appleboy/ssh-action@v1.2.0
@@ -222,12 +296,15 @@ jobs:
           MATTER_ACTIVITY_READER_EMAILS: ${{ secrets.MATTER_ACTIVITY_READER_EMAILS }}
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
           DEPLOY_SHA: ${{ github.sha }}
+          ATOMIC_WEBSITE_DEPLOY: ${{ vars.ATOMIC_WEBSITE_DEPLOY || '0' }}
+          WEBSITE_RELEASE_ID: ${{ steps.website.outputs.release_id }}
+          WEBSITE_ARCHIVE_SHA256: ${{ steps.website.outputs.sha256 }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
-          envs: MATTER_CS_RUNTIME_B64,MATTER_ACTIVITY_READER_EMAILS,DO_APP_PATH,DEPLOY_SHA
+          envs: MATTER_CS_RUNTIME_B64,MATTER_ACTIVITY_READER_EMAILS,DO_APP_PATH,DEPLOY_SHA,ATOMIC_WEBSITE_DEPLOY,WEBSITE_RELEASE_ID,WEBSITE_ARCHIVE_SHA256
           script: |
             set -e
             cd -- "$DO_APP_PATH"
@@ -244,6 +321,22 @@ jobs:
             git fetch --all --prune
             if [ "$(git rev-parse origin/main)" != "$DEPLOY_SHA" ]; then
               echo "Main advanced since this deployment was selected. Use the run for the reviewed current commit."
+              exit 1
+            fi
+
+            if [ "$ATOMIC_WEBSITE_DEPLOY" = 1 ]; then
+              case "$WEBSITE_RELEASE_ID" in "$DEPLOY_SHA"-[0-9]*-[0-9]*) ;; *) echo "Invalid website release identity"; exit 1 ;; esac
+              website_incoming="$DO_APP_PATH/.website/incoming/$WEBSITE_RELEASE_ID"
+              git show "$DEPLOY_SHA:.github/scripts/website-release.mjs" > "$website_incoming/publisher.mjs"
+              node "$website_incoming/publisher.mjs" check "$DO_APP_PATH/.website/current" https://matterapp.online
+              printf '%s  %s\n' "$WEBSITE_ARCHIVE_SHA256" "$website_incoming/website-build.tar.gz" | sha256sum --check -
+              mkdir "$website_incoming/build"
+              tar -xzf "$website_incoming/website-build.tar.gz" -C "$website_incoming/build" --no-same-owner --no-same-permissions
+              node "$website_incoming/publisher.mjs" verify "$website_incoming/build" "$WEBSITE_RELEASE_ID"
+            elif [ "$ATOMIC_WEBSITE_DEPLOY" != 0 ]; then
+              echo "ATOMIC_WEBSITE_DEPLOY must be 0 or 1"; exit 1
+            elif [ -L "$DO_APP_PATH/.website/current" ]; then
+              echo "Website bootstrap exists. Complete atomic activation or explicitly restore legacy routing before disabling the mode."
               exit 1
             fi
 
@@ -269,6 +362,7 @@ jobs:
             cd ..
 
             echo "[5/7] Install and build client"
+            if [ "$ATOMIC_WEBSITE_DEPLOY" = 0 ]; then
             cd client
             npm ci
             npm run build
@@ -286,6 +380,9 @@ jobs:
             };
             console.log(JSON.stringify(await releaseClientBuildDependencies({appRoot:process.cwd(),apply:true,verifyHealth})));
             NODE
+            else
+              echo "Website candidate was built and verified separately; live website files are unchanged."
+            fi
 
             echo "[5/7] Verify canonical Customer Service and existing staff access"
             node server/scripts/customerServiceDeploy.js --apply
@@ -311,6 +408,64 @@ jobs:
               DRIVER_AUDIT_DEPLOY_SHA="$DEPLOY_SHA" node server/scripts/driverAuditSourceDeploy.js deploy-source-resume
               source_paused=0
             fi
+
+            if [ "$ATOMIC_WEBSITE_DEPLOY" = 1 ]; then
+              node .github/scripts/website-release.mjs publish "$DO_APP_PATH" "$website_incoming/build" "$WEBSITE_RELEASE_ID" https://matterapp.online
+            fi
+
+      - name: Prepare the reviewed report-only operator
+        if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'deploy-supabase-reader' || inputs.operation == 'check-supabase-reader')
+        id: reader
+        shell: bash
+        env:
+          READER_PREVIOUS_SHA: ${{ inputs.app_reader_previous_sha }}
+          READER_HEAD_SHA: ${{ inputs.app_reader_head_sha256 }}
+          READER_GENERATION: ${{ inputs.app_reader_generation }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs=require('fs'),crypto=require('crypto'),zlib=require('zlib');
+          const bytes=fs.readFileSync('.github/scripts/driver-audit-supabase-app-release.mjs');
+          if(bytes.length>192*1024)throw Error('The reviewed reader operator exceeds its bound');
+          const sha=crypto.createHash('sha256').update(bytes).digest('hex');
+          const request={version:1,expectedOldSha:process.env.READER_PREVIOUS_SHA,selectedSha:process.env.GITHUB_SHA,
+            reportHeadSha256:process.env.READER_HEAD_SHA,generation:process.env.READER_GENERATION};
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,'operator='+zlib.gzipSync(bytes).toString('base64')+'\nsha256='+sha+'\nrequest='+Buffer.from(JSON.stringify(request)).toString('base64')+'\n');
+          NODE
+
+      - name: Release only the verified Supabase report reader
+        if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'deploy-supabase-reader' || inputs.operation == 'check-supabase-reader')
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DRIVER_AUDIT_APP_PATH: ${{ secrets.DO_APP_PATH }}
+          READER_OPERATOR_GZIP: ${{ steps.reader.outputs.operator }}
+          READER_OPERATOR_SHA: ${{ steps.reader.outputs.sha256 }}
+          READER_REQUEST: ${{ steps.reader.outputs.request }}
+          READER_APPLY: ${{ inputs.operation == 'deploy-supabase-reader' && '1' || '0' }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          envs: DRIVER_AUDIT_APP_PATH,READER_OPERATOR_GZIP,READER_OPERATOR_SHA,READER_REQUEST,READER_APPLY
+          script: |
+            set -eu
+            /usr/bin/node --input-type=module <<'NODE'
+            import {gunzipSync} from 'node:zlib';import {createHash} from 'node:crypto';
+            try {
+              const bytes=gunzipSync(Buffer.from(process.env.READER_OPERATOR_GZIP,'base64'),{maxOutputLength:192*1024});
+              if(!/^[a-f0-9]{64}$/.test(process.env.READER_OPERATOR_SHA||'')||createHash('sha256').update(bytes).digest('hex')!==process.env.READER_OPERATOR_SHA)throw Error('Operator identity differs');
+              const operator=await import('data:text/javascript;base64,'+bytes.toString('base64'));
+              const request=operator.validateAppReaderReleaseRequest(JSON.parse(Buffer.from(process.env.READER_REQUEST,'base64')));
+              if(!['0','1'].includes(process.env.READER_APPLY||''))throw Error('Invalid reviewed reader operation');
+              console.log(JSON.stringify(await operator.releaseSupabaseAppReader({appRoot:process.env.DRIVER_AUDIT_APP_PATH,request,apply:process.env.READER_APPLY==='1'})));
+            } catch(error) {
+              const budget=error.code==='APP_READER_COLD_BUDGET';
+              console.log(JSON.stringify({status:'supabase-app-reader-stopped',reason:budget?'cold-transfer-budget':'private-release-guard',
+                ...(budget?{requiredBytes:error.requiredBytes,availableBytes:error.availableBytes}:{})}));
+              process.exitCode=1;
+            }
+            NODE
 
       - name: Prepare private source transfer
         id: source-transfer
@@ -398,7 +553,7 @@ jobs:
           strip_components: 1
 
       - name: Run reviewed driver audit operation
-        if: github.event_name == 'workflow_dispatch' && inputs.operation != 'deploy'
+        if: github.event_name == 'workflow_dispatch' && inputs.operation != 'deploy' && inputs.operation != 'deploy-supabase-reader' && inputs.operation != 'check-supabase-reader'
         uses: appleboy/ssh-action@v1.2.0
         env:
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
@@ -456,3 +611,84 @@ jobs:
           if (!/^\.source-transfer-[a-f0-9-]{36}$/.test(dir || '')) throw Error('Invalid cleanup path');
           await fs.rm(dir, {recursive: true, force: true});
           NODE
+
+  reporting-preview:
+    if: >-
+      github.repository == 'sidimohameddaliali2-crypto/matter-admin-app' &&
+      github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' &&
+      contains(fromJSON('["reporting-readiness","reporting-preview-stage","reporting-preview-enable","reporting-preview-disable"]'), inputs.operation)
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Check out the reviewed operator
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Select the exact reporting operation
+        id: reporting-operator
+        shell: bash
+        env:
+          REPORTING_OPERATION: ${{ inputs.operation }}
+          REPORTING_DEPLOYED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          case "$REPORTING_OPERATION" in
+            reporting-readiness) mode=inspect ;;
+            reporting-preview-stage) mode=stage ;;
+            reporting-preview-enable) mode=enable ;;
+            reporting-preview-disable) mode=disable ;;
+            *) echo "Invalid reporting operation."; exit 1 ;;
+          esac
+          if [[ ! "$REPORTING_DEPLOYED_SHA" =~ ^[a-f0-9]{40}$ || "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "Select the exact deployed app commit from the reviewed main workflow."
+            exit 1
+          fi
+          operator=server/scripts/reporting-source-operator.mjs
+          if [[ "$(wc -c < "$operator")" -gt 49152 ]]; then
+            echo "The reporting operator exceeds its transfer limit."
+            exit 1
+          fi
+          node --check "$operator"
+          checksum=$(sha256sum "$operator")
+          printf 'mode=%s\ncode=%s\nsha256=%s\n' "$mode" "$(base64 -w0 "$operator")" "${checksum%% *}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure only Preview delivery reporting
+        uses: appleboy/ssh-action@7eaf76671a0d7eec5d98ee897acda4f968735a17 # v1.2.0
+        env:
+          DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
+          REPORTING_WORKFLOW_SHA: ${{ github.sha }}
+          REPORTING_DEPLOYED_SHA: ${{ inputs.expected_sha }}
+          REPORTING_OPERATOR_MODE: ${{ steps.reporting-operator.outputs.mode }}
+          REPORTING_OPERATOR_CODE: ${{ steps.reporting-operator.outputs.code }}
+          REPORTING_OPERATOR_SHA256: ${{ steps.reporting-operator.outputs.sha256 }}
+          MATTER_REPORTING_WEBHOOK_SECRET: ${{ inputs.operation == 'reporting-preview-enable' && secrets.MATTER_REPORTING_WEBHOOK_SECRET || '' }}
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
+          command_timeout: 6m
+          envs: ${{ inputs.operation == 'reporting-preview-enable' && 'DO_APP_PATH,REPORTING_WORKFLOW_SHA,REPORTING_DEPLOYED_SHA,REPORTING_OPERATOR_MODE,REPORTING_OPERATOR_CODE,REPORTING_OPERATOR_SHA256,MATTER_REPORTING_WEBHOOK_SECRET' || 'DO_APP_PATH,REPORTING_WORKFLOW_SHA,REPORTING_DEPLOYED_SHA,REPORTING_OPERATOR_MODE,REPORTING_OPERATOR_CODE,REPORTING_OPERATOR_SHA256' }}
+          script: |
+            set -eu
+            cd -- "$DO_APP_PATH"
+            if [ "$(git ls-remote --exit-code origin refs/heads/main | cut -f1)" != "$REPORTING_WORKFLOW_SHA" ] ||
+              [ "$(git --no-replace-objects rev-parse HEAD)" != "$REPORTING_DEPLOYED_SHA" ] ||
+              ! git --no-replace-objects diff --quiet HEAD -- server; then
+              echo "The main workflow or deployed server checkout differs from the selected commit."
+              exit 1
+            fi
+            umask 077
+            operator=$(mktemp --suffix=.mjs server/scripts/.reporting-preview-op.XXXXXXXX)
+            trap 'rm -f -- "$operator"' EXIT
+            printf '%s' "$REPORTING_OPERATOR_CODE" | base64 --decode > "$operator"
+            checksum=$(sha256sum "$operator")
+            if [ "${checksum%% *}" != "$REPORTING_OPERATOR_SHA256" ]; then
+              echo "The reporting operator checksum did not match."
+              exit 1
+            fi
+            unset REPORTING_OPERATOR_CODE
+            node "$operator" "$REPORTING_OPERATOR_MODE" "$REPORTING_DEPLOYED_SHA"

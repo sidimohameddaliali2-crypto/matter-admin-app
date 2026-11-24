@@ -1,3 +1,4 @@
+import { isPartnerItemAvailable } from '../services/partnerOrderValidation.js';
 import express from 'express';
 import SpaceMenu from '../models/SpaceMenu.js';
 import SpacePrice from '../models/SpacePrice.js';
@@ -77,6 +78,7 @@ router.get('/menu', async (req, res) => {
         if (!a.menuItem || a.menuItem.isAvailable === false) return false;
         if (!checkDate) return true;
         const item = a.menuItem;
+        if (item.mealType === 'breakfast' && item.source === 'menu-selection') return isPartnerItemAvailable(item, checkDate);
         if (item.availableFrom) {
           const from = new Date(item.availableFrom); from.setUTCHours(0, 0, 0, 0);
           if (checkDate < from) return false;
@@ -206,12 +208,14 @@ router.post('/orders/:id/submit', async (req, res) => {
     if (order.status === 'submitted') return res.status(400).json({ success: false, message: 'Order already submitted.' });
     if (isInLockWindow(order.deliveryDate)) return res.status(400).json({ success: false, message: 'Delivery date is past its ordering deadline.' });
 
-    const lines = await MemberOrderLine.find({ order: order._id }).populate('menuItem', 'name');
+    const lines = await MemberOrderLine.find({ order: order._id }).populate('menuItem', 'name mealType source price sellingPrice isAvailable availableDates availableFrom availableTo');
     if (!lines.length) return res.status(400).json({ success: false, message: 'Order has no items.' });
 
+    if (lines.some(line => line.menuItem?.mealType === 'breakfast' && !isPartnerItemAvailable(line.menuItem, order.deliveryDate))) return res.status(400).json({ success: false, message: 'Breakfast is unavailable for this delivery date.' });
     const spaceId = req.member.partner._id;
     const priced = await Promise.all(lines.map(async (l) => {
-      const unitPrice = (await currentPrice(spaceId, l.menuItem?._id || l.menuItem)) || 0;
+      const override = await currentPrice(spaceId, l.menuItem?._id || l.menuItem);
+      const unitPrice = override ?? (l.menuItem?.mealType === 'breakfast' ? l.menuItem.sellingPrice ?? l.menuItem.price ?? 0 : 0);
       return {
         itemName: l.menuItem?.name || '—',
         quantity: l.quantity,

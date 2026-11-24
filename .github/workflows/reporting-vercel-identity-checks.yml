@@ -1,0 +1,69 @@
+name: Reporting source checks
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/reporting-vercel-identity-checks.yml'
+      - '.github/workflows/deploy-digitalocean.yml'
+      - 'server/scripts/reporting-source-operator*.mjs'
+      - 'server/middleware/apiKeyAuth.js'
+      - 'server/middleware/reportingVercelIdentity*.js'
+      - 'server/routes/externalReportingApi.js'
+      - 'server/routes/deliveries.js'
+      - 'server/models/Delivery.js'
+      - 'server/models/ReportingOutbox.js'
+      - 'server/services/reportingOutbox*.js'
+      - 'server/services/truckoomVisitSync*.js'
+      - 'server/services/vehicleLocationCaptureStore.js'
+      - 'server/services/matterDeliveryImportService.js'
+      - 'server/services/matterDeliveryInsert*.js'
+      - 'server/package*.json'
+permissions:
+  contents: read
+jobs:
+  reporting-identity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.22.1'
+      - name: Verify Vercel reporting authentication
+        run: node --test server/middleware/reportingVercelIdentity.test.js
+      - name: Verify protected reporting operator settings and rollback
+        run: node --test server/scripts/reporting-source-operator.test.mjs
+  reporting-mongo:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.22.1'
+      - name: Install server test dependencies
+        working-directory: server
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Start disposable MongoDB replica set
+        run: |
+          docker run -d --name reporting-mongo -p 127.0.0.1:27017:27017 mongo:7.0 --bind_ip_all --replSet reporting
+          for i in {1..30}; do
+            if docker exec reporting-mongo mongosh --quiet --eval 'quit(db.adminCommand({ping: 1}).ok === 1 ? 0 : 1)'; then break; fi
+            sleep 2
+          done
+          docker exec reporting-mongo mongosh --quiet --eval 'quit(rs.initiate({_id:"reporting",members:[{_id:0,host:"127.0.0.1:27017"}]}).ok === 1 ? 0 : 1)'
+          for i in {1..30}; do
+            if docker exec reporting-mongo mongosh --quiet --eval 'quit(db.hello().isWritablePrimary ? 0 : 1)'; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+      - name: Verify source writes, rollback, GPS and webhook receipts
+        working-directory: server
+        env:
+          REPORTING_TEST_MONGO_URI: mongodb://127.0.0.1:27017/driver_reports_ci?directConnection=true
+        run: node --test services/reportingOutbox.test.js services/reportingOutbox.integration.test.js services/matterDeliveryInsert.test.js services/truckoomVisitSync.test.js

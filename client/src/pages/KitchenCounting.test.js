@@ -5,9 +5,16 @@ import KitchenCounting from './KitchenCounting';
 import { installActivityCapture } from '../utils/activityCapture';
 
 jest.mock('../utils/api', () => ({ __esModule: true, default: { get: jest.fn(), post: jest.fn() } }));
-jest.mock('../contexts/SocketContext', () => ({useSocket: () => ({socket: null})}));
+const mockSocketHandlers = new Map();
+const mockSocket = {
+  on: (event, handler) => mockSocketHandlers.set(event, handler),
+  off: (event, handler) => { if (mockSocketHandlers.get(event) === handler) mockSocketHandlers.delete(event); },
+};
+jest.mock('../contexts/SocketContext', () => ({useSocket: () => ({socket: mockSocket})}));
 const mockCountingSave = jest.fn();
 const mockCountingRows = jest.fn(rows => rows);
+const mockCookingSave = jest.fn();
+jest.mock('xlsx-js-style', () => ({ __esModule: true, default: { ...jest.requireActual('xlsx-js-style'), writeFile: (...args) => mockCookingSave(...args) } }));
 jest.mock('xlsx', () => ({utils: {book_new: () => ({}), json_to_sheet: rows => mockCountingRows(rows), book_append_sheet: () => {}}, writeFile: (...args) => mockCountingSave(...args)}));
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -33,6 +40,7 @@ beforeEach(async () => {
   api.get.mockImplementation(async (path, config) => {
     if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}};
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', startDate: A, endDate: B }] } };
+    if (path.endsWith('/kitchen-components')) return { data: { success: true, data: [] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [entry] } };
     if (path.includes('kitchen-inputs')) return { data: { data: { plan_name: 'Custom', macros: { carbohydrates: 60, protein: 60, fat: 20 }, active_delivery_dates: [A, B] } } };
     if (path.includes('delivery-on-date')) {
@@ -189,10 +197,174 @@ test('Partner order is inline below cook groups and included in the main Excel e
 });
 
 
-test('a partner-only cooking day can use the main Excel download', async () => {
+test('component names appear beside their summed weights and in the Excel breakdown', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => path.endsWith('/kitchen-components')
+    ? { data: { success: true, data: [{ _id: 'recipe', mealType: 'main', mealName: 'Fixture meal', cycleMeal: { components: [
+      { type: 'Protein', name: 'Chicken portion' }, { type: 'Carb', name: 'Saffron rice' }, { type: 'Vegetable', name: 'Green beans' },
+    ] } }] } } : originalGet(path, config));
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  const parts = [...container.querySelectorAll('.kitchen-count-component')];
+  expect(parts.map(part => part.querySelector('span').textContent)).toEqual(['Chicken portion', 'Saffron rice', 'Green beans']);
+  expect(parts.every(part => /^\d[\d,]* g$/.test(part.querySelector('b').textContent))).toBe(true);
+  await act(async () => exportButton().click());
+  const exported = mockCountingRows.mock.calls.at(-1)[0][0];
+  expect(exported['Protein Components']).toBe(`Chicken portion: ${exported['Total Protein Weight (g)']} g`);
+  expect(exported['Carb Components']).toBe(`Saffron rice: ${exported['Total Carb Weight (g)']} g`);
+});
+
+test('saved PCS changes refresh without preparation and match both Excel downloads', async () => {
+  const originalGet = api.get.getMockImplementation();
+  let settings = { qtyUnit: 'KG' };
+  let refresh;
+  api.get.mockImplementation(async (path, config) => path.endsWith('/kitchen-components')
+    ? refresh ? await refresh : { data: { success: true, data: [{ _id: 'recipe', mealType: 'main', mealName: 'Fixture meal',
+      proteinSource: 'Patty', cycleMeal: settings }] } } : originalGet(path, config));
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  const preparationCalls = api.post.mock.calls.length;
+  const cookingButton = () => [...container.querySelectorAll('button')].find(item => item.textContent.includes('Cooking & EOD Excel'));
+  let rejectRefresh;
+  refresh = new Promise((resolve, reject) => { rejectRefresh = reject; });
+  await act(async () => window.dispatchEvent(new Event('focus')));
+  expect(exportButton().disabled).toBe(true);
+  expect(cookingButton().disabled).toBe(true);
+  expect(container.querySelector('[aria-label="Download customers for Fixture meal"]').disabled).toBe(true);
+  expect(container.querySelector('.kitchen-count-component')).toBeNull();
+  await act(async () => { rejectRefresh(new Error('Unavailable')); });
+  expect(exportButton().disabled).toBe(true);
+  expect(cookingButton().disabled).toBe(true);
+  refresh = undefined;
+  settings = { qtyUnit: 'PCS', gramsPerPiece: 50 };
+  await act(async () => mockSocketHandlers.get('kitchen:mealLibraryChanged')());
+  expect(exportButton().disabled).toBe(false);
+  expect(cookingButton().disabled).toBe(false);
+  expect(container.querySelector('[aria-label="Download customers for Fixture meal"]').disabled).toBe(false);
+  const pieceLabel = container.querySelector('.kitchen-count-component b').textContent;
+  expect(pieceLabel).toMatch(/^\d+ PCS$/);
+  await act(async () => exportButton().click());
+  const standard = mockCountingRows.mock.calls.at(-1)[0][0];
+  const expected = Math.ceil(standard['Total Protein Weight (g)'] * 1.05 / 50);
+  expect(pieceLabel).toBe(`${expected} PCS`);
+  expect(standard['Protein Components']).toBe(`Patty: ${expected} PCS`);
+  const button = [...container.querySelectorAll('button')].find(item => item.textContent.includes('Cooking & EOD Excel'));
+  await act(async () => button.click());
+  const sheet = mockCookingSave.mock.calls.at(-1)[0].Sheets['Cooking & EOD'];
+  expect(sheet.B8.v).toBe(expected);
+  expect(sheet.E8.v).toBe('PCS');
+  expect(api.post.mock.calls).toHaveLength(preparationCalls);
+});
+
+test('both exports read current quantities even if no focus or socket event arrived', async () => {
+  const originalGet = api.get.getMockImplementation();
+  let gramsPerPiece = 50;
+  api.get.mockImplementation(async (path, config) => path.endsWith('/kitchen-components')
+    ? { data: { success: true, data: [{ _id: 'recipe', mealType: 'main', mealName: 'Fixture meal',
+      proteinSource: 'Patty', cycleMeal: { qtyUnit: 'PCS', gramsPerPiece } }] } } : originalGet(path, config));
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  gramsPerPiece = 100;
+  await act(async () => exportButton().click());
+  const standard = mockCountingRows.mock.calls.at(-1)[0][0];
+  const grams = standard['Total Protein Weight (g)'];
+  expect(standard['Protein Components']).toBe(`Patty: ${Math.ceil(grams * 1.05 / 100)} PCS`);
+
+  gramsPerPiece = 150;
+  const cookingButton = [...container.querySelectorAll('button')].find(button => button.textContent.includes('Cooking & EOD Excel'));
+  await act(async () => cookingButton.click());
+  const sheet = mockCookingSave.mock.calls.at(-1)[0].Sheets['Cooking & EOD'];
+  const pieces = Math.ceil(grams * 1.05 / 150);
+  expect(sheet.B8.v).toBe(pieces);
+  expect(container.querySelector('.kitchen-count-component b').textContent).toBe(`${pieces} PCS`);
+});
+
+test('a settings change during a download reports a retry and does not write stale counts', async () => {
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  const originalGet = api.get.getMockImplementation();
+  let finishOrders;
+  api.get.mockImplementation((path, config) => path === '/menus/kitchen-partner-orders'
+    ? new Promise(resolve => { finishOrders = () => resolve(originalGet(path, config)); })
+    : originalGet(path, config));
+  await act(async () => exportButton().click());
+  await act(async () => mockSocketHandlers.get('kitchen:mealLibraryChanged')());
+  await act(async () => finishOrders());
+  expect(mockCountingSave).not.toHaveBeenCalled();
+  expect(container.textContent).toContain('Component settings could not be verified for this download. Please try again.');
+});
+
+test('a component-label request failure does not remove verified counts', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => {
+    if (path.endsWith('/kitchen-components')) throw new Error('Recipe labels unavailable');
+    if (path.endsWith('/selections')) return { data: { success: true, data: [{
+      ...entry, selectedMeals: [
+        { ...entry.selectedMeals[0], menuItemId: 'recipe', slotNumber: 1 },
+        { ...entry.selectedMeals[0], slotNumber: 2 },
+      ],
+    }] } };
+    return originalGet(path, config);
+  });
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  expect(container.textContent).toContain('2 main meal(s) total');
+  expect(container.textContent).toContain('Component settings could not be loaded');
+  expect(exportButton().disabled).toBe(true);
+  const checklists = container.querySelectorAll('[aria-label="Download customers for Fixture meal"]');
+  expect(checklists).toHaveLength(1);
+  const [checklist] = checklists;
+  expect(checklist.disabled).toBe(false);
+  await act(async () => checklist.click());
+  expect(mockCountingRows.mock.calls.at(-1)[0]).toEqual(Array.from({ length: 2 }, () => expect.objectContaining({ Email: entry.email })));
+});
+
+test('focus during preparation refreshes quantity before either export becomes available', async () => {
+  const originalGet = api.get.getMockImplementation();
+  let refresh, finish;
+  const catalog = settings => ({ data: { success: true, data: [{
+    _id: 'recipe', mealType: 'main', mealName: 'Fixture meal', proteinSource: 'Patty', cycleMeal: settings,
+  }] } });
+  api.get.mockImplementation(async (path, config) => path.endsWith('/kitchen-components')
+    ? refresh || catalog({ qtyUnit: 'KG' }) : originalGet(path, config));
+  await select(1, A);
+  expect(pending[A]).toBeDefined();
+  refresh = new Promise(resolve => { finish = resolve; });
+  await act(async () => window.dispatchEvent(new Event('focus')));
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  const cookingButton = () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Cooking & EOD Excel'));
+  expect(exportButton().disabled).toBe(true);
+  expect(cookingButton().disabled).toBe(true);
+  await act(async () => finish(catalog({ qtyUnit: 'PCS', gramsPerPiece: 50 })));
+  expect(container.querySelector('.kitchen-count-component b').textContent).toMatch(/PCS$/);
+  expect(exportButton().disabled).toBe(false);
+  expect(cookingButton().disabled).toBe(false);
+});
+
+test('Cooking & EOD is a separate download with buffered kg and blank staff fields', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => path.endsWith('/kitchen-components') ? { data: { success: true, data: [{
+    _id: 'recipe', mealName: 'Fixture meal', mealType: 'main', proteinSource: 'Chicken', carbs: 'Rice', veg: 'Carrot', sauce: 'BBQ sauce', garnish: 'Parsley',
+  }] } } : originalGet(path, config));
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  const button = [...container.querySelectorAll('button')].find(item => item.textContent.includes('Cooking & EOD Excel'));
+  expect(button.disabled).toBe(false);
+  await act(async () => button.click());
+  expect(mockCookingSave).toHaveBeenCalledWith(expect.anything(), `cooking-and-eod-${A}.xlsx`);
+  const wb = mockCookingSave.mock.calls.at(-1)[0], ws = wb.Sheets['Cooking & EOD'];
+  expect(ws.B2.v).toBe(0.05); expect(ws.E8.v).toBe('KG'); expect(ws.B8.f).toContain('*(1+$B$2)');
+  expect(ws.C8.v).toBe(''); expect(ws.D8.v).toBe('');
+  expect(ws.E11.v).toBe('PCS'); expect(ws.B11.v).toBe(1);
+  expect(mockCountingSave).not.toHaveBeenCalled();
+  expect(api.post.mock.calls.every(([url]) => !/selections|meal-edits/.test(url))).toBe(true);
+});
+
+test.each([false, true])('a day with only partner rows can use the main Excel download (settings unavailable=%s)', async settingsUnavailable => {
   const originalGet = api.get.getMockImplementation();
   const item = {itemId: 'po', name: 'Partner-only bowl', mealType: 'bowl', quantity: 3};
   api.get.mockImplementation(async (path, config) => {
+    if (settingsUnavailable && path.endsWith('/kitchen-components')) throw new Error('Unavailable');
     if (path.endsWith('/selections')) return {data: {success: true, data: []}};
     if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [{id: 'po', lines: [item]}], counts: [item], orderCount: 1, totalQuantity: 3}}};
     return originalGet(path, config);

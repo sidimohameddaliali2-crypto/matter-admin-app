@@ -1,12 +1,12 @@
 import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
-import api from '../../utils/api';
+import api from '../../utils/publicMenuApi';
 import MenuSelectionLink, { buildRealModel, expandSaturdaySkips } from './MenuSelectionLink';
 import { allergenMatchesAny } from '../../constants/exclusionList';
 import { evaluateComponentSelection } from '../../constants/componentSelectionRules';
 import { kitchenMealChanges, kitchenMealWarnings } from '../../utils/kitchenIntegrity';
 
-jest.mock('../../utils/api', () => ({ get: jest.fn(), post: jest.fn() }));
+jest.mock('../../utils/publicMenuApi', () => ({ get: jest.fn(), post: jest.fn() }));
 
 test('reopening the menu keeps saved Wednesday, Friday and Saturday skips visible alongside active deliveries', () => {
   const dates = ['2099-10-21', '2099-10-22', '2099-10-23', '2099-10-24'];
@@ -42,6 +42,19 @@ test('Saturday includes an eligible Sunday across menu or month boundaries; Sund
 
 
 const DELIVERY_DATE = '2099-10-21';
+
+test('a menu-load failure offers a retry and abandons the previous request', async () => {
+  api.get.mockRejectedValueOnce(Object.assign(new Error('Timed out'), { code: 'ECONNABORTED' }));
+  await act(async () => root.render(<MenuSelectionLink token="fixture-token" />));
+  expect(node.textContent).toContain('Please check your connection and try again');
+  const firstRequest = api.get.mock.calls[0][1];
+  expect(firstRequest.timeout).toBe(45000);
+  api.get.mockResolvedValueOnce({data:{data:{title:'Recovered menu',meals:[]}}});
+  await click(button('Try again'));
+  expect(node.textContent).toContain('Recovered Menu');
+  expect(api.get).toHaveBeenCalledTimes(2);
+  expect(firstRequest.signal.aborted).toBe(true);
+});
 const privateComponent = (id, type, exclusions = [], name = id) => ({ id, type, name, exclusions, notes: 'Internal kitchen note' });
 const cycleItem = (components, extra = {}) => ({
   _id: 'private-item', mealName: 'Private fixture meal', mealType: 'main', proteinSource: 'Chicken portion', carbs: 'Rice name', veg: 'Vegetable name', sauce: 'Sauce name',
@@ -245,4 +258,25 @@ test('a Sunday restored by a Matter admin is not implicitly skipped again by a s
   expect(expandSaturdaySkips([dates[0]], dates, [dates[1]])).toEqual([dates[0]]);
   // A fresh explicit Sunday skip is still permitted.
   expect(expandSaturdaySkips(dates, dates, [dates[1]])).toEqual(dates);
+});
+
+
+test.each([false, undefined])('unknown Matter allergy availability (%s) blocks meal selection until retry succeeds', async allergiesAvailable => {
+  const item = cycleItem([privateComponent('portion', 'Protein')]);
+  await signIn(item, { allergiesAvailable });
+  expect(node.textContent).toContain('Allergy information unavailable');
+  expect(button('Submit my week')).toBeUndefined();
+  expect(button('+')).toBeUndefined();
+  expect(api.post).not.toHaveBeenCalled();
+  api.get.mockResolvedValue({ data: { success: true, data: { firstName: 'Test', email: 'subscriber@example.invalid', allergies: [], allergiesAvailable: true, deliveryDates: [DELIVERY_DATE], mealPerDay: 1 } } });
+  await click(button('Try again'));
+  expect(node.textContent).not.toContain('Allergy information unavailable');
+  expect(button('+', card())).toBeDefined();
+});
+
+test('Matter milk allergy blocks butter hidden in recipe ingredients', async () => {
+  await signIn(cycleItem([privateComponent('portion', 'Protein')], { sauceIngredients: [{ name: 'Butter', visible: false }] }), { allergies: ['Milk'] });
+  expect(card().textContent).toContain('allergen');
+  expect(button('+', card())).toBeUndefined();
+  expect(api.post).not.toHaveBeenCalled();
 });

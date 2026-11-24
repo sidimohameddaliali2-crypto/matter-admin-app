@@ -31,6 +31,7 @@ import {
   Zap,
   Search
 } from 'lucide-react';
+import useDriverAssignmentRefresh from '../hooks/useDriverAssignmentRefresh';
 import { logout } from '../store/slices/authSlice';
 import { 
   fetchDriverDeliveries, 
@@ -106,6 +107,7 @@ const getScaledDimensions = (width, height) => {
 };
 
 const DriverMobile = () => {
+  useDriverAssignmentRefresh();
   const [activeTab, setActiveTab] = useState('deliveries');
   const [showMenu, setShowMenu] = useState(false);
   const [currentStep, setCurrentStep] = useState('delivery');

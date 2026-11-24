@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import mongoose from 'mongoose';
 import VehicleLocationCaptureBatch from '../models/VehicleLocationCaptureBatch.js';
 import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
+import { withReportingEvents } from './reportingOutbox.js';
 
 export const CAPTURE_MAX_ROWS = 2000;
 export const CAPTURE_MAX_BYTES = 4 * 1024 * 1024;
@@ -146,12 +147,15 @@ export function createVehicleLocationCaptureStore({
       const acknowledged = await history.countDocuments({ _id: { $in: ids }, captureBatchId: lease.batchId });
       if (acknowledged !== chunk.length) throw failure('CAPTURE_ROWS_UNCONFIRMED');
     }
-    const at = now();
-    const result = await batches.updateOne({ ...ownership(lease, at), state: 'pending', payloadSha256: batch.payloadSha256 }, {
-      $set: { state: 'complete', completedAt: at, updatedAt: at },
-      $unset: { failureCode: 1 },
-    }, WRITE_OPTIONS);
-    if (result.matchedCount !== 1) throw failure('CAPTURE_LEASE_LOST');
+    await withReportingEvents(async (session, enqueue) => {
+      const at = now();
+      const result = await batches.updateOne({ ...ownership(lease, at), state: 'pending', payloadSha256: batch.payloadSha256 }, {
+        $set: { state: 'complete', completedAt: at, updatedAt: at },
+        $unset: { failureCode: 1 },
+      }, session ? { session } : WRITE_OPTIONS);
+      if (result.matchedCount !== 1) throw failure('CAPTURE_LEASE_LOST');
+      await enqueue('gps.batch-committed', [lease.batchId]);
+    });
     return { ...batch.payload.summary, status: 'complete', batchId: lease.batchId, storedRows: rows.length };
   }
 

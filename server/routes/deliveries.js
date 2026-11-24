@@ -1,9 +1,11 @@
+import { recordReportingDeliveryChanges, saveReportingDelivery, updateReportingDelivery, withReportingEvents } from '../services/reportingOutbox.js';
 import { recordDeliveryBagMovements, legacyBagReturn } from '../services/deliveryBagMovements.js';
 import { recordCompletionFailure } from '../services/deliveryCompletionFailure.js';
 import { findRegisteredBag } from '../services/bagRecordLookup.js';
 import { moveBag } from '../services/bagMovementStore.js';
 import deliveryOrderRouter from './deliveryOrder.js';
 import express from 'express';
+import { protectMatterImportIdentityInput } from '../middleware/matterImportIdentityInput.js';
 import { structuredDeliveryAddress } from '../services/deliveryAddress.js';
 import mongoose from 'mongoose';
 import axios from 'axios';
@@ -39,6 +41,18 @@ import { buildOrderedRouteLegs } from '../services/distanceMatrixService.js';
 import Handoff from '../models/Handoff.js';
 import { HANDOFF_DWELL_SECONDS, KITCHEN_RELOAD_DWELL_SECONDS } from '../services/handoffPlanner.js';
 
+async function deleteReportingDeliveries(query) {
+  return withReportingEvents(async (session, enqueue) => {
+    const deliveriesToDelete = await Delivery.find(query).session(session ?? null).lean();
+    const result = await Delivery.deleteMany(query, { session });
+    if (session && result.deletedCount !== deliveriesToDelete.length) {
+      throw new Error('Delivery selection changed during reporting delete');
+    }
+    await enqueue('delivery.removed', deliveriesToDelete.map(delivery => delivery._id));
+    return { deliveriesToDelete, result };
+  });
+}
+
 // Helper to persist coordinates onto a customer's record via their deliveries
 async function saveCustomerCoords(delivery, lat, lng, link) {
   if (!delivery) return;
@@ -49,7 +63,7 @@ async function saveCustomerCoords(delivery, lat, lng, link) {
   };
   delivery.lat = lat;
   delivery.lng = lng;
-  await delivery.save();
+  await saveReportingDelivery(delivery);
 
   // A dispatcher manually placing a pin is the most trustworthy source there
   // is — cache it on the customer so it's reused everywhere (Optimize Routes,
@@ -248,11 +262,7 @@ export async function applyChangesToDelivery(delivery, changes) {
     console.log(`🗺️ Area auto-detection in change apply: "${updateFields.zone}" for address: "${updateFields.address}"`);
   }
   
-  const updatedDelivery = await Delivery.findByIdAndUpdate(
-    delivery._id, 
-    { $set: updateFields },
-    { new: true, runValidators: true }
-  );
+  const updatedDelivery = await updateReportingDelivery(Delivery, delivery._id, { $set: updateFields });
   
   console.log('Delivery updated successfully:', updatedDelivery._id);
   console.log('Updated values:', updateFields);
@@ -360,6 +370,7 @@ async function checkAndApplyPendingChanges(delivery) {
 // All routes are protected
 router.use(protect);
 router.use(protectMatterRevenueInput);
+router.use(protectMatterImportIdentityInput);
 // Tracker verdicts, their baseline evidence, and receipt timestamps are server-owned.
 router.use(function protectTrackerEvidence(req, res, next) {
   const clean = value => {
@@ -1675,7 +1686,7 @@ router.post('/', [
     }
 
     // Create delivery
-    const delivery = await Delivery.create(deliveryData);
+    const delivery = await saveReportingDelivery(new Delivery(deliveryData));
 
     // Check for and apply any pending changes
     const appliedChangesCount = await checkAndApplyPendingChanges(delivery);
@@ -1987,7 +1998,7 @@ router.patch('/assign-driver', [
 
     const { deliveryIds, driverId } = req.body;
 
-    const driver = await User.findOne({ _id: driverId, role: 'driver' });
+    const driver = await User.findOne({ _id: driverId, role: 'driver', isActive: true });
     if (!driver) {
       return res.status(404).json({
         success: false,
@@ -2028,7 +2039,7 @@ router.patch('/assign-driver', [
         notes: `Assigned to ${driverName}`
       });
 
-      await delivery.save();
+      await saveReportingDelivery(delivery);
       await delivery.populate('driver', 'profile.firstName profile.lastName profile.colorCode email');
       updatedDeliveries.push(delivery);
     }
@@ -2115,7 +2126,7 @@ router.patch('/unassign-driver', [
         notes: `Unassigned by ${unassignerName}`
       });
 
-      await delivery.save();
+      await saveReportingDelivery(delivery);
       await delivery.populate('driver', 'profile.firstName profile.lastName profile.colorCode email');
       updatedDeliveries.push(delivery);
       removedFromDrivers.push({ driverId: oldDriverId, delivery });
@@ -2181,11 +2192,9 @@ router.put('/:id', authorize(['admin', 'super_admin', 'dispatcher', 'manager']),
       });
     }
 
-    const delivery = await Delivery.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      { new: true, runValidators: true }
-    ).populate('driver', 'profile.firstName profile.lastName profile.colorCode email');
+    const delivery = await updateReportingDelivery(Delivery, req.params.id, updateData);
+    if (!delivery) return res.status(404).json({ success: false, message: 'Delivery not found' });
+    await delivery.populate('driver', 'profile.firstName profile.lastName profile.colorCode email');
 
     // Track changes
     const changes = [];
@@ -2427,7 +2436,7 @@ router.post('/:id/collect', upload.single('proofImage'), handleUploadError, auth
         : (req.body.notes || 'Marked as collected')
     });
 
-    await delivery.save();
+    await saveReportingDelivery(delivery);
 
     const io = req.app.get('io');
     if (io) io.emit('delivery:updated', delivery);
@@ -2632,7 +2641,7 @@ router.patch('/:id/acknowledge-change', async (req, res) => {
       acknowledgedAt: new Date(),
       acknowledgedBy: req.user._id,
     };
-    await delivery.save();
+    await saveReportingDelivery(delivery);
 
     res.json({ success: true, data: { delivery } });
   } catch (error) {
@@ -2693,7 +2702,7 @@ router.patch('/:id/bag-assignment', async (req, res) => {
       notes: bagId ? `Delivery completed with bag ${bagId}` : 'Delivery completed'
     });
 
-    await delivery.save();
+    await saveReportingDelivery(delivery);
     
     res.json(delivery);
   } catch (error) {
@@ -2811,7 +2820,7 @@ router.patch('/:id/status', async (req, res) => {
       notes: bagId ? `Delivery completed with bag ${bagId}` : `Status updated to ${status}`
     });
 
-    await delivery.save();
+    await saveReportingDelivery(delivery);
 
     // Populate driver information before returning
     await delivery.populate('driver');
@@ -2876,10 +2885,7 @@ router.delete('/by-ids', authorize(['admin', 'super_admin']), async (req, res) =
       deleteQuery.updatedAt = new Date(expectedDelivery.updatedAt);
     }
 
-    // Fetch deliveries before deletion for Slack notification
-    const deliveriesToDelete = await Delivery.find(deleteQuery).lean();
-    
-    const result = await Delivery.deleteMany(deleteQuery);
+    const { deliveriesToDelete, result } = await deleteReportingDeliveries(deleteQuery);
     if (expectedDelivery !== undefined && result.deletedCount !== 1) {
       return res.status(409).json({ success: false, message: 'Delivery changed or no longer exists. Read it again before requesting deletion.' });
     }
@@ -2952,20 +2958,8 @@ router.delete('/bulk-delete', authorize(['admin', 'super_admin']), async (req, r
     const adjustedEndDate = new Date(endDate);
     adjustedEndDate.setHours(23, 59, 59, 999);
 
-    // Fetch deliveries before deletion for Slack notification
-    const deliveriesToDelete = await Delivery.find({
-      scheduledTime: {
-        $gte: startDate,
-        $lte: adjustedEndDate
-      }
-    }).lean();
-
-    // Delete deliveries within the date range
-    const result = await Delivery.deleteMany({
-      scheduledTime: {
-        $gte: startDate,
-        $lte: adjustedEndDate
-      }
+    const { deliveriesToDelete, result } = await deleteReportingDeliveries({
+      scheduledTime: { $gte: startDate, $lte: adjustedEndDate },
     });
 
     // Send Slack notification
@@ -3031,11 +3025,8 @@ router.patch('/:id', authorize(['admin', 'super_admin', 'dispatcher', 'manager']
       return res.status(404).json({ success: false, message: 'Delivery not found' });
     }
 
-    const delivery = await Delivery.findByIdAndUpdate(
-      id,
-      { gpsLocation },
-      { new: true, runValidators: true }
-    );
+    const delivery = await updateReportingDelivery(Delivery, id, { gpsLocation });
+    if (!delivery) return res.status(404).json({ success: false, message: 'Delivery not found' });
 
     await flagDeliveryChangeIfNeeded(originalDelivery, { gpsLocation });
 
@@ -3086,7 +3077,7 @@ router.post('/:id/report-issue', protect, async (req, res) => {
     };
     
     console.log('Saving complaint data:', JSON.stringify(delivery.complaint, null, 2));
-    await delivery.save();
+    await saveReportingDelivery(delivery);
 
     // Send to Slack
     const complaintTypeLabel = {
@@ -3408,29 +3399,22 @@ router.post('/:id/manual-coords', protect, authorize(['driver', 'dispatcher', 'm
     let propagatedIds = [];
     if (delivery.addressId) {
       const { startOfDay: startOfToday } = getBusinessDayBounds(new Date());
-      const targets = await Delivery.find({
-        _id: { $ne: delivery._id },
-        customerId: delivery.customerId,
-        addressId: delivery.addressId,
-        type: 'Delivery',
-        status: { $in: ['pending', 'assigned'] },
-        scheduledTime: { $gte: startOfToday }
-      }).select('_id').lean();
-      propagatedIds = targets.map((t) => String(t._id));
-      if (propagatedIds.length > 0) {
-        await Delivery.updateMany(
-          { _id: { $in: targets.map((t) => t._id) } },
-          {
-            $set: {
-              'gpsLocation.lat': parsedLat,
-              'gpsLocation.lng': parsedLng,
-              'gpsLocation.link': linkToSave,
-              lat: parsedLat,
-              lng: parsedLng
-            }
-          }
-        );
-      }
+      propagatedIds = await withReportingEvents(async (session, enqueue) => {
+        const scope = {
+          _id: { $ne: delivery._id }, customerId: delivery.customerId, addressId: delivery.addressId,
+          type: 'Delivery', status: { $in: ['pending', 'assigned'] }, scheduledTime: { $gte: startOfToday },
+        };
+        const targets = await Delivery.find(scope).session(session ?? null).select('_id').lean();
+        if (targets.length === 0) return [];
+        const ids = targets.map(target => target._id);
+        const result = await Delivery.updateMany({ ...scope, _id: { $in: ids } }, {
+          $set: { 'gpsLocation.lat': parsedLat, 'gpsLocation.lng': parsedLng,
+            'gpsLocation.link': linkToSave, lat: parsedLat, lng: parsedLng },
+        }, { session });
+        if (session && result.matchedCount !== ids.length) throw new Error('Delivery pin scope changed');
+        await recordReportingDeliveryChanges(session, enqueue, ids, Delivery.collection);
+        return ids.map(String);
+      });
     }
     console.info('[manual-coords]', JSON.stringify({
       deliveryId: String(delivery._id),

@@ -4,7 +4,8 @@ import Menu from '../models/WeeklyMenu.js';
 import Item from '../models/MenuItem.js';
 import Selection from '../models/MenuSelectionRecord.js';
 import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
-import { validateCycleMealSnapshot } from './menuComponentSnapshot.js';
+import { validKitchenQuantityRule, validateCycleMealSnapshot } from './menuComponentSnapshot.js';
+import { libraryMealKind } from './mealLibraryDuplicates.js';
 
 const fail = (message, statusCode = 400, conflicts) => {
   throw Object.assign(new Error(message), { statusCode, ...(conflicts ? { conflicts } : {}) });
@@ -61,6 +62,16 @@ export const planManagedMenu = ({ days, existingItems = [], selections = [], sta
       if (published && !bodybuilder && mealType === 'main' && !['chicken', 'beef', 'fish'].includes(input.portionType)) fail(`Set the protein type for ${mealName} before publishing.`);
       if (input.usedForCorePlan !== undefined && typeof input.usedForCorePlan !== 'boolean') fail(`Core Plan must be true or false for ${mealName}.`);
       const original = byId.get(idOf(input.menuItemId)) || byKey.get(dishKey({ itemDate: date, mealType, mealName }));
+      let snapshot = input.cycleMeal === undefined ? original?.cycleMeal : input.cycleMeal;
+      const inheritedQuantity = original?.cycleMeal && snapshot && libraryMealKind(snapshot) === libraryMealKind(original.cycleMeal)
+        && snapshot.qtyUnit === original.cycleMeal.qtyUnit && snapshot.gramsPerPiece === original.cycleMeal.gramsPerPiece;
+      const unchangedQuantity = inheritedQuantity && original.mealType === mealType;
+      if (inheritedQuantity && !unchangedQuantity && !validKitchenQuantityRule(snapshot, mealType === 'main')) {
+        // The dated editor can change the category but has no QTY controls.
+        snapshot = { ...snapshot };
+        delete snapshot.qtyUnit;
+        delete snapshot.gramsPerPiece;
+      }
       const fields = {
         itemDate: new Date(date), mealType, mealName, mealPlan: bodybuilder ? 'Bodybuilder' : 'Standard',
         ingredients: bodybuilder ? [['Protein', input.proteinSource], ['Vegetables', input.veg], ['Carbs', input.carbs], ['Sauces', input.sauce]].filter(([, value]) => String(value || '').trim()).map(([label, value]) => `${label}: ${String(value).trim()}`).join('; ') : input.ingredients || '',
@@ -68,7 +79,7 @@ export const planManagedMenu = ({ days, existingItems = [], selections = [], sta
         allergens: (Array.isArray(input.allergens) ? input.allergens : String(input.allergens || '').split(',')).map(value => String(value).trim()).filter(Boolean),
         garnish: input.garnish || '', carbs: input.carbs || '', veg: input.veg || '', sauce: input.sauce || '',
         portionType: input.portionType || '', rotationCategory: input.rotationCategory || '',
-        ...(input.cycleMeal !== undefined ? { cycleMeal: validateCycleMealSnapshot(input.cycleMeal) } : original?.cycleMeal !== undefined ? { cycleMeal: validateCycleMealSnapshot(original.cycleMeal) } : {}),
+        ...(snapshot !== undefined ? { cycleMeal: validateCycleMealSnapshot(snapshot, { datedMealType: mealType, legacyQuantity: unchangedQuantity ? 'preserve' : undefined }) } : {}),
         usedForCorePlan: input.usedForCorePlan === undefined ? !!original?.usedForCorePlan : input.usedForCorePlan,
         ...Object.fromEntries(['portionIngredients', 'carbIngredients', 'vegIngredients', 'sauceIngredients'].map(key => [key, Array.isArray(input[key]) ? input[key] : []])),
       };
@@ -126,7 +137,14 @@ export const saveManagedMenu = async ({ menuId, body, userId, buildMealName, mer
     }
     menu.selectionDeadlines = FIXED_SELECTION_DEADLINES;
     if (body.shareLinkActive !== undefined) {
-      if (!menu.shareLink?.token) menu.shareLink = { token: crypto.randomBytes(32).toString('hex'), createdAt: new Date(), expiresAt: new Date(Date.now() + 30 * 86400000) };
+      // Legacy menus can already have a distributed short alias without a long
+      // token. Fill missing fields individually so stop/reopen preserves it.
+      if (!menu.shareLink?.token) {
+        if (!menu.shareLink) menu.shareLink = {};
+        menu.shareLink.token = crypto.randomBytes(32).toString('hex');
+        if (!menu.shareLink.createdAt) menu.shareLink.createdAt = new Date();
+        if (!menu.shareLink.expiresAt) menu.shareLink.expiresAt = new Date(Date.now() + 30 * 86400000);
+      }
       menu.shareLink.isActive = !!body.shareLinkActive;
     }
     const existingItems = oldItems.length ? await Item.find({ _id: { $in: oldItems } }).session(session).lean() : [];

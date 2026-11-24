@@ -149,7 +149,7 @@ function apiBase() {
 function currentContext(includeExcluded = false) {
   const page = window.location.pathname;
   // Public links can carry credentials in their path and have no verified actor.
-  if (!includeExcluded && (/^\/(?:traceability|login|join|menu-select)(?:\/|$)/.test(page) || /^\/partner\/login(?:\/|$)/.test(page))) return null;
+  if (!includeExcluded && (/^\/(?:traceability|login|join|menu-select|m)(?:\/|$)/.test(page) || /^\/partner\/login(?:\/|$)/.test(page))) return null;
   const scheme = /^\/partner(?:\/|$)/.test(page) ? 'partner' : /^\/member(?:\/|$)/.test(page) ? 'member' : 'staff';
   const key = scheme === 'staff' ? 'token' : `${scheme}Token`;
   let token;

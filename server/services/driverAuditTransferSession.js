@@ -109,12 +109,12 @@ export function createDriverAuditTransferSessions({ root, targetDatabase, capaci
       }
       const remote = await spaces.head(sessionId);
       if (remote.bytes !== state.plan.cipherBytes) throw Error('Encrypted native transfer size differs');
-      const stream = await spaces.read(sessionId, signal);
+      const stream = await spaces.read(sessionId, signal, remote);
       const inputFiles = [];
       let proof;
       try {
         proof = await decryptTransfer({ stream, key: Buffer.from(state.key, 'base64'), baseNonce: Buffer.from(state.baseNonce, 'base64'),
-          context: { sessionId, targetDatabase, inventorySha256: state.inventorySha256 }, plan: state.plan, signal,
+          context: { sessionId, targetDatabase, inventorySha256: state.inventorySha256 }, plan: state.plan, signal: stream.signal || signal,
           async receive(row, bytes) {
             if (row.kind !== 'input') { await archive.putVerifiedObject(row.key, bytes); return; }
             const file = path.join(folder, row.name);
@@ -127,7 +127,7 @@ export function createDriverAuditTransferSessions({ root, targetDatabase, capaci
             }
             inputFiles.push({ name: row.name, sha256: row.key.slice(0, 64), bytes: bytes.length });
           } });
-      } finally { stream.destroy?.(); }
+      } finally { await stream.destroy?.(); }
       await canStage();
       const receipt = { version: 1, status: 'transfer-received', ...proof, sessionId, targetDatabase,
         inputFiles, completedAt: new Date(clock()).toISOString(), authorityChanged: false };

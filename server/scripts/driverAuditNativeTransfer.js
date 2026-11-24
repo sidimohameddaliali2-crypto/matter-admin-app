@@ -8,19 +8,34 @@ import mongoose from 'mongoose';
 import { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createDriverAuditMongoArchive } from '../services/driverAuditMongoArchive.js';
+import { createDriverAuditNativeObjectStore } from '../services/driverAuditNativeObjectStore.js';
 import { createDriverAuditTransferSessions, validateDriverAuditTransferPlan } from '../services/driverAuditTransferSession.js';
+import { createDriverAuditTransferDownload } from '../services/driverAuditTransferDownload.js';
 import { acquireWorkerLock } from '../vendor/driver-audits/integration/hosted/worker-lock.mjs';
 
 const exec = promisify(execFile);
 
-function spacesAdapter(env) {
+// Control inputs must be stageable before preparing the hybrid connection.
+// Archive payloads must never silently fill the app's small database instead.
+export function createDriverAuditTransferArchive({ archive, objectStore }) {
+  if (typeof archive?.putVerifiedObject !== 'function') throw Error('Native archive is unavailable');
+  return { async putVerifiedObject(key, bytes) {
+    if (!/^[a-f0-9]{64}$/.test(objectStore?.identitySha256 || '')) {
+      throw Object.assign(Error('Prepare the verified external archive before importing evidence files'),
+        { code: 'AUDIT_EXTERNAL_ARCHIVE_REQUIRED' });
+    }
+    return archive.putVerifiedObject(key, bytes);
+  } };
+}
+
+export function createDriverAuditTransferSpacesAdapter(env, { client } = {}) {
   if (!env.SPACES_KEY || !env.SPACES_SECRET || !env.SPACES_BUCKET) throw Error('Existing private Spaces connection required');
   const endpoint = new URL('https://' + (env.SPACES_ENDPOINT || 'nyc3.digitaloceanspaces.com').replace(/^https?:\/\//, ''));
   if (endpoint.protocol !== 'https:' || !/^[a-z0-9-]+\.digitaloceanspaces\.com$/.test(endpoint.hostname)
       || endpoint.pathname !== '/' || endpoint.username || endpoint.password || endpoint.port || endpoint.search || endpoint.hash) {
     throw Error('Unexpected existing Spaces endpoint');
   }
-  const s3 = new S3Client({ endpoint: endpoint.href, region: env.SPACES_REGION || endpoint.hostname.split('.')[0],
+  const s3 = client || new S3Client({ endpoint: endpoint.href, region: env.SPACES_REGION || endpoint.hostname.split('.')[0],
     requestChecksumCalculation: 'WHEN_REQUIRED',
     credentials: { accessKeyId: env.SPACES_KEY, secretAccessKey: env.SPACES_SECRET } });
   const object = id => ({ Bucket: env.SPACES_BUCKET, Key: '_driver_report_migration/' + id + '/transfer.enc' });
@@ -30,8 +45,14 @@ function spacesAdapter(env) {
       const uploadUrl = await getSignedUrl(s3, command, { expiresIn: 3600 });
       return { uploadUrl, headers: { 'content-type': 'application/octet-stream', 'x-amz-acl': 'private' }, expiresInSeconds: 3600 };
     },
-    async head(id) { const value = await s3.send(new HeadObjectCommand(object(id))); return { bytes: value.ContentLength }; },
-    async read(id, signal) { return (await s3.send(new GetObjectCommand(object(id)), { abortSignal: signal })).Body; },
+    async head(id) { const value = await s3.send(new HeadObjectCommand(object(id)));
+      return { bytes: value.ContentLength, etag: value.ETag, ...(value.VersionId === undefined ? {} : { versionId: value.VersionId }) }; },
+    async read(id, signal, remote) {
+      return createDriverAuditTransferDownload({ remote, signal,
+        readRange: ({ start, end, etag, versionId, signal: attemptSignal }) => s3.send(new GetObjectCommand({ ...object(id),
+          Range: `bytes=${start}-${end}`, IfMatch: etag, ...(versionId === undefined ? {} : { VersionId: versionId }) }),
+        { abortSignal: attemptSignal }) });
+    },
     async remove(id) { await s3.send(new DeleteObjectCommand(object(id))); },
     close() { s3.destroy(); },
   };
@@ -54,8 +75,9 @@ export async function runDriverAuditNativeTransfer({ operation, request, session
     await connection.asPromise();
     const db = connection.db;
     if (db.databaseName !== target.targetDatabase) throw Error('Native transfer database differs');
-    const archive = createDriverAuditMongoArchive({ db, client: connection.getClient(), capacityBytes: target.capacityBytes });
-    spaces = spacesAdapter(process.env);
+    const objectStore = await createDriverAuditNativeObjectStore();
+    const archive = createDriverAuditMongoArchive({ db, client: connection.getClient(), capacityBytes: target.capacityBytes, objectStore });
+    spaces = createDriverAuditTransferSpacesAdapter(process.env);
     const canStage = async () => {
       const [authority, stage, processes] = await Promise.all([
         db.collection('driverAuditNativeControl').findOne({ _id: 'authority' }),
@@ -71,7 +93,7 @@ export async function runDriverAuditNativeTransfer({ operation, request, session
       if (capacity && capacity.limitBytes !== target.capacityBytes) throw Error('Native transfer allowance differs');
     };
     const sessions = createDriverAuditTransferSessions({ root: folder, targetDatabase: db.databaseName,
-      capacityBytes: target.capacityBytes, archive, spaces, canStage });
+      capacityBytes: target.capacityBytes, archive: createDriverAuditTransferArchive({ archive, objectStore }), spaces, canStage });
     return operation === 'prepare-transfer' ? await sessions.prepare(request) : await sessions.receive(sessionId);
   } finally { spaces?.close(); await connection?.close(); await lock.release(); }
 }

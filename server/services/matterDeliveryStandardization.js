@@ -1,3 +1,4 @@
+import { bulkWriteReportingDeliveries } from './reportingOutbox.js';
 import Delivery from '../models/Delivery.js';
 import Customer from '../models/Customer.js';
 import matterApiService from './matterApiService.js';
@@ -98,7 +99,7 @@ export async function standardizeMatterDeliveries(date, { dryRun = false, roster
   if (dryRun) return { date, ...plan };
   let updated = 0;
   if (plan.updates.length) {
-    const result = await Delivery.bulkWrite(plan.updates.map(({ deliveryId, before, identity, fields }) => ({ updateOne: {
+    const result = await bulkWriteReportingDeliveries(Delivery, plan.updates.map(({ deliveryId, before, identity, fields }) => ({ updateOne: {
       // A concurrent completion or dispatcher edit must not be overwritten.
       filter: { _id: deliveryId, type: 'Delivery', company: /^matter$/i, ...before, ...identity },
       update: { $set: fields },

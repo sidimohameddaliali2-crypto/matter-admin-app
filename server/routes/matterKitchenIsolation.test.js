@@ -12,7 +12,7 @@ import router, { runAutoPopulateMissing } from './menus.js';
 const query = (data) => ({ select() { return this; }, populate() { return this; }, sort() { return this; }, lean: async () => data, then: (resolve, reject) => Promise.resolve(data).then(resolve, reject) });
 const response = () => ({ set() { return this; }, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } });
 const route = (path, method) => router.stack.find((layer) => layer.route?.path === path && layer.route.methods[method]).route.stack.at(-1).handle;
-const source = { customer_id: '42', customer_email: 'website@example.invalid', customer_name: 'Matter Name', subscription_id: 'renewal', plan_name: 'Custom', meal_frequency: 1, breakfast_included: false, snacks_per_day: 0, exclusions: [], weekend_enabled: true, macros: { carbohydrates: 38, protein: 32, fat: 10 } };
+const source = { customer_id: '42', customer_email: 'website@example.invalid', customer_name: 'Matter Name', subscription_id: 'renewal', plan_name: 'Custom', meal_frequency: 1, breakfast_included: false, snacks_per_day: 0, exclusions: [], allergens: ['Milk'], weekend_enabled: true, macros: { carbohydrates: 38, protein: 32, fat: 10 } };
 const blockInternal = (t) => {
   for (const name of ['find', 'findOne', 'findById', 'updateOne', 'findOneAndUpdate', 'findByIdAndUpdate', 'create']) t.mock.method(Customer, name, () => assert.fail(`Forbidden Internal Customer.${name}`));
   t.mock.method(Customer.prototype, 'save', () => assert.fail('Forbidden Internal customer save'));
@@ -61,13 +61,8 @@ test('kitchen preparation releases a confirmed skip when Matter restores the act
   assert.equal(writes[0].$push.unpausedDays.date, date);
 });
 
-test('menu sign-in reads only Internal allergies; identity and saved selections remain Matter-owned', async (t) => {
+test('menu sign-in uses Matter allergies and never reads Internal profiles', async (t) => {
   blockInternal(t);
-  // Owner (2026-10-21): internal allergy profiles are the sole exception.
-  t.mock.method(Customer, 'find', () => ({ select(fields) {
-    assert.equal(fields, 'allergies email matterCustomerId matterSubscriptionId');
-    return query([{ matterCustomerId: '42', allergies: ['Milk'], firstName: 'Internal name', mealPerDay: 99 }]);
-  } }));
   const record = { email: source.customer_email, matterCustomerId: '42', selectedMeals: [{ date: '2026-10-22', mealType: 'main' }], skippedDays: [], firstName: 'Untrusted legacy name' };
   t.mock.method(matter, 'getKitchenNutrition', async () => source);
   t.mock.method(Record, 'findOne', () => query(record)); t.mock.method(Record, 'find', () => query([record]));
@@ -87,19 +82,9 @@ test('menu sign-in reads only Internal allergies; identity and saved selections 
   assert.equal(list.body.data[0].matterCustomerId, '42');
 });
 
-test('staff selection edits read only the allergy profile and never mirror changes onto Internal customers', async (t) => {
+test('staff selection edits use only Matter and never read or mirror Internal customers', async (t) => {
   blockInternal(t);
   const menuId = '507f1f77bcf86cd799439012';
-  const allergyRead = t.mock.method(Customer, 'find', (filter) => {
-    assert.deepEqual(filter, { $or: [
-      { matterCustomerId: '42' }, { matterSubscriptionId: 'renewal' },
-      { email: /^website@example\.invalid$/i },
-    ] });
-    return { select(fields) {
-      assert.equal(fields, 'allergies email matterCustomerId matterSubscriptionId');
-      return { lean: async () => [{ matterCustomerId: '42', allergies: [] }] };
-    } };
-  });
   t.mock.method(Menu, 'findById', () => query({ _id: menuId, meals: [] }));
   t.mock.method(Menu, 'findByIdAndUpdate', async () => ({}));
   t.mock.method(Record, 'findOne', () => query({ matterCustomerId: '42', email: 'old-storage@example.invalid', selectedMeals: [] }));
@@ -109,11 +94,9 @@ test('staff selection edits read only the allergy profile and never mirror chang
   const res = response();
   await route('/:menuId/selections/:email', 'put')({ params: { menuId, email: 'old-storage@example.invalid' }, body: { matterCustomerId: '42', selections: [] } }, res);
   assert.equal(res.body.success, true, JSON.stringify(res.body));
-  assert.equal(allergyRead.mock.callCount(), 1);
   const deleted = response();
   await route('/:menuId/selections/:email', 'delete')({ params: { menuId, email: 'old-storage@example.invalid' } }, deleted);
   assert.equal(deleted.body.success, true);
-  assert.equal(allergyRead.mock.callCount(), 1);
 });
 
 test('selections GET suppresses only an approved archived alias and never recreates or deletes records', async (t) => {

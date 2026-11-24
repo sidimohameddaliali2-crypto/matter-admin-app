@@ -1,5 +1,23 @@
 # Matter API integration
 
+## Customer Management labels (23 November 2026)
+
+Customer type appears as a blue `New`/`Returning` badge in the profile header after the customer name, rather than inside Matter customer details. The header's subscription status and `Renews` badges are removed. The same type badge is retained on list cards; the dropdown remains below search.
+
+Named customer tags appear as rounded badges to the left of the customer name in the profile header. Badge tints use Matter's supplied tag colour, with a blue fallback. Tags are no longer listed in the Matter customer details box; no placeholder badge is shown when there are no tags.
+
+The staff screen titled **Customer Management** is `WebsiteSubscription.js` at `/website-subscriptions` (and `/:id`). Its Customer type dropdown sits directly below search, alongside a refresh control. It reads types, tags, source update time and upcoming plans directly from the existing Matter list/detail API, including subscribers without an internal customer match. Search also includes type and tag names; the Upcoming plan tab combines with the type filter and existing controls. Refresh reloads both list and selected profile. The older `/customers` logistics directory also displays captured labels as described below.
+
+Customer Management captures `customer_type`, named `customer_tags` and `upcoming_plan` from every verified page of the Matter subscription list. Opening the page or using Refresh as an admin, super admin, manager or dispatcher invokes `POST /api/customers/matter-metadata/refresh` (also requires the existing customers permission). Other permitted readers see saved labels. Refreshes share an in-process request and have a one-minute success cooldown; no new scheduled job is enabled.
+
+The snapshot is stored in `Customer.matterMetadata`, exposed by `GET /api/customers`. Match by saved permanent `matterCustomerId`, or an exact saved subscription link when no permanent ID exists. Multiple subscriptions for one permanent ID remain unresolved; names, email and phone do not assign these labels. Unlinked/manual customers remain available with type “Not provided.” The refresh neither creates customer/delivery records nor changes internal plans, addresses or entitlements.
+
+`updated_at` is Matter's source update clock, not a plan start date. Older source responses cannot overwrite newer snapshots; concurrent requests also compare capture clocks and saved identity links at the write boundary. Unchanged snapshots generate no customer writes. Read the complete list instead of relying on `updated_since`, because an upcoming plan has its own update clock. Missing fields stay unknown or preserve previous supplied values; explicit null/empty values clear labels. Failed/partial pagination preserves saved data and produces an inline retry warning.
+
+The Upcoming plan filter and badge use `upcoming_plan.starting_date` against today's Dubai calendar date (including today); a past start is excluded. Do not infer paid service from subscription status. Missing start dates remain explicitly unavailable. Customer type filtering combines with search and existing plan/status filters. Profiles show source update/capture times, type, tags, upcoming plan name, subscription and start date.
+
+Scope check: this changes the existing logistics Customer Management page (`client/src/pages/Customers.js`) and MongoDB customer labels. It does not change the separate Customer Service components, Supabase directory, conversation identity, actions or reports; the shared Customer Service review pack remains applicable to that unchanged journey. Local acceptance covers persistence, pagination failures, identity/renewal ambiguity, date rules, filters, profiles and saved-data recovery. Live provider reads verified these list fields; deployment and real staff acceptance remain separate.
+
 This app reads live subscription/nutrition/delivery data from Matter's own
 backend (the website people subscribe through) and, in one place, writes to
 it (pausing a subscription's deliveries). It's the source of truth for a
@@ -129,6 +147,123 @@ Every route responds `{ success, data }` on success and
 HTTP status forwarded when available (so a Matter 404 reaches the client as
 a 404, not a generic 500).
 
+### Background delivery imports (2026-11-20)
+
+`POST /api/matter/import-deliveries` accepts `{ "date": "2026-11-22" }`
+and now returns **202** with `{ success: true, data: { id, date, status,
+progress } }`. It queues a request rather than waiting for every subscription
+read and delivery write. Consumers of the old synchronous response must poll
+for the final `result` instead of reading `created` from the POST response.
+
+Use `GET /api/matter/import-deliveries/jobs/:id` for one attempt, or
+`GET /api/matter/import-deliveries/status?date=YYYY-MM-DD` to restore the latest
+attempt after a reload. All three routes require an active staff JWT and an
+admin, super_admin, dispatcher or manager role. The Deliveries page polls and
+checks progress every three seconds while a job is queued/running and every
+60 seconds when idle or finished. A local submission restarts fast polling
+without waiting for the idle timer; an earlier in-flight read cannot overwrite
+the accepted queued job. Jobs started by another staff member are discovered
+on the next idle check. Both polling endpoints are included in the generated
+traceability catalog for route matching and error activity classification.
+The page
+quietly refreshes rows once per terminal job ID, without entering the page's
+loading branch or starting another standardization request. The parent retains
+handled job IDs through control remounts caused by manual refresh or errors.
+If a quiet row refresh fails, the page retains the last loaded rows, selections
+and import results/controls. An inline warning labels the sheet as the last
+loaded version and offers a quiet sheet-refresh retry. A successful retry
+clears that warning; initial/foreground loading errors retain the existing
+full-page error behavior.
+Delivery reads also carry increasing request IDs. Only the latest request for
+the selected date may apply rows, prune selections or show errors. Foreground
+loading ownership is tracked separately so a superseding quiet read can release
+the spinner, and an older response cannot clear a newer foreground spinner.
+Sunday meal records still follow the
+existing Saturday/Sunday combined dispatch rules.
+
+Jobs and their result/progress snapshots are retained in MongoDB's
+`matterimportjobs` collection. Status is `queued`, `running`, `completed`,
+`incomplete` or `failed`; phases are listing pages, checking calendars,
+importing deliveries and finalizing. Calendar verification progress is not a
+count of deliveries created. Results retain failures, skipped destinations,
+missing delivery windows and review comparisons; finishing does not resolve
+those cases or establish dispatch readiness.
+
+The model declares `{ status: 1, createdAt: 1 }` for oldest-queued claims and
+`{ status: 1, leaseUntil: 1 }` for expired-running recovery. These use the
+existing Mongoose schema/index initialization mechanism (`Job.init()` on the
+enqueue path); no new production index-deployment command is introduced.
+An isolated MongoDB 6.0 check seeded 20,000 completed jobs with no eligible
+jobs, initialized the actual model, and explained the worker's findAndModify
+claim and multi-update recovery commands without hints. Winning plans used
+`status_1_createdAt_1` and `status_1_leaseUntil_1`, respectively; both examined
+zero documents and zero keys, with no collection scan or blocking sort.
+
+To repeat against a disposable local MongoDB only, set the test-only variable
+`MATTER_IMPORT_TEST_MONGO_URI=mongodb://127.0.0.1:PORT/matter_import_index_test_local`
+and run `node --test server/models/MatterImportJob.indexes.test.js` from the
+repository root. The integration case refuses non-loopback/non-test database
+names, does not load app environment files, and drops its synthetic database
+on completion. It is skipped without that variable. This is isolated query-plan
+evidence, not verification of deployed production indexes.
+
+A unique active date key coalesces duplicate clicks. The import control mounts
+only for the staff roles authorized by the endpoints; a denied status request
+stops polling and displays a permission warning rather than suggesting a job
+is running. Interrupted attempts display their last saved phase, processed
+count and any available write/skip/failure counts, including known zero counts.
+The recovery view also includes saved customer-creation, delivery-write-failure
+and discovery-failure counts; missing counts remain unknown rather than zero.
+
+A shared Mongo lease
+serializes workers across PM2 processes; heartbeat and ownership checks fence
+further work after ownership loss. Queued jobs survive restarts. A running
+job whose lease expires is marked interrupted, retaining its last saved
+progress; it is not silently resumed. Staff can retry using a new attempt,
+which uses the existing delivery duplicate checks and leaves the old result
+available. A failure between a database write and the next progress update
+can leave the progress snapshot behind the actual delivery count, so retry
+rechecks stored deliveries rather than trusting that count.
+
+New imported deliveries carry server-owned immutable identities for the source
+subscription/day (`matterImportKey`), internal customer/day
+(`matterImportCustomerKey`) and, when available, permanent Matter customer/day
+(`matterImportSourceCustomerKey`). Partial unique MongoDB indexes enforce the
+existing one-stop-per-customer/day import rule at insertion, even when a paused
+worker resumes after a replacement imports a renewed subscription. The
+permanent identity also protects against an internal customer-link change.
+The importer explicitly awaits all three indexes before processing new records;
+an unavailable index blocks those writes rather than allowing an unprotected
+insert. Only collisions on these identities count as already imported; other
+write failures remain failures. Single and bulk manual HTTP requests strip
+these keys, including nested/dotted paths and rename attempts, before writes.
+Historical and manual/CSV rows without a key
+are outside the partial index and still use the existing lookup checks. No
+historical backfill or completed-record rewrite is performed.
+
+The same complete counts snapshot is saved after each processed subscription
+and before finalization, so interruption during finalization does not lose
+already-imported, already-scheduled, failed or address/window skip counts.
+
+The worker consumes explicitly queued requests and does not enqueue dates
+on startup. `MATTER_IMPORT_ENABLED` still controls the separate daily/startup
+schedule; when already enabled, it now queues requests through the same
+worker. It remains disabled by default. If scheduled enqueueing fails, an
+in-process retry retains that exact service date and backs off from one minute
+to a maximum five-minute interval. A newer daily service date does not replace
+the pending older date, and repeated attempts for the same date are coalesced.
+Once MongoDB accepts a job it is durable; a retry not yet accepted by MongoDB
+is held only by the running scheduler, not a separate durable journal.
+The script-only
+`runImportMatterDeliveriesOnce` helper still runs directly and must not be
+used concurrently with the queue.
+
+No new environment variables are needed. This changes delivery import
+execution and its UI, not Customer Service topics, lookup results, provider
+messages, cancellation authority or the saved API base URL. Incomplete
+upstream discovery still creates no deliveries. This change does not
+implement issue #12 reconciliation or authorize deployment or live testing.
+
 ## 4. Cross-referencing Matter subscriptions with internal customers
 
 Matter has no concept of this app's internal `Customer` records — matching
@@ -185,8 +320,15 @@ adjustments supply the food calculations. Ordinary meal frequency includes
 breakfast; Core main meals and extra breakfast use the existing separate rules.
 Core protein/carbohydrate targets are food weights; its missing fat target is
 normal, and final meal macros come from the approved weight lookup. Required
-missing fields cannot be replaced with Internal defaults. Allergies absent from
-Matter are shown as unavailable. Legacy partner assignment based on Internal
+missing fields cannot be replaced with Internal defaults. Subscription detail's
+`allergens: [{id, name}]` is the only customer-menu allergy source; `exclusions`
+remains a separate preference list. An explicit empty allergen array means none
+recorded. Missing or malformed allergen data is unavailable and blocks customer
+meal selection/submission until Matter can be verified. Both the browser and
+server check stored recipe/component metadata, including private ingredients;
+customer-submitted flags cannot waive an allergen block. Internal Customer
+allergy profiles are never queried or merged in this flow.
+Legacy partner assignment based on Internal
 Customer membership is disabled; these members need verified Matter accounts.
 
 `GET /api/matter/subscriptions/kitchen-inputs` requires staff authentication and

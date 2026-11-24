@@ -23,9 +23,12 @@ async function fixtures(run) {
 }
 
 test('bootstrap recovers saved snapshots without modifying menus; repeat loads cannot empty state',()=>fixtures(async saved=>{
-  const before=JSON.stringify(saved.menus), first=res();await route('post','/bootstrap')({body:{}},first);
+  const events = [];
+  const app = { get: () => ({ emit: event => events.push([event, saved.writes]) }) };
+  const before=JSON.stringify(saved.menus), first=res();await route('post','/bootstrap')({app,body:{}},first);
   assert.equal(first.statusCode,200);assert.equal(first.body.data.catalogue.meals[0].id,'recovered');assert.equal(saved.writes,1);
-  const again=res();await route('post','/bootstrap')({body:{}},again);assert.equal(saved.writes,1);assert.deepEqual(again.body.data,first.body.data);assert.equal(JSON.stringify(saved.menus),before);
+  const again=res();await route('post','/bootstrap')({app,body:{}},again);assert.equal(saved.writes,1);assert.deepEqual(again.body.data,first.body.data);assert.equal(JSON.stringify(saved.menus),before);
+  assert.deepEqual(events, [['kitchen:mealLibraryChanged', 1]]);
 }));
 
 test('first-run migration survives dangling browser boards while retaining browser meals and recovered placements',()=>fixtures(async saved=>{
@@ -36,10 +39,13 @@ test('first-run migration survives dangling browser boards while retaining brows
 
 test('updates require current revision and CAS; failed/stale updates never change data',()=>fixtures(async saved=>{
   await route('post','/bootstrap')({body:{}},res());
-  const ok=res();await route('put','/')({body:{revision:0,catalogue:{meals:[meal('new')]}}},ok);assert.equal(ok.statusCode,200);assert.equal(ok.body.data.revision,1);
+  const events = [];
+  const app = { get: () => ({ emit: event => events.push([event, saved.state.revision]) }) };
+  const ok=res();await route('put','/')({app,body:{revision:0,catalogue:{meals:[meal('new')]}}},ok);assert.equal(ok.statusCode,200);assert.equal(ok.body.data.revision,1);
   const state=structuredClone(saved.state);
-  const stale=res();await route('put','/')({body:{revision:0,catalogue:{meals:[]}}},stale);assert.equal(stale.statusCode,409);assert.deepEqual(saved.state,state);
-  saved.concurrent=true;const race=res();await route('put','/')({body:{revision:1,catalogue:{meals:[meal('lost')]}}},race);assert.equal(race.statusCode,409);assert.deepEqual(saved.state,state);
+  const stale=res();await route('put','/')({app,body:{revision:0,catalogue:{meals:[]}}},stale);assert.equal(stale.statusCode,409);assert.deepEqual(saved.state,state);
+  saved.concurrent=true;const race=res();await route('put','/')({app,body:{revision:1,catalogue:{meals:[meal('lost')]}}},race);assert.equal(race.statusCode,409);assert.deepEqual(saved.state,state);
+  assert.deepEqual(events, [['kitchen:mealLibraryChanged', 1]]);
 }));
 
 test('routes are staff-authenticated and require effective menus permission',()=>{

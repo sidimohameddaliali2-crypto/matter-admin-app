@@ -4,6 +4,8 @@ import { useSelector } from 'react-redux';
 import * as XLSX from 'xlsx';
 import api from '../utils/api';
 import PrintConfigModal from '../components/deliveries/PrintConfigModal';
+import MatterImportControl, { canImportMatter } from '../components/deliveries/MatterImportControl';
+import SatoStickerPrintModal from '../components/stickers/SatoStickerPrintModal';
 import DeliveryDetailModal from '../components/deliveries/DeliveryDetailModal';
 import { toBusinessComponents, businessComponentsToUtcDate, formatBusinessDateInput } from '../utils/businessTime';
 import { useSocket } from '../contexts/SocketContext';
@@ -117,8 +119,11 @@ const Deliveries = () => {
   const [driverFilter, setDriverFilter] = useState(() => searchParams.get('driver') || 'all');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [rowRefreshError, setRowRefreshError] = useState('');
   const [selectedDate, setSelectedDate] = useState(() => formatBusinessDateInput(new Date()));
   const selectedDateRef = React.useRef(selectedDate);
+  const deliveryRequestId = React.useRef(0);
+  const foregroundDeliveryRequest = React.useRef(null);
   selectedDateRef.current = selectedDate;
   const [matterSyncError, setMatterSyncError] = useState('');
   const [refreshVersion, setRefreshVersion] = useState(0);
@@ -127,7 +132,9 @@ const Deliveries = () => {
   useEffect(() => { selectionRef.current = selectedDeliveries; }, [selectedDeliveries]);
   const [allDrivers, setAllDrivers] = useState([]);
   const [isPrintConfigOpen, setIsPrintConfigOpen] = useState(false);
-  const [isImportingFromMatter, setIsImportingFromMatter] = useState(false);
+  // Keep receipts above the loading/error branches that can unmount the control.
+  const handledMatterImportJobs = React.useRef(new Set());
+  const [isSatoPrintOpen, setIsSatoPrintOpen] = useState(false);
   const [isDeletingSelected, setIsDeletingSelected] = useState(false);
   // Owner (2026-10-10): clicking a delivery opens its details in a modal,
   // in place, instead of navigating to a separate page — closing it must
@@ -140,9 +147,15 @@ const Deliveries = () => {
   // the whole day regardless of which table filters are active.
   const fetchDeliveries = useCallback(async (quiet = false) => {
     quiet = quiet === true;
+    const requestId = ++deliveryRequestId.current;
+    const isLatest = () => deliveryRequestId.current === requestId && selectedDateRef.current === selectedDate;
     try {
-      if (!quiet) setIsLoading(true);
-      setError(null);
+      if (!quiet) {
+        foregroundDeliveryRequest.current = { id: requestId, date: selectedDate };
+        setIsLoading(true);
+        setError(null);
+        setRowRefreshError('');
+      }
 
       const params = { page: 1, limit: MAX_FETCH_LIMIT };
       if (selectedDate) {
@@ -155,15 +168,18 @@ const Deliveries = () => {
       }
 
       const response = await api.get('/deliveries', { params });
-      if (selectedDateRef.current !== selectedDate) return;
+      if (!isLatest()) return;
       if (!response.data?.success) {
         throw new Error(response.data?.message || 'Failed to load deliveries');
       }
 
       const data = response.data?.data || {};
       const pageDeliveries = Array.isArray(data.deliveries) ? data.deliveries : [];
+      setError(null);
+      setRowRefreshError('');
       setDeliveries(pageDeliveries);
       setSelectedDeliveries((prev) => {
+        if (!isLatest()) return prev;
         if (prev.size === 0) return prev;
         const validIds = new Set(pageDeliveries.map((d) => d._id));
         const next = new Set();
@@ -171,20 +187,41 @@ const Deliveries = () => {
         return next;
       });
     } catch (err) {
-      if (selectedDateRef.current !== selectedDate) return;
+      if (!isLatest()) return;
       console.error('Error fetching deliveries:', err);
+      if (quiet) {
+        // A failed background read is not evidence that stored rows vanished.
+        // Keep the sheet, selections and import recovery controls mounted.
+        setRowRefreshError(err.response?.data?.message || 'Failed to refresh delivery rows');
+        return;
+      }
       setDeliveries([]);
       setError(err.response?.data?.message || 'Failed to load deliveries');
     } finally {
-      if (selectedDateRef.current === selectedDate && !quiet) setIsLoading(false);
+      const foreground = foregroundDeliveryRequest.current;
+      if (selectedDateRef.current === selectedDate && foreground?.date === selectedDate
+        && ((!quiet && foreground.id === requestId) || (quiet && isLatest()))) {
+        // Loading ownership is separate from response ordering: a newer quiet
+        // read may finish while the superseded foreground request is pending.
+        foregroundDeliveryRequest.current = null;
+        setIsLoading(false);
+      }
     }
   }, [selectedDate]);
+
+  const onMatterImportComplete = useCallback(job => {
+    if (!job?.id || job.date !== selectedDateRef.current || handledMatterImportJobs.current.has(job.id)) return;
+    handledMatterImportJobs.current.add(job.id);
+    // Refresh only rows. A terminal import must not trigger the page-loading
+    // branch or another standardization run and remount its own polling control.
+    fetchDeliveries(true);
+  }, [fetchDeliveries]);
 
   useEffect(() => {
     let cancelled = false;
     setMatterSyncError('');
     const loaded = fetchDeliveries();
-    if (selectedDate && ['admin', 'super_admin', 'dispatcher', 'manager'].includes(role)) {
+    if (selectedDate && canImportMatter(role)) {
       const synchronized = api.post('/matter/standardize-deliveries', { date: selectedDate });
       Promise.all([loaded, synchronized]).then(([, response]) => {
         if (cancelled) return;
@@ -388,35 +425,6 @@ const Deliveries = () => {
     setTimingFilter('all');
   };
 
-  // Pulls deliveries for the currently-selected date straight from Matter
-  // (owner, 2026-10-11) — the on-demand counterpart to the nightly import
-  // job, which stays off unless MATTER_IMPORT_ENABLED=1. Safe to click more
-  // than once: already-imported/already-scheduled customers are skipped
-  // server-side, and a customer with no address flagged "current" in Matter
-  // is skipped too rather than guessed at.
-  const handleImportFromMatter = async () => {
-    if (!selectedDate) return;
-    const confirmed = window.confirm(`Fetch deliveries scheduled for ${formattedSelectedDate} from the Matter API?`);
-    if (!confirmed) return;
-    try {
-      setIsImportingFromMatter(true);
-      const response = await api.post('/matter/import-deliveries', { date: selectedDate });
-      if (!response.data?.success) throw new Error(response.data?.message || 'Failed to import deliveries from Matter');
-      const s = response.data.data || {};
-      alert(
-        `Matter import for ${selectedDate}: ${s.created || 0} created, ${s.alreadyExisted || 0} already imported, ` +
-        `${s.alreadyHadOtherDelivery || 0} already had a delivery, ${s.noCurrentAddress || 0} skipped (no current address), ` +
-        `${s.failed || 0} failed.`
-      );
-      await fetchDeliveries();
-    } catch (err) {
-      console.error('Import from Matter error:', err);
-      alert(err.response?.data?.message || err.message || 'Failed to import deliveries from Matter');
-    } finally {
-      setIsImportingFromMatter(false);
-    }
-  };
-
   const handleDeleteSelectedDeliveries = async () => {
     if (!hasSelections) return;
     const deliveryIds = Array.from(selectedDeliveries);
@@ -501,6 +509,13 @@ const Deliveries = () => {
 
   return (
     <div className="matter-analytics p-6 bg-gray-50 min-h-screen">
+      {rowRefreshError && <div role="alert" className="mb-4 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+        <p>Delivery rows could not be refreshed. Showing the last loaded sheet.</p>
+        <p>{rowRefreshError}</p>
+        <button type="button" onClick={() => fetchDeliveries(true)} className="mt-2 rounded border border-amber-400 px-3 py-1 font-medium hover:bg-amber-100">
+          Retry sheet refresh
+        </button>
+      </div>}
       {matterSyncError && <p role="status" className="mb-4 text-sm text-amber-800">{matterSyncError}</p>}
       {completionToast && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-5 py-3 rounded-lg bg-emerald-600 text-white font-medium shadow-lg">
@@ -519,17 +534,7 @@ const Deliveries = () => {
           <button onClick={() => setRefreshVersion((value) => value + 1)} className="p-2 text-gray-500 hover:text-blue-600 hover:bg-gray-100 rounded-lg transition-colors" title="Refresh">
             <span className={`material-symbols-outlined ${isLoading ? 'animate-spin' : ''}`}>refresh</span>
           </button>
-          <button
-            onClick={handleImportFromMatter}
-            disabled={isImportingFromMatter || !selectedDate}
-            title="Fetch deliveries for the selected date from the Matter API"
-            className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            <span className={`material-symbols-outlined text-[18px] ${isImportingFromMatter ? 'animate-spin' : ''}`}>
-              {isImportingFromMatter ? 'progress_activity' : 'cloud_download'}
-            </span>
-            {isImportingFromMatter ? 'Importing…' : 'Import from Matter'}
-          </button>
+          {canImportMatter(role) && <MatterImportControl role={role} date={selectedDate} formattedDate={formattedSelectedDate} onComplete={onMatterImportComplete} />}
           <button
             onClick={() => setIsPrintConfigOpen(true)}
             disabled={filteredDeliveries.length === 0}
@@ -537,6 +542,14 @@ const Deliveries = () => {
           >
             <span className="material-symbols-outlined text-[18px]">print</span>
             {hasSelections ? `Print (${selectedCount})` : `Print (${filteredDeliveries.length})`}
+          </button>
+          <button
+            onClick={() => setIsSatoPrintOpen(true)}
+            disabled={getPrintTargets().length === 0}
+            className="flex items-center gap-2 px-4 py-2 border border-gray-200 rounded text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <span className="material-symbols-outlined text-[18px]">print</span>
+            SATO stickers ({getPrintTargets().length})
           </button>
           <button
             onClick={handleDownloadExcel}
@@ -911,6 +924,9 @@ const Deliveries = () => {
         )}
       </div>
 
+      {isSatoPrintOpen && (
+        <SatoStickerPrintModal deliveries={getPrintTargets()} onClose={() => setIsSatoPrintOpen(false)} />
+      )}
       {isPrintConfigOpen && (
         <PrintConfigModal
           deliveries={getPrintTargets()}

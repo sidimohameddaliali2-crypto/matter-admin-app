@@ -1,3 +1,4 @@
+import { saveReportingDelivery } from './reportingOutbox.js';
 import axios from 'axios';
 import User from '../models/User.js';
 import Delivery from '../models/Delivery.js';
@@ -377,7 +378,7 @@ export const batchAutoAssign = async (deliveries, options = {}) => {
       // Update delivery with assigned driver
       delivery.driver = assignment.assignedDriver.id;
       delivery.status = 'assigned';
-      await delivery.save();
+      await saveReportingDelivery(delivery);
 
       results.success.push({
         deliveryId: delivery._id,

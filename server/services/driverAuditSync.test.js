@@ -24,10 +24,44 @@ test('a complete pinned generation is activated even when a newer saved capture 
  assert.equal(events.at(-1)[1].pending,true);
 });
 
+test('Supabase serving metadata advances a report without a Mongo direct-import marker',async()=>{
+ let head={servingPackage:{version:1,dataStore:'supabase',collectorRevision:1,sourceBasis:basis('a')},
+  visibleCutoffAt:'2026-11-11T17:30:00.000Z'};
+ const statuses=[],selected=source(2,'b');
+ await runDriverAuditSyncTick({readHead:async()=>head,readSource:async()=>selected,getCandidate:async()=>null,
+  build:async()=>candidate(2,'b'),apply:async value=>{head={...head,servingPackage:{version:1,dataStore:'supabase',
+   collectorRevision:value.collectorRevision,sourceBasis:value.sourceBasis}};},status:async value=>statuses.push(value)});
+ assert.equal(head.directImport,undefined);
+ assert.equal(head.servingPackage.collectorRevision,2);
+ assert.equal(statuses.at(-1).status,'ready');
+});
+
+test('Supabase sync health reloads the bounded private file and retains source clocks',async t=>{
+ const fs=await import('node:fs/promises'),os=await import('node:os'),path=await import('node:path');
+ const {readDriverAuditFileSyncStatus}=await import('./driverAuditSyncStatus.js');
+ const directory=await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(),'driver-report-status-')));
+ t.after(()=>fs.rm(directory,{recursive:true,force:true}));
+ const file=path.join(directory,'sync-status.private.json'),now=Date.parse('2026-11-17T10:00:00.000Z');
+ const saved={status:'ready',activeGeneration:basis('a'),pending:false,checkedAt:new Date(now).toISOString(),
+  latestCaptureAt:'2026-11-16T23:59:59.000Z'};
+ await fs.writeFile(file,JSON.stringify(saved),{mode:0o600});
+ assert.equal((await readDriverAuditFileSyncStatus(file,basis('a'),()=>now)).latestCaptureAt,saved.latestCaptureAt);
+ await fs.writeFile(file,JSON.stringify({...saved,pending:true,status:'pending'}),{mode:0o600});
+ assert.equal((await readDriverAuditFileSyncStatus(file,basis('a'),()=>now)).status,'pending');
+ await fs.chmod(file,0o644);
+ assert.equal((await readDriverAuditFileSyncStatus(file,basis('a'),()=>now)).status,'failed');
+});
+
 test('retry applies an already verified candidate before rebuilding from the newest source',async()=>{
  const {deps,events}=fixture({initial:source(3,'c'),pinned:candidate(2,'b')});
  await runDriverAuditSyncTick(deps);
  assert.deepEqual(events.filter(([type])=>type!=='status'),[['apply',2]]);
+});
+
+test('a scheduled check publishes the latest changed basis instead of an older unpublished candidate',async()=>{
+ const {deps,events}=fixture({initial:source(3,'c'),pinned:candidate(2,'b')});
+ await runDriverAuditSyncTick({...deps,preferLatestEvidence:true});
+ assert.deepEqual(events.filter(([type])=>type!=='status'),[['build',3],['apply',3]]);
 });
 
 test('an oversized pinned candidate yields to newer evidence',async()=>{

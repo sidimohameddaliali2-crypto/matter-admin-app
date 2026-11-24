@@ -35,3 +35,12 @@ export function captureMetadata(point) {
 }
 
 export const CAPTURE_FIELDS = 'trackerServerTime rawGpsTime rawTrackerServerTime speedKph ignition trackerStatus locationSource qualityFlags fixAgeMs driverMappingState driverCandidates sourceReceipt sourceRow captureBatchId captureRow';
+
+export function serializeHistoryPoint(point) {
+  const { vehicleNo, driver, latitude, longitude, recordedAt, gpsTime, _id } = point;
+  const capture = captureMetadata(point);
+  const valid = Number.isFinite(latitude) && Number.isFinite(longitude)
+    && Math.abs(latitude) <= 90 && Math.abs(longitude) <= 180 && !(latitude === 0 && longitude === 0);
+  return { _id, vehicleNo, driver, latitude: valid ? latitude : null, longitude: valid ? longitude : null,
+    recordedAt, gpsTime: gpsTime || null, ...(capture ? { capture } : {}) };
+}

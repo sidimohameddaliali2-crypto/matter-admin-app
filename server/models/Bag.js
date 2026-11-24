@@ -7,7 +7,7 @@ const bagSchema = new mongoose.Schema({
   custodyVersion: {type:Number},
   verifiedAt: Date,
   lastCustomer: {customerId:String,customerName:String},
-  pendingHandover: {driver:{type:mongoose.Schema.Types.ObjectId,ref:'User'},preparedBy:{type:mongoose.Schema.Types.ObjectId,ref:'User'},preparedAt:Date,transfer:Boolean},
+  pendingHandover: {driver:{type:mongoose.Schema.Types.ObjectId,ref:'User'},preparedBy:{type:mongoose.Schema.Types.ObjectId,ref:'User'},preparedAt:Date,eventId:String,transfer:Boolean},
   damageEvidence: {description:String,proofPhotoUrl:String,reportedBy:{type:mongoose.Schema.Types.ObjectId,ref:'User'},reportedAt:Date},
   bagId: {
     type: String,

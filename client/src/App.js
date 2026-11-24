@@ -26,8 +26,7 @@ import Users from './pages/Users'
 import Employees from './pages/Employees'
 import DeliveryChanges from './pages/DeliveryChanges';
 import AddDeliveryChange from './pages/AddDeliveryChange';
-import DispatcherMobile from './pages/DispatcherMobile';
-import DispatcherDesktop from './pages/DispatcherDesktop';
+import DispatcherWorkspace from './pages/DispatcherWorkspace';
 import DriverRoutesPage from './pages/DriverRoutesPage';
 import Customers from './pages/Customers';
 import Events from './pages/Events';
@@ -89,20 +88,7 @@ const AccessDenied = ({
 };
 
 // Responsive Dispatcher Component - Shows desktop or mobile based on screen size
-const ResponsiveDispatcher = () => {
-  const [isDesktop, setIsDesktop] = React.useState(window.innerWidth >= 1024);
-
-  React.useEffect(() => {
-    const handleResize = () => {
-      setIsDesktop(window.innerWidth >= 1024);
-    };
-
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
-
-  return isDesktop ? <DispatcherDesktop /> : <DispatcherMobile />;
-};
+const ResponsiveDispatcher = () => <DispatcherWorkspace />;
 
 const safeGetUser = () => {
   try {
@@ -594,6 +580,7 @@ function App() {
             <Route path="/menu-select/:token" element={
               <MenuSelectPage />
             } />
+            <Route path="/m/:token" element={<MenuSelectPage />} />
 
             {/* Standalone design preview (demo data only). The real redesigned
                 flow is served from /menu-select/:token itself, for every menu. */}

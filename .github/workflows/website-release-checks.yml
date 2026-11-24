@@ -1,0 +1,23 @@
+name: Website release publisher checks
+on:
+  pull_request:
+    paths:
+      - '.github/scripts/website-release*'
+      - '.github/workflows/deploy-digitalocean.yml'
+      - '.github/workflows/website-release-checks.yml'
+      - 'docs/ATOMIC_WEBSITE_DEPLOYMENT.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  publisher:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: sudo apt-get update && sudo apt-get install -y nginx
+      - run: node --test .github/scripts/website-release.test.mjs .github/scripts/website-nginx.test.mjs
+        env:
+          NGINX_BIN: /usr/sbin/nginx

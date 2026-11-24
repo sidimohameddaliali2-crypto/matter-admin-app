@@ -34,9 +34,13 @@ const marginColor = (m) => (m >= 50 ? '#3f8500' : m >= 35 ? '#0b1a3f' : '#ff3b00
 
 // Category display order: Oats, Wraps/Buns, Snack, Bowl, Main (Bowl wasn't
 // in the list given — placed just before Main since it's not mentioned).
-const MEAL_TYPES = ['oats', 'wraps-buns', 'snack', 'bowl', 'main'];
-const MEAL_TYPE_LABEL = { oats: 'Oats', 'wraps-buns': 'Wraps/Buns', snack: 'Snack', bowl: 'Bowl', main: 'Main' };
+const MEAL_TYPES = ['breakfast', 'oats', 'wraps-buns', 'snack', 'bowl', 'main'];
+const MEAL_TYPE_LABEL = { breakfast: 'Breakfast of the day', oats: 'Oats', 'wraps-buns': 'Wraps/Buns', snack: 'Snack', bowl: 'Bowl', main: 'Main' };
 const TYPE_BADGE = { cafe: '#fff2d9', gym: '#e3edff', restaurant: '#e3f3d9', other: '#f1ebe2' };
+const PARTNER_CONTACT_ROLES = [['pointOfContact', 'Point of Contact'], ['financeContact', 'Finance Contact'], ['ownerContact', 'Owner']];
+const partnerContactFields = partner => Object.fromEntries(PARTNER_CONTACT_ROLES.map(([key]) => [key, {
+  fullName: partner?.[key]?.fullName || '', email: partner?.[key]?.email || '', phone: partner?.[key]?.phone || ''
+}]));
 const WASTE_REASONS = ['over-order', 'spoilage', 'returns', 'prep-error'];
 
 const AB = { fontFamily: "'Archivo Black', sans-serif" };
@@ -76,12 +80,15 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
         businessName: initial.businessName, businessType: initial.businessType, contactName: initial.contactName,
         phone: initial.phone || '', address: initial.address || '', minimumOrder: initial.minimumOrder ?? 0,
         menuSelectionEnabled: !!initial.menuSelectionEnabled,
-        presetMacros: { C: initial.presetMacros?.C ?? 0, P: initial.presetMacros?.P ?? 0, F: initial.presetMacros?.F ?? 0 },
-        profilePicture: initial.profilePicture || '', accountCategory: initial.accountCategory || 'partner'
+        presetMacros: {C: initial.presetMacros?.C ?? 0, P: initial.presetMacros?.P ?? 0, F: initial.presetMacros?.F ?? 0},
+        profilePicture: initial.profilePicture || '', accountCategory: initial.accountCategory || 'partner',
+        ...partnerContactFields(initial)
       }
     : {
         businessName: '', businessType: 'cafe', contactName: '', email: '', password: '', phone: '', address: '', minimumOrder: 0,
-        menuSelectionEnabled: false, presetMacros: { C: 0, P: 0, F: 0 }, profilePicture: '', accountCategory: 'partner'
+        profilePicture: '', accountCategory: 'partner',
+        menuSelectionEnabled: false, presetMacros: {C: 0, P: 0, F: 0},
+        ...partnerContactFields()
       }
   );
   const [saving, setSaving] = useState(false);
@@ -89,7 +96,12 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
   const [uploadingPicture, setUploadingPicture] = useState(false);
 
   const set = (e) => { const { name, value } = e.target; setForm((p) => ({ ...p, [name]: value })); setError(''); };
-  const setMacro = (key) => (e) => { const value = e.target.value; setForm((p) => ({ ...p, presetMacros: { ...p.presetMacros, [key]: value } })); };
+  const setContact = (role, field) => (e) => {
+    const value = e.target.value;
+    setForm(p => ({ ...p, [role]: { ...p[role], [field]: value } }));
+    setError('');
+  };
+
 
   const uploadPicture = async (e) => {
     const file = e.target.files?.[0];
@@ -107,7 +119,20 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
   const submit = async (e) => {
     e.preventDefault(); setSaving(true); setError('');
     try {
-      const payload = { ...form, presetMacros: { C: Number(form.presetMacros.C) || 0, P: Number(form.presetMacros.P) || 0, F: Number(form.presetMacros.F) || 0 } };
+      const {menuSelectionEnabled, presetMacros, ...payload} = form;
+      if (!isEdit || menuSelectionEnabled !== !!initial.menuSelectionEnabled) payload.menuSelectionEnabled = menuSelectionEnabled;
+      if (!isEdit || ['C', 'P', 'F'].some(key => Number(presetMacros[key]) !== Number(initial.presetMacros?.[key] ?? 0))) {
+        payload.presetMacros = Object.fromEntries(['C', 'P', 'F'].map(key => [key, Number(presetMacros[key]) || 0]));
+      }
+      // A closed Details panel must not resend stale contact values. Explicit
+      // empty strings still clear individual fields without replacing siblings.
+      if (isEdit) for (const [role] of PARTNER_CONTACT_ROLES) {
+        const changes = Object.fromEntries(['fullName', 'email', 'phone']
+          .filter(field => form[role][field] !== (initial[role]?.[field] || ''))
+          .map(field => [field, form[role][field]]));
+        if (Object.keys(changes).length) payload[role] = changes;
+        else delete payload[role];
+      }
       const res = isEdit
         ? await api.patch(`/admin/partners/${initial._id}`, payload)
         : await api.post('/admin/partners', payload);
@@ -177,41 +202,54 @@ const PartnerFormModal = ({ onClose, onSaved, initial = null }) => {
             <input name="phone" value={form.phone} onChange={set} className={inputCls} placeholder="+971 50 000 0000" /></div>
           <div><label className="block text-sm font-medium text-[#0b1a3f] mb-1">Address</label>
             <input name="address" value={form.address} onChange={set} className={inputCls} placeholder="Dubai, UAE" /></div>
+          <details className="col-span-2 group border border-[#e3d9ca] rounded-2xl p-3.5" aria-label="Contact details">
+            <summary className="cursor-pointer flex items-center justify-between list-none text-sm font-bold text-[#0b1a3f]">
+              Details <ChevronDown className="w-4 h-4 transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="grid grid-cols-2 gap-3 mt-4">
+              {PARTNER_CONTACT_ROLES.map(([role, title]) => (
+                <fieldset key={role} className="col-span-2 border border-[#e3d9ca] rounded-2xl p-3.5">
+                  <legend className="px-1 text-sm font-bold text-[#0b1a3f]">{title} <span className="font-normal text-[#6b7894]">(optional)</span></legend>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="sm:col-span-2">
+                      <label htmlFor={`${role}-fullName`} className="block text-xs font-medium text-[#6b7894] mb-1">Full name</label>
+                      <input id={`${role}-fullName`} name={`${role}.fullName`} value={form[role].fullName} onChange={setContact(role, 'fullName')} className={inputCls} autoComplete="off" />
+                    </div>
+                    <div>
+                      <label htmlFor={`${role}-email`} className="block text-xs font-medium text-[#6b7894] mb-1">Email</label>
+                      <input id={`${role}-email`} name={`${role}.email`} type="email" value={form[role].email} onChange={setContact(role, 'email')} className={inputCls} autoComplete="off" />
+                    </div>
+                    <div>
+                      <label htmlFor={`${role}-phone`} className="block text-xs font-medium text-[#6b7894] mb-1">Phone</label>
+                      <input id={`${role}-phone`} name={`${role}.phone`} type="tel" value={form[role].phone} onChange={setContact(role, 'phone')} className={inputCls} autoComplete="off" placeholder="+971 50 000 0000" />
+                    </div>
+                  </div>
+                </fieldset>
+              ))}
+              <fieldset className="col-span-2 border border-[#e3d9ca] rounded-2xl p-3.5">
+                <legend className="px-1 text-sm font-bold text-[#0b1a3f]">Customer Menu Selection defaults</legend>
+                <label className="flex items-start gap-2 text-sm text-[#0b1a3f]">
+                  <input type="checkbox" name="menuSelectionEnabled" checked={form.menuSelectionEnabled}
+                    onChange={e => {const checked = e.target.checked; setForm(p => ({...p, menuSelectionEnabled: checked}));}}
+                    className="mt-0.5 accent-[#3f8500]" />
+                  Apply defaults to linked customers
+                </label>
+                <p className="text-xs text-[#6b7894] mt-2">Newly linked customers inherit unlimited meals and these preset macros. All partners can order published daily dishes independently of this setting.</p>
+                {form.menuSelectionEnabled && <div className="grid grid-cols-3 gap-3 mt-3">
+                  {[['C', 'Carbs (C)'], ['P', 'Protein (P)'], ['F', 'Fat (F)']].map(([key, label]) => <div key={key}>
+                    <label htmlFor={`presetMacros-${key}`} className="block text-xs text-[#6b7894] mb-1">{label}</label>
+                    <input id={`presetMacros-${key}`} type="number" min="0" value={form.presetMacros[key]}
+                      onChange={e => {const value = e.target.value; setForm(p => ({...p, presetMacros: {...p.presetMacros, [key]: value}}));}}
+                      className={inputCls} />
+                  </div>)}
+                </div>}
+              </fieldset>
+            </div>
+          </details>
           <div className="col-span-2">
             <label className="block text-sm font-medium text-[#0b1a3f] mb-1">Minimum Order (AED)</label>
             <input name="minimumOrder" type="number" min="0" step="0.01" value={form.minimumOrder} onChange={set} className={inputCls} placeholder="0" />
             <p className="text-xs text-[#6b7894] mt-1">Partners must reach this amount before placing an order. Set to 0 for no minimum.</p>
-          </div>
-          <div className="col-span-2 border-t border-[#e3d9ca] pt-4">
-            <label className="flex items-start gap-2.5 cursor-pointer">
-              <input type="checkbox" checked={form.menuSelectionEnabled}
-                onChange={(e) => setForm((p) => ({ ...p, menuSelectionEnabled: e.target.checked }))}
-                className="mt-0.5 h-4 w-4 rounded accent-[#3f8500]" />
-              <span>
-                <span className="block text-sm font-medium text-[#0b1a3f]">Menu Selection Partner</span>
-                <span className="block text-xs text-[#6b7894] mt-0.5">
-                  This partner's members order through the regular Menu Selection flow (weekly menu) instead of
-                  the à-la-carte partner menu — no daily meal limit, and a preset macro target below instead of
-                  entering their own macros.
-                </span>
-              </span>
-            </label>
-            {form.menuSelectionEnabled && (
-              <div className="grid grid-cols-3 gap-3 mt-3 bg-[#f1ebe2] rounded-2xl p-3">
-                <div>
-                  <label className="block text-xs font-medium text-[#6b7894] mb-1">Carbs (C)</label>
-                  <input type="number" min="0" value={form.presetMacros.C} onChange={setMacro('C')} className="w-full border-[1.5px] border-[#e3d9ca] rounded-full px-2.5 py-1.5 text-sm bg-white focus:ring-2 focus:ring-[#bcf679]" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-[#6b7894] mb-1">Protein (P)</label>
-                  <input type="number" min="0" value={form.presetMacros.P} onChange={setMacro('P')} className="w-full border-[1.5px] border-[#e3d9ca] rounded-full px-2.5 py-1.5 text-sm bg-white focus:ring-2 focus:ring-[#bcf679]" />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-[#6b7894] mb-1">Fat (F)</label>
-                  <input type="number" min="0" value={form.presetMacros.F} onChange={setMacro('F')} className="w-full border-[1.5px] border-[#e3d9ca] rounded-full px-2.5 py-1.5 text-sm bg-white focus:ring-2 focus:ring-[#bcf679]" />
-                </div>
-              </div>
-            )}
           </div>
         </div>
         <div className="flex gap-3 pt-2">
@@ -263,7 +301,9 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
         {error && <div className="bg-[#fff2eb] border border-[#ffd9c2] text-[#ff3b00] rounded-2xl px-4 py-2 text-sm">{error}</div>}
         {initial?.source === 'menu-selection' && (
           <div className="bg-[#eafbd0] border border-[#cdeb9e] text-[#2a3f13] rounded-2xl px-4 py-2.5 text-[12.5px] leading-snug">
-            Auto-synced from the Menu Selection weekly menu. Its price and availability window are kept in sync automatically each time next week's menu is published — edits here will be overwritten the next time that dish appears.
+            {initial.mealType === 'breakfast'
+              ? 'Breakfast of the day starts at AED 20. Edit the selling price below; your price and availability toggle are preserved when menus synchronize. Serving dates follow Menu Selection.'
+              : "Auto-synced from the Menu Selection weekly menu. Its price and availability window are kept in sync automatically each time next week's menu is published — edits here will be overwritten the next time that dish appears."}
           </div>
         )}
         <div><label className="block text-sm font-medium text-[#0b1a3f] mb-1">Item Name *</label>
@@ -285,7 +325,7 @@ const MenuItemModal = ({ onClose, onSaved, initial = null }) => {
           <textarea name="description" rows={2} value={form.description} onChange={set} className="w-full border-[1.5px] border-[#e3d9ca] rounded-2xl px-3.5 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#bcf679]" /></div>
         <div><label className="block text-sm font-medium text-[#0b1a3f] mb-1">Ingredients <span className="text-[#c9bfae] font-normal">(comma-separated)</span></label>
           <textarea name="ingredients" rows={2} value={form.ingredients} onChange={set} className="w-full border-[1.5px] border-[#e3d9ca] rounded-2xl px-3.5 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-[#bcf679]" placeholder="Chicken, Rice, Olive Oil, Garlic…" /></div>
-        {initial?.source === 'menu-selection' ? <div>
+        {initial?.source === 'menu-selection' && initial.mealType === 'breakfast' ? <p className="text-sm text-[#6b7894]">Serving dates: {(initial.availableDates || []).map(fmtDate).join(', ') || 'No scheduled dates'}</p> : initial?.source === 'menu-selection' ? <div>
           <label className="block text-sm font-medium text-[#0b1a3f] mb-1">Availability Window <span className="text-[#c9bfae] font-normal">(optional)</span></label>
           <div className="grid grid-cols-2 gap-3">
             <div><label className="block text-xs text-[#6b7894] mb-1">From</label>
@@ -712,7 +752,7 @@ const AdminPartners = () => {
                             )}
                           <div className="min-w-0">
                             <div className="font-bold truncate">{space.businessName}</div>
-                            <div className="text-[11.5px] text-[#6b7894] truncate">{space.contactName}{space.menuSelectionEnabled ? ' · Menu Selection' : ''}</div>
+                            <div className="text-[11.5px] text-[#6b7894] truncate">{space.contactName}</div>
                           </div>
                         </div>
                         <div><span className="rounded-full px-2.5 py-1 text-[11px] font-bold capitalize" style={{ background: TYPE_BADGE[space.businessType] || '#f1ebe2', color: '#0b1a3f' }}>{space.businessType}</span></div>
@@ -749,6 +789,26 @@ const AdminPartners = () => {
                           <div className="text-[13px] font-bold mt-0.5 truncate">{sel.phone || '—'}</div>
                         </div>
                       </div>
+
+                      <details aria-label="Partner contact details" className="mt-4 group">
+                        <summary className="cursor-pointer flex items-center justify-between list-none text-sm font-bold text-[#0b1a3f]">
+                          Details <ChevronDown className="w-4 h-4 transition-transform group-open:rotate-180" />
+                        </summary>
+                        <section aria-label="Partner contacts" className="mt-2 space-y-2">
+                          {PARTNER_CONTACT_ROLES.map(([role, title]) => {
+                            const contact = sel[role];
+                            const filled = contact && [contact.fullName, contact.email, contact.phone].some(Boolean);
+                            return <div key={role} className="bg-[#f1ebe2] rounded-2xl px-3 py-2.5">
+                              <h4 className="text-[10px] font-bold tracking-[0.1em] uppercase text-[#6b7894]">{title}</h4>
+                              {filled ? <div className="text-[13px] mt-1 space-y-0.5 break-words">
+                                {contact.fullName && <p className="font-bold">{contact.fullName}</p>}
+                                {contact.email && <p>{contact.email}</p>}
+                                {contact.phone && <p>{contact.phone}</p>}
+                              </div> : <p className="text-xs text-[#6b7894] mt-1">Not provided</p>}
+                            </div>;
+                          })}
+                        </section>
+                      </details>
 
                       {!isKitchen && (
                         <div className="flex gap-2 mt-3">

@@ -82,6 +82,7 @@ const weeklyMenuSchema = new mongoose.Schema({
   
   // Sharing
   shareLink: {
+    shortToken: String,
     token: {
       type: String,
       unique: true,
@@ -210,6 +211,9 @@ const weeklyMenuSchema = new mongoose.Schema({
     default: 0
   },
   
+  // Internal transaction fence; does not alter the staff edit timestamp.
+  partnerBreakfastSyncRevision: { type: Number, default: 0 },
+
   // Tracking
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
@@ -229,6 +233,7 @@ const weeklyMenuSchema = new mongoose.Schema({
 
 weeklyMenuSchema.index({ startDate: 1, endDate: 1 });
 weeklyMenuSchema.index({ 'shareLink.token': 1 });
+weeklyMenuSchema.index({ 'shareLink.shortToken': 1 }, { unique: true, sparse: true });
 weeklyMenuSchema.index({ isActive: 1, isPublished: 1 });
 
 export default mongoose.model('WeeklyMenu', weeklyMenuSchema);

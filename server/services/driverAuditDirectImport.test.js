@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import {gzipSync,gunzipSync} from 'node:zlib';
-import {checkVerifiedAuditPackageTransfer,prepareRemotePreviewPackage} from '../vendor/driver-audits/integration/cloud/remote-preview-package.mjs';
+import {checkVerifiedAuditPackageTransfer,loadRemotePreviewPackage,prepareRemotePreviewPackage} from '../vendor/driver-audits/integration/cloud/remote-preview-package.mjs';
 import {prepareDirectAuditBundle} from '../vendor/driver-audits/integration/cloud/driver-audit-handoff.mjs';
 import {runDriverAuditSyncTick} from './driverAuditSync.js';
 import {archiveBytes} from '../vendor/driver-audits/integration/cloud/repository.mjs';
@@ -216,6 +216,39 @@ test('transfer sizing matches the direct package including its descriptor',async
   assert.throws(()=>checkVerifiedAuditPackageTransfer({privateRoot,maxBytes:actual.totalBytes-1,validation}),{
     code:'AUDIT_CAPACITY',capacity:{kind:'import-transfer',availableBytes:actual.totalBytes-1,requiredBytes:actual.totalBytes},
   });
+});
+
+test('direct packages compress large GPS availability without changing its original bytes or transfer ceiling',async t=>{
+  const {config}=await fixture(t);
+  const privateRoot=await fs.realpath(config.bundleRoot);
+  const descriptor=JSON.parse(await fs.readFile(path.join(privateRoot,config.pointer.descriptor.chunks[0].sha256+'.gz')));
+  const files={};
+  for(const [name,reference] of Object.entries(descriptor.files)){
+    const file=path.join(privateRoot,name);
+    await fs.copyFile(path.join(privateRoot,reference.chunks[0].sha256+'.gz'),file);
+    files[name]=reference.sha256;
+  }
+  const raw='release-gps-availability.private.json';
+  const availability=Buffer.from(JSON.stringify({version:1,records:{sample:'x'.repeat(36*1024**2)}}));
+  const renderer=Buffer.alloc(30*1024**2,32);
+  await fs.writeFile(path.join(privateRoot,raw),availability,{mode:0o600});
+  await fs.writeFile(path.join(privateRoot,'renderer.private.html'),renderer,{mode:0o600});
+  const manifest=Buffer.from(JSON.stringify({...files,[raw]:sha(availability),'renderer.private.html':sha(renderer)}));
+  await fs.writeFile(path.join(privateRoot,'files.private.json'),manifest,{mode:0o600});
+  const validation={ok:true,manifestSha256:sha(manifest)},objects=new Map();
+  const maxBytes=128*1024**2;
+  const size=checkVerifiedAuditPackageTransfer({privateRoot,maxBytes,validation});
+  const result=await prepareRemotePreviewPackage({privateRoot,maxBytes,validation,includeRetained:false,
+    transport:{async putVerifiedObject(key,bytes){objects.set(key,Buffer.from(bytes));return {key,sha256:sha(bytes),verified:true};}},
+    runBatch:async(_limits,operation)=>operation(),
+  });
+  assert.equal(result.totalBytes,size);
+  const loaded=await loadRemotePreviewPackage({descriptor:result.descriptor,
+    transport:{async readObject(key){return [objects.get(key)];}},parallelCoreReads:true});
+  assert.equal(loaded.has(raw),false);
+  assert.equal(sha(gunzipSync(loaded.read(raw+'.gz'))),sha(availability));
+  assert.equal(sha(await fs.readFile(path.join(privateRoot,raw))),sha(availability));
+  assert.equal(loaded.descriptor.sourceManifestSha256,validation.manifestSha256);
 });
 
 test('oversized package preparation reports the transfer limit before any archive reads',async t=>{

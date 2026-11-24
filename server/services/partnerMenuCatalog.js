@@ -19,8 +19,8 @@ export const uniquePartnerMenuItems = (items, referencedIds = []) => {
     const id = String(item._id);
     if (seenIds.has(id)) return false;
     seenIds.add(id);
-    const key = item.source === 'menu-selection' && item.mealType === 'main'
-      ? 'main|' + partnerMenuNameKey(item.name) + '|' + partnerMenuNameKey(item.category)
+    const key = item.source === 'menu-selection' && ['main', 'breakfast'].includes(item.mealType)
+      ? item.mealType + '|' + partnerMenuNameKey(item.name) + (item.mealType === 'main' ? '|' + partnerMenuNameKey(item.category) : '')
       : 'id|' + id;
     if (seen.has(key) && !referenced.has(id)) return false;
     seen.add(key);

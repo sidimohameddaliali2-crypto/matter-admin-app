@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { constants } from 'node:fs';
 import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -7,9 +8,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gunzipSync, gzipSync } from 'node:zlib';
 
 export const NATIVE_IMPORT_CAPACITY_BYTES = 16 * 1024 ** 3;
-export const NATIVE_IMPORT_SOURCE_MANIFEST = 'e1650c0a521271976629fafc1ad6d6eb0abf39074b5eeaf909f2d93f929f9d9d';
-export const NATIVE_BUILDER_FROM = '293c5001a5cc3aa61e422dc659db507d9be00e79c0848900f074279f6a02960f';
-export const NATIVE_BUILDER_TO = 'aa624979d3d119bb3fd8eb4ca82ed1b976aaa6319ec3974596745c3a30a24b65';
+export const NATIVE_IMPORT_SOURCE_MANIFEST = '15301337474717828b88997faac92cbc23763b16ed1fc7881fa6bd553696a64b';
+export const NATIVE_BUILDER_FROM = '5780bdb95450558e4cc7dba91b3ed593fdd0b149648a6602b7c5ed441dec84c3';
+export const NATIVE_BUILDER_TO = '76790677571490ea75f63c8954ac0c798311b80458b45bf1ccbf54f00ae0701d';
+export const NATIVE_BUILDER_CODE_ARCHIVES = Object.freeze({
+  from: { key: 'be387ba71fef8b87df0d6c4c3b15b904df1ac067512cc351eb72d86b21c1000d.gz', bytes: 225124 },
+  to: { key: '2f2343af23885067ca1a5a05756d698d4519f67273e595ab2e083b04a10a8f62.gz', bytes: 225227 },
+});
 export const NATIVE_IMPORT_FILES = Object.freeze({
   documents: 'documents.private.jsonl.gz', receipts: 'receipts.private.jsonl.gz',
   historical: 'historical.private.jsonl.gz', objects: 'objects.private.jsonl.gz',
@@ -22,9 +27,9 @@ const integer = value => Number.isSafeInteger(value) && value >= 0;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const requireImport = (condition, message) => { if (!condition) throw Object.assign(Error(message), { importGuard: true }); };
 
-async function saveProfile(file, bytes, read) {
+async function saveProfile(file, bytes, read, maxBytes = 1024 * 1024) {
   try {
-    const existing = await read(file, 1024 * 1024);
+    const existing = await read(file, maxBytes);
     requireImport(hash(existing) === hash(bytes), 'The immutable import profile differs');
     return;
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -38,7 +43,181 @@ async function saveProfile(file, bytes, read) {
   } finally { await fs.unlink(temporary); }
 }
 
-async function stageBuilder({ folder, received, bundleSha256, syncRoot, read, privateDirectory, load, pins }) {
+async function prepareArchiveByteVerification({ appRoot, folder, transferRoot, db, env, profileBytes,
+  profileSha256, inputs, expectedSha, execute, read, load }) {
+  const paths = { verifier: '.github/scripts/driver-audit-native-parity.mjs',
+    archive: 'server/services/driverAuditMongoArchive.js', spaces: 'server/services/driverAuditSpacesArchive.js',
+    factory: 'server/services/driverAuditNativeObjectStore.js', migrationCli: 'server/scripts/driverAuditMongoMigrate.js' };
+  const publicBytes = async relative => {
+    const file = path.join(appRoot, relative), stat = await fs.lstat(file);
+    requireImport(stat.isFile() && stat.size > 0 && stat.size <= 1024 * 1024
+      && await fs.realpath(file) === file, 'The reviewed native verification implementation differs');
+    const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const opened = await handle.stat();
+      requireImport(opened.isFile() && opened.dev === stat.dev && opened.ino === stat.ino
+        && opened.size === stat.size, 'The reviewed native verification implementation changed');
+      const bytes = await handle.readFile();
+      requireImport(bytes.length === stat.size, 'The reviewed native verification implementation changed');
+      return bytes;
+    } finally { await handle.close(); }
+  };
+  const clean = async () => {
+    await execute('git', ['ls-files', '--error-unmatch', '--', ...Object.values(paths)],
+      { cwd: appRoot, timeout: 5000, maxBuffer: 4096 });
+    // The CLI's imported readers and validation helpers must be the same reviewed
+    // application code as the exact byte-pass entry point.
+    await execute('git', ['diff', '--quiet', expectedSha, '--', 'server', paths.verifier],
+      { cwd: appRoot, timeout: 5000, maxBuffer: 4096 });
+  };
+  const verifyInputs = async () => {
+    for (const row of inputs.values()) {
+      const bytes = await read(path.join(folder, row.name), row.bytes);
+      requireImport(bytes.length === row.bytes && hash(bytes) === row.sha256, 'A received private import input changed');
+    }
+    requireImport(hash(await read(path.join(folder, 'profile.private.json'), 1024 * 1024)) === profileSha256,
+      'The exact byte-pass profile changed');
+  };
+  await clean(); await verifyInputs();
+  const codeBytes = {};
+  for (const [name, relative] of Object.entries(paths)) codeBytes[name] = await publicBytes(relative);
+  const implementationIdentities = Object.fromEntries(Object.entries(codeBytes).map(([name, bytes]) => [name + 'Sha256', hash(bytes)]));
+  // Import only the tracked deployed verifier, with its content identity in the
+  // module URL so a long-lived test/operator cannot reuse another implementation.
+  const parity = await import(pathToFileURL(path.join(appRoot, paths.verifier)).href + '?sha256=' + implementationIdentities.verifierSha256);
+  requireImport(typeof parity.captureNativeDriverAuditArchiveMetadata === 'function'
+    && typeof parity.createDriverAuditNativeCliByteAttestation === 'function'
+    && typeof parity.validateDriverAuditNativeArchiveByteAttestation === 'function'
+    && typeof parity.driverAuditArchiveImplementationSha256 === 'function'
+    && typeof parity.nativeDriverAuditTargetIdentity === 'function', 'The reviewed native byte verifier is required');
+  implementationIdentities.archiveSha256 = parity.driverAuditArchiveImplementationSha256({
+    'services/driverAuditMongoArchive.js': codeBytes.archive,
+    'services/driverAuditSpacesArchive.js': codeBytes.spaces,
+    'services/driverAuditNativeObjectStore.js': codeBytes.factory,
+  });
+  const { createDriverAuditNativeObjectStore } = await load('services/driverAuditNativeObjectStore.js');
+  const { validateDriverAuditSpacesArchiveReference } = await load('services/driverAuditSpacesArchive.js');
+  const objectStore = await createDriverAuditNativeObjectStore({ env });
+  const profile = JSON.parse(profileBytes), ref = profile.objects, sourceInput = inputs.get(ref.file);
+  requireImport(sourceInput?.sha256 === ref.sha256, 'The exact byte-pass object input differs');
+  const sourceObjectsBytes = await read(path.join(folder, ref.file), sourceInput.bytes);
+  requireImport(sourceObjectsBytes.length === sourceInput.bytes && hash(sourceObjectsBytes) === ref.sha256,
+    'The exact byte-pass object input changed');
+  const objects = gunzipSync(sourceObjectsBytes, { maxOutputLength: 16 * 1024 * 1024 }).toString('utf8')
+    .split('\n').filter(Boolean).map(JSON.parse);
+  const targetIdentitySha256 = parity.nativeDriverAuditTargetIdentity(env.MONGODB_URI, db.databaseName);
+  const capture = () => parity.captureNativeDriverAuditArchiveMetadata({ db, objects, targetIdentitySha256,
+    objectStoreIdentitySha256: objectStore?.identitySha256, validateExternalReference: validateDriverAuditSpacesArchiveReference });
+  const before = await capture();
+  return async receipt => {
+    requireImport(receipt.archiveBytesRead === before.bytes && receipt.archiveObjects === before.objects,
+      'The native migration CLI did not read the complete original object inventory');
+    await clean(); await verifyInputs();
+    for (const [name, relative] of Object.entries(paths)) {
+      requireImport(hash(await publicBytes(relative)) === hash(codeBytes[name]), 'The native byte-pass implementation changed');
+    }
+    const after = await capture(), file = path.join(transferRoot,
+      'archive-bytes-' + before.inventorySha256 + '-' + before.metadataSha256 + '.private.json');
+    const attestation = parity.createDriverAuditNativeCliByteAttestation({ before, after, cliReceipt: receipt,
+      sourceProfileSha256: profileSha256, sourceProfileBytes: profileBytes, sourceObjectsBytes, implementationIdentities });
+    let priorBytes;
+    try { priorBytes = await read(file, 1024 * 1024); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (priorBytes) {
+      // An earlier profile or fresh parity pass may already prove this exact
+      // immutable physical union. Validate its original code, clock and metadata
+      // after validating the new CLI result, then retain its bytes unchanged.
+      parity.validateDriverAuditNativeArchiveByteAttestation(JSON.parse(priorBytes), after, implementationIdentities, Date.now());
+      requireImport(hash(await read(file, 1024 * 1024)) === hash(priorBytes), 'The prior native byte attestation changed');
+      return hash(priorBytes);
+    }
+    const bytes = Buffer.from(JSON.stringify(attestation, null, 2) + '\n');
+    await saveProfile(file, bytes, read);
+    requireImport(hash(await read(file, 1024 * 1024)) === hash(bytes), 'The saved native byte attestation differs');
+    return hash(bytes);
+  };
+}
+
+async function stageHistoricalSource({ folder, received, proofSha256, syncRoot, db, read, load, env }) {
+  const { DRIVER_AUDIT_HISTORICAL_SOURCE_FILE: name, validateDriverAuditHistoricalSourceProof } =
+    await load('services/driverAuditOriginalSourceLineage.js');
+  requireImport(name === 'historical-source-lineage.private.json' && received.inputFiles?.length === 1
+    && received.inputFiles[0].name === name && received.inputFiles[0].sha256 === proofSha256
+    && integer(received.inputFiles[0].bytes) && received.inputFiles[0].bytes > 0 && received.inputFiles[0].bytes <= 16 * 1024 * 1024,
+  'The exact original historical source proof is required');
+  const bytes = await read(path.join(folder, name), 16 * 1024 * 1024);
+  requireImport(bytes.length === received.inputFiles[0].bytes && hash(bytes) === proofSha256,
+    'The original historical source proof hash differs');
+  const proof = JSON.parse(bytes), config = JSON.parse(await read(path.join(syncRoot, 'sync.json'), 1024 * 1024));
+  await validateDriverAuditHistoricalSourceProof({ proof, config });
+  const { createHostedRpc } = await load('vendor/driver-audits/integration/cloud/rpc.mjs');
+  const { createCloudState } = await load('vendor/driver-audits/integration/cloud/cloud-state.mjs');
+  const secret = env.DRIVER_AUDIT_SUPABASE_SECRET || env.MATTER_SUPABASE_SECRET;
+  requireImport(typeof secret === 'string' && secret.length > 0, 'The original source is required for the collector census');
+  const source = createCloudState({ rpc: createHostedRpc({ secret }) }), before = await source.read('collector-state');
+  requireImport(Number.isSafeInteger(before.revision) && before.revision > 0 && typeof before.body === 'string',
+    'The original collector source is unavailable');
+  const target = path.join(syncRoot, name), existed = await fs.lstat(target).then(() => true, error => {
+    if (error.code !== 'ENOENT') throw error; return false;
+  });
+  await saveProfile(target, bytes, read, 16 * 1024 * 1024);
+  const { collectDriverAuditReceiptRoots } = await load('services/driverAuditLiveImport.js');
+  const census = await collectDriverAuditReceiptRoots({ db, syncRoot,
+    documents: [{ key: 'collector-state', revision: before.revision, body_text: before.body }] });
+  const after = await source.read('collector-state');
+  requireImport(after.revision === before.revision && after.body === before.body, 'The original collector source changed during the census');
+  requireImport(census.receiptBindings?.length === proof.entries.length, 'The original historical source proof was not consumed');
+  return { status: existed ? 'historical-source-already-retained' : 'historical-source-retained', proofSha256,
+    collectorRootsSha256: census.sha256, collectorRevisions: census.collectorRevisions,
+    historicalSourceReceipts: census.receiptBindings, renderedWorkspaceRecovered: false, sourceRecordsChanged: false,
+    authorityChanged: false, activationPending: true };
+}
+
+async function qualifySource({ sourceRoot, syncRoot, fixtureSha256, expectedSha, server, appRoot, read, load, env, execute }) {
+  const { default: dotenv } = await load('node_modules/dotenv/lib/main.js');
+  const durable = dotenv.parse(await read(path.join(server, '.env.local'), 1024 * 1024));
+  requireImport(env.DRIVER_AUDIT_REPLICA_GC_ENABLED === '0' && durable.DRIVER_AUDIT_REPLICA_GC_ENABLED === '0',
+    'Source qualification requires durably disabled replica pruning');
+  const sync = JSON.parse(await read(path.join(syncRoot, 'sync.json'), 1024 * 1024));
+  requireImport(sync.builderSha256 === NATIVE_BUILDER_TO, 'Source qualification requires the reviewed managed-cache builder');
+  const { readDriverAuditSourceConfig } = await load('services/driverAuditSource.js');
+  const config = await readDriverAuditSourceConfig(path.join(sourceRoot, 'source.json'));
+  requireImport(config.manifestSha256 === NATIVE_IMPORT_SOURCE_MANIFEST && config.dataStore === 'mongo'
+    && config.environment?.DRIVER_AUDIT_DATA_STORE === 'mongo'
+    && config.archiveCacheDirectory === path.join(syncRoot, 'work/archive-cache'), 'The exact native source configuration differs');
+  const { acquireWorkerLock } = await load('vendor/driver-audits/integration/hosted/worker-lock.mjs');
+  const held = await acquireWorkerLock(path.join(path.dirname(sourceRoot), 'source-deployment.lock'));
+  try {
+    const { qualifyDriverAuditSourceWhileHeld } = await load('scripts/driverAuditSourceQualify.js');
+    requireImport(typeof qualifyDriverAuditSourceWhileHeld === 'function', 'The reviewed held qualification implementation is required');
+    const supervisor = async () => JSON.parse((await execute('pm2', ['jlist'], { timeout: 5000, maxBuffer: 8 * 1024 * 1024 })).stdout);
+    const control = async action => {
+      const result = await execute(process.execPath, [path.join(server, 'scripts/driverAuditDeploy.js'), action], {
+        cwd: appRoot, env: { ...env, DRIVER_AUDIT_DEPLOY_SHA: expectedSha }, timeout: 240000, maxBuffer: 65536,
+      });
+      requireImport((action === 'deploy-worker-resume' ? ['resumed'] : ['paused', 'inactive']).includes(result.stdout.trim()),
+        'The actual managed sync lifecycle result differs');
+    };
+    const result = await qualifyDriverAuditSourceWhileHeld({ config, commit: expectedSha, fixtureSha256, supervisor,
+      startSync: () => control('deploy-worker-resume'), stopSync: async () => {
+        await control('deploy-worker-pause'); await execute('pm2', ['save'], { timeout: 10000, maxBuffer: 65536 });
+      } });
+    requireImport(digest(result.receiptSha256) && result.commit === expectedSha && result.configSha256 === config.configSha256
+      && result.fixtureSha256 === fixtureSha256, 'The actual host qualification receipt differs');
+    const verified = result.status === 'verified' && result.verified === true;
+    const blocked = result.blocked && Object.fromEntries(Object.entries(result.blocked).filter(([key, value]) =>
+      ['phase', 'reason', 'availableBytes', 'requiredBytes', 'line', 'workerPhase'].includes(key)
+      && (integer(value) || typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value))));
+    return { status: verified ? 'source-qualified' : 'source-qualification-partial', verified,
+      fixtureSha256, qualificationReceiptSha256: result.receiptSha256, configSha256: config.configSha256,
+      ...(blocked ? { blocked } : {}), sourcePeakRssBytes: integer(result.source?.peakRssBytes) ? result.source.peakRssBytes : null,
+      builderPeakRssBytes: integer(result.builder?.peakRssBytes) ? result.builder.peakRssBytes : null,
+      sourceAfterBuilderPeakRssBytes: integer(result.sourceAfterBuilder?.peakRssBytes) ? result.sourceAfterBuilder.peakRssBytes : null,
+      reportWorkersHeld: true, authorityChanged: false, activationPending: true };
+  } finally { await held.release(); }
+}
+
+async function stageBuilder({ folder, received, bundleSha256, syncRoot, db, client, read, privateDirectory, load, pins, env }) {
   const changed = 'integration/cloud/automatic-release-source.mjs', filename = 'builder-bundle.private.json.gz';
   requireImport(digest(pins.from) && digest(pins.to) && pins.from !== pins.to, 'The reviewed builder identities differ');
   const matching = Array.isArray(received.inputFiles) ? received.inputFiles.filter(row => row?.name === filename) : [];
@@ -78,6 +257,37 @@ async function stageBuilder({ folder, received, bundleSha256, syncRoot, read, pr
     requireImport(bytes.length <= 8 * 1024 * 1024 && hash(bytes) === expected, 'The replacement builder file differs');
     candidate.push([name, bytes]);
   }
+  // The complete original and replacement code, including the other deployed
+  // fixes, must be recoverable from Sidi's own native store before a swap. The
+  // transferred delta alone is not an independent maintenance source.
+  if (pins.codeArchives) {
+    const { createDriverAuditMongoArchive } = await load('services/driverAuditMongoArchive.js');
+    const { createDriverAuditNativeObjectStore } = await load('services/driverAuditNativeObjectStore.js');
+    const objectStore = await createDriverAuditNativeObjectStore({ env });
+    const archive = createDriverAuditMongoArchive({ db, client, capacityBytes: NATIVE_IMPORT_CAPACITY_BYTES, objectStore });
+    for (const [side, expectedManifest, expectedFiles] of [['from', pins.from, original.files], ['to', pins.to, manifest.files]]) {
+      const reference = pins.codeArchives[side];
+      requireImport(/^[a-f0-9]{64}\.gz$/.test(reference?.key || '') && integer(reference.bytes)
+        && reference.bytes > 0 && reference.bytes <= 1024 * 1024, 'The complete builder code archive pin differs');
+      const bytes = Buffer.concat(await archive.readObject(reference.key, { maxBytes: reference.bytes }));
+      requireImport(bytes.length === reference.bytes && hash(bytes) === reference.key.slice(0, 64), 'The complete builder code archive differs');
+      const code = JSON.parse(gunzipSync(bytes, { maxOutputLength: 16 * 1024 * 1024 }));
+      requireImport(object(code) && Object.keys(code).sort().join(',') === 'files,manifestSha256,version'
+        && code.version === 1 && code.manifestSha256 === expectedManifest && Array.isArray(code.files) && code.files.length === 74,
+      'The complete builder maintenance envelope differs');
+      const seen = new Set();
+      for (const entry of code.files) {
+        requireImport(object(entry) && Object.keys(entry).sort().join(',') === 'dataBase64,path'
+          && (entry.path === 'runtime-manifest.json' || Object.hasOwn(expectedFiles, entry.path)) && !seen.has(entry.path)
+          && typeof entry.dataBase64 === 'string', 'The complete builder maintenance paths differ');
+        const body = Buffer.from(entry.dataBase64, 'base64');
+        requireImport(body.toString('base64') === entry.dataBase64
+          && hash(body) === (entry.path === 'runtime-manifest.json' ? expectedManifest : expectedFiles[entry.path]),
+        'The complete builder maintenance bytes differ');
+        seen.add(entry.path);
+      }
+    }
+  }
   const verify = async directory => {
     await verifyAuditBuilder(directory, pins.to);
     async function directories(root) {
@@ -91,7 +301,8 @@ async function stageBuilder({ folder, received, bundleSha256, syncRoot, read, pr
     requireImport(hash(await read(path.join(directory, 'runtime-manifest.json'), 128 * 1024)) === pins.to,
       'The staged builder manifest differs');
   };
-  const result = { builderSha256: pins.to, sourceBuilderSha256: pins.from, bundleSha256, files: 73, activationPending: true,
+  const result = { builderSha256: pins.to, sourceBuilderSha256: pins.from, bundleSha256, files: 73,
+    ...(pins.codeArchives ? { builderCodeArchives: { previous: pins.codeArchives.from.key, current: pins.codeArchives.to.key } } : {}), activationPending: true,
     authorityChanged: false };
   if (await fs.lstat(target).then(() => true, error => { if (error.code !== 'ENOENT') throw error; return false; })) {
     await verify(target); return { ...result, status: 'builder-already-staged' };
@@ -105,7 +316,7 @@ async function stageBuilder({ folder, received, bundleSha256, syncRoot, read, pr
   return { ...result, status: 'builder-staged' };
 }
 
-async function stageSource({ folder, received, bundleSha256, syncRoot, server, db, client, read, privateDirectory, load, execute, pins }) {
+async function stageSource({ folder, received, bundleSha256, syncRoot, server, db, client, read, privateDirectory, load, execute, pins, env }) {
   const names = ['source-bundle.private.json.gz', 'environment.private.json'];
   requireImport(Array.isArray(received.inputFiles) && received.inputFiles.length === names.length
     && names.every(name => received.inputFiles.filter(row => row?.name === name).length === 1),
@@ -120,7 +331,7 @@ async function stageSource({ folder, received, bundleSha256, syncRoot, server, d
   };
   const compressed = await input('source-bundle.private.json.gz', 1024 * 1024);
   const environmentBytes = await input('environment.private.json', 64 * 1024);
-  requireImport(hash(compressed) === bundleSha256 && digest(pins.manifest) && pins.files === 134, 'The reviewed complete source bundle differs');
+  requireImport(hash(compressed) === bundleSha256 && digest(pins.manifest) && pins.files === 136, 'The reviewed complete source bundle differs');
   const bundle = JSON.parse(gunzipSync(compressed, { maxOutputLength: 16 * 1024 * 1024 }));
   requireImport(object(bundle) && Object.keys(bundle).sort().join(',') === 'files,manifestSha256,nodeExecutable,nodeVersion,version'
     && bundle.version === 1 && bundle.manifestSha256 === pins.manifest && Array.isArray(bundle.files) && bundle.files.length === pins.files + 1
@@ -172,7 +383,9 @@ async function stageSource({ folder, received, bundleSha256, syncRoot, server, d
     requireImport(receipt.bundleSha256 === bundleSha256 && receipt.environmentSha256 === hash(environmentBytes),
       'The staged source code and private environment pins differ');
     const { createDriverAuditMongoArchive } = await load('services/driverAuditMongoArchive.js');
-    const archive = createDriverAuditMongoArchive({ db, client, capacityBytes: NATIVE_IMPORT_CAPACITY_BYTES });
+    const { createDriverAuditNativeObjectStore } = await load('services/driverAuditNativeObjectStore.js');
+    const objectStore = await createDriverAuditNativeObjectStore({ env });
+    const archive = createDriverAuditMongoArchive({ db, client, capacityBytes: NATIVE_IMPORT_CAPACITY_BYTES, objectStore });
     const key = bundleSha256 + '.gz', saved = await archive.putVerifiedObject(key, compressed);
     requireImport(saved.verified === true && saved.key === key && saved.sha256 === bundleSha256 && saved.bytes === compressed.length,
       'The complete native code archive receipt differs');
@@ -401,12 +614,12 @@ async function diagnoseRoots({ db, syncRoot, read, privateDirectory, load, recip
 
 // The optional adapters are for isolated fixture tests. Dispatch supplies only
 // reviewed public identities; all private paths/modules come from the host.
-export async function runDriverAuditNativeImport({ operation, sessionId, templateSha256, profileSha256,
+export async function runDriverAuditNativeImport({ operation, sessionId, templateSha256, profileSha256, qualificationFixtureSha256,
   expectedSha, appRoot, recipientPublicKey, diagnosticPage = 0 }, adapters = {}) {
   let phase = 'checkout', lock, connection;
   const execute = adapters.exec || exec, env = adapters.env || process.env;
   try {
-    requireImport(['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'diagnose-roots'].includes(operation)
+    requireImport(['create-profile', 'plan-import', 'stage-import', 'verify-import', 'stage-builder', 'stage-source', 'stage-lineage', 'qualify-source', 'diagnose-roots'].includes(operation)
       && typeof sessionId === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(sessionId)
       && (operation === 'diagnose-roots' ? templateSha256 === undefined || digest(templateSha256) : digest(templateSha256)),
     'A reviewed import operation and public input identities are required');
@@ -414,7 +627,9 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
       || typeof recipientPublicKey === 'string' && recipientPublicKey.length <= 8192 && !recipientPublicKey.includes('PRIVATE KEY')
         && /-----BEGIN (?:RSA )?PUBLIC KEY-----/.test(recipientPublicKey)), 'A bounded public diagnostic recipient is required');
     requireImport(profileSha256 === undefined || digest(profileSha256), 'The import profile pin is invalid');
-    requireImport(!['stage-import', 'verify-import'].includes(operation) || digest(profileSha256), 'The exact import profile pin is required');
+    requireImport(!['stage-import', 'verify-import', 'qualify-source'].includes(operation) || digest(profileSha256), 'The exact import profile pin is required');
+    requireImport(operation === 'qualify-source' ? digest(qualificationFixtureSha256) : qualificationFixtureSha256 === undefined,
+      'The exact qualification fixture identity is required');
     requireImport(typeof appRoot === 'string' && path.isAbsolute(appRoot) && path.resolve(appRoot) === appRoot
       && await fs.realpath(appRoot) === appRoot, 'The exact application root is required');
     const checkout = async () => {
@@ -498,15 +713,22 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
     if (operation === 'stage-source') {
       phase = 'source-staging';
       const result = await stageSource({ folder, received, bundleSha256: templateSha256, syncRoot, server,
-        db, client: connection.getClient(), read, privateDirectory, load, execute,
-        pins: adapters.sourcePins || { manifest: NATIVE_IMPORT_SOURCE_MANIFEST, files: 134 } });
+        db, client: connection.getClient(), read, privateDirectory, load, execute, env,
+        pins: adapters.sourcePins || { manifest: NATIVE_IMPORT_SOURCE_MANIFEST, files: 136 } });
+      await stopped(); await checkout();
+      return { version: 1, sessionId, applicationCommit: expectedSha, ...result };
+    }
+    if (operation === 'stage-lineage') {
+      phase = 'historical-source-retention';
+      const result = await stageHistoricalSource({ folder, received, proofSha256: templateSha256, syncRoot, db, read, load, env });
       await stopped(); await checkout();
       return { version: 1, sessionId, applicationCommit: expectedSha, ...result };
     }
     if (operation === 'stage-builder') {
       phase = 'builder-staging';
       const result = await stageBuilder({ folder, received, bundleSha256: templateSha256, syncRoot, read, privateDirectory, load,
-        pins: adapters.builderPins || { from: NATIVE_BUILDER_FROM, to: NATIVE_BUILDER_TO } });
+        db, client: connection.getClient(), env,
+        pins: adapters.builderPins || { from: NATIVE_BUILDER_FROM, to: NATIVE_BUILDER_TO, codeArchives: NATIVE_BUILDER_CODE_ARCHIVES } });
       await stopped(); await checkout();
       return { version: 1, sessionId, applicationCommit: expectedSha, ...result };
     }
@@ -573,8 +795,18 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
     const output = { version: 1, sessionId, applicationCommit: expectedSha, templateSha256, profileSha256: actualProfileSha,
       collectorRootsSha256, capacityBytes: NATIVE_IMPORT_CAPACITY_BYTES, activationPending: true };
     if (operation === 'create-profile') return { ...output, status: 'profile-created' };
+    if (operation === 'qualify-source') {
+      phase = 'source-qualification';
+      const result = await qualifySource({ sourceRoot, syncRoot, fixtureSha256: qualificationFixtureSha256, expectedSha,
+        server, appRoot, read, load, env, execute });
+      await safety();
+      return { ...output, ...result };
+    }
     phase = operation;
     const cliOperation = { 'plan-import': 'plan', 'stage-import': 'stage', 'verify-import': 'verify' }[operation];
+    const completeArchiveVerification = cliOperation === 'verify' ? await prepareArchiveByteVerification({
+      appRoot, folder, transferRoot, db, env, profileBytes, profileSha256: actualProfileSha,
+      inputs, expectedSha, execute, read, load }) : undefined;
     const result = await execute(process.execPath, [path.join(server, 'scripts/driverAuditMongoMigrate.js'), cliOperation,
       profileFile, actualProfileSha], { cwd: server, env, timeout: 55 * 60 * 1000, maxBuffer: 256 * 1024 });
     const receipt = JSON.parse(result.stdout);
@@ -583,8 +815,9 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
       && (receipt.collectorRootsSha256 === undefined || receipt.collectorRootsSha256 === collectorRootsSha256)
       && (cliOperation === 'plan' || receipt.activationPending === true), 'The native migration CLI receipt differs');
     await safety();
+    const archiveAttestationSha256 = completeArchiveVerification ? await completeArchiveVerification(receipt) : undefined;
     const counts = {};
-    for (const name of ['objects', 'missingObjects', 'missingBytes', 'availableAllowanceBytes', 'archiveObjects']) {
+    for (const name of ['objects', 'missingObjects', 'missingBytes', 'availableAllowanceBytes', 'archiveObjects', 'archiveBytesRead']) {
       if (integer(receipt[name])) counts[name] = receipt[name];
     }
     for (const [name, count] of Object.entries({ documents: receipt.documents?.documents ?? receipt.documents,
@@ -593,7 +826,8 @@ export async function runDriverAuditNativeImport({ operation, sessionId, templat
     }
     return { ...output, status: receipt.status, counts,
       ...(cliOperation === 'verify' ? { archiveClosurePending: true, resultsEqual: receipt.resultsEqual === true,
-        reportIdentityEqual: receipt.reportIdentityEqual === true, assessmentHistoryEqual: receipt.assessmentHistoryEqual === true } : {}) };
+        reportIdentityEqual: receipt.reportIdentityEqual === true, assessmentHistoryEqual: receipt.assessmentHistoryEqual === true,
+        archiveAttestationSha256 } : {}) };
   } catch (error) {
     throw Object.assign(Error(error.importGuard ? error.message : 'Native import stopped at ' + phase), { phase });
   } finally {
@@ -609,6 +843,7 @@ if (process.argv[1] && await fs.realpath(process.argv[1]).catch(() => null) === 
     console.log(JSON.stringify(await runDriverAuditNativeImport({ operation: process.env.NATIVE_HANDOFF_OPERATION,
       sessionId: process.env.NATIVE_TRANSFER_SESSION_ID, templateSha256: process.env.NATIVE_IMPORT_TEMPLATE_SHA256,
       profileSha256: process.env.NATIVE_IMPORT_PROFILE_SHA256 || undefined,
+      qualificationFixtureSha256: process.env.NATIVE_QUALIFICATION_FIXTURE_SHA256 || undefined,
       expectedSha: process.env.EXPECTED_DEPLOYED_SHA, appRoot: await fs.realpath(process.cwd()) })));
   } catch (error) {
     console.error('Native import stopped at ' + (error.phase || 'checkout') + '. Check the reviewed inputs and stopped report workers.');

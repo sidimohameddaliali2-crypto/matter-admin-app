@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {createDriverAuditMongoTextReader,storeDriverAuditMongoText} from './driverAuditMongoText.js';
 import {isDriverAuditTechnicalKey} from './driverAuditLiveImport.js';
 import {createDriverAuditTechnicalState} from './driverAuditTechnicalState.js';
+import {validateDriverAuditPollProgressWrite} from './driverAuditPollProgress.js';
 
 const maxTextBytes=32*1024*1024;
 const archiveLimit=60_000_000_000;
@@ -20,6 +21,7 @@ const argumentsFor={
   matter_hosted_state_read_if_changed:['p_key','p_revision'],
   matter_hosted_state_receipts:['p_key','p_after','p_limit'],
   matter_hosted_state_cas:['p_key','p_expected','p_event_id','p_body_text','p_event_text','p_request_text'],
+  matter_hosted_native_progress_cas:['p_key','p_owner','p_token','p_expected','p_event_id','p_body_text','p_event_text','p_request_text'],
   matter_hosted_lease_acquire:['p_owner','p_ttl'],
   matter_hosted_lease_assert:['p_owner','p_token'],
   matter_hosted_lease_release:['p_owner','p_token'],
@@ -248,6 +250,13 @@ export function createDriverAuditMongoRpc({db,client,objects}){
     if(!await leaseValid(name,args,session))throw failure('Native reporting lease expired or changed');
     return result;
   }
+  async function progressCas(args,session){
+    await touchLease('collector',session);
+    if(!await leaseValid('collector',args,session))throw failure('Native reporting lease expired or changed');
+    const result=await cas(args.p_key,args,session);
+    if(!await leaseValid('collector',args,session))throw failure('Native reporting lease expired or changed');
+    return result;
+  }
   async function archiveControl(session){
     const row=await control.findOneAndUpdate({_id:'total'},{$inc:{write_fence:1}},
       {session,returnDocument:'after',includeResultMetadata:false});
@@ -378,8 +387,11 @@ export function createDriverAuditMongoRpc({db,client,objects}){
       }
       case 'matter_hosted_state_cas':
         valid(matches(keyPattern,args.p_key),'Invalid native reporting key');
-        if(['collector-state','migration-publication-qualification'].includes(args.p_key))throw failure('Native state requires its writer lease','42501');
+        if(['collector-state','migration-publication-qualification'].includes(args.p_key)||args.p_key.startsWith('native-progress:'))throw failure('Native state requires its writer lease','42501');
         return transaction(session=>cas(args.p_key,args,session));
+      case 'matter_hosted_native_progress_cas':
+        validateDriverAuditPollProgressWrite(args);
+        return transaction(session=>progressCas(args,session));
       case 'matter_hosted_lease_acquire': return transaction(session=>leaseAcquire('collector',args,session));
       case 'matter_hosted_lease_assert': return leaseValid('collector',args);
       case 'matter_hosted_lease_release': return transaction(session=>leaseRelease('collector',args,session));
