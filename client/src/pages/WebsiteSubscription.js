@@ -7,6 +7,7 @@ import DeliveryCalendar from '../components/DeliveryCalendar';
 import { matchLabels } from '../components/subscriptionUi';
 import { formatDate, formatMoney, isCycleEnded, daysUntil } from '../utils/subscriptionFormat';
 import CustomerMatterDetails, { CustomerTypeTag, CustomerTagBadges } from '../components/CustomerMatterDetails';
+import UpcomingPlanSection from '../components/UpcomingPlanSection';
 import { websiteMetadataCustomer, hasUpcomingPlan, typeLabel, matchesCustomerType } from '../utils/customerMatterMetadata';
 
 // "Due for renewal" = fewer than 6 days left until renewal_due_date, and the
@@ -788,6 +789,7 @@ function CustomerProfilePanel({ subscriptionId, refreshVersion }) {
       </div>
 
       {/* Subscription details + Macro profile */}
+      <UpcomingPlanSection key={profile.subscription_id} subscription={profile} />
       <div className="mb-4"><CustomerMatterDetails customer={websiteMetadataCustomer(profile)} /></div>
       <div className="grid grid-cols-12 gap-4 mb-4">
         <div className="col-span-12 lg:col-span-7 bg-white rounded-2xl border border-matter-dust/40 shadow-md p-6">
