@@ -1,5 +1,11 @@
 # Matter API integration
 
+## Customer profile allergens (24 November 2026)
+
+Website Customer Management displays the subscription detail's `allergens[].name` as red badges with white text in the macro/dietary profile card. Allergens have their own labelled section; `exclusions[].title` stays in Dietary Restrictions. No allergen names are inferred from exclusions or internal preferences. Missing or empty allergen arrays produce no badges and do not imply a verified allergy-free profile.
+
+This applies to every selected website customer, not a specific subscription. Each profile reads `/api/matter/subscriptions/:id`, whose server handler fetches the corresponding Matter API detail. Internal customer/database allergy fields never supply these badges. Profile-switch coverage verifies different API allergen lists, an empty list and a missing list, even when internal allergy records exist.
+
 ## Customer Management labels (23 November 2026)
 
 Customer type appears as a blue `New`/`Returning` badge in the profile header after the customer name, rather than inside Matter customer details. The header's subscription status and `Renews` badges are removed. The same type badge is retained on list cards; the dropdown remains below search.
