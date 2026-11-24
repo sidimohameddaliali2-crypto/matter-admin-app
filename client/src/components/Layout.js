@@ -37,6 +37,7 @@ const NAV_ITEMS = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard, permission: 'dashboard', group: 'Overview' },
 
   { name: 'Deliveries', href: '/deliveries', icon: Package, permission: 'deliveries', group: 'Operations' },
+  { name: 'Collection', href: '/collections', icon: ShoppingBag, permission: 'deliveries', allowedRoles: ['admin', 'manager', 'dispatcher'], group: 'Operations' },
   { name: 'Drivers', href: '/drivers', icon: Motorbike, permission: 'drivers', group: 'Operations' },
   { name: 'Fleet', href: '/fleet', icon: Truck, permission: 'fleet', group: 'Operations' },
   { name: 'Live Tracking', href: '/live-tracking', icon: Radar, permission: 'live_map', group: 'Operations' },
@@ -115,6 +116,7 @@ const Layout = ({ children }) => {
   const isNavItemVisible = (item) => {
     if (item.activityHistory) return user?.canViewActivityHistory === true;
     if (user?.role === 'super_admin') return true;
+    if (item.allowedRoles && !item.allowedRoles.includes(user?.role)) return false;
     if (item.permission) {
       if (user?.role === 'yellowblock_user' && item.permission === 'events') return true;
       return user?.permissions?.[item.permission] === true;

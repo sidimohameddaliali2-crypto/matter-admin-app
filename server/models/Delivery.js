@@ -197,7 +197,27 @@ const deliverySchema = new mongoose.Schema({
       default: false
     }
   },
+  // Refund intent at request creation; does not execute or approve a refund.
+  collectionRequest: {
+    customerSource: { type: String, enum: ['internal', 'manual'] },
+    phone: String,
+    depositAlreadyRefunded: Boolean, // Legacy declaration only; never reinterpret as a refund request.
+    refundRequestedAfterCollection: Boolean,
+    recordedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    recordedAt: Date
+  },
   completedAt: Date,
+  collectionRefund: {
+    status: { type: String, enum: ['pending', 'not_refunded', 'refunded'] },
+    version: Number,
+    depositKey: String,
+    reference: String,
+    note: String,
+    updatedAt: Date,
+    updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    updatedByName: String,
+    history: [{ _id: false, eventId: String, status: String, reference: String, note: String, actor: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, actorName: String, timestamp: Date }]
+  },
   lateMinutes: {
     type: Number,
     default: 0
@@ -299,6 +319,8 @@ deliveryType: {
   timestamps: true
 });
 
+// One recorded AED 155 deposit refund per customer in the collection tracker.
+deliverySchema.index({ 'collectionRefund.depositKey': 1 }, { unique: true, sparse: true });
 // Index for better query performance
 deliverySchema.index({ scheduledTime: 1 });
 for (const [field, name] of MATTER_IMPORT_IDENTITIES) {

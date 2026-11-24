@@ -182,6 +182,7 @@ mongoose.connection.on('error', (err) => {
 import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
 import deliveryRoutes from './routes/deliveries.js';
+import collectionRoutes from './routes/collections.js';
 import bagRoutes from './routes/bags.js';
 import bagOperationsRoutes from './routes/bagOperations.js';
 import dispatcherLocationReviewsRoutes from './routes/dispatcherLocationReviews.js';
@@ -239,6 +240,7 @@ app.use('/api/deliveries', deliveryRoutes);
 const mcpOAuth = createMcpOAuthIntegration();
 app.use(mcpOAuth.router);
 app.use('/api/mcp', createMcpRouter({ oauthProvider: mcpOAuth.provider }));
+app.use('/api/collections', collectionRoutes);
 app.use('/api/bags', bagRoutes);
 app.use('/api/bag-operations', bagOperationsRoutes);
 app.use('/api/dispatcher-location-reviews', dispatcherLocationReviewsRoutes);

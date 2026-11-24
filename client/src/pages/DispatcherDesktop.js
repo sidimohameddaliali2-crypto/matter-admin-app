@@ -165,15 +165,15 @@ const DispatcherDesktop = () => {
   };
 
   useEffect(() => {
-    const start = new Date(`${selectedDate}T00:00:00`);
+    const start = new Date(`${selectedDate}T00:00:00+04:00`);
     if (!Number.isNaN(start.getTime())) {
       const end = new Date(start);
-      end.setDate(end.getDate() + 1);
+      end.setUTCDate(end.getUTCDate() + 1);
 
       dispatch(fetchDeliveries({
         dateRange: 'custom',
         dateFrom: start.toISOString(),
-        dateTo: end.toISOString(),
+        dateTo: new Date(end.getTime() - 1).toISOString(),
         limit: 1000
       }));
     }
@@ -433,13 +433,13 @@ const DispatcherDesktop = () => {
   };
 
   const refreshDeliveriesForSelectedDate = () => {
-    const start = new Date(`${selectedDate}T00:00:00`);
+    const start = new Date(`${selectedDate}T00:00:00+04:00`);
     const end = new Date(start);
-    end.setDate(end.getDate() + 1);
+    end.setUTCDate(end.getUTCDate() + 1);
     dispatch(fetchDeliveries({
       dateRange: 'custom',
       dateFrom: start.toISOString(),
-      dateTo: end.toISOString(),
+      dateTo: new Date(end.getTime() - 1).toISOString(),
       limit: 1000
     }));
   };
@@ -595,7 +595,7 @@ const DispatcherDesktop = () => {
             {user?.profile?.firstName ? `Welcome, ${user.profile.firstName}` : 'Delivery Management'}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <button
             onClick={() => { dispatch(fetchEvents()); navigate('/dispatcher/events'); }}
             className="relative flex items-center gap-2 px-4 py-2 bg-indigo-50 text-indigo-700 rounded-lg hover:bg-indigo-100 font-semibold"
@@ -1835,13 +1835,13 @@ const DispatcherDesktop = () => {
                   }
                   await api.put(`/deliveries/${editingDelivery._id}`, payload);
                   setEditingDelivery(null);
-                  const start = new Date(`${selectedDate}T00:00:00`);
+                  const start = new Date(`${selectedDate}T00:00:00+04:00`);
                   const end = new Date(start);
-                  end.setDate(end.getDate() + 1);
+                  end.setUTCDate(end.getUTCDate() + 1);
                   dispatch(fetchDeliveries({
                     dateRange: 'custom',
                     dateFrom: start.toISOString(),
-                    dateTo: end.toISOString(),
+                    dateTo: new Date(end.getTime() - 1).toISOString(),
                     limit: 1000
                   }));
                   setFeedback({ message: 'Delivery updated successfully', error: false });
