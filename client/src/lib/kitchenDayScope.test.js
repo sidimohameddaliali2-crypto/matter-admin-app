@@ -68,15 +68,16 @@ test.each([
   expect(JSON.stringify(entry)).toBe(before);
 });
 
-test.each(['2026-11-02', '2026-11-04'])('Core double-day mains and additional breakfast follow export entitlements on %s', date => {
-  const subscription = { plan_name: 'Matter Core', meal_frequency: 1, breakfast_included: true,
+test.each(['2026-11-02', '2026-11-04'])('Core double-day mains, breakfasts and snacks follow export entitlements on %s', date => {
+  const subscription = { plan_name: 'Matter Core', meal_frequency: 1, breakfast_included: true, snacks_per_day: 1,
     active_delivery_dates: [date], double_delivery_dates: [date] };
-  const entry = { selectedMeals: [{ date, mealType: 'main' }, { date, mealType: 'breakfast' }] };
-  expect(kitchenCustomerDay(entry, date, subscription).missingSelectionReason).toBe('1 of 2 main meal portion(s) selected.');
-  const complete = { ...entry, selectedMeals: [{ date, mealType: 'main', quantity: 2 }, { date, mealType: 'breakfast' }] };
+  const entry = { selectedMeals: [{ date, mealType: 'main', quantity: 2 }, { date, mealType: 'breakfast' }, { date, mealType: 'snack' }] };
+  expect(kitchenCustomerDay(entry, date, subscription).missingSelectionReason)
+    .toBe('1 of 2 breakfast portion(s) selected. 1 of 2 snack portion(s) selected.');
+  const complete = { ...entry, selectedMeals: entry.selectedMeals.map(meal => ({ ...meal, quantity: 2 })) };
   expect(kitchenCustomerDay(complete, date, subscription).missingSelection).toBe(false);
   expect(kitchenCustomerDay({ ...complete, selectedMeals: complete.selectedMeals.slice(0, 1) }, date, subscription).missingSelectionReason)
-    .toContain('included breakfast missing');
+    .toContain('0 of 2 breakfast portion(s) selected.');
   expect(kitchenCustomerDay(entry, date, { ...subscription, double_delivery_dates: [] }).missingSelection).toBe(false);
 });
 

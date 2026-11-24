@@ -1,6 +1,13 @@
 import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
 
+const partnerContactSchema = new mongoose.Schema({
+  fullName: { type: String, trim: true, default: '' },
+  email: { type: String, trim: true, lowercase: true, default: '',
+    match: [/^$|^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Enter a valid contact email address'] },
+  phone: { type: String, trim: true, default: '' }
+}, { _id: false });
+
 const partnerSchema = new mongoose.Schema({
   businessName: { type: String, required: true, trim: true },
   // Label shown in the partner app header: MATTER RETAIL / MEMBER / PARTNER.
@@ -20,6 +27,11 @@ const partnerSchema = new mongoose.Schema({
   },
   password: { type: String, required: true, select: false },
   phone: { type: String, default: '' },
+  // Optional business contacts, separate from the partner login identity.
+  pointOfContact: { type: partnerContactSchema, default: undefined, validate: { validator: value => value !== null, message: 'Contact must be an object; leave its fields blank to clear it' } },
+  // Finance/owner details are admin-only, including populated partner records.
+  financeContact: { type: partnerContactSchema, default: undefined, select: false, validate: { validator: value => value !== null, message: 'Contact must be an object; leave its fields blank to clear it' } },
+  ownerContact: { type: partnerContactSchema, default: undefined, select: false, validate: { validator: value => value !== null, message: 'Contact must be an object; leave its fields blank to clear it' } },
   address: { type: String, default: '' },
   minimumOrder: { type: Number, default: 0, min: 0 },
   defaultDeliveryTime: { type: String, default: null },

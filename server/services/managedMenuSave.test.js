@@ -27,6 +27,44 @@ test('an unchanged selected dish retains its ID and leaves quantity-two customer
   assert.equal(JSON.stringify(records), before);
 });
 
+test('a selected dish can retain an existing legacy conversion but rejects a new invalid conversion', () => {
+  const snapshot = { id: 'recipe', name: 'Chosen Chicken', qtyUnit: 'PCS',
+    components: [{ id: 'protein', type: 'Protein', name: 'Chicken', exclusions: [] }] };
+  const item = { ...existing(), cycleMeal: snapshot };
+  const days = baseDays();
+  days[0].items[0].cycleMeal = { ...snapshot };
+  const retained = plan({ days, existingItems: [item], selections: [selection()] })[0];
+  assert.equal(String(retained.existingId), itemId);
+  assert.deepEqual(retained.fields.cycleMeal, snapshot);
+  assert.throws(() => plan({ days }), /grams per piece/);
+  days[0].items[0].cycleMeal.gramsPerPiece = 0;
+  assert.throws(() => plan({ days, existingItems: [item] }), /grams per piece/);
+});
+
+test('new PCS snapshots must be compatible with the dated meal type', () => {
+  const days = baseDays();
+  const snapshot = { id: 'recipe', name: 'Chosen Chicken', mealKind: 'Breakfast', qtyUnit: 'PCS',
+    components: [{ id: 'protein', type: 'Protein', name: 'Chicken', exclusions: [] }] };
+  days[0].items[0].cycleMeal = snapshot;
+  assert.throws(() => plan({ days }), /PCS quantity must match the dated meal type/);
+  const saved = { ...existing(), cycleMeal: snapshot };
+  assert.equal(String(plan({ days, existingItems: [saved], selections: [selection()] })[0].existingId), itemId);
+});
+
+test('an unselected dish can be reclassified without carrying an incompatible inherited QTY rule', () => {
+  const snapshot = { id: 'recipe', name: 'Chosen Chicken', mealKind: 'Main meal', qtyUnit: 'PCS', gramsPerPiece: 50,
+    components: [{ id: 'protein', type: 'Protein', name: 'Chicken', exclusions: [] }] };
+  const original = { ...existing(), cycleMeal: snapshot };
+  const days = baseDays();
+  Object.assign(days[0].items[0], { menuItemId: itemId, mealType: 'breakfast', cycleMeal: snapshot });
+  const revised = plan({ days, existingItems: [original] })[0].fields;
+  assert.equal(revised.mealType, 'breakfast');
+  assert.equal(revised.cycleMeal.qtyUnit, undefined);
+  assert.deepEqual(revised.cycleMeal.components, snapshot.components);
+  assert.equal(original.cycleMeal.gramsPerPiece, 50);
+  assert.throws(() => plan({ days, existingItems: [original], selections: [selection()] }), /Existing customer selections are protected/);
+});
+
 test('Core eligibility alone can be toggled on a selected dish, keeping its ID and saved choices', () => {
   for (const usedForCorePlan of [true, false]) {
     const item = { ...existing(), usedForCorePlan: !usedForCorePlan };

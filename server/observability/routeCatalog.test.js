@@ -13,6 +13,10 @@ test('route inventory matches the current owning source and covers installer and
     readFileSync(new URL('../../docs/traceability/routes.json', import.meta.url)),
   );
   assert.ok(catalog.api.length > 400);
+  assert.equal(resolveTraceRoute('GET', '/api/matter/import-deliveries/status?date=2026-11-22').path,
+    '/api/matter/import-deliveries/status');
+  assert.equal(resolveTraceRoute('GET', '/api/matter/import-deliveries/jobs/507f1f77bcf86cd799439011').path,
+    '/api/matter/import-deliveries/jobs/:id');
   assert.ok(catalog.browser.length >= 50);
   assert.equal(
     resolveTraceRoute('GET', '/api/customer-service/policy').path,

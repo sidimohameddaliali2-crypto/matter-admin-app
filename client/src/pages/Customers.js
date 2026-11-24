@@ -2,9 +2,12 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Search, Eye, Download, RefreshCw, MapPin, Phone, Mail, Calendar, Package, CheckCircle, Clock, AlertCircle, TrendingUp, Upload, DollarSign, UserPlus, X, Send, ChevronLeft, ChevronRight } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { useLocation } from 'react-router-dom';
+import { useSelector } from 'react-redux';
 import api from '../utils/api';
 import MealPreferences from '../components/MealPreferences';
 import { EXCLUSION_LIST } from '../constants/exclusionList';
+import CustomerMatterDetails, { CustomerTypeTag, CustomerTagBadges } from '../components/CustomerMatterDetails';
+import { customerType, hasUpcomingPlan, matchesCustomerType, typeLabel } from '../utils/customerMatterMetadata';
 
 const ISSUE_TYPE_LABELS = {
   wrong_item: 'Wrong Item',
@@ -307,6 +310,9 @@ const EditCustomerModal = ({ customer, onClose, onSubmit, isSubmitting, submitEr
 
 const Customers = () => {
   const location = useLocation();
+  const role = useSelector(state => state.auth.user?.role);
+  const canRefreshMatter = ['admin', 'super_admin', 'dispatcher', 'manager'].includes(role);
+  const [matterRefreshError, setMatterRefreshError] = useState(null);
   const [customers, setCustomers] = useState([]);
   const [filteredCustomers, setFilteredCustomers] = useState([]);
   // The Dashboard's "Find account" link passes a name via router state.
@@ -347,6 +353,7 @@ const Customers = () => {
   const [showCycleCalendar, setShowCycleCalendar] = useState(false);
   const [customerFilter, setCustomerFilter] = useState('all');
   const [planFilter, setPlanFilter] = useState('');
+  const [typeFilter, setTypeFilter] = useState('');
 
   const handleAddCustomer = async (formData) => {
     setAddCustomerError(null);
@@ -467,6 +474,15 @@ const Customers = () => {
       setIsLoading(true);
       setError(null);
 
+      if (canRefreshMatter) {
+        try {
+          await api.post('/customers/matter-metadata/refresh');
+          setMatterRefreshError(null);
+        } catch (refreshError) {
+          setMatterRefreshError('Matter details could not be refreshed. Showing saved customer types, tags and upcoming plans. Use Refresh to retry.');
+        }
+      }
+
       // Fetch all customers from database (includes imported ones)
       const customersResponse = await api.get('/customers', { params: { limit: 10000 } });
       const dbCustomers = customersResponse.data?.data || [];
@@ -497,6 +513,9 @@ const Customers = () => {
           company: dbCustomer.company || 'N/A',
           address: dbCustomer.address || 'N/A',
           gpsLocation: dbCustomer.gpsLocation || null,
+          matterCustomerId: dbCustomer.matterCustomerId,
+          matterSubscriptionId: dbCustomer.matterSubscriptionId,
+          matterMetadata: dbCustomer.matterMetadata,
           phone: dbCustomer.phone || 'N/A',
           email: dbCustomer.email || 'N/A',
           cpf: dbCustomer.cpf || null,
@@ -583,7 +602,7 @@ const Customers = () => {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [canRefreshMatter]);
 
   // Fetch deliveries for selected customer
   const fetchCustomerDeliveries = useCallback(async (customerId, customerEmail) => {
@@ -661,6 +680,9 @@ const Customers = () => {
       });
     }
 
+    if (customerFilter === 'upcoming') filtered = filtered.filter(c => hasUpcomingPlan(c));
+    if (typeFilter) filtered = filtered.filter(c => matchesCustomerType(c, typeFilter));
+
     if (searchTerm) {
       filtered = filtered.filter(customer =>
         customer.customerName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -672,7 +694,7 @@ const Customers = () => {
     }
 
     setFilteredCustomers(filtered);
-  }, [customers, searchTerm, customerFilter, planFilter]);
+  }, [customers, searchTerm, customerFilter, planFilter, typeFilter]);
 
   const handleSelectCustomer = (customer) => {
     setSelectedCustomer(customer);
@@ -1253,7 +1275,11 @@ const Customers = () => {
         {/* Customer Detail Header */}
         <div className="flex items-start justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">{selectedCustomer.customerName}</h1>
+            <div className="flex items-center gap-3 flex-wrap">
+              <CustomerTagBadges customer={selectedCustomer} />
+              <h1 className="text-2xl font-bold text-gray-900">{selectedCustomer.customerName}</h1>
+              <CustomerTypeTag customer={selectedCustomer} />
+            </div>
             <p className="text-gray-600 text-sm mt-1">Customer ID: {selectedCustomer.customerId}</p>
           </div>
           <div className="flex gap-2">
@@ -1381,6 +1407,9 @@ const Customers = () => {
             </div>
           );
         })()}
+
+        {matterRefreshError && <p role="status" className="rounded-lg bg-amber-50 text-amber-800 p-3 text-sm">{matterRefreshError}</p>}
+        <CustomerMatterDetails customer={selectedCustomer} />
 
         {/* Customer Info */}
         <div className="bg-white rounded-lg border border-gray-200 p-6">
@@ -1950,6 +1979,8 @@ const Customers = () => {
           </div>
         </div>
 
+        {matterRefreshError && <p role="status" className="rounded-lg bg-amber-50 text-amber-800 p-3 text-sm">{matterRefreshError}</p>}
+
         {/* Renewal Modal */}
         {showRenewalModal && (() => {
           const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -2175,6 +2206,18 @@ const Customers = () => {
             </button>
           </div>
 
+          <button onClick={() => setCustomerFilter('upcoming')}
+            className={`px-3 py-2 rounded-lg text-sm font-medium ${customerFilter === 'upcoming' ? 'bg-indigo-100 text-indigo-800' : 'bg-gray-100 text-gray-600'}`}>
+            Upcoming plan ({customers.filter(c => hasUpcomingPlan(c)).length})
+          </button>
+          <label className="flex items-center gap-2 text-sm text-gray-600">Customer type
+            <select aria-label="Customer type" value={typeFilter} onChange={e => setTypeFilter(e.target.value)} className="rounded-lg border border-gray-300 bg-white px-3 py-2">
+              <option value="">All customer types</option>
+              {[...new Set(customers.map(customerType).filter(Boolean))].sort().map(type => <option key={type} value={type}>{typeLabel(type)}</option>)}
+              <option value="__unknown">Not provided</option>
+            </select>
+          </label>
+
           {/* Plan filter dropdown */}
           {(() => {
             const planCounts = {};
@@ -2228,6 +2271,7 @@ const Customers = () => {
                   <Eye className="w-4 h-4 text-gray-400 flex-shrink-0 ml-2" />
                 </div>
 
+                <CustomerMatterDetails customer={customer} compact />
                 <div className="space-y-2 mb-4 text-sm">
                   <p className="text-gray-600 truncate">
                     <span className="text-gray-500">Company:</span> {customer.company}

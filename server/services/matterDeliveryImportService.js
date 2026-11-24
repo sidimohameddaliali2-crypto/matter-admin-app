@@ -1,4 +1,5 @@
 import Delivery from '../models/Delivery.js';
+import { ensureMatterDeliveryIdempotency, insertMatterDelivery } from './matterDeliveryInsert.js';
 import matterApiService from './matterApiService.js';
 import { resolveCustomerMatch, createCustomerFromMatterSubscription } from './customerMatchService.js';
 import { detectAreaFromAddress } from '../config/areas.js';
@@ -7,6 +8,7 @@ import { displayMatterName } from '../utils/matterName.js';
 import { resolveMatterDeliveryAddress } from './matterSubscriptionContract.js';
 import { compareMatterDelivery } from './matterDeliveryComparison.js';
 import { capturePendingMatterRevenue } from './matterSalesService.js';
+import { recordReportingDeliveryChanges, withReportingEvents } from './reportingOutbox.js';
 
 // Only pending/assigned work today or later can receive a name refresh.
 const EDITABLE_STATUSES = new Set(['pending', 'assigned']);
@@ -151,17 +153,26 @@ export function buildMatterDeliverySnapshot(sub, dateKey, customer = null) {
  * would have created a genuine duplicate delivery for every one of them —
  * a real duplicate driver stop, not just a harmless double DB row.
  */
-export async function importMatterDeliveriesForDate(dateKey) {
+export async function importMatterDeliveriesForDate(dateKey, { onProgress, assertActive } = {}) {
   let matches;
   try {
-    matches = await matterApiService.findSubscriptionsWithDeliveryOnDate(dateKey);
+    matches = await matterApiService.findSubscriptionsWithDeliveryOnDate(dateKey, { onProgress });
   } catch (error) {
     if (error.code !== 'INCOMPLETE_DELIVERY_ROSTER') throw error;
     return { date: dateKey, complete: false, total: error.discovery.candidates, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, failed: error.discovery.failed, discoveryFailed: error.discovery.failed, writeFailed: 0, errors: error.discovery.errors };
   }
   const summary = { date: dateKey, complete: true, discoveryFailed: 0, writeFailed: 0, total: matches.length, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, noDeliveryWindow: 0, failed: 0, errors: [], comparisons: [] };
 
+  let processed = 0;
+  let idempotencyReady = false;
+  const progressSnapshot = phase => ({ phase, completed: processed, total: matches.length,
+    created: summary.created, failed: summary.failed, alreadyExisted: summary.alreadyExisted,
+    alreadyHadOtherDelivery: summary.alreadyHadOtherDelivery, noCurrentAddress: summary.noCurrentAddress,
+    noDeliveryWindow: summary.noDeliveryWindow, customersCreated: summary.customersCreated,
+    discoveryFailed: summary.discoveryFailed, writeFailed: summary.writeFailed });
+  await onProgress?.(progressSnapshot('importing'));
   for (const sub of matches) {
+    await assertActive?.();
     try {
       const subscriptionId = String(sub.subscription_id);
       const { startOfDay, endOfDayExclusive } = getBusinessDayBounds(sub.delivery_date || dateKey);
@@ -180,7 +191,15 @@ export async function importMatterDeliveriesForDate(dateKey) {
         // imported — keep the sheet in step, unless the delivery is finished.
         const matterName = displayMatterName(sub.name);
         if (matterName && existingFromThisImport.customerName !== matterName && EDITABLE_STATUSES.has(existingFromThisImport.status) && startOfDay >= getBusinessDayBounds(new Date()).startOfDay) {
-          await Delivery.updateOne({ _id: existingFromThisImport._id, status: { $in: ['pending', 'assigned'] } }, { $set: { customerName: matterName } });
+          await assertActive?.();
+          await withReportingEvents(async (session, enqueue) => {
+            const filter = { _id: existingFromThisImport._id, status: { $in: ['pending', 'assigned'] } };
+            const update = { $set: { customerName: matterName } };
+            const result = await Delivery.updateOne(filter, update, session ? { session } : undefined);
+            if (result.modifiedCount) {
+              await recordReportingDeliveryChanges(session, enqueue, [existingFromThisImport._id], Delivery.collection);
+            }
+          });
           summary.namesRefreshed = (summary.namesRefreshed || 0) + 1;
         }
         continue;
@@ -216,6 +235,11 @@ export async function importMatterDeliveriesForDate(dateKey) {
         continue;
       }
 
+      if (!idempotencyReady) {
+        await assertActive?.();
+        await ensureMatterDeliveryIdempotency();
+        idempotencyReady = true;
+      }
       let customer = (await resolveCustomerMatch({
         email: sub.email,
         phone: sub.phone,
@@ -224,6 +248,7 @@ export async function importMatterDeliveriesForDate(dateKey) {
       })).customer;
 
       if (!customer) {
+        await assertActive?.();
         customer = await createCustomerFromMatterSubscription(sub);
         summary.customersCreated += 1;
       } else {
@@ -244,19 +269,25 @@ export async function importMatterDeliveriesForDate(dateKey) {
       const snapshot = buildMatterDeliverySnapshot(sub, dateKey, customer);
       snapshot.customerName = displayMatterName(sub.name)
         || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || 'Matter Customer';
-      await Delivery.create(snapshot);
-      summary.created += 1;
+      await assertActive?.();
+      if (await insertMatterDelivery(snapshot, sub.delivery_date || dateKey)) summary.created += 1;
+      else summary.alreadyExisted += 1;
     } catch (err) {
+      if (err.code === 'MATTER_IMPORT_INTERRUPTED') throw err;
       summary.failed += 1;
       summary.writeFailed += 1;
       summary.complete = false;
       summary.errors.push({ subscription_id: sub.subscription_id, message: err.message });
+    } finally {
+      processed++;
+      await onProgress?.(progressSnapshot('importing'));
     }
   }
 
   // Best effort from the already verified local Matter capture. Import and
   // driver operation must never depend on financial API availability.
   if (summary.created) {
+    await onProgress?.(progressSnapshot('finalizing'));
     try { await capturePendingMatterRevenue(); }
     catch { summary.pricingCapturePending = true; }
   }

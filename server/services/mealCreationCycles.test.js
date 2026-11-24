@@ -197,7 +197,10 @@ test('exact re-upload replaces unknown alias days without changing saved cycle p
   const manuallySaved = empty(); manuallySaved[4][2] = [{ mealId: canonical.id, isMatterCore: true }];
   saved = changeMealCreationState(saved, { cycleId: 'NOV4', boards: { 'Main menu:Week 1': manuallySaved } });
   saved = upload(saved, [meal('NOV4-004', 'DAY 4')], 'Nov4.xlsx');
-  assert.deepEqual(cycle(saved, 'NOV4').meals[0], { mealId: canonical.id, sourceMealId: 'NOV4-004', day: 'DAY 4' });
+  const { recipeSignatures, ...occurrence } = cycle(saved, 'NOV4').meals[0];
+  assert.equal(recipeSignatures.length, 1);
+  assert.match(recipeSignatures[0], /^[a-f0-9]{64}$/);
+  assert.deepEqual(occurrence, { mealId: canonical.id, sourceMealId: 'NOV4-004', day: 'DAY 4' });
   assert.deepEqual(cycle(saved, 'NOV4').boards['Main menu:Week 1'], manuallySaved);
   assert.deepEqual(upload(saved, [meal('NOV4-004', 'DAY 4')], 'Nov4.xlsx'), saved);
 });

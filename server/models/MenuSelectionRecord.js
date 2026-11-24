@@ -101,6 +101,10 @@ const menuSelectionRecordSchema = new mongoose.Schema({
       type: Boolean,
       default: false
     },
+    // Set on breakfasts and snacks assigned for a Core double delivery.
+    // Keep the food-day index so a schedule change can undo only those writes.
+    coreDeliveryFoodDay: { type: Number, enum: [1, 2] },
+    coreDeliverySnackSlot: { type: Number, min: 0 },
     // A sauce/garnish exclusion match is never shown to the customer or
     // blocked — the meal is added normally, and this flag (plus the matched
     // terms) is surfaced only in the Kitchen List so staff know to swap that

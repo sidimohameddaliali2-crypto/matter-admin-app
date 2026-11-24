@@ -1,4 +1,6 @@
 import express from 'express';
+import mongoose from 'mongoose';
+import { matterImportJobs } from '../services/matterImportJobService.js';
 import { protect, authorize } from '../middleware/auth.js';
 import matterApiService, { describeMatterApiError } from '../services/matterApiService.js';
 import { detectAreaFromAddress } from '../config/areas.js';
@@ -8,7 +10,7 @@ import Customer from '../models/Customer.js';
 import { isDateKey, getBusinessDayBounds, toBusinessDateKey } from '../utils/businessDate.js';
 import { resolveMatterDeliveryAddress, matterMealContract } from '../services/matterSubscriptionContract.js';
 import { compareMatterDelivery } from '../services/matterDeliveryComparison.js';
-import { buildMatterDeliverySnapshot, importMatterDeliveriesForDate } from '../services/matterDeliveryImportService.js';
+import { buildMatterDeliverySnapshot } from '../services/matterDeliveryImportService.js';
 import { standardizeMatterDeliveriesForPage } from '../services/matterDeliveryStandardization.js';
 import { refreshMatterSales, getMatterSalesReport } from '../services/matterSalesService.js';
 import { effectivePermissions } from '../models/User.js';
@@ -183,15 +185,30 @@ router.get('/subscriptions/delivery-on-date', protect, async (req, res) => {
 router.post('/import-deliveries', protect, authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
   try {
     const { date } = req.body || {};
-    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    if (!isDateKey(date)) {
       return res.status(400).json({ success: false, message: 'date is required, as YYYY-MM-DD' });
     }
-    const summary = await importMatterDeliveriesForDate(date);
-    res.status(summary.complete === false ? 503 : 200).json({ success: summary.complete !== false, message: summary.complete === false ? 'Delivery import is incomplete; no complete result is available.' : undefined, data: summary });
+    const job = await matterImportJobs.enqueue(date, req.user._id);
+    res.status(202).json({ success: true, data: job });
   } catch (error) {
     console.error('Matter API import-deliveries error:', error.response?.data || error.message);
     res.status(500).json({ success: false, message: describeMatterApiError(error) || 'Failed to import deliveries from Matter', error: error.response?.data || error.message });
   }
+});
+
+router.get('/import-deliveries/status', protect, authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
+  if (!isDateKey(req.query.date)) return res.status(400).json({ success: false, message: 'A valid delivery date is required.' });
+  try { res.json({ success: true, data: await matterImportJobs.latest(req.query.date) }); }
+  catch { res.status(503).json({ success: false, message: 'Import progress is temporarily unavailable. The job may still be running.' }); }
+});
+
+router.get('/import-deliveries/jobs/:id', protect, authorize(['admin', 'super_admin', 'dispatcher', 'manager']), async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid import job ID.' });
+  try {
+    const job = await matterImportJobs.get(req.params.id);
+    if (!job) return res.status(404).json({ success: false, message: 'Import job not found.' });
+    res.json({ success: true, data: job });
+  } catch { res.status(503).json({ success: false, message: 'Import progress is temporarily unavailable.' }); }
 });
 
 // Every subscription (list-level fields only — status, plan name, cycle/renewal

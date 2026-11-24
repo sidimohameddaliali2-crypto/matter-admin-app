@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { activityActor, safeChanges, privateValue, fieldLabel } from './activityPolicy.js';
 import { traceContext } from './telemetry.js';
 import { describeActivity } from './activityLanguage.js';
-import { shouldAuditModel, isAutomaticDriverLocation, isLocationOnlyUpdate } from './activityScope.js';
+import { shouldAuditModel, isAutomaticDriverLocation, isLocationOnlyUpdate, isAutomaticTrackerVisit } from './activityScope.js';
 
 const pendingWrites = Symbol('activity-pending-writes');
 const wrappedSession = Symbol('activity-wrapped-session');
@@ -303,7 +303,8 @@ export function createActivityPlugin({ write }) {
         event.confirmation =
           'Previous values were observed before the write. Submitted values can be affected by concurrent edits and database update operators.';
         this.activityEvent = event;
-        await write({
+        this.activityStartedDeferred = isAutomaticTrackerVisit(traceContext(), this.model.modelName, operation, proposed, this.getOptions());
+        if (!this.activityStartedDeferred) await write({
           ...event,
           eventId: randomUUID(),
           stage: 'record_change_started',
@@ -354,6 +355,18 @@ export function createActivityPlugin({ write }) {
           this.getOptions().session,
           write,
         );
+      });
+      if (operation === 'updateOne') schema.post(operation, { query: true, document: false }, function (error, _result, next) {
+        if (!this.activityStartedDeferred || !this.activityEvent) return next(error);
+        // Keep failed attempts visible without serializing the provider/DB error
+        // (which may contain credentials). Never replace the original failure.
+        Promise.resolve().then(() => write({
+          ...this.activityEvent,
+          eventId: randomUUID(), occurredAt: new Date().toISOString(),
+          stage: 'record_not_saved', outcome: 'uncertain',
+          summary: 'The automated tracker verdict update was not confirmed.',
+          issue: 'The tracker write failed or its audit confirmation failed. Retain the evidence and retry; no saved outcome is inferred.'
+        })).then(() => next(error), () => next(error));
       });
     }
     schema.post('insertMany', function (error, documents, next) {

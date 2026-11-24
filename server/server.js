@@ -38,8 +38,10 @@ import { startFlaggedNotifier } from './jobs/flaggedCustomerNotifier.js';
 import { startMoveUncollectedCollectionsJob } from './jobs/moveUncollectedCollections.js';
 import { startRecalculateDriverKpisJob } from './jobs/recalculateDriverKpis.js';
 import { startImportMatterDeliveriesJob } from './jobs/importMatterDeliveries.js';
+import { startMatterImportWorker } from './jobs/processMatterImports.js';
 import { startCaptureMatterSalesJob } from './jobs/captureMatterSales.js';
 import { startRecordVehicleLocationsJob } from './jobs/recordVehicleLocations.js';
+import { startReportingEmitter } from './services/reportingOutbox.js';
 import { startCustomerTrackerVisitsJob } from './jobs/syncCustomerTrackerVisits.js';
 import { authenticateSocket, registerStaffSocket } from './middleware/socketAuth.js';
 import {authenticateStaffToken} from './middleware/auth.js';
@@ -182,6 +184,8 @@ import userRoutes from './routes/users.js';
 import deliveryRoutes from './routes/deliveries.js';
 import bagRoutes from './routes/bags.js';
 import bagOperationsRoutes from './routes/bagOperations.js';
+import dispatcherLocationReviewsRoutes from './routes/dispatcherLocationReviews.js';
+import dispatcherHandoversRoutes from './routes/dispatcherHandovers.js';
 import bagRefundRoutes from './routes/bagRefunds.js';
 import bagFollowupRoutes from './routes/bagFollowups.js';
 import reportRoutes from './routes/reports.js';
@@ -214,6 +218,7 @@ import xeroRoutes from './routes/xero.js';
 import vehicleRoutes from './routes/vehicles.js';
 import yellowblockRoutes from './routes/yellowblock.js';
 import externalDeliveryApiRoutes from './routes/externalDeliveryApi.js';
+import externalReportingApiRoutes from './routes/externalReportingApi.js';
 import externalDriverLocationApiRoutes from './routes/externalDriverLocationApi.js';
 import mobileUpdatesRoutes from './routes/mobileUpdates.js';
 import { createMcpRouter } from './routes/mcp.js';
@@ -236,6 +241,8 @@ app.use(mcpOAuth.router);
 app.use('/api/mcp', createMcpRouter({ oauthProvider: mcpOAuth.provider }));
 app.use('/api/bags', bagRoutes);
 app.use('/api/bag-operations', bagOperationsRoutes);
+app.use('/api/dispatcher-location-reviews', dispatcherLocationReviewsRoutes);
+app.use('/api/dispatcher-handovers', dispatcherHandoversRoutes);
 app.use('/api/bag-refunds', bagRefundRoutes);
 app.use('/api/bag-followups', bagFollowupRoutes);
 app.use('/api/reports', reportRoutes);
@@ -270,6 +277,7 @@ app.use('/api/yellowblock', yellowblockRoutes);
 // API key (DELIVERY_API_KEYS), not the app's own JWT login. See
 // middleware/apiKeyAuth.js and docs/EXTERNAL_DELIVERY_API.md.
 app.use('/api/external/deliveries', externalDeliveryApiRoutes);
+app.use('/api/external/reporting', externalReportingApiRoutes);
 // Same static API key, for live driver/vehicle GPS instead of delivery
 // records — see docs/EXTERNAL_DELIVERY_API.md.
 app.use('/api/external/drivers', externalDriverLocationApiRoutes);
@@ -370,13 +378,16 @@ app.use('/api/*', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
+// Local UI testing may use shared credentials without running scheduled jobs
+// or joining the production Socket.IO Redis adapter.
+const localPreviewMode = process.env.LOCAL_PREVIEW_MODE === '1';
 
 // Initialize Redis for caching. Awaited (unlike the old fire-and-forget
 // call) so the Socket.io Redis adapter below can attach before the server
 // starts accepting connections — initRedis() has its own 5s connectTimeout
 // and try/catch, so this resolves within a bounded time either way, it
 // just delays startup slightly rather than risking a startup crash.
-await initRedis().catch((error) => {
+if (!localPreviewMode) await initRedis().catch((error) => {
   console.warn('⚠️  Redis initialization failed:', error.message);
   console.log('💡 Continuing without cache. Install Redis for production optimization.');
 });
@@ -428,12 +439,15 @@ server.listen(PORT, () => {
 });
 
 // Start background jobs
+if (!localPreviewMode) {
 startFlaggedNotifier();
 startMoveUncollectedCollectionsJob();
 startRecalculateDriverKpisJob();
 startImportMatterDeliveriesJob();
+startMatterImportWorker();
 startCaptureMatterSalesJob();
 startRecordVehicleLocationsJob();
+startReportingEmitter();
 startCustomerTrackerVisitsJob(io);
 
 // Warm the Supy recipe search cache so the first meal-editor search of the
@@ -450,6 +464,10 @@ if (process.env.ENABLE_FLAGGED_ALERTS === '1') {
   } catch (err) {
     console.error('Failed to start flagged notifier:', err.message);
   }
+}
+
+} else {
+  console.log('Local preview mode: background jobs, cache warm-up, and Redis disabled.');
 }
 
 // Handle unhandled promise rejections

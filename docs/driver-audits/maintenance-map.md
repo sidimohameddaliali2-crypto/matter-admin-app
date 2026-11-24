@@ -87,6 +87,19 @@ The [service worker](../../client/public/service-worker.js) and [worker compatib
 
 The saved source assessments view reuses the archive catalog pinned by the selected release. The first date lookup streams the original browser snapshot to verify its hash and extracts only its history index. The runtime reuses the verified index for later lookups. Compare case versions against the preserved staff history using exact saved rows. The link appears in the staff report frame when its package declares a source snapshot.
 
+## Source reporting change feed
+
+The owned reporting worker can catch up through the operational app’s API. Keep this feed disabled until the source owner approves activation and verifies that the storage deployment supports MongoDB transactions.
+
+- Set `MATTER_REPORTING_API_CLIENTS` to the existing report worker key labels. A bare key uses the `default` label. Normal external clients retain their existing delivery detail shape.
+- Set `MATTER_REPORTING_CAPTURE_ENABLED=1` to record metadata-only events with the delivery write or completed GPS batch. The source uses a global committed sequence. The existing 10:30 and noon Dubai report builds remain separate.
+- Set `MATTER_REPORTING_EMITTER_ENABLED=1` only with the approved HTTPS `MATTER_REPORTING_WEBHOOK_URL` and private `MATTER_REPORTING_WEBHOOK_SECRET`. The sender signs the Unix-seconds timestamp, a period and the exact JSON body. It acknowledges only the inbox's accepted or duplicate receipt and retries the same event ID when delivery is uncertain. Disabling emission retains the recorded outbox.
+- `GET /api/external/reporting/changes?after=0&limit=200` gives the upper sequence `through` for the page set. Retain that value and pass the latest `cursor` as `after` until `hasMore` is false. `GET /api/external/reporting/gps-batches/:id` returns only an immutable completed batch. The worker checks the returned `reportingVersion` against the requested revision. The Vercel Preview worker reads the changed row through `GET /api/external/reporting/deliveries/:id`. The existing API-key worker uses `GET /api/external/deliveries/:id`.
+- Set `MATTER_REPORTING_VERCEL_OIDC_ENABLED=1` to opt in to the installed Populus AI `matter-private-reporting` Preview identity. The Vercel worker exchanges its runtime token for the single audience `https://matterapp.online/api/external/reporting`. The source verifies Vercel’s signature, exact team, project and Preview claims and authorizes only the reporting GET endpoints. Readiness can verify this identity before capture. Delivery, GPS and change data require capture to be enabled. Leave `MATTER_REPORTING_VERCEL_OIDC_PRODUCTION_ENABLED` unset through Preview qualification. Existing API-key label authorization stays on its own path, and Vercel credentials do not authorize other source routes.
+- `GET /api/external/reporting/days/:day/ids` returns the Dubai scheduled-day IDs, status, update clock, reporting revision and feed watermark in one read-only transaction. It excludes the stored Abu Dhabi zone after trimming and case normalization and returns an error above the consumer's 2,000-delivery limit. `GET /api/external/reporting/readiness` checks whether the connected database supports transactions. Verify write access separately in the authorized environment.
+- Routine Matter imports and guarded name corrections, AI assignment, route plan updates and Matter delivery standardization record source changes with their existing writes. Unordered CSV creates can commit a valid subset on failure. Day reconciliation can detect their missing versions and rows from before capture was enabled. Provide a tested repair for eligible unversioned rows before relying on the live ledger for a complete day. Matter revenue allocation writes accounting metadata outside Driver Reports scope.
+- Keep both weekday builds until a fresh delivery automatically reaches private Preview with its original photo, saved AI grade and real GPS. Verify offline completion replay, the alternate multipart photo path, a delivery deleted before its first fetch, and a late update on an archived date with the other deliveries and reviews intact. Verify that a rolled-back delivery leaves no event, two concurrent saves produce consecutive cursors, an expired sender lease retries the same ID, and an unfinished GPS batch cannot be read.
+
 ## Source schedules and upstream inputs
 
 The supervisor invokes the following request identities as child functions; they are **not Express routes mounted on Sidi**. Each job retains its original request method/path, cron authorization and a 300-second maximum. Exact active schedules come from the pinned source manifest. The recovered schedule set uses UTC; delivery-day boundaries use Dubai time.
@@ -198,6 +211,48 @@ Keep a private acceptance receipt that binds the deployed app/report HTTP proces
 For an Activity history release, also check that a real authorized report request retains the original staff account identity while its canonical saved-review actor/history and permissions remain unchanged. This live identity check is pending; local auth, integration and offline fixtures do not establish production acceptance.
 
 Record each result and unresolved gap. A report displaying only its pre-activation capture, a source-only success, or a passing fixture suite does not complete this journey.
+
+## Operational tracker activity volume (2026-11-21)
+
+The generic Mongoose activity producer is
+[`activityDatabase.js`](../../server/observability/activityDatabase.js), with
+the narrow predicate in [`activityScope.js`](../../server/observability/activityScope.js).
+The operational `customer-tracker-visits` job writes Delivery `trackerVisit`
+and occasionally its one-time `trackerVisitGpsBaseline`. Its full pre-write
+snapshot duplicated the terminal audit payload in `activity_audit_events`.
+
+The prepared change defers only that automated tracker-only `updateOne` start
+snapshot. It retains saved/unchanged terminal events and records a failed write
+as explicitly uncertain without exposing raw errors. Human/action contexts,
+mixed business fields, upserts, bulk writes and other jobs retain their existing
+audit behavior. A crash before any terminal outcome no longer has an individual
+durable tracker-start row; job telemetry and the independent tracker/GPS retry
+and evidence paths remain. This is not a blanket Delivery audit exclusion.
+
+Impact check: GPS acquisition, immutable capture batches, tracker history,
+delivery proof/status, original report evidence, Supabase reviews, source and
+builder controls are unchanged. No private source export or serving package
+needs replacement for this generic operational activity change.
+
+Local acceptance: `activityTrackerVisit.test.js` covers exact predicate
+boundaries, saved/unchanged/uncertain outcomes, original error propagation and
+real Mongoose writes in disposable MongoDB. Run the existing activity scope,
+transaction, journal, vehicle capture/store and Truckoom visit tests too.
+The optional integration uses `TRACKER_AUDIT_TEST_MONGO_URI` and refuses
+non-loopback/non-test databases; it drops only its synthetic database.
+
+Production acceptance remains pending: verify actual serving SHA and sample
+tracker write outcomes plus continuing operational GPS capture after a separately
+authorized release. This note authorizes no deployment, deletion or retention
+change. Existing started/saved rows remain intact. A possible redundant start
+is `stage=record_change_started`, `outcome=pending`, not a `status=started`
+field. Its confirmed saved counterpart must independently match `operationId`,
+`job=customer-tracker-visits`, `record.type=Delivery`, the same `record.id`,
+`stage=record_saved`, `outcome=saved`, and a non-earlier event time. Event IDs
+are different: the start uses its own UUID, while the saved event uses the
+operation UUID. Unmatched, failed or uncertain attempts are outside any
+redundant-start cleanup. Backup, restore proof and cleanup admission are a
+separate prerequisite owned by the incident coordinator.
 
 ## Run the relevant checks
 

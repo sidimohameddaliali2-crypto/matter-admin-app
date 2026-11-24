@@ -1,8 +1,11 @@
 import mongoose from 'mongoose';
+import { MATTER_IMPORT_IDENTITIES } from '../config/matterImportIdentity.js';
 import { sanitizeDeliveryAddressEdit } from '../services/deliveryAddressEdit.js';
+import { saveReportingDelivery } from '../services/reportingOutbox.js';
 import { applyZoneRules, isAbuDhabiEmirate, ABU_DHABI_ZONE } from '../config/zoneRules.js';
 
 const deliverySchema = new mongoose.Schema({
+  reportingVersion: { type: Number, immutable: true, select: false },
   bagReturnReceipts: [{bagId:String,eventId:String,receivedAt:Date}],
   
   customerId: {
@@ -13,6 +16,8 @@ const deliverySchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  // Contact entered by dispatch stays with this delivery snapshot.
+  customerPhone: { type: String, trim: true, default: '' },
   // Set when this delivery was auto-imported from the real Matter
   // subscription platform (services/matterDeliveryImportService.js,
   // jobs/importMatterDeliveries.js) — the Matter subscription_id it came
@@ -25,6 +30,11 @@ const deliverySchema = new mongoose.Schema({
     index: true
   },
   matterCustomerId: { type: String, default: null, index: true },
+  // Immutable identity for newly imported subscription/service-day obligations.
+  // Not derived from editable scheduledTime and absent on historical/manual jobs.
+  matterImportKey: { type: String, immutable: true },
+  matterImportCustomerKey: { type: String, immutable: true },
+  matterImportSourceCustomerKey: { type: String, immutable: true },
   // Independent of editable delivery names, times and subscription references.
   // Never reprice completed work from a newer subscription.
   matterRevenue: { type: mongoose.Schema.Types.Mixed, default: undefined, select: false },
@@ -291,6 +301,10 @@ deliveryType: {
 
 // Index for better query performance
 deliverySchema.index({ scheduledTime: 1 });
+for (const [field, name] of MATTER_IMPORT_IDENTITIES) {
+  deliverySchema.index({ [field]: 1 }, { name, unique: true,
+    partialFilterExpression: { [field]: { $type: 'string' } } });
+}
 deliverySchema.index({ driver: 1, status: 1 });
 deliverySchema.index({ customerId: 1 });
 deliverySchema.index({ driver: 1, scheduledTime: 1 }); // For getDriverTodaysDeliveries query
@@ -304,7 +318,7 @@ deliverySchema.index({ customerId: 1, addressId: 1, scheduledTime: 1 }); // Pin-
 deliverySchema.pre('validate', async function clearStaleAddressOnSave() {
   if (this.isNew || !this.isModified('address')) return;
   const original = await this.constructor.findById(this._id)
-    .select('address addressId addressDetails gpsLocation').lean();
+    .select('address addressId addressDetails gpsLocation').session(this.$session() ?? null).lean();
   if (!original) return;
   const fields = { address: this.address };
   for (const key of ['addressId', 'addressDetails', 'gpsLocation']) {
@@ -330,7 +344,7 @@ deliverySchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], async functi
   // Bulk edits cannot share one old address; invalidate dependent fields
   // conservatively unless the caller supplies replacements.
   const original = this.op === 'updateMany' ? null : await this.model.findOne(this.getQuery())
-    .select('address addressId addressDetails gpsLocation').lean();
+    .select('address addressId addressDetails gpsLocation').session(this.getOptions().session ?? null).lean();
   sanitizeDeliveryAddressEdit(original, set);
 });
 
@@ -402,7 +416,7 @@ deliverySchema.methods.updateStatus = async function (status, notes, location) {
     };
   }
 
-  return this.save();
+  return saveReportingDelivery(this);
 };
 
 deliverySchema.statics.getDriverTodaysDeliveries = function (driverId) {

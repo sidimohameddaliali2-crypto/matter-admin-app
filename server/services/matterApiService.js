@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { cacheGet, cacheSet } from '../config/cache.js';
 import { boundedMap } from './boundedMap.js';
 import { normalizeMatterAllergens } from './matterAllergens.js';
+import { readMatterGet } from './matterReadRetry.js';
 import { resolveMatterDeliveryAddress, matterMealContract, matterWeekendEnabled, matterDoubleDeliveryDates } from './matterSubscriptionContract.js';
 
 // A customer's macro/plan config on Matter changes on the order of days or
@@ -140,7 +141,7 @@ class MatterApiService {
    * List subscriptions, optionally filtered by email/customerId/renewal date and paginated.
    */
   async listSubscriptions({ page = 1, pageSize = 50, email, customerId, updatedSince } = {}) {
-    const response = await this.client().get('/subscriptions', {
+    const response = await readMatterGet(this.client(), '/subscriptions', {
       params: {
         page,
         page_size: pageSize,
@@ -157,7 +158,7 @@ class MatterApiService {
    * Get a single subscription by id.
    */
   async getSubscription(subscriptionId) {
-    const response = await this.client().get(`/subscriptions/${subscriptionId}`);
+    const response = await readMatterGet(this.client(), `/subscriptions/${subscriptionId}`);
     return response.data;
   }
 
@@ -325,7 +326,7 @@ class MatterApiService {
   /**
    * Page through every subscription (the list endpoint caps at ~100/page).
    */
-  async listAllSubscriptions() {
+  async listAllSubscriptions({ onProgress } = {}) {
     const pageSize = 100;
     let page = 1;
     let totalPages = 1;
@@ -335,6 +336,7 @@ class MatterApiService {
       const result = await this.listSubscriptions({ page, pageSize });
       all.push(...(result?.data || []));
       totalPages = result?.meta?.total_pages || 1;
+      await onProgress?.({ phase: 'listing', completed: page, total: totalPages });
       page += 1;
     } while (page <= totalPages);
 
@@ -360,8 +362,8 @@ class MatterApiService {
    * already fetched in one shot and just gets checked against every date in
    * range.
    */
-  async findSubscriptionsWithDeliveryInRange(startDateKey, endDateKey, { includeKitchenInputs = false } = {}) {
-    const all = await this.listAllSubscriptions();
+  async findSubscriptionsWithDeliveryInRange(startDateKey, endDateKey, { includeKitchenInputs = false, onProgress } = {}) {
+    const all = await this.listAllSubscriptions({ onProgress });
     const candidates = all.filter((sub) =>
       ['active', 'paused', 'cancelled'].includes(sub.subscription_status)
       && String(sub.cycle_end_date || '').slice(0, 10) >= startDateKey
@@ -370,6 +372,8 @@ class MatterApiService {
     const CONCURRENCY = 20;
     const matches = [];
     const failures = [];
+    let checked = 0;
+    await onProgress?.({ phase: 'checking', completed: 0, total: candidates.length, failed: 0 });
 
     const results = await boundedMap(candidates, CONCURRENCY, async (sub) => {
         try {
@@ -432,9 +436,12 @@ class MatterApiService {
             delivery_date: deliveryDate
           }));
         } catch (error) {
+          if (error.code === 'MATTER_IMPORT_INTERRUPTED') throw error;
           console.error(`delivery-in-range check failed for subscription ${sub.subscription_id}:`, error.message);
           failures.push({ subscriptionId: String(sub.subscription_id), message: 'Unable to verify delivery schedule' });
           return [];
+        } finally {
+          await onProgress?.({ phase: 'checking', completed: ++checked, total: candidates.length, failed: failures.length });
         }
     });
     matches.push(...results.flat());
