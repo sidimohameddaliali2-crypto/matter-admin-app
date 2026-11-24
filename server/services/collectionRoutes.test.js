@@ -4,19 +4,18 @@ import router from '../routes/collections.js';
 import Customer from '../models/Customer.js';
 import Delivery from '../models/Delivery.js';
 
-const original = { findCustomer: Customer.findOne, create: Delivery.create };
-afterEach(() => { Customer.findOne = original.findCustomer; Delivery.create = original.create; });
+const original = { findCustomer: Customer.findOne, save: Delivery.prototype.save };
+afterEach(() => { Customer.findOne = original.findCustomer; Delivery.prototype.save = original.save; });
 const response = () => ({ statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } });
 const body = { customerSource: 'manual', customerName: 'Manual Customer', address: 'Al Quoz, Dubai', collectionDate: '2026-11-27', refundRequestedAfterCollection: true };
 const post = router.stack.find(layer => layer.route?.path === '/' && layer.route.methods.post).route.stack[0].handle;
 
 test('request becomes an unassigned Collection delivery and emits the existing dispatch event', async () => {
   let written, event;
-  Delivery.create = async data => {
-    const doc = new Delivery(data);
-    await doc.validate();
-    written = doc;
-    return doc;
+  Delivery.prototype.save = async function () {
+    await this.validate();
+    written = this;
+    return this;
   };
   const res = response();
   await post({ body: { ...body, driver: 'malicious', status: 'collected' }, user: { _id: '507f1f77bcf86cd799439011' }, app: { get: () => ({ emit: (name, data) => { event = { name, data }; } }) } }, res);
@@ -29,7 +28,7 @@ test('request becomes an unassigned Collection delivery and emits the existing d
 });
 test('missing selected customer returns a useful error without creating any delivery', async () => {
   Customer.findOne = () => ({ select() { return this; }, lean: async () => null });
-  Delivery.create = () => { throw new Error('must not write'); };
+  Delivery.prototype.save = () => { throw new Error('must not write'); };
   const res = response();
   await post({ body: { ...body, customerSource: 'internal', customerId: 'removed' }, user: { _id: 'staff' } }, res);
   assert.equal(res.statusCode, 400);

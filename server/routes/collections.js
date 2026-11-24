@@ -8,6 +8,7 @@ import { protect, authorize } from '../middleware/auth.js';
 import { effectivePermissions } from '../models/User.js';
 import { detectAreaFromAddress } from '../config/areas.js';
 import { buildCollectionRequest } from '../services/collectionRequest.js';
+import { saveReportingDelivery } from '../services/reportingOutbox.js';
 
 const router = express.Router();
 router.use(protect, authorize(['super_admin', 'admin', 'manager', 'dispatcher']));
@@ -86,7 +87,7 @@ router.post('/', async (req, res) => {
       ? await Customer.findOne({ customerId: req.body.customerId }).select('customerId firstName lastName').lean() : null;
     const data = buildCollectionRequest(req.body, customer, req.user._id);
     data.zone = detectAreaFromAddress(data.address, '', { company: data.company }) || undefined;
-    const delivery = await Delivery.create(data);
+    const delivery = await saveReportingDelivery(new Delivery(data));
     req.app.get('io')?.emit('delivery:created', delivery);
     res.status(201).json({ success: true, data: delivery, message: 'Collection request created.' });
   } catch (error) {

@@ -16,10 +16,11 @@ test('ordinary delivery edits cannot forge or erase the refund ledger', () => {
 });
 test('only completed requested bag collections enter the pending refund queue', () => {
   const filter = collectionRefundFilter();
-  assert.deepEqual(filter.status.$in, ['collected', 'completed']);
+  assert.deepEqual(filter.status.$in, ['collected', 'completed', 'delivered']);
   assert.equal(filter['collectionRequest.refundRequestedAfterCollection'], true);
   assert.deepEqual(filter['collectionDetails.noBagsAvailable'], { $ne: true });
   for (const change of [{ type: 'Delivery' }, { status: 'assigned' }, { collectionRequest: {} }, { collectionDetails: { noBagsAvailable: true } }]) assert.throws(() => buildCollectionRefundUpdate({ ...record, ...change }, input, user), /completed bag collection/);
+  assert.doesNotThrow(() => buildCollectionRefundUpdate({ ...record, status: 'delivered' }, input, user));
 });
 test('recording payment requires management and a reference, and preserves actor and audit evidence', () => {
   for (const role of ['driver', 'dispatcher', 'store_keeper', 'viewer']) assert.throws(() => buildCollectionRefundUpdate(record, input, { ...user, role }), error => error.statusCode === 403);
