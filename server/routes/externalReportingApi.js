@@ -120,7 +120,10 @@ router.get('/days/:day/ids', async (req, res) => {
     // The watermark and membership are read from the same snapshot. The
     // ordinary delivery writes outside the outbox still change membership
     // or the source row's update clock and status.
-    const result = await mongoose.connection.transaction(async session => {
+    // Mongoose 7 returns the commit receipt, so keep the final attempt's rows
+    // here and use them only once the snapshot transaction has committed.
+    let result;
+    await mongoose.connection.transaction(async session => {
       const through = await readReportingWatermark(session);
       const rows = await Delivery.find({
         scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive },
@@ -130,8 +133,7 @@ router.get('/days/:day/ids', async (req, res) => {
         ] },
       }).session(session).select('_id status type updatedAt +reportingVersion')
         .sort({ scheduledTime: 1, _id: 1 }).limit(maxDayRows + 1).maxTimeMS(5_000).lean();
-      if (rows.length > maxDayRows) return null;
-      return { through, data: rows.map(row => ({
+      result = rows.length > maxDayRows ? null : { through, data: rows.map(row => ({
         id: String(row._id),
         status: typeof row.status === 'string' ? row.status.trim().toLowerCase() || null : null,
         type: typeof row.type === 'string' ? row.type.trim() || null : null,
