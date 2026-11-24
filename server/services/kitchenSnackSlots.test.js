@@ -37,3 +37,12 @@ test('eligible matches still take priority over ambiguous raw names', () => {
   assert.deepEqual(missingCoreSnackSlots([{ mealName: 'Shared', slotNumber: 0 }], 2, eligible, raw), [1]);
   assert.deepEqual(missingCoreSnackSlots([{ mealName: 'Shared', quantity: 2 }], 2, eligible, raw), []);
 });
+
+test('a one-snack daily rotation repeats the first pool on a double date', () => {
+  assert.deepEqual(missingCoreSnackSlots([{ mealName: 'First' }], 2, pools, pools, 1), [1]);
+});
+
+test('overlapping numbered second-pool snacks do not occupy the first slot on a single date', () => {
+  const meals = [{ mealName: 'Second', slotNumber: 1 }, { mealName: 'Second', slotNumber: 1 }];
+  assert.deepEqual(missingCoreSnackSlots(meals, 2, pools), [0]);
+});

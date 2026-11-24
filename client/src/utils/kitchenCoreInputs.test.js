@@ -26,17 +26,44 @@ test('Wednesday starter gets two full Core portions from dated Matter flags, mat
   expect(() => assertKitchenExportReady([result])).not.toThrow();
 });
 
-test('Core Monday and Wednesday require doubled mains with normal portions; Friday remains single', () => {
+test('Core Monday and Wednesday require double portions with normal macros and weights; Friday remains single', () => {
   const deliveryDates = ['2026-10-26', '2026-10-28', '2026-10-30'];
-  const customer = { matterCustomerId: 'person', planName: 'Matter Core', mealsPerDay: 2, deliveryDates, targetMacros: { C: 300, P: 300, F: null } };
-  const roster = [{ customer_id: 'person', name: 'Core fixture', plan_name: 'Matter Core', meal_frequency: 2 }];
+  const customer = { matterCustomerId: 'person', planName: 'Matter Core', mealsPerDay: 2, snacksPerDay: 1, breakfastIncluded: true, deliveryDates, targetMacros: { C: 300, P: 300, F: null } };
+  const roster = [{ customer_id: 'person', name: 'Core fixture', plan_name: 'Matter Core', meal_frequency: 2, breakfast_included: true, snacks_per_day: 1 }];
+  const breakfastPreset = { presetsByName: { eggs: { C: 12, P: 20, F: 8 } } };
+  const snackPreset = { presetsByName: { bite: { C: 15, P: 10, F: 6 } } };
   for (const [date, count] of [[deliveryDates[0], 4], [deliveryDates[1], 4], [deliveryDates[2], 2]]) {
-    const meals = Array.from({ length: count }, () => ({ date, mealType: 'main', quantity: 1 }));
-    const calculated = calculateKitchenListEntry({ customer, selectedMeals: meals });
-    expect(calculated.selectedMeals.every(meal => meal.proteinWeight === 150 && meal.carbWeight === 150)).toBe(true);
+    const quantity = count / 2;
+    const mains = Array.from({ length: count }, () => ({ date, mealType: 'main', quantity: 1 }));
+    const breakfast = { date, mealType: 'breakfast', mealName: 'Eggs', quantity };
+    const snack = { date, mealType: 'snack', mealName: 'Bite', quantity };
+    const meals = [...mains, breakfast, snack];
+    const calculated = calculateKitchenListEntry({ customer, selectedMeals: meals, breakfastPreset, snackPreset });
+    const byType = type => calculated.selectedMeals.filter(meal => meal.mealType === type);
+    expect(byType('main').every(meal => meal.proteinWeight === 150 && meal.carbWeight === 150)).toBe(true);
+    expect(byType('breakfast')).toHaveLength(quantity);
+    expect(byType('breakfast').every(meal => meal.macros.C === 12 && meal.proteinWeight === 100)).toBe(true);
+    expect(byType('snack')).toHaveLength(quantity);
+    expect(byType('snack').every(meal => meal.macros.C === 15 && meal.proteinWeight === 50)).toBe(true);
     expect(() => assertKitchenRosterCovered([{ ...customer, selectedMeals: meals }], roster, date)).not.toThrow();
     expect(() => assertKitchenRosterCovered([{ ...customer, selectedMeals: meals.slice(1) }], roster, date)).toThrow(`needs ${count} meal(s)`);
+    if (quantity === 2) {
+      expect(() => assertKitchenRosterCovered([{ ...customer, selectedMeals: [...mains, { ...breakfast, quantity: 1 }, snack] }], roster, date)).toThrow('needs 2 breakfast(s)');
+      expect(() => assertKitchenRosterCovered([{ ...customer, selectedMeals: [...mains, breakfast, { ...snack, quantity: 1 }] }], roster, date)).toThrow('needs 2 snack(s)');
+    }
   }
+});
+
+test.each(['breakfast', 'snack'])('export flags surplus automatic Core %s portions on an unresolved legacy calendar', kind => {
+  const date = '2026-10-26';
+  const sub = { customer_id: 'person', plan_name: 'Matter Core', meal_frequency: 1,
+    active_delivery_dates: [date, '2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30'],
+    breakfast_included: kind === 'breakfast', snacks_per_day: kind === 'snack' ? 1 : 0 };
+  const tagged = { date, mealType: kind, coreDeliveryFoodDay: 2, isAutoAssigned: true };
+  const entry = { matterCustomerId: 'person', selectedMeals: [{ date, mealType: 'main' }, { date, mealType: kind }, tagged] };
+  expect(() => assertKitchenRosterCovered([entry], [sub], date)).toThrow('confirm the Matter schedule');
+  tagged.isAutoAssigned = false;
+  expect(() => assertKitchenRosterCovered([entry], [sub], date)).not.toThrow();
 });
 
 // Anonymous fixtures reproduce the actual Matter Core API shapes: upstream

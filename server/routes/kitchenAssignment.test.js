@@ -4,6 +4,7 @@ import WeeklyMenu from '../models/WeeklyMenu.js';
 import MenuItem from '../models/MenuItem.js';
 import Customer from '../models/Customer.js';
 import Record from '../models/MenuSelectionRecord.js';
+import Breakfast from '../models/KitchenBreakfastPreset.js';
 import Snack from '../models/KitchenSnackPreset.js';
 import matter from '../services/matterApiService.js';
 import { runAssignMainMeals, runAssignSnacks, runAssignMatterCoreMeals } from './menus.js';
@@ -112,6 +113,90 @@ for (const date of ['2026-10-31', '2026-11-01', '2026-11-19']) {
   });
 }
 
+for (const [date, snacksPerDay, withBreakfast, partial, multiplier, plan = 'Matter Core', legacySnack = false] of [
+  ['2026-11-16', 1, true, false, 2],
+  ['2026-11-18', 2, true, true, 2],
+  ['2026-11-18', 0, false, false, 2],
+  ['2026-11-20', 2, true, false, 1],
+  ['2026-11-16', 1, true, false, 1, 'Custom'],
+  ['2026-11-16', 1, true, false, 2, 'Matter Core', true],
+]) test(`Core assignment fills the dated add-on entitlement (${plan}, ${date}, ${snacksPerDay} snacks, breakfast: ${withBreakfast}, legacy snack: ${legacySnack})`, async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(`${date}T08:00:00Z`) });
+  const query = value => ({ select() { return this; }, sort() { return this; }, lean: async () => value });
+  const main = { _id: 'main', mealType: 'main', mealName: 'Core chicken', usedForCorePlan: true };
+  const early = { name: 'Early bite', C: 20, P: 12, F: 6 };
+  const late = { name: 'Late bite', C: 24, P: 16, F: 8 };
+  let firstPool = [early];
+  t.mock.method(WeeklyMenu, 'findById', () => query({ meals: [{ items: [main._id] }],
+    breakfastOptionsByDate: { [date]: [{ name: 'Eggs' }] },
+    snackOptionsByDate: { [date]: { first: firstPool, second: [late] } } }));
+  t.mock.method(MenuItem, 'find', filter => query(filter.mealType === 'main' ? [main] : []));
+  t.mock.method(Breakfast, 'findOne', () => query({ presetsByName: { eggs: { C: 12, P: 20, F: 8 } } }));
+  t.mock.method(Snack, 'findOne', () => query({ presetsByName: { 'early bite': early, 'late bite': late } }));
+  const saved = Array.from({ length: multiplier }, (_, slotNumber) => ({
+    date, mealType: 'main', mealName: main.mealName, slotNumber, isAutoAssigned: slotNumber > 0,
+  }));
+  if (partial) saved.push({ date, mealType: 'breakfast', mealName: 'Customer eggs' },
+    { date, mealType: 'snack', mealName: late.name });
+  if (legacySnack) saved.push({ date, mealType: 'snack', mealName: late.name, slotNumber: 1, isAutoAssigned: true });
+  const before = JSON.stringify(saved);
+  const record = { _id: 'record', matterCustomerId: 'fixture', selectedMeals: [...saved], skippedDays: [] };
+  t.mock.method(Record, 'find', () => query([]));
+  t.mock.method(Record, 'findOne', () => query(record));
+  const writes = [];
+  t.mock.method(Record, 'findOneAndUpdate', async (_, update) => {
+    const appended = update.$push.selectedMeals.$each;
+    writes.push(...appended);
+    record.selectedMeals.push(...appended);
+    return record;
+  });
+  const nutrition = { customer_id: 'fixture', customer_email: 'core@example.invalid', subscription_id: 'sub', plan_name: plan,
+    meal_frequency: 1, breakfast_included: withBreakfast, snacks_per_day: snacksPerDay, exclusions: [],
+    active_delivery_dates: ['2026-11-16', '2026-11-18', '2026-11-20'], double_delivery_dates: ['2026-11-16', '2026-11-18'] };
+  const assign = () => runAssignMatterCoreMeals('menu', date, [{ email: nutrition.customer_email }],
+    { snackOnly: true, includeBreakfast: true, matterInputs: [nutrition] });
+  const result = await assign();
+  const snackWrites = writes.filter(meal => meal.mealType === 'snack');
+  const snackNames = snacksPerDay === 1 ? Array(multiplier - Number(legacySnack)).fill(early.name)
+    : snacksPerDay === 0 ? [] : partial ? [early.name, early.name, late.name] : [early.name, late.name];
+  assert.equal(result.data.assignedBreakfast, withBreakfast ? multiplier - Number(partial) : 0);
+  assert.equal(result.data.assignedSnacks, snacksPerDay * multiplier - Number(partial) - Number(legacySnack));
+  assert.equal(writes.filter(meal => meal.mealType === 'breakfast').reduce((sum, meal) => sum + meal.quantity, 0),
+    withBreakfast ? multiplier - Number(partial) : 0);
+  assert.deepEqual(snackWrites.map(meal => meal.mealName), snackNames);
+  for (const meal of snackWrites) {
+    const option = meal.mealName === early.name ? early : late;
+    assert.deepEqual(meal.snackMacros, { C: option.C / snacksPerDay, P: option.P / snacksPerDay, F: option.F / snacksPerDay });
+  }
+  assert.equal(JSON.stringify(record.selectedMeals.slice(0, saved.length)), before);
+  const retry = await assign();
+  assert.equal(retry.data.assignedBreakfast, 0);
+  assert.equal(retry.data.assignedSnacks, 0);
+  if (snacksPerDay === 1 && multiplier === 2) {
+    t.mock.method(Record, 'updateOne', async (_, update) => {
+      record.selectedMeals = update.$set.selectedMeals;
+      return { modifiedCount: 1 };
+    });
+    assert.equal(record.selectedMeals.filter(meal => meal.coreDeliveryFoodDay === 2).length, legacySnack ? 1 : 2);
+    if (!legacySnack) {
+      nutrition.snacks_per_day = 2;
+      firstPool = [];
+      const increased = await assign();
+      assert.equal(increased.data.assignedSnacks, 2);
+      assert.deepEqual(record.selectedMeals.filter(meal => meal.mealType === 'snack').map(meal => [meal.mealName, meal.slotNumber]),
+        [[early.name, 0], [early.name, 2], [late.name, 1], [late.name, 3]]);
+      nutrition.snacks_per_day = 1;
+    }
+    nutrition.double_delivery_dates = nutrition.double_delivery_dates.filter(day => day !== date);
+    const changed = await assign();
+    assert.equal(changed.data.assignedBreakfast, 0);
+    assert.equal(changed.data.assignedSnacks, 0);
+    assert.deepEqual(record.selectedMeals.map(meal => meal.mealType).sort(), ['breakfast', 'main', 'snack']);
+    assert.equal(record.selectedMeals.some(meal => meal.coreDeliveryFoodDay === 2), false);
+    assert.equal(record.selectedMeals.find(meal => meal.mealType === 'snack').mealName, legacySnack ? late.name : early.name);
+  }
+});
+
 test('Core snack assignment hydrates component tags and preserves saved customer choices', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-19T08:00:00Z') });
   const date = '2026-11-19';
@@ -146,6 +231,78 @@ test('Core snack assignment hydrates component tags and preserves saved customer
   assert.equal(retry.data.assignedSnacks, 0);
   assert.equal(writes.length, 1, 'Retry cannot duplicate the second-slot snack');
   assert.equal(record.selectedMeals.length, 2);
+});
+
+test('double Core preparation falls back to an eligible second pool and preserves saved portions', async t => {
+  const date = '2026-11-18';
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(`${date}T08:00:00Z`) });
+  const query = value => ({ select() { return this; }, sort() { return this; }, lean: async () => value });
+  const nutrition = { customer_id: 'fixture', customer_email: 'fixture@example.invalid', subscription_id: 'sub', plan_name: 'Matter Core',
+    meal_frequency: 1, breakfast_included: false, snacks_per_day: 1, exclusions: ['All Nuts'], active_delivery_dates: [date], double_delivery_dates: [date] };
+  const saved = [{ date, mealType: 'main', mealName: 'Saved main', quantity: 2 },
+    { date, mealType: 'snack', mealName: 'Saved snack', slotNumber: 0 }];
+  const record = { _id: 'record', email: nutrition.customer_email, matterCustomerId: 'fixture', selectedMeals: [...saved], skippedDays: [] };
+  t.mock.method(WeeklyMenu, 'findById', () => query({ meals: [],
+    snackOptionsByDate: { [date]: { first: [{ name: 'Nut bite' }], second: [{ name: 'Safe bite' }] } } }));
+  t.mock.method(MenuItem, 'find', filter => query(filter.mealType === 'snack'
+    ? [{ mealName: 'Nut bite', cycleMeal: { components: [{ type: 'Snack', exclusions: ['All Nuts'] }] } }] : []));
+  t.mock.method(Record, 'find', () => query([record]));
+  t.mock.method(Record, 'findOne', () => query(record));
+  t.mock.method(Snack, 'findOne', () => query({ presetsByName: { 'safe bite': { C: 15, P: 10, F: 6 } } }));
+  t.mock.method(Record, 'findOneAndUpdate', async (_, update) => {
+    record.selectedMeals.push(...update.$push.selectedMeals.$each);
+    return record;
+  });
+  const assign = () => runAssignMatterCoreMeals('menu', date, [{ email: record.email }],
+    { matterInputs: [nutrition], snackOnly: true, includeBreakfast: true });
+  const result = await assign();
+  assert.equal(result.data.assignedSnacks, 1);
+  assert.equal(result.data.skippedSnackNoOption, 0);
+  assert.deepEqual(record.selectedMeals.slice(0, saved.length), saved);
+  assert.equal(record.selectedMeals.at(-1).mealName, 'Safe bite');
+  assert.equal(record.selectedMeals.at(-1).coreDeliveryFoodDay, 2);
+  assert.equal((await assign()).data.assignedSnacks, 0);
+});
+
+for (const changesPlan of [false, true]) test(`the snack-only route doubles Core snacks and follows updated entitlements (plan change: ${changesPlan})`, async t => {
+  const date = '2026-11-18';
+  t.mock.timers.enable({ apis: ['Date'], now: new Date(`${date}T08:00:00Z`) });
+  const query = value => ({ select() { return this; }, lean: async () => value });
+  const nutrition = { customer_id: 'fixture', customer_email: 'fixture@example.invalid', subscription_id: 'sub', plan_name: 'Matter Core',
+    meal_frequency: null, breakfast_included: null, snacks_per_day: 1, exclusions: [], active_delivery_dates: [date], double_delivery_dates: [date] };
+  const saved = [{ date, mealType: 'main', mealName: 'Saved main' }, { date, mealType: 'breakfast', mealName: 'Saved eggs' }];
+  const record = { _id: 'record', email: nutrition.customer_email, selectedMeals: [...saved], skippedDays: [] };
+  t.mock.method(WeeklyMenu, 'findById', () => query({ meals: [],
+    snackOptionsByDate: { [date]: { second: [{ name: 'Safe bite', C: 15, P: 10, F: 6 }] } } }));
+  t.mock.method(MenuItem, 'find', filter => {
+    assert.equal(filter.mealType, 'snack');
+    return query([]);
+  });
+  t.mock.method(Record, 'find', () => Object.assign(Promise.resolve([record]), { select: () => query([record]) }));
+  t.mock.method(Record, 'findOne', () => query(record));
+  t.mock.method(Snack, 'findOne', () => query({ presetsByName: { 'safe bite': { C: 15, P: 10, F: 6 } } }));
+  t.mock.method(Record, 'findOneAndUpdate', async (_, update) => {
+    record.selectedMeals.push(...update.$push.selectedMeals.$each);
+    return record;
+  });
+  const assign = () => runAssignSnacks('menu', { date }, { matterInputs: [nutrition] });
+  assert.equal((await assign()).data.assigned, 2);
+  assert.deepEqual(record.selectedMeals.slice(0, 2), saved);
+  assert.deepEqual(record.selectedMeals.slice(2).map(meal => [meal.mealName, meal.coreDeliveryFoodDay]),
+    [['Safe bite', 1], ['Safe bite', 2]]);
+  assert.equal((await assign()).data.assigned, 0);
+  t.mock.method(Record, 'updateOne', async (filter, update) => {
+    assert.equal(filter.email, record.email);
+    record.selectedMeals = update.$set.selectedMeals;
+    return { modifiedCount: 1 };
+  });
+  if (changesPlan) {
+    nutrition.plan_name = 'Custom';
+    nutrition.snacks_per_day = 0;
+  } else nutrition.double_delivery_dates = [];
+  assert.equal((await assign()).data.assigned, 0);
+  assert.equal(record.selectedMeals.length, changesPlan ? 2 : 3);
+  assert.deepEqual(record.selectedMeals.slice(0, 2), saved);
 });
 
 test('Core retry infers an unnumbered same-name snack from the eligible second pool', async t => {
