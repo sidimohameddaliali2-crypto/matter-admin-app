@@ -1,6 +1,9 @@
-// Core alternates first/second pools. A failed first slot must not make a
-// saved second-slot snack count as first on the next preparation attempt.
-export function missingCoreSnackSlots(meals, count, eligiblePools, originalPools = eligiblePools) {
+// Restart the first/second pool rotation for each food day in a delivery.
+export const coreSnackPoolForSlot = (slot, snacksPerDay) => (slot % snacksPerDay) % 2 === 0 ? 'first' : 'second';
+
+// A failed first slot must not make a saved second-slot snack count as first
+// on the next preparation attempt.
+export function missingCoreSnackSlots(meals, count, eligiblePools, originalPools = eligiblePools, snacksPerDay = count) {
   const occupied = new Set();
   const slots = Array.from({ length: Math.max(0, Math.floor(count)) }, (_, slot) => slot);
   const name = value => String(value || '').trim().toLowerCase();
@@ -30,7 +33,7 @@ export function missingCoreSnackSlots(meals, count, eligiblePools, originalPools
       }
     }
     for (let portion = 0; portion < portions(meal); portion++) {
-      const preferred = slots.find(slot => !occupied.has(slot) && (slot % 2 === 0 ? first : second));
+      const preferred = slots.find(slot => !occupied.has(slot) && (coreSnackPoolForSlot(slot, snacksPerDay) === 'first' ? first : second));
       const slot = preferred ?? slots.find(slot => !occupied.has(slot));
       if (slot !== undefined) occupied.add(slot);
     }

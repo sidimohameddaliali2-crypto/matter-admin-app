@@ -1,4 +1,4 @@
-import { loadKitchenSnapshot } from './kitchenSnapshot';
+import { calculateKitchenSnapshot, loadKitchenSnapshot } from './kitchenSnapshot';
 import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
 
 const day = '2026-10-22';
@@ -13,6 +13,36 @@ const prepared = () => ({
     breakfastIncluded: false, dietaryRestrictions: [], deliveryAddressStatus: 'resolved', deliveryAddress: { id: 'place' },
     selectedMeals: [{ date: day, mealType: 'main', mealName: 'Approved choice', quantity: 1 }],
   }], breakfastPreset: {}, snackPreset: {},
+});
+
+test('a range paper uses each date’s Core calendar across a subscription renewal', () => {
+  const before = '2026-11-25', after = '2026-11-27';
+  const core = { customer_id: '42', plan_name: 'Matter Core', meal_frequency: 1, breakfast_included: true, snacks_per_day: 1 };
+  const rosters = new Map([
+    [before, [{ ...core, subscription_id: 'outgoing', active_delivery_dates: [before], double_delivery_dates: [before] }]],
+    [after, [{ ...core, subscription_id: 'renewal', active_delivery_dates: [after], double_delivery_dates: [] }]],
+  ]);
+  const selectedMeals = [[before, 2], [after, 1]].flatMap(([date, quantity]) => [
+    { date, quantity, mealType: 'main', mealName: 'Approved choice' },
+    { date, quantity, mealType: 'breakfast', mealName: 'Eggs', isAutoAssigned: true, coreDeliveryFoodDay: quantity },
+    { date, quantity, mealType: 'snack', mealName: 'Bite', isAutoAssigned: true, coreDeliveryFoodDay: quantity },
+  ]);
+  const entry = { ...prepared().selections[0], planName: 'Matter Core', deliveryDates: [after], doubleDeliveryDates: [],
+    targetMacros: { C: 200, P: 200, F: null }, selectedMeals };
+  const kitchenInputsByDate = new Map([
+    [before, [{ subscription_id: 'outgoing', macros: { carbohydrates: 100, protein: 100 } }]],
+    [after, [{ subscription_id: 'renewal', macros: { carbohydrates: 200, protein: 200 } }]],
+  ]);
+  const input = { selections: [entry], rosters, dayKeys: [before, after], menuId: 'menu',
+    breakfastPreset: { presetsByName: { eggs: { C: 12, P: 20, F: 8 } } },
+    snackPreset: { presetsByName: { bite: { C: 15, P: 10, F: 6 } } } };
+  expect(() => calculateKitchenSnapshot(input)).toThrow('could not be verified');
+  const snapshot = calculateKitchenSnapshot({ ...input, kitchenInputsByDate });
+  expect(snapshot.entries[0].selectedMeals.map(meal => meal.mealType).sort())
+    .toEqual(['breakfast', 'breakfast', 'breakfast', 'main', 'main', 'main', 'snack', 'snack', 'snack']);
+  expect(snapshot.entries[0].selectedMeals.filter(meal => meal.mealType === 'main').map(meal => meal.proteinWeight))
+    .toEqual([100, 100, 200]);
+  expect(() => assertKitchenExportReady(snapshot.entries)).not.toThrow();
 });
 
 test('immediate download uses the exact verified version and permanent Matter customer identity', async () => {

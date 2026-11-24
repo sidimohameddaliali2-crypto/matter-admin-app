@@ -15,29 +15,54 @@ export const hasKitchenDeliveryOnDate = (entry, roster, date) => {
   return roster.some((sub) => matchesMatterSubscription(entry, sub));
 };
 
-export const requiredKitchenMeals = (sub, entry, date) => {
-  const core = String(sub.plan_name || '').trim().toLowerCase() === 'matter core';
-  return Math.max(1, Number(sub.meal_frequency) || 1) * (core && isMatterCoreDoubleDay(date, entry?.deliveryDates || sub.active_delivery_dates, entry?.doubleDeliveryDates ?? sub.double_delivery_dates) ? 2 : 1);
+const isCorePlan = sub => String(sub.plan_name || '').trim().toLowerCase() === 'matter core';
+const kitchenCoreDoubleDelivery = (sub, entry, date) => {
+  // A paper can span a renewal. Use the subscription verified for this date
+  // when it supplies a calendar, including its legacy scheduling fallback.
+  if (!isCorePlan(sub)) return false;
+  return Array.isArray(sub.active_delivery_dates)
+    ? isMatterCoreDoubleDay(date, sub.active_delivery_dates, sub.double_delivery_dates)
+    : isMatterCoreDoubleDay(date, entry?.deliveryDates, sub.double_delivery_dates ?? entry?.doubleDeliveryDates);
+};
+
+export const kitchenPortionCoverage = (sub, entry, date, meals) => {
+  const core = isCorePlan(sub);
+  const doubleDelivery = kitchenCoreDoubleDelivery(sub, entry, date);
+  const multiplier = doubleDelivery ? 2 : 1;
+  const count = predicate => meals.filter(predicate)
+    .reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
+  return {
+    core, doubleDelivery,
+    mains: count(meal => core ? meal.mealType === 'main' : meal.mealType !== 'snack'),
+    snacks: count(meal => meal.mealType === 'snack'),
+    breakfasts: count(meal => meal.mealType === 'breakfast'),
+    requiredMains: Math.max(1, Number(sub.meal_frequency) || 1) * multiplier,
+    requiredSnacks: (Number(sub.snacks_per_day) || 0) * multiplier,
+    requiredBreakfasts: core && sub.breakfast_included === true ? multiplier : 0,
+  };
 };
 
 export const assertKitchenRosterCovered = (selections, roster, date) => {
   for (const sub of roster) {
     const entry = selections.find((candidate) => matchesMatterSubscription(candidate, sub));
     const meals = (entry?.selectedMeals || []).filter((meal) => getDateKey(meal.date) === date);
-    const core = String(sub.plan_name || '').trim().toLowerCase() === 'matter core';
-    const portions = meals.filter((meal) => core ? meal.mealType === 'main' : meal.mealType !== 'snack')
-      .reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
-    const required = requiredKitchenMeals(sub, entry, date);
-    const snackPortions = meals.filter(meal => meal.mealType === 'snack').reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
+    const { doubleDelivery, mains, snacks, breakfasts, requiredMains, requiredSnacks, requiredBreakfasts } = kitchenPortionCoverage(sub, entry, date, meals);
     if ((entry?.kitchenAutoHolds || []).some(hold => hold.date === date)
-      && (portions < required || (sub.snacks_per_day != null && snackPortions < Number(sub.snacks_per_day))
-        || (core && sub.breakfast_included === true && !meals.some(meal => meal.mealType === 'breakfast')))) {
+      && (mains < requiredMains || snacks < requiredSnacks || breakfasts < requiredBreakfasts)) {
       throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || entry?.customerName || sub.email || sub.customer_id}. Automatic assignment is paused after a staff deletion. Add the missing portions before cutoff or choose Restore automatic assignment.`);
     }
-    if (sub.snacks_per_day != null && snackPortions < Number(sub.snacks_per_day)) throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || sub.email || sub.customer_id} needs ${sub.snacks_per_day} snack(s), but has ${snackPortions}.`);
-    if (core && sub.breakfast_included === true && !meals.some(meal => meal.mealType === 'breakfast')) throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || sub.email || sub.customer_id} is missing the included breakfast.`);
-    if (!entry || portions < required) {
-      throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || entry?.customerName || sub.email || sub.customer_id} needs ${required} meal(s), but has ${portions}. Refresh preparation before exporting.`);
+    if (snacks < requiredSnacks) throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || sub.email || sub.customer_id} needs ${requiredSnacks} snack(s), but has ${snacks}.`);
+    if (breakfasts < requiredBreakfasts) throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || sub.email || sub.customer_id} needs ${requiredBreakfasts} breakfast(s), but has ${breakfasts}.`);
+    const reviewSurplus = (kind, actual, maximum) => {
+      if (maximum !== null && actual > maximum
+        && meals.some(meal => meal.mealType === kind && meal.isAutoAssigned === true && meal.coreDeliveryFoodDay)) {
+        throw new Error(`Kitchen export blocked for ${date}. ${sub.name || sub.email || sub.customer_id} has ${actual} ${kind} portion(s), with ${maximum} due. Review the previously assigned Core portions and confirm the Matter schedule.`);
+      }
+    };
+    reviewSurplus('snack', snacks, sub.snacks_per_day == null ? null : requiredSnacks);
+    reviewSurplus('breakfast', breakfasts, typeof sub.breakfast_included === 'boolean' ? Number(sub.breakfast_included) * (doubleDelivery ? 2 : 1) : null);
+    if (!entry || mains < requiredMains) {
+      throw new Error(`Kitchen assignments are incomplete for ${date}: ${sub.name || entry?.customerName || sub.email || sub.customer_id} needs ${requiredMains} meal(s), but has ${mains}. Refresh preparation before exporting.`);
     }
   }
 };
@@ -83,6 +108,7 @@ export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => 
     productionScope: single && !single.cached && single.data?.rosterComplete === true
       ? { complete: true, date: dayKeys[0], roster: single.data.kitchenRoster } : null });
   const rosters = new Map();
+  const kitchenInputsByDate = new Map();
   for (const date of dayKeys) {
     const preparation = preparations.get(date);
     const source = preparation?.data;
@@ -91,18 +117,44 @@ export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => 
       : verifiedKitchenRoster((await api.get('/matter/subscriptions/delivery-on-date', { params: { date }, timeout: 180000 })).data);
     assertKitchenRosterCovered(selections, roster, date);
     rosters.set(date, roster);
+    if (!preparation?.cached && Array.isArray(source?.kitchenInputs)) kitchenInputsByDate.set(date, source.kitchenInputs);
   }
   if (!isCurrent()) throw new Error('Selection changed during preparation.');
-  return calculateKitchenSnapshot({ selections, rosters, dayKeys, menuId, breakfastPreset, snackPreset, transformSelection });
+  return calculateKitchenSnapshot({ selections, rosters, kitchenInputsByDate, dayKeys, menuId, breakfastPreset, snackPreset, transformSelection });
 };
 
-export const calculateKitchenSnapshot = ({ selections, rosters, dayKeys, menuId, breakfastPreset, snackPreset, transformSelection = (entry) => entry, checkedAt }) => {
+export const calculateKitchenSnapshot = ({ selections, rosters, kitchenInputsByDate = new Map(), dayKeys, menuId, breakfastPreset, snackPreset, transformSelection = (entry) => entry, checkedAt }) => {
   for (const date of dayKeys) assertKitchenRosterCovered(selections, rosters.get(date) || [], date);
+  const inputsBySubscriptionByDate = new Map([...kitchenInputsByDate].map(([date, inputs]) =>
+    [date, new Map(inputs.filter(input => input?.subscription_id != null).map(input => [String(input.subscription_id), input]))]));
   const entries = selections.map(transformSelection).map((entry) => {
-    const deliveryDates = dayKeys.filter((date) => hasKitchenDeliveryOnDate(entry, rosters.get(date), date));
+    const coreInputsByDate = {};
+    const deliveryDates = dayKeys.filter((date) => {
+      const roster = rosters.get(date) || [];
+      if (entry.partner) return hasKitchenDeliveryOnDate(entry, roster, date);
+      const sub = roster.find(candidate => matchesMatterSubscription(entry, candidate));
+      if (sub && isCorePlan(sub)) {
+        const input = inputsBySubscriptionByDate.get(date)?.get(String(sub.subscription_id));
+        const macros = input?.macros;
+        const hasWeights = [macros?.carbohydrates, macros?.protein]
+          .every(weight => weight != null && String(weight).trim() !== '' && Number.isFinite(Number(weight)) && Number(weight) >= 0);
+        const differentSubscription = dayKeys.length > 1 && sub.subscription_id != null && entry.matterSourceSubscriptionId != null
+          && String(sub.subscription_id) !== String(entry.matterSourceSubscriptionId);
+        if (!hasWeights && differentSubscription) {
+          throw new Error(`Matter Core food weights for ${sub.name || entry.email} on ${date} could not be verified. Refresh preparation for that date.`);
+        }
+        coreInputsByDate[date] = {
+          doubleDelivery: kitchenCoreDoubleDelivery(sub, entry, date),
+          mealsPerDay: Number(sub.meal_frequency) || undefined,
+          ...(hasWeights && { carbs: Number(macros.carbohydrates), protein: Number(macros.protein) }),
+        };
+      }
+      return !!sub;
+    });
     // Calculate the entire selection first: the approved fallback delivery-number
     // adjustment depends on its full date order, not the range being printed.
-    const calculated = calculateKitchenListEntry({ customer: { ...entry, customerName: getCustomerName(entry) }, selectedMeals: entry.selectedMeals || [], breakfastPreset, snackPreset });
+    const calculated = calculateKitchenListEntry({ customer: { ...entry, customerName: getCustomerName(entry), coreInputsByDate },
+      selectedMeals: entry.selectedMeals || [], breakfastPreset, snackPreset });
     const selectedMeals = calculated.selectedMeals.filter((meal) => deliveryDates.includes(getDateKey(meal.date)));
     return {
       ...calculated, selectedMeals, deliveryDates, dayNotes: entry.dayNotes || [],
