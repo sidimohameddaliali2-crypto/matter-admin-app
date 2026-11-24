@@ -245,7 +245,7 @@ test('deadline locking still prevents cancellation when reading orders no longer
   assert.equal(f.writes(), 0);
 });
 
-test('legacy auto-locked orders can be invoiced, and a failed snapshot write can be retried', async t => {
+for (const failureStage of ['partner', 'matter']) test(`interrupted ${failureStage} line snapshots retry using one billing identity`, async t => {
   const f = fixtures(t, 'locked');
   Line.find.mock.mockImplementation(() => query([doc({ menuItem: f.item, quantity: 5 })]));
   f.order.space.businessName = 'Partner Cafe';
@@ -263,7 +263,7 @@ test('legacy auto-locked orders can be invoiced, and a failed snapshot write can
   t.mock.method(InvoiceLine, 'deleteMany', async filter => snapshotIds.delete(filter.invoice));
   let fail = true;
   t.mock.method(InvoiceLine, 'insertMany', async snapshots => {
-    if (snapshots[0].invoice === 'matter' && fail) { fail = false; throw new Error('Fixture: interrupted statement write'); }
+    if (snapshots[0].invoice === failureStage && fail) { fail = false; throw new Error('Fixture: interrupted statement write'); }
     snapshotIds.add(snapshots[0].invoice);
   });
   const first = await call(adminRouter, 'patch', '/orders/:orderId/lock');
@@ -437,4 +437,60 @@ test('submitted orders retain delivery address and recipient snapshots', async t
   const response=await call(partnerRouter,'post','/orders/:id/submit',{partner:{_id:SPACE,minimumOrder:0,deliveryAddress:'Unit 2, Dubai',deliveryRecipientPhone:'+971501234567'}});
   assert.equal(response.code,200);
   assert.equal(f.order.deliveryAddress,'Unit 2, Dubai');assert.equal(f.order.deliveryRecipientPhone,'+971501234567');
+});
+
+test('a statement creation failure preserves the partner invoice billing name on retry', async t => {
+  const f=fixtures(t,'locked');
+  f.order.space.businessName='Cafe';f.order.space.invoiceBusinessName='Company A';
+  Line.find.mock.mockImplementation(()=>query([doc({menuItem:f.item,quantity:5})]));
+  const invoices=[];const snapshotIds=new Set();let fail=true;
+  Invoice.find.mock.mockImplementation(()=>query(invoices));
+  InvoiceLine.distinct.mock.mockImplementation(async()=>[...snapshotIds]);
+  t.mock.method(Invoice,'findOne',async filter=>invoices.find(i=>i.type===filter.type));
+  t.mock.method(Invoice,'create',async fields=>{
+    if(fields.type==='matter'&&fail){fail=false;throw new Error('Fixture: statement creation interrupted');}
+    const invoice=doc({...fields,_id:fields.type,async save(){}});invoices.push(invoice);return invoice;
+  });
+  t.mock.method(InvoiceLine,'deleteMany',async filter=>snapshotIds.delete(filter.invoice));
+  t.mock.method(InvoiceLine,'insertMany',async rows=>snapshotIds.add(rows[0].invoice));
+  assert.equal((await call(adminRouter,'patch','/orders/:orderId/lock')).code,500);
+  assert.equal(invoices.length,1);assert.equal(invoices[0].billedToName,'Company A');
+  f.order.space.invoiceBusinessName='Company B';
+  assert.equal((await call(adminRouter,'patch','/orders/:orderId/lock')).code,200);
+  assert.deepEqual(invoices.map(i=>i.billedToName),['Company A','Company A']);
+});
+
+for (const existingType of ['partner','matter']) test(`a saved ${existingType} invoice supplies the billing name for the whole pair`, async t => {
+  const f=fixtures(t,'locked');f.order.space.businessName='Cafe';f.order.space.invoiceBusinessName='New Company';
+  Line.find.mock.mockImplementation(()=>query([doc({menuItem:f.item,quantity:5})]));
+  const invoices=[doc({_id:existingType,type:existingType,billedToName:'Original Company',async save(){}})];
+  Invoice.find.mock.mockImplementation(()=>query(invoices));
+  t.mock.method(Invoice,'findOne',async filter=>invoices.find(i=>i.type===filter.type));
+  t.mock.method(Invoice,'create',async fields=>{const row=doc({...fields,_id:fields.type,async save(){}});invoices.push(row);return row;});
+  t.mock.method(InvoiceLine,'deleteMany',async()=>{});t.mock.method(InvoiceLine,'insertMany',async()=>{});
+  const response=await call(adminRouter,'patch','/orders/:orderId/lock');
+  assert.equal(response.code,200);assert.deepEqual(invoices.map(i=>i.billedToName),['Original Company','Original Company']);
+});
+
+test('partially generated legacy invoices keep the previous partner-name fallback', async t => {
+  const f=fixtures(t,'locked');f.order.space.businessName='Cafe';f.order.space.invoiceBusinessName='New Company';
+  Line.find.mock.mockImplementation(()=>query([doc({menuItem:f.item,quantity:5})]));
+  const invoices=[doc({_id:'partner',type:'partner',async save(){}})];
+  Invoice.find.mock.mockImplementation(()=>query(invoices));
+  t.mock.method(Invoice,'findOne',async filter=>invoices.find(i=>i.type===filter.type));
+  t.mock.method(Invoice,'create',async fields=>{const row=doc({...fields,_id:fields.type,async save(){}});invoices.push(row);return row;});
+  t.mock.method(InvoiceLine,'deleteMany',async()=>{});t.mock.method(InvoiceLine,'insertMany',async()=>{});
+  assert.equal((await call(adminRouter,'patch','/orders/:orderId/lock')).code,200);
+  assert.deepEqual(invoices.map(i=>i.billedToName),['Cafe','Cafe']);
+});
+
+test('conflicting saved invoice identities stop before rewriting either snapshot', async t => {
+  const f=fixtures(t,'locked');
+  Line.find.mock.mockImplementation(()=>query([doc({menuItem:f.item,quantity:5})]));
+  const invoices=[{_id:'partner',type:'partner',billedToName:'A'},{_id:'matter',type:'matter',billedToName:'B'}];
+  Invoice.find.mock.mockImplementation(()=>query(invoices));
+  t.mock.method(Invoice,'findOne',async filter=>invoices.find(i=>i.type===filter.type));
+  t.mock.method(InvoiceLine,'deleteMany',()=>assert.fail('Do not rewrite conflicting invoices'));
+  const response=await call(adminRouter,'patch','/orders/:orderId/lock');
+  assert.equal(response.code,409);assert.equal(f.writes(),0);
 });

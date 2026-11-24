@@ -8,7 +8,8 @@ jest.mock('react-redux', () => ({
     partnerAuth: {
       partner: {
         _id: 'partner',
-        businessName: 'Fixture'
+        businessName: 'Fixture',
+        invoiceBusinessName: 'Current Company LLC'
       }
     }
   }),

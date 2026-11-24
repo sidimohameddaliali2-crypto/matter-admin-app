@@ -261,9 +261,16 @@ router.patch('/orders/:orderId/lock', admin, async (req, res) => {
       return { menuItem: l.menuItem._id, itemName: l.menuItem.name, quantity: l.quantity, unitPrice, unitCost, lineRevenue, lineCost, lineMargin: lineRevenue - lineCost };
     });
 
-    // Partner invoice (no cost info)
-    const billedToName = partnerInvoiceName(order.space);
+    // Both documents describe one order. Recover its existing identity before
+    // creating either document, including retries after a partial failure.
     let partnerInv = await Invoice.findOne({ order: order._id, type: 'partner' });
+    let matterInv = await Invoice.findOne({ order: order._id, type: 'matter' });
+    if (partnerInv?.billedToName && matterInv?.billedToName && partnerInv.billedToName !== matterInv.billedToName) {
+      return res.status(409).json({success: false, message: 'Invoice billing names disagree. Review the existing invoices before retrying.'});
+    }
+    const billedToName = partnerInv?.billedToName || matterInv?.billedToName
+      || (partnerInv || matterInv ? order.space.businessName : partnerInvoiceName(order.space));
+    // Partner invoice (no cost info)
     if (partnerInv) {
       await InvoiceLine.deleteMany({ invoice: partnerInv._id });
       partnerInv.billedToName ||= billedToName;
@@ -277,7 +284,6 @@ router.patch('/orders/:orderId/lock', admin, async (req, res) => {
     await InvoiceLine.insertMany(snapshots.map(s => ({ invoice: partnerInv._id, menuItem: s.menuItem, itemName: s.itemName, quantity: s.quantity, unitPrice: s.unitPrice, unitCost: 0, lineRevenue: s.lineRevenue, lineCost: 0, lineMargin: 0 })));
 
     // Matter statement (with COGS + margin)
-    let matterInv = await Invoice.findOne({ order: order._id, type: 'matter' });
     if (matterInv) {
       await InvoiceLine.deleteMany({ invoice: matterInv._id });
       matterInv.billedToName ||= billedToName;

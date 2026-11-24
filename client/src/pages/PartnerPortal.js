@@ -338,7 +338,7 @@ const PartnerPortal = () => {
       doc.text(`Invoice no: ${inv.invoiceNumber}`, right, 56, { align: 'right' });
       doc.text(`Order: PO-${String(o._id).slice(-4).toUpperCase()}`, right, 72, { align: 'right' });
       doc.text(`Delivery date: ${fmtDay(toISO(new Date(o.deliveryDate)))}`, right, 88, { align: 'right' });
-      doc.text(`Billed to: ${inv.billedToName || partner?.invoiceBusinessName || partner?.businessName || ''}`, 40, 120);
+      doc.text(`Billed to: ${inv.billedToName || partner?.businessName || ''}`, 40, 120);
 
       let y = 160;
       doc.setFont('helvetica', 'bold');

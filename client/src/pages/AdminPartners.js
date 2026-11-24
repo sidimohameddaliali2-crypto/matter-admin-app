@@ -625,7 +625,7 @@ const AdminPartners = () => {
     doc.setTextColor(11, 26, 63); doc.setFontSize(12); doc.setFont('helvetica', 'bold');
     doc.text(`${isMatter ? 'Statement' : 'Invoice'}: ${inv.invoiceNumber}`, m, y); y += 6;
     doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
-    doc.text(`Partner: ${inv.billedToName || inv.space?.invoiceBusinessName || inv.space?.businessName || ''}`, m, y); y += 5;
+    doc.text(`Partner: ${inv.billedToName || inv.space?.businessName || ''}`, m, y); y += 5;
     doc.text(`Delivery Date: ${fmtDate(inv.order?.deliveryDate)}`, m, y); y += 8;
     const lines = invoiceLines[inv._id] || [];
     const head = isMatter
@@ -1176,7 +1176,7 @@ const AdminPartners = () => {
                       <div className="px-5 py-3.5 flex items-center gap-3">
                         <div className="flex-1 min-w-0">
                           <div className="font-bold text-[14px]">{inv.invoiceNumber}</div>
-                          <div className="text-xs text-[#6b7894] mt-0.5">{inv.billedToName || inv.space?.invoiceBusinessName || inv.space?.businessName} · Delivery {fmtDate(inv.order?.deliveryDate)}</div>
+                          <div className="text-xs text-[#6b7894] mt-0.5">{inv.billedToName || inv.space?.businessName} · Delivery {fmtDate(inv.order?.deliveryDate)}</div>
                         </div>
                         <div className="flex items-center gap-3 flex-none">
                           <div className="text-right hidden sm:block">
