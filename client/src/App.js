@@ -594,6 +594,7 @@ function App() {
             <Route path="/menu-select/:token" element={
               <MenuSelectPage />
             } />
+            <Route path="/m/:token" element={<MenuSelectPage />} />
 
             {/* Standalone design preview (demo data only). The real redesigned
                 flow is served from /menu-select/:token itself, for every menu. */}
