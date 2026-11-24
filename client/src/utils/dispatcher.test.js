@@ -1,4 +1,17 @@
-import { dayRange, shiftDay, emptyFilters, filterDispatchDeliveries, loadDispatchDay, proofImageUrl } from './dispatcher';
+import { dispatchDateWindow, dayRange, shiftDay, emptyFilters, filterDispatchDeliveries, loadDispatchDay, proofImageUrl } from './dispatcher';
+
+test.each([
+  ['2026-11-23T20:00:00.000Z', '2026-11-24', '2026-11-24T05:00:00.000Z'],
+  ['2026-11-24T04:59:59.999Z', '2026-11-24', '2026-11-24T05:00:00.000Z'],
+  ['2026-11-24T05:00:00.000Z', '2026-11-25', '2026-11-24T20:00:00.000Z'],
+  ['2026-11-24T19:59:59.999Z', '2026-11-25', '2026-11-24T20:00:00.000Z']
+])('the dispatcher date and next Dubai cutoff at %s', (instant, date, nextBoundary) => {
+  expect(dispatchDateWindow(new Date(instant))).toEqual({
+    today: '2026-11-24',
+    defaultDate: date,
+    nextBoundary: new Date(nextBoundary)
+  });
+});
 test('Dubai day bounds are fixed and exclude next midnight', () => {
   expect(dayRange('2026-11-23')).toEqual({
     dateFrom: '2026-11-22T20:00:00.000Z',

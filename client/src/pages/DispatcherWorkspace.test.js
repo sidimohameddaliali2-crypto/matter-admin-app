@@ -2,7 +2,7 @@ import React, { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import DispatcherWorkspace from './DispatcherWorkspace';
 import api from '../utils/api';
-import { businessToday, shiftDay, dayRange } from '../utils/dispatcher';
+import { dispatchDateWindow, dayRange } from '../utils/dispatcher';
 jest.mock('../utils/api', () => ({
   __esModule: true,
   default: {
@@ -46,7 +46,7 @@ jest.mock('../components/SimpleQrScanner', () => ({
 }])}>Scan test bag</button>);
 global.IS_REACT_ACT_ENVIRONMENT = true;
 let container, root, deliveries, drivers;
-const nextDay = () => shiftDay(businessToday(), 1);
+const defaultDate = () => dispatchDateWindow().defaultDate;
 const buttons = () => [...container.querySelectorAll('button')];
 const button = text => buttons().find(b => b.textContent.trim() === text || b.getAttribute('aria-label') === text);
 const click = async text => {
@@ -79,7 +79,7 @@ beforeEach(async () => {
     zone: 'Marina',
     status: 'pending',
     type: 'Delivery',
-    scheduledTime: nextDay() + 'T03:00:00Z',
+    scheduledTime: defaultDate() + 'T03:00:00Z',
     gpsLocation: {
       lat: 25.08,
       lng: 55.14
@@ -97,7 +97,7 @@ beforeEach(async () => {
       name: 'Ravi'
     },
     type: 'Delivery',
-    scheduledTime: nextDay() + 'T04:00:00Z',
+    scheduledTime: defaultDate() + 'T04:00:00Z',
     timeline: []
   }];
   drivers = Array.from({
@@ -214,8 +214,9 @@ afterEach(async () => {
   container.remove();
   jest.restoreAllMocks();
 });
-test('single filter button replaces print, routing and grid controls', () => {
-  expect(container.querySelectorAll('.dp-filter-trigger')).toHaveLength(1);
+test('advanced and driver filters are available without print, routing or grid controls', () => {
+  expect(container.querySelectorAll('.dp-filter-trigger:not(.dp-driver-filter)')).toHaveLength(1);
+  expect(button('Filter by driver')).toBeDefined();
   expect(buttons().map(b => b.textContent).join(' ')).not.toMatch(/Grid view|Map assignment|Driver routes|Print/);
   expect(api.post).not.toHaveBeenCalled();
 });
@@ -243,6 +244,74 @@ test('date choice loads the Dubai day and clears prior selection', async () => {
     params: expect.objectContaining(dayRange('2026-12-21'))
   }));
   expect(container.querySelector('.dp-selection')).toBeNull();
+});
+test('an open board switches to tomorrow at 9 a.m. Dubai time and clears checked rows', async () => {
+  await act(async () => root.render(null));
+  jest.useFakeTimers();
+  try {
+    jest.setSystemTime(new Date('2026-11-24T04:59:59Z'));
+    deliveries = [
+      { ...deliveries[0], scheduledTime: '2026-11-24T03:00:00Z' },
+      { ...deliveries[1], scheduledTime: '2026-11-25T04:00:00Z' }
+    ];
+    await act(async () => root.render(<DispatcherWorkspace />));
+    expect(container.querySelector('.dp-date').textContent).toContain('Today');
+    expect(container.querySelector('.dp-delivery-card').textContent).toContain('Pending customer');
+    await select('Pending customer');
+    await act(async () => jest.advanceTimersByTime(1000));
+    expect(api.get).toHaveBeenLastCalledWith('/deliveries', expect.objectContaining({
+      params: expect.objectContaining(dayRange('2026-11-25'))
+    }));
+    expect(container.querySelector('.dp-date').textContent).toContain('Tomorrow');
+    expect(container.querySelector('.dp-delivery-card').textContent).toContain('Assigned customer');
+    expect(container.querySelector('.dp-selection')).toBeNull();
+  } finally {
+    await act(async () => root.render(null));
+    jest.useRealTimers();
+  }
+});
+test('choosing Today before the Dubai cutoff keeps that date after 9 a.m.', async () => {
+  await act(async () => root.render(null));
+  jest.useFakeTimers();
+  try {
+    jest.setSystemTime(new Date('2026-11-24T04:59:59Z'));
+    deliveries[0].scheduledTime = '2026-11-24T03:00:00Z';
+    await act(async () => root.render(<DispatcherWorkspace />));
+    await act(async () => container.querySelector('.dp-date').click());
+    await click('Today');
+    await act(async () => jest.advanceTimersByTime(1000));
+    expect(container.querySelector('.dp-date').textContent).toContain('Today');
+    expect(container.querySelector('.dp-delivery-card').textContent).toContain('Pending customer');
+  } finally {
+    await act(async () => root.render(null));
+    jest.useRealTimers();
+  }
+});
+test('Dubai midnight refreshes an open new-customer list on the same dispatch date', async () => {
+  await act(async () => root.render(null));
+  jest.useFakeTimers();
+  try {
+    jest.setSystemTime(new Date('2026-11-24T19:59:59Z'));
+    const get = api.get.getMockImplementation();
+    const yesterday = { subscriptionId: 'yesterday', customerName: 'Yesterday customer' };
+    let upcoming = [yesterday];
+    api.get.mockImplementation((url, config) => url === '/dispatcher-location-reviews'
+      ? Promise.resolve({ data: { data: { count: upcoming.length, rows: upcoming, pages: upcoming.length } } })
+      : get(url, config));
+    await act(async () => root.render(<DispatcherWorkspace />));
+    await click('New customer, 1');
+    expect(container.querySelector('.dp-new-customer-list button').textContent).toContain(yesterday.customerName);
+    const deliveryCalls = api.get.mock.calls.filter(([url]) => url === '/deliveries').length;
+    upcoming = [];
+    await act(async () => jest.advanceTimersByTime(1000));
+    expect(container.querySelector('.dp-date').textContent).toContain('Today');
+    expect(container.querySelector('.dp-new-customer-list button')).toBeNull();
+    expect(button('New customer, 0')).toBeDefined();
+    expect(api.get.mock.calls.filter(([url]) => url === '/deliveries')).toHaveLength(deliveryCalls);
+  } finally {
+    await act(async () => root.render(null));
+    jest.useRealTimers();
+  }
 });
 test('bulk assignment posts selected real IDs after confirmation', async () => {
   await select('Pending customer');
@@ -300,7 +369,7 @@ test('new delivery submits entered fields and Dubai time', async () => {
     customerName: 'New customer',
     customerId: 'C900',
     address: 'Actual building',
-    scheduledTime: nextDay() + 'T03:00:00.000Z'
+    scheduledTime: defaultDate() + 'T03:00:00.000Z'
   }));
 });
 test('ordering saves the entire driver schedule and revision', async () => {
@@ -310,7 +379,7 @@ test('ordering saves the entire driver schedule and revision', async () => {
   await click('Apply order');
   expect(api.put).toHaveBeenCalledWith('/deliveries/delivery-order', {
     driverId: 'driver-2',
-    date: nextDay(),
+    date: defaultDate(),
     revision: 'current-revision',
     deliveryIds: ['delivery-2', 'delivery-1']
   });
@@ -551,4 +620,80 @@ test('unassigning a driver increases the unassigned zone count and select-all ex
  const original=api.patch.getMockImplementation();api.patch.mockImplementation(async(url,body)=>{if(url==='/deliveries/unassign-driver')deliveries=deliveries.map(d=>body.deliveryIds.includes(d._id)?{...d,driver:null,status:'pending'}:d);return original(url,body);});
  await select('Assigned customer');await click('Unassign');await click('Confirm unassign');await click('Unassigned');await act(async()=>container.querySelector('.dp-filter-trigger').click());expect(button('JVC').textContent).toContain('1 unassigned');await click('Close dialog');await click('Unassigned');
  deliveries=[...deliveries,{...deliveries[0],_id:'finished',status:'delivered',customerName:'Finished customer'}];await click('Refresh deliveries');await click('Select all deliveries');expect(container.querySelector('.dp-selection').textContent).toContain('2 selected');
+});
+
+test('quick driver filter shows only the selected driver and clears hidden bulk selections', async () => {
+  await select('Pending customer');
+  await click('Unassigned');
+  await click('Filter by driver');
+  const dialog = container.querySelector('[role="dialog"]');
+  expect(dialog.getAttribute('aria-label')).toBe('Filter by driver');
+  expect(dialog.querySelector('[aria-label="Search zones"]')).toBeNull();
+  expect(dialog.querySelector('[aria-label="Drivers options"]').querySelectorAll('button')).toHaveLength(7);
+  await fill(dialog.querySelector('[aria-label="Search drivers"]'), 'ravi');
+  await click('Ravi');
+  await click('Show deliveries');
+  expect(button('Filter by driver').textContent).toContain('Ravi');
+  expect(button('Unassigned').getAttribute('aria-pressed')).toBe('false');
+  expect(container.querySelector('.dp-selection')).toBeNull();
+  expect(container.querySelectorAll('.dp-delivery-card')).toHaveLength(1);
+  expect(container.querySelector('.dp-delivery-card').textContent).toContain('Assigned customer');
+  await click('Select all deliveries');
+  expect(container.querySelector('.dp-selection').textContent).toContain('1 selected');
+  expect(api.patch).not.toHaveBeenCalled();
+});
+
+test('quick and advanced driver filters stay in sync and clearing drivers preserves other filters', async () => {
+  const openAdvanced = () => act(async () => container.querySelector('.dp-board-filters .dp-filter-trigger:not(.dp-driver-filter)').click());
+  await openAdvanced();
+  await click('JVC');
+  await click('Ravi');
+  await click('Apply filters');
+  expect(button('Filter by driver').textContent).toContain('Ravi');
+  await click('Filter by driver');
+  expect(button('Ravi').getAttribute('aria-pressed')).toBe('true');
+  await click('Clear drivers');
+  await click('Show deliveries');
+  expect(button('Filter by driver').textContent).toContain('All drivers');
+  expect(container.querySelectorAll('.dp-delivery-card')).toHaveLength(1);
+  await openAdvanced();
+  expect(button('JVC').getAttribute('aria-pressed')).toBe('true');
+  expect(button('Ravi').getAttribute('aria-pressed')).toBe('false');
+});
+
+test('board actions align in one group and show saved addresses in both delivery layouts', () => {
+  const actions = container.querySelector('.dp-board-actions');
+  expect(actions.contains(button('Select all deliveries'))).toBe(true);
+  expect(actions.querySelector('.dp-new-customer-button')).not.toBeNull();
+  expect(container.querySelector('.dp-delivery-card .dp-card-address').textContent).toBe('Building One');
+  expect(container.querySelector('.dp-table-address').textContent).toBe('Building One');
+});
+
+test('successful assignment clears the active filters and keeps the same delivery date', async () => {
+  await fill(container.querySelector('[aria-label="Search deliveries"]'), 'Pending customer');
+  await click('Unassigned');
+  await act(async () => container.querySelector('.dp-filter-trigger').click());
+  await click('Marina');
+  await click('Apply filters');
+  const date = container.querySelector('.dp-date').textContent;
+  await select('Pending customer');
+  await click('Assign / reassign');
+  await pickFirst();
+  await click('Confirm assignment');
+  expect(container.querySelector('[aria-label="Search deliveries"]').value).toBe('');
+  expect(button('Unassigned').getAttribute('aria-pressed')).toBe('false');
+  expect(container.querySelector('.dp-filter-trigger').textContent).toContain('All');
+  expect(container.querySelector('.dp-date').textContent).toBe(date);
+  expect(container.querySelectorAll('.dp-delivery-card')).toHaveLength(2);
+});
+
+test('the zone filter grays out only zones with zero unassigned deliveries in Unassigned view', async () => {
+  await act(async () => container.querySelector('.dp-filter-trigger').click());
+  expect(button('JVC').classList.contains('dp-zone-empty')).toBe(false);
+  await click('Close dialog');
+  await click('Unassigned');
+  await act(async () => container.querySelector('.dp-filter-trigger').click());
+  expect(button('JVC').classList.contains('dp-zone-empty')).toBe(true);
+  expect(button('JVC').textContent).toContain('0 unassigned');
+  expect(button('Marina').classList.contains('dp-zone-empty')).toBe(false);
 });

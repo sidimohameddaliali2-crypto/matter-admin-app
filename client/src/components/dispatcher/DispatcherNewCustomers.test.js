@@ -48,6 +48,69 @@ test('completion on the final page clamps the customer list to a remaining valid
  try{await act(async()=>{handlers.get('delivery:statusUpdate')({status:'delivered'});jest.advanceTimersByTime(351);});expect(el.textContent).toContain('Page 1 / 1');expect(el.querySelectorAll('.dp-new-customer-list button')).toHaveLength(1);}finally{jest.useRealTimers();}
 });
 
+test('a failed completion refresh hides stale rows and retries the current page', async () => {
+  const handlers = new Map();
+  mockSocket = { on: jest.fn((name, handler) => handlers.set(name, handler)), off: jest.fn() };
+  await act(async () => root.render(<DispatcherNewCustomers />));
+  await click('New customer, 1');
+  expect(el.querySelector('.dp-new-customer-list button')).not.toBeNull();
+  api.get.mockRejectedValueOnce(new Error('Queue unavailable'));
+  jest.useFakeTimers();
+  try {
+    await act(async () => {
+      handlers.get('delivery:statusUpdate')({ status: 'delivered' });
+      jest.advanceTimersByTime(350);
+    });
+    expect(el.querySelector('.dp-new-customer-list button')).toBeNull();
+    expect(el.querySelector('[role="alert"]').textContent).toContain('Queue unavailable');
+    api.get.mockResolvedValueOnce({ data: { data: { count: 0, rows: [], pages: 0 } } });
+    await click('Retry list');
+    expect(el.querySelector('[role="alert"]')).toBeNull();
+    expect(button('New customer, 0')).toBeDefined();
+  } finally {
+    await act(async () => root.render(null));
+    jest.useRealTimers();
+  }
+});
+
+test('an ineligible customer from a cached page triggers a fresh list and count', async () => {
+  await click('New customer, 1');
+  api.get.mockRejectedValueOnce({ response: { status: 409 } });
+  api.get.mockResolvedValueOnce({ data: { data: { count: 0, rows: [], pages: 0 } } });
+  await act(async () => el.querySelector('.dp-new-customer-list button').click());
+  expect(el.textContent).toContain('This customer is no longer in the new-customer queue.');
+  expect(el.querySelector('.dp-new-customer-list button')).toBeNull();
+  expect(button('New customer, 0')).toBeDefined();
+  await click('Close dialog');
+  await click('New customer, 0');
+  expect(el.querySelector('.dp-new-customer-list button')).toBeNull();
+  expect(api.get.mock.calls.filter(([, config]) => config?.params?.details)).toHaveLength(2);
+});
+
+test('returning from customer details retains a failed list refresh and shows Retry', async () => {
+  const handlers = new Map();
+  mockSocket = { on: jest.fn((name, handler) => handlers.set(name, handler)), off: jest.fn() };
+  await act(async () => root.render(<DispatcherNewCustomers />));
+  await open();
+  api.get.mockRejectedValueOnce(new Error('Queue unavailable'));
+  jest.useFakeTimers();
+  try {
+    await act(async () => {
+      handlers.get('delivery:statusUpdate')({ status: 'delivered' });
+      jest.advanceTimersByTime(350);
+    });
+    await click('← Back to new customers');
+    expect(el.querySelector('[role="alert"]').textContent).toContain('Queue unavailable');
+    expect(el.textContent).not.toContain('Loading current customer locations');
+    api.get.mockResolvedValueOnce({ data: { data: { count: 0, rows: [], pages: 0 } } });
+    await click('Retry list');
+    expect(el.textContent).toContain('No new customers with an upcoming first delivery');
+  } finally {
+    await act(async () => root.render(null));
+    jest.useRealTimers();
+  }
+});
+
 test('an older badge request cannot restore a customer after a driver completion refresh',async()=>{
  await act(async()=>root.render(null));
  const handlers=new Map();mockSocket={on:jest.fn((name,handler)=>handlers.set(name,handler)),off:jest.fn()};
@@ -60,4 +123,58 @@ test('an older badge request cannot restore a customer after a driver completion
   expect(button('New customer, 0')).toBeDefined();
   await act(async()=>resolveOld({data:{data:{count:1}}}));expect(button('New customer, 0')).toBeDefined();
  }finally{jest.useRealTimers();}
+});
+
+test('reopening the new-customer list reuses its cached page while detail reviews are fetched fresh', async () => {
+  await open();
+  await click('Close dialog');
+  await click('New customer, 1');
+  expect(el.querySelector('.dp-new-customer-list button').textContent).toContain('Fixture tower, Marina');
+  expect(api.get.mock.calls.filter(([, config]) => config?.params?.details)).toHaveLength(1);
+  await act(async () => el.querySelector('.dp-new-customer-list button').click());
+  expect(api.get.mock.calls.filter(([url]) => url === '/dispatcher-location-reviews/7')).toHaveLength(2);
+});
+
+test('reopening after cache expiry refreshes the page', async () => {
+  const clock = jest.spyOn(Date, 'now');
+  const start = Date.now();
+  clock.mockReturnValue(start);
+  try {
+    await click('New customer, 1');
+    await click('Close dialog');
+    detail = { ...detail, location: 'Updated address' };
+    clock.mockReturnValue(start + 121000);
+    await click('New customer, 1');
+    expect(el.querySelector('.dp-new-customer-list button').textContent).toContain('Updated address');
+    expect(api.get.mock.calls.filter(([, config]) => config?.params?.details)).toHaveLength(2);
+  } finally {
+    clock.mockRestore();
+  }
+});
+
+test('a changed queue revision invalidates cached pages even when the customer count stays the same', async () => {
+  let reordered = false;
+  const other = { ...detail, subscriptionId: '8', customerName: 'Another customer' };
+  api.get.mockImplementation(async (_url, config) => {
+    const rows = reordered ? [other, detail] : [detail, other];
+    return { data: { data: { count: 1, rows: [rows[config.params.page - 1]], pages: 2, queueRevision: reordered ? 'second' : 'first' } } };
+  });
+  await click('New customer, 1');
+  expect(el.querySelector('.dp-new-customer-list button').textContent).toContain('Fixture customer');
+  reordered = true;
+  await click('Next');
+  expect(el.querySelector('.dp-new-customer-list button').textContent).toContain('Fixture customer');
+  await click('Previous');
+  expect(el.querySelector('.dp-new-customer-list button').textContent).toContain('Another customer');
+});
+
+test('customer location details label the actual building, apartment and floor', async () => {
+  detail.addressDetails = { building: 'Fixture Tower', unit: '804B', floor: 0, street: 'Harbour Street', area: 'Marina', emirate: 'Dubai' };
+  await open();
+  const fields = [...el.querySelectorAll('.dp-detail-grid > div')];
+  const valueFor = label => fields.find(field => field.querySelector('small').textContent === label)?.querySelector('strong').textContent;
+  expect(valueFor('Building name')).toBe('Fixture Tower');
+  expect(valueFor('Apartment / unit number')).toBe('804B');
+  expect(valueFor('Floor')).toBe('0');
+  expect(valueFor('Street')).toBe('Harbour Street');
 });
