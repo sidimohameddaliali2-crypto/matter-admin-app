@@ -8,6 +8,7 @@ import { planManagedMenu, saveManagedMenu } from './managedMenuSave.js';
 import router from '../routes/menus.js';
 import PartnerItem from '../models/PartnerMenuItem.js';
 import Partner from '../models/Partner.js';
+import { invalidateMenuShareCache } from './menuShareLinks.js';
 
 const startDate = '2026-10-26', endDate = '2026-11-01';
 const menuId = '507f1f77bcf86cd799439011', itemId = '507f1f77bcf86cd799439012';
@@ -175,6 +176,31 @@ test('tag-only saves update the existing item atomically without creating dishes
   assert.equal(store.items[0].usedForCorePlan, true);
   assert.equal(String(store.menu.meals[0].items[0]), itemId);
   assert.equal(JSON.stringify(store.selections), before);
+});
+
+test('stop and reopen preserve a legacy short-only link, its dates and customer selections', async t => {
+  const {store}=fixture(t);
+  const code='Ab3dE6fG9hJ2kL5m';
+  const createdAt=new Date('2026-10-01'),expiresAt=new Date('2099-01-01');
+  store.menu.shareLink={shortToken:code,createdAt,expiresAt,isActive:true};
+  store.selections=[selection()];const originalSelections=JSON.stringify(store.selections);
+  const cached=new Map([[`menu:share:${code}`,{isActive:true}]]);
+  await saveManagedMenu({menuId,body:{shareLinkActive:false},buildMealName,mergeUploadedSnackPools:()=>{}});
+  assert.equal(store.menu.shareLink.shortToken,code);
+  assert.match(store.menu.shareLink.token,/^[a-f0-9]{64}$/);
+  assert.equal(store.menu.shareLink.isActive,false);
+  assert.equal(+store.menu.shareLink.createdAt,+createdAt);
+  assert.equal(+store.menu.shareLink.expiresAt,+expiresAt);
+  await invalidateMenuShareCache(store.menu,async key=>cached.delete(key));
+  assert.equal(cached.size,0);
+  t.mock.method(Menu,'findOne',()=>({populate:async()=>Menu.hydrate(store.menu)}));
+  const stopped=response();await handler('/share/:token','get')({params:{token:code}},stopped);
+  assert.equal(stopped.statusCode,410);
+  const token=store.menu.shareLink.token;
+  await saveManagedMenu({menuId,body:{shareLinkActive:true},buildMealName,mergeUploadedSnackPools:()=>{}});
+  assert.equal(store.menu.shareLink.shortToken,code);assert.equal(store.menu.shareLink.token,token);
+  assert.equal(store.menu.shareLink.isActive,true);
+  assert.equal(JSON.stringify(store.selections),originalSelections);
 });
 
 test('a failed final menu save rolls back a Core tag update as well', async t => {

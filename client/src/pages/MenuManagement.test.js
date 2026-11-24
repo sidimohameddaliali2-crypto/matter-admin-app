@@ -16,6 +16,32 @@ const mockUploadRows = jest.fn();
 jest.mock('xlsx-js-style',()=>({read:()=>({Sheets:{Meals:{}},SheetNames:['Meals']}),utils:{sheet_to_json:()=>mockUploadRows(),book_new: () => ({}), aoa_to_sheet: rows => { mockExcelRows(rows); return {}; }, book_append_sheet: () => {} }, writeFile: jest.fn()}));
 global.IS_REACT_ACT_ENVIRONMENT=true;
 
+test.each([false,true])('publishing immediately updates Preview to the copied short link (clipboard blocked: %s)',async blocked=>{
+  const shortToken='Ab3dE6fG9hJ2kL5m',shareUrl=`https://matterapp.online/m/${shortToken}`;
+  const menu={_id:'published-fixture',title:'Published fixture',startDate:'2099-01-05',endDate:'2099-01-11',isPublished:true,meals:[],shareLink:{token:'original-long-token',isActive:true}};
+  api.get.mockImplementation(async url=>({data:{success:true,data:url==='/menus'?[]:{shareUrl,shortToken}}}));
+  api.post.mockResolvedValue({data:{success:true,data:menu}});
+  const clipboard=Object.getOwnPropertyDescriptor(navigator,'clipboard');
+  const writeText=blocked?jest.fn().mockRejectedValue(new Error('Not allowed')):jest.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText}});
+  const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
+  const click=async label=>act(async()=>[...node.querySelectorAll('button')].find(button=>button.textContent.trim()===label).click());
+  try{
+    await act(async()=>root.render(<MenuManagement/>));await click('New menu');
+    await act(async()=>{const input=node.querySelector('input[placeholder="Menu Title"]');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'Published fixture');input.dispatchEvent(new Event('input',{bubbles:true}));});
+    await click('Publish & copy link');
+    expect(writeText).toHaveBeenCalledWith(shareUrl);
+    const preview=[...node.querySelectorAll('a')].find(link=>link.textContent.trim()==='Preview');
+    expect(preview.getAttribute('href')).toBe(`/m/${shortToken}`);
+    expect(api.get.mock.calls.filter(([url])=>url.endsWith('/share-link'))).toHaveLength(1);
+    if(blocked)expect(node.textContent).toContain('Menu saved. Use Copy link');
+  }finally{
+    await act(async()=>root.unmount());node.remove();
+    if(clipboard)Object.defineProperty(navigator,'clipboard',clipboard);else delete navigator.clipboard;
+    jest.clearAllMocks();
+  }
+});
+
 test('Copy link uses the short URL and updates Preview without rotating the original link', async()=>{
   const code='Ab3dE6fG9hJ2kL5m', shareUrl=`https://matterapp.online/m/${code}`;
   const menu={_id:'short-link-menu',title:'Short link fixture',startDate:'2099-01-05',endDate:'2099-01-11',isPublished:true,meals:[],shareLink:{token:'original-long-token',isActive:true}};

@@ -137,7 +137,14 @@ export const saveManagedMenu = async ({ menuId, body, userId, buildMealName, mer
     }
     menu.selectionDeadlines = FIXED_SELECTION_DEADLINES;
     if (body.shareLinkActive !== undefined) {
-      if (!menu.shareLink?.token) menu.shareLink = { token: crypto.randomBytes(32).toString('hex'), createdAt: new Date(), expiresAt: new Date(Date.now() + 30 * 86400000) };
+      // Legacy menus can already have a distributed short alias without a long
+      // token. Fill missing fields individually so stop/reopen preserves it.
+      if (!menu.shareLink?.token) {
+        if (!menu.shareLink) menu.shareLink = {};
+        menu.shareLink.token = crypto.randomBytes(32).toString('hex');
+        if (!menu.shareLink.createdAt) menu.shareLink.createdAt = new Date();
+        if (!menu.shareLink.expiresAt) menu.shareLink.expiresAt = new Date(Date.now() + 30 * 86400000);
+      }
       menu.shareLink.isActive = !!body.shareLinkActive;
     }
     const existingItems = oldItems.length ? await Item.find({ _id: { $in: oldItems } }).session(session).lean() : [];

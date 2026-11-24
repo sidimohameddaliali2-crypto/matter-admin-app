@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createShortMenuToken, ensureShortMenuToken, menuShareFilter } from './menuShareLinks.js';
+import { createShortMenuToken, ensureShortMenuToken, menuShareFilter, invalidateMenuShareCache } from './menuShareLinks.js';
 import Menu from '../models/WeeklyMenu.js';
 import router from '../routes/menus.js';
 
@@ -35,6 +35,15 @@ test('a unique-index collision retries with another random alias', async () => {
 test('storage failures do not silently return a broken short URL', async () => {
   const Model={findOneAndUpdate:async ()=>{throw Error('unavailable');}};
   await assert.rejects(ensureShortMenuToken({_id:'menu'},{Model}), /unavailable/);
+});
+
+test('cache invalidation removes short-only legacy entries as well as both aliases', async () => {
+  for (const shareLink of [{shortToken:'short'}, {token:'long',shortToken:'short'}]) {
+    const cached=new Map([['menu:share:short',{isActive:true}],['menu:share:long',{isActive:true}]]);
+    await invalidateMenuShareCache({shareLink},async key=>cached.delete(key));
+    assert.equal(cached.has('menu:share:short'),false);
+    if(shareLink.token)assert.equal(cached.has('menu:share:long'),false);
+  }
 });
 
 test('the public route loads the same menu through old and short links and rejects disabled short links', async t => {
