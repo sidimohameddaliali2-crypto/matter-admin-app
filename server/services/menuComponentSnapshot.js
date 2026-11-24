@@ -18,7 +18,7 @@ export function validateCycleMealSnapshot(value) {
     if (component.notes !== undefined && typeof component.notes !== 'string') invalid('component notes must be text.');
   }
   if (value.carbCombined !== undefined && !['Yes', 'No', 'Not specified'].includes(value.carbCombined)) invalid('carbCombined must be Yes, No or Not specified.');
-  for (const field of ['isSaladBase', 'isOatmeal']) if (value[field] !== undefined && typeof value[field] !== 'boolean') invalid(`${field} must be true or false.`);
+  for (const field of ['isSaladBase', 'isOatmeal', 'isFixedMeal']) if (value[field] !== undefined && typeof value[field] !== 'boolean') invalid(`${field} must be true or false.`);
   try { return JSON.parse(JSON.stringify(value)); }
   catch { return invalid('the snapshot must contain JSON data.'); }
 }

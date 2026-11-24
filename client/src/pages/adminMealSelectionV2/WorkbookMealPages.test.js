@@ -24,6 +24,25 @@ const setInput = (input, value) => act(() => {
 });
 const component = (id, type, name, exclusions, notes = '') => ({ id, type, name, exclusions, notes, adaptation: 'Not reviewed' });
 
+test.each(['Main meal', 'Breakfast'])('Fixed meal can be enabled, reopened and disabled for %s without losing components', async mealKind => {
+  const meal = { id: 'fixed-test', name: 'House dish', mealKind, mealType: 'Chicken', components: [component('p', 'Protein', 'House portion', ['Dairy']), component('c', 'Carb', 'Rice', ['Gluten']), component('v', 'Vegetable', 'Broccoli', [])] };
+  const onSave = render(meal);
+  const checkbox = () => [...host.querySelectorAll('label')].find(label => label.textContent.startsWith('Fixed meal')).querySelector('input');
+  expect(checkbox().checked).toBe(false);
+  await act(async () => checkbox().click()); await click('Save draft');
+  const saved = onSave.mock.calls[0][0]; expect(saved.isFixedMeal).toBe(true); expect(saved.components).toEqual(meal.components);
+  await act(async () => root.render(<MealComposer key="reopened-fixed" meal={saved} onSave={onSave}/>));
+  expect(checkbox().checked).toBe(true);
+  await act(async () => checkbox().click()); await click('Save draft');
+  expect(onSave.mock.calls[1][0].isFixedMeal).toBe(false); expect(onSave.mock.calls[1][0].components).toEqual(meal.components);
+});
+
+test('snacks do not offer Fixed meal or save an inherited fixed setting', async () => {
+  const onSave = render({ id: 'snack', name: 'House snack', mealKind: 'Snack', isFixedMeal: true, components: [component('s', 'Snack', 'House snack', ['Nuts'])] });
+  expect(host.textContent).not.toContain('Fixed meal'); await click('Save draft');
+  expect(onSave.mock.calls[0][0].isFixedMeal).toBe(false);
+});
+
 test('one deduplicated library record remains visible under all of its source cycle days',async()=>{
   const meal={id:'one',name:'Own meal',day:'DAY 1',cycleDays:['DAY 1','DAY 6 & 7'],mealKind:'Main meal',mealType:'Chicken',components:[component('p','Protein','Roast',[])]};
   await act(async()=>root.render(<MealLibrary meals={[meal]} source="Own.xlsx"/>));

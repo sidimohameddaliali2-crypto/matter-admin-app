@@ -16,6 +16,13 @@ test('copies placements to actual dates with Main/Sub, Core and internal-only co
   expect(JSON.stringify(options)).toBe(before);
 });
 
+test('fixed meal rules survive copying both main meals and breakfasts into dated menus', () => {
+  const options = input(); options.catalogue.meals[0].isFixedMeal = true; options.catalogue.meals[2].isFixedMeal = true;
+  const before = JSON.stringify(options), items = importCycleMenu(options)[0].items;
+  expect(items.filter(item => item.cycleMeal.isFixedMeal).map(item => item.mealType)).toEqual(['breakfast', 'main']);
+  expect(JSON.stringify(options)).toBe(before);
+});
+
 test('salad maps to veg; optional absent sauces and garnish stay empty; all notes and extras survive', () => {
   const options = input(); options.catalogue.meals[0].components = [
     { id:'p', type:'Protein',name:'Chicken', exclusions:[],notes:'' },

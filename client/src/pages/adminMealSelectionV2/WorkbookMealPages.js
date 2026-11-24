@@ -87,7 +87,7 @@ export function MealComposer({ meal, isNew, onSave }) {
     const initial = meal ? JSON.parse(JSON.stringify(meal)) : { id: `PREVIEW-${Date.now()}`, name: '', day: '', category: '', temperature: 'WARM', tags: '', carbCombined: 'No', notes: '', components: [] };
     const mealKind = meal ? kindOf(meal) : 'Main meal';
     const isSaladBase = mealKind === 'Main meal' && (meal?.isSaladBase ?? Boolean(initial.components.some(c => c.type === 'Sauce 2' || c.type === 'Salad') || /SALAD BASE/i.test(initial.tags || '')));
-    return { ...initial, mealKind, mealType: meal ? mealType(meal) : '', isOatmeal: meal?.isOatmeal ?? meal?.category === 'OATS', isSaladBase, components: editorComponents(initial, mealKind, isSaladBase) };
+    return { ...initial, mealKind, mealType: meal ? mealType(meal) : '', isFixedMeal: initial.isFixedMeal === true, isOatmeal: meal?.isOatmeal ?? meal?.category === 'OATS', isSaladBase, components: editorComponents(initial, mealKind, isSaladBase) };
   });
   const kindDrafts = useRef({});
   const [error, setError] = useState('');
@@ -136,7 +136,7 @@ export function MealComposer({ meal, isNew, onSave }) {
     components = components.filter(c => c.type !== 'Sauce 2' || c.name.trim());
     if (!components.length || components.some(c => !c.name.trim())) return setError('Add a name for each component, including the salad when selected.');
     setSaving(true);
-    try { await onSave({ ...form, name: form.name.trim(), mealFormat: isBreakfast ? 'Breakfast' : isSnack ? 'Snack' : 'Main', mealType: form.mealKind === 'Main meal' ? form.mealType : '', isOatmeal: isBreakfast && form.isOatmeal, isSaladBase: form.mealKind === 'Main meal' && form.isSaladBase, status: 'Draft', components: components.map(({ relationship, ...c }) => c.type === 'Sauce 2' ? { ...c, saladComponentId: salad?.id || '' } : c) }); }
+    try { await onSave({ ...form, name: form.name.trim(), mealFormat: isBreakfast ? 'Breakfast' : isSnack ? 'Snack' : 'Main', mealType: form.mealKind === 'Main meal' ? form.mealType : '', isFixedMeal: !isSnack && form.isFixedMeal === true, isOatmeal: isBreakfast && form.isOatmeal, isSaladBase: form.mealKind === 'Main meal' && form.isSaladBase, status: 'Draft', components: components.map(({ relationship, ...c }) => c.type === 'Sauce 2' ? { ...c, saladComponentId: salad?.id || '' } : c) }); }
     catch (err) { setError(err.response?.data?.message || err.message || 'Could not save the meal.'); }
     finally { setSaving(false); }
   };
@@ -156,6 +156,7 @@ export function MealComposer({ meal, isNew, onSave }) {
       <label className="av2-field">{isSnack ? 'Snack name' : 'Meal name'}<input value={form.name} onChange={e => field('name', e.target.value)}/></label>
       {isSnack ? <ComponentExclusions values={snack?.exclusions || []} componentName={form.name || 'snack'} componentId={snack?.id} onChange={values => field('components', [{ ...(snack || newComponent('Snack')), name: form.name, exclusions: values }])}/> : <>
         <div className="av2-form-grid">{!isBreakfast && <label>Meal type<select aria-label="Meal type" value={form.mealType} onChange={e => field('mealType', e.target.value)}><option value="">Choose meal type...</option>{MEAL_TYPES.map(type => <option key={type}>{type}</option>)}</select></label>}<label>Temperature<select aria-label="Temperature" value={form.temperature} onChange={e => field('temperature', e.target.value)}><option>WARM</option><option>COLD</option></select></label></div>
+        <label className="av2-field"><span><input type="checkbox" checked={form.isFixedMeal} onChange={e => field('isFixedMeal', e.target.checked)}/>Fixed meal</span><small>Serve as designed. Protein, carb and vegetables cannot be changed.</small></label>
         {isBreakfast && <label className="av2-field"><span><input type="checkbox" checked={form.isOatmeal} onChange={e => field('isOatmeal', e.target.checked)}/>Oatmeal</span></label>}
         {!isBreakfast && <label className="av2-field"><span><input type="checkbox" checked={form.isSaladBase} onChange={e => toggleSalad(e.target.checked)}/>Includes a salad base</span></label>}
       </>}
