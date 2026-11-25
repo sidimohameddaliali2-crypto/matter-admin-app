@@ -105,7 +105,7 @@ export default function Collections() {
   }
 
   return <div className="collection-page">
-    <header className="collection-heading"><div><span className="collection-eyebrow">OPERATIONS</span><h1>Collection</h1><p>Create bag collection requests and track their progress.</p></div><Link className="collection-secondary" to="/deliveries">Open dispatch in Deliveries</Link></header>
+    <header className="collection-heading"><div><span className="collection-eyebrow">OPERATIONS</span><h1>Collection</h1><p>Create bag collection requests and track their progress.</p></div></header>
     <div className="collection-grid">
       <section className="collection-card">
         <h2><Plus size={19} /> New collection request</h2>
