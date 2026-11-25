@@ -10,6 +10,20 @@ Use [historical source receipt retention](historical-source-lineage.md) when an 
 
 ## Components and source ownership
 
+The proposed [API handoff](../deployment/API_HANDOFF.md) adds an isolated web
+release and a separately pinned local gateway. Its manual workflow never resets
+the running job-owner checkout, pauses the report source/builder, or restarts
+scheduled GPS/import work. Each candidate must prewarm the existing selected
+report reader before traffic moves; this is engineering readiness, not proof of
+live evidence flow. The old report-only restart operator fails closed once a
+managed web release is active because it targets the retained job owner rather
+than the actual serving web checkout. Qualify a release-aware report operation
+before using that old path again. Live acceptance remains pending: verify the
+actual routed web SHA, unchanged source/builder identities, an authenticated
+report, saved review, original photo/GPS evidence and a real worker publication
+before and after handoff/rollback. Retain all existing private safety limits,
+store selections, pending paid attempts, journals and code/data archives.
+
 The data path is `operational delivery/GPS inputs → source capture and assessment → Supabase evidence → delivery-scoped publication → staff report and saved reviews`. Staff reads retain the last verified report while capture or publication is pending. Source requests read operational APIs. Report grades and reviews describe recorded evidence and preserve the original delivery status.
 
 Use these entry points to locate each component:

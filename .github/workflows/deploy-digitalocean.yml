@@ -94,22 +94,7 @@ on:
       sync_min_free_disk_bytes:
         description: Minimum free disk from the reviewed isolated sync replay
         type: string
-  push:
-    branches:
-      - main
-    # A diagnostics-only release must not restart the worker it is inspecting.
-    paths-ignore:
-      - '.github/workflows/deploy-digitalocean.yml'
-      - '.github/workflows/reporting-vercel-identity-checks.yml'
-      - 'server/scripts/reporting-source-operator.mjs'
-      - 'server/scripts/reporting-source-operator.test.mjs'
-      - '.github/workflows/audit-sync-status.yml'
-      - '.github/scripts/audit-sync-status.mjs'
-      - '.github/scripts/audit-sync-status.test.mjs'
-      - '.github/workflows/driver-audit-native-handoff.yml'
-      - '.github/scripts/driver-audit-native-handoff.mjs'
-      - '.github/scripts/driver-audit-native-*.mjs'
-      - '.github/scripts/driver-audit-supabase-*.mjs'
+  # Automatic production deployment is paused. Only manual operations run.
 
 concurrency:
   group: production-deploy
@@ -145,8 +130,6 @@ jobs:
           if [ -z "$DO_USER" ]; then echo "DO_USER is missing"; exit 1; fi
           if [ -z "$DO_APP_PATH" ]; then echo "DO_APP_PATH is missing"; exit 1; fi
           if [ -z "$DO_SSH_KEY" ]; then echo "DO_SSH_KEY is missing"; exit 1; fi
-          if [ "$OPERATION" = deploy ] && [ -z "$MATTER_CS_RUNTIME_B64" ]; then echo "Customer Service connection secret is missing"; exit 1; fi
-          if [ "$OPERATION" = deploy ] && [ -z "$MATTER_ACTIVITY_READER_EMAILS" ]; then echo "Private activity reader configuration is missing"; exit 1; fi
 
       - name: Verify reviewed audit operation inputs
         if: github.event_name == 'workflow_dispatch' && inputs.operation != 'deploy'
@@ -243,7 +226,7 @@ jobs:
           fi
 
       - name: Set up website build runtime
-        if: (github.event_name == 'push' || inputs.operation == 'deploy') && vars.ATOMIC_WEBSITE_DEPLOY == '1'
+        if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -252,7 +235,7 @@ jobs:
 
       - name: Build and seal website away from the live server
         id: website
-        if: (github.event_name == 'push' || inputs.operation == 'deploy') && vars.ATOMIC_WEBSITE_DEPLOY == '1'
+        if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'
         shell: bash
         env:
           REACT_APP_2GIS_API_KEY: ${{ vars.REACT_APP_2GIS_API_KEY }}
@@ -266,7 +249,7 @@ jobs:
           REACT_APP_GOOGLE_GEOCODING_API_KEY: ${{ vars.REACT_APP_GOOGLE_GEOCODING_API_KEY }}
         run: |
           set -euo pipefail
-          node --test .github/scripts/website-release.test.mjs
+          node --test .github/scripts/website-release.test.mjs .github/scripts/api-handoff.test.mjs
           release_id="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           cd client
           npm ci
@@ -274,144 +257,64 @@ jobs:
           cd ..
           node .github/scripts/website-release.mjs seal client/build "$release_id"
           tar -czf website-build.tar.gz -C client/build .
+          git archive --format=tar HEAD server .github/scripts | gzip > api-source.tar.gz
+          echo "api_sha256=$(sha256sum api-source.tar.gz | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
           echo "sha256=$(sha256sum website-build.tar.gz | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
 
       - name: Upload immutable website candidate
-        if: (github.event_name == 'push' || inputs.operation == 'deploy') && vars.ATOMIC_WEBSITE_DEPLOY == '1'
+        if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'
         uses: appleboy/scp-action@v1
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
-          source: website-build.tar.gz
+          source: website-build.tar.gz,api-source.tar.gz
           target: ${{ secrets.DO_APP_PATH }}/.website/incoming/${{ steps.website.outputs.release_id }}
 
-      - name: Deploy over SSH
-        if: github.event_name == 'push' || inputs.operation == 'deploy'
+      - name: Hand off the isolated API and publish the verified website
+        if: github.event_name == 'workflow_dispatch' && inputs.operation == 'deploy'
         uses: appleboy/ssh-action@v1.2.0
         env:
-          MATTER_CS_RUNTIME_B64: ${{ secrets.MATTER_CS_RUNTIME_B64 }}
-          MATTER_ACTIVITY_READER_EMAILS: ${{ secrets.MATTER_ACTIVITY_READER_EMAILS }}
           DO_APP_PATH: ${{ secrets.DO_APP_PATH }}
           DEPLOY_SHA: ${{ github.sha }}
           ATOMIC_WEBSITE_DEPLOY: ${{ vars.ATOMIC_WEBSITE_DEPLOY || '0' }}
           WEBSITE_RELEASE_ID: ${{ steps.website.outputs.release_id }}
           WEBSITE_ARCHIVE_SHA256: ${{ steps.website.outputs.sha256 }}
+          API_ARCHIVE_SHA256: ${{ steps.website.outputs.api_sha256 }}
         with:
           host: ${{ secrets.DO_HOST }}
           username: ${{ secrets.DO_USER }}
           key: ${{ secrets.DO_SSH_KEY }}
           passphrase: ${{ secrets.DO_SSH_PASSPHRASE }}
-          envs: MATTER_CS_RUNTIME_B64,MATTER_ACTIVITY_READER_EMAILS,DO_APP_PATH,DEPLOY_SHA,ATOMIC_WEBSITE_DEPLOY,WEBSITE_RELEASE_ID,WEBSITE_ARCHIVE_SHA256
+          command_timeout: 30m
+          envs: DO_APP_PATH,DEPLOY_SHA,ATOMIC_WEBSITE_DEPLOY,WEBSITE_RELEASE_ID,WEBSITE_ARCHIVE_SHA256,API_ARCHIVE_SHA256
           script: |
-            set -e
+            set -eu
+            umask 077
             cd -- "$DO_APP_PATH"
-
-            echo "[0/7] Current directory"
-            pwd
-            echo "[0/7] Directory listing"
-            ls -la
-
-            echo "[1/7] Verify git repository"
-            git rev-parse --is-inside-work-tree
-
-            echo "[2/7] Fetch latest code"
-            git fetch --all --prune
-            if [ "$(git rev-parse origin/main)" != "$DEPLOY_SHA" ]; then
-              echo "Main advanced since this deployment was selected. Use the run for the reviewed current commit."
-              exit 1
-            fi
-
+            git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+            [ "$(git rev-parse origin/main)" = "$DEPLOY_SHA" ] || { echo 'Main advanced; select its reviewed run'; exit 1; }
+            case "$ATOMIC_WEBSITE_DEPLOY" in 0|1) ;; *) exit 1 ;; esac
+            case "$WEBSITE_RELEASE_ID" in "$DEPLOY_SHA"-[0-9]*-[0-9]*) ;; *) exit 1 ;; esac
+            incoming="$DO_APP_PATH/.website/incoming/$WEBSITE_RELEASE_ID"
+            printf '%s  %s\n' "$WEBSITE_ARCHIVE_SHA256" "$incoming/website-build.tar.gz" | sha256sum --check -
+            printf '%s  %s\n' "$API_ARCHIVE_SHA256" "$incoming/api-source.tar.gz" | sha256sum --check -
+            mkdir "$incoming/build"
+            tar -xzf "$incoming/website-build.tar.gz" -C "$incoming/build" --no-same-owner --no-same-permissions
+            mkdir -p "$DO_APP_PATH/.api/releases"
+            release="$DO_APP_PATH/.api/releases/$WEBSITE_RELEASE_ID"
+            mkdir "$release"
+            tar -xzf "$incoming/api-source.tar.gz" -C "$release" --no-same-owner --no-same-permissions
+            publisher="$release/.github/scripts/website-release.mjs"
+            node "$publisher" verify "$incoming/build" "$WEBSITE_RELEASE_ID"
             if [ "$ATOMIC_WEBSITE_DEPLOY" = 1 ]; then
-              case "$WEBSITE_RELEASE_ID" in "$DEPLOY_SHA"-[0-9]*-[0-9]*) ;; *) echo "Invalid website release identity"; exit 1 ;; esac
-              website_incoming="$DO_APP_PATH/.website/incoming/$WEBSITE_RELEASE_ID"
-              git show "$DEPLOY_SHA:.github/scripts/website-release.mjs" > "$website_incoming/publisher.mjs"
-              node "$website_incoming/publisher.mjs" check "$DO_APP_PATH/.website/current" https://matterapp.online
-              printf '%s  %s\n' "$WEBSITE_ARCHIVE_SHA256" "$website_incoming/website-build.tar.gz" | sha256sum --check -
-              mkdir "$website_incoming/build"
-              tar -xzf "$website_incoming/website-build.tar.gz" -C "$website_incoming/build" --no-same-owner --no-same-permissions
-              node "$website_incoming/publisher.mjs" verify "$website_incoming/build" "$WEBSITE_RELEASE_ID"
-            elif [ "$ATOMIC_WEBSITE_DEPLOY" != 0 ]; then
-              echo "ATOMIC_WEBSITE_DEPLOY must be 0 or 1"; exit 1
-            elif [ -L "$DO_APP_PATH/.website/current" ]; then
-              echo "Website bootstrap exists. Complete atomic activation or explicitly restore legacy routing before disabling the mode."
-              exit 1
-            fi
-
-            sync_paused=0
-            source_paused=0
-            trap 'if [ "$sync_paused" = 1 ] || [ "$source_paused" = 1 ]; then echo "A previously supervised audit worker remains paused because deployment or recovery failed."; fi' EXIT
-            if [ -f server/scripts/driverAuditSourceDeploy.js ]; then
-              source_state=$(DRIVER_AUDIT_DEPLOY_SHA="$(git rev-parse HEAD)" node server/scripts/driverAuditSourceDeploy.js deploy-source-pause)
-              if [ "$(printf '%s' "$source_state" | node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>console.log(JSON.parse(s).status))')" = paused ]; then source_paused=1; fi
-            fi
-            if [ -f server/scripts/driverAuditDeploy.js ]; then
-              worker_state=$(DRIVER_AUDIT_DEPLOY_SHA="$(git rev-parse HEAD)" node server/scripts/driverAuditDeploy.js deploy-worker-pause)
-              if [ "$worker_state" = paused ]; then sync_paused=1; fi
-            fi
-
-            echo "[3/7] Checkout and pull branch"
-            git checkout main
-            git reset --hard "$DEPLOY_SHA"
-
-            echo "[4/7] Install server dependencies"
-            cd server
-            npm ci --omit=dev
-            cd ..
-
-            echo "[5/7] Install and build client"
-            if [ "$ATOMIC_WEBSITE_DEPLOY" = 0 ]; then
-            cd client
-            npm ci
-            npm run build
-            cd ..
-
-            echo "[5/7] Release verified client build dependencies"
-            node --input-type=module <<'NODE'
-            import './server/loadEnv.js';
-            import { releaseClientBuildDependencies } from './.github/scripts/audit-sync-status.mjs';
-            const port = Number(process.env.PORT || 5000);
-            if (!Number.isInteger(port) || port < 1 || port > 65535) throw Error('Invalid existing app port.');
-            const verifyHealth = async () => {
-              const response = await fetch(`http://127.0.0.1:${port}/api/health`, {signal:AbortSignal.timeout(10000)});
-              if (!response.ok || (await response.json()).database !== 'connected') throw Error('The existing app must stay healthy during build cleanup.');
-            };
-            console.log(JSON.stringify(await releaseClientBuildDependencies({appRoot:process.cwd(),apply:true,verifyHealth})));
-            NODE
+              node "$publisher" check "$DO_APP_PATH/.website/current" https://matterapp.online
             else
-              echo "Website candidate was built and verified separately; live website files are unchanged."
+              node "$publisher" prepare-live "$DO_APP_PATH" "$incoming/build" "$WEBSITE_RELEASE_ID" https://matterapp.online
             fi
-
-            echo "[5/7] Verify canonical Customer Service and existing staff access"
-            node server/scripts/customerServiceDeploy.js --apply
-            node server/scripts/activityHistoryDeploy.js --apply
-            unset MATTER_CS_RUNTIME_B64
-            unset MATTER_ACTIVITY_READER_EMAILS
-
-            echo "[6/7] Restart API with PM2"
-            pm2 delete matter-delivery-api 2>/dev/null || true
-            pm2 start npm --name matter-delivery-api -- start --prefix server
-
-            echo "[7/7] Save PM2 process list"
-            pm2 save
-
-            echo "[7/7] Verify existing app health and canonical Customer Service readiness"
-            node server/scripts/customerServiceDeploy.js --verify
-            node server/scripts/activityHistoryDeploy.js --verify
-            if [ "$sync_paused" = 1 ]; then
-              DRIVER_AUDIT_DEPLOY_SHA="$DEPLOY_SHA" node server/scripts/driverAuditDeploy.js deploy-worker-resume
-              sync_paused=0
-            fi
-            if [ "$source_paused" = 1 ]; then
-              DRIVER_AUDIT_DEPLOY_SHA="$DEPLOY_SHA" node server/scripts/driverAuditSourceDeploy.js deploy-source-resume
-              source_paused=0
-            fi
-
-            if [ "$ATOMIC_WEBSITE_DEPLOY" = 1 ]; then
-              node .github/scripts/website-release.mjs publish "$DO_APP_PATH" "$website_incoming/build" "$WEBSITE_RELEASE_ID" https://matterapp.online
-            fi
+            node "$release/.github/scripts/api-release.mjs" "$DO_APP_PATH" "$WEBSITE_RELEASE_ID" "$incoming/build" "$ATOMIC_WEBSITE_DEPLOY"
 
       - name: Prepare the reviewed report-only operator
         if: github.event_name == 'workflow_dispatch' && (inputs.operation == 'deploy-supabase-reader' || inputs.operation == 'check-supabase-reader')
@@ -450,6 +353,10 @@ jobs:
           envs: DRIVER_AUDIT_APP_PATH,READER_OPERATOR_GZIP,READER_OPERATOR_SHA,READER_REQUEST,READER_APPLY
           script: |
             set -eu
+            if [ -f "$DRIVER_AUDIT_APP_PATH/.api/current.json" ]; then
+              echo 'Managed web API is active. The legacy reader operator cannot restart its separate job owner or certify a different serving checkout.'
+              exit 1
+            fi
             /usr/bin/node --input-type=module <<'NODE'
             import {gunzipSync} from 'node:zlib';import {createHash} from 'node:crypto';
             try {

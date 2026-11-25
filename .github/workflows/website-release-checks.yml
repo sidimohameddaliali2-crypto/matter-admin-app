@@ -3,6 +3,12 @@ on:
   pull_request:
     paths:
       - '.github/scripts/website-release*'
+      - '.github/scripts/website-nginx*'
+      - '.github/scripts/api-*'
+      - '.github/scripts/private-socket.mjs'
+      - 'server/services/apiRuntime*'
+      - 'server/loadEnv.js'
+      - 'server/server.js'
       - '.github/workflows/deploy-digitalocean.yml'
       - '.github/workflows/website-release-checks.yml'
       - 'docs/ATOMIC_WEBSITE_DEPLOYMENT.md'
@@ -18,6 +24,7 @@ jobs:
         with:
           node-version: '22'
       - run: sudo apt-get update && sudo apt-get install -y nginx
-      - run: node --test .github/scripts/website-release.test.mjs .github/scripts/website-nginx.test.mjs
+      - run: npm ci --prefix server --omit=dev --ignore-scripts --no-audit --no-fund
+      - run: node --test .github/scripts/website-release.test.mjs .github/scripts/website-nginx.test.mjs .github/scripts/api-handoff.test.mjs .github/scripts/api-gateway.test.mjs .github/scripts/api-nginx.test.mjs server/services/apiRuntime.test.js server/services/apiRuntimeEnv.test.js
         env:
           NGINX_BIN: /usr/sbin/nginx
