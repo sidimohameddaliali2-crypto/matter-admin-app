@@ -1,6 +1,7 @@
 import MenuSelectionBrowser from '../components/MenuSelectionBrowser';
 import MenuNonSelectors from '../components/MenuNonSelectors';
 import SelectionComponentTags from '../components/SelectionComponentTags';
+import SelectionStatusTags from '../components/SelectionStatusTags';
 import { selectionComponentDetails, selectionHasWarning } from '../utils/selectionComponentDetails';
 import { loadMenuSelectionSummaries, loadMenuSelectionDetails } from '../lib/menuSelectionLoading';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -2780,6 +2781,7 @@ const MenuManagement = () => {
                                                           Qty: {meal.quantity}
                                                         </span>
                                                       )}
+                                                      <SelectionStatusTags meal={meal} />
                                                       <SelectionComponentTags meal={meal} />
                                                       {meal.conflict && !meal.preferenceConflict?.length && (
                                                         <span className="text-xs font-bold bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full">
@@ -3382,6 +3384,7 @@ const MenuManagement = () => {
                                         <span className={`text-sm font-semibold px-3 py-1 rounded-full ${mealStyle.badge}`}>
                                           {meal.mealType || meal.menuItemId?.mealType || 'meal'}
                                         </span>
+                                        <SelectionStatusTags meal={meal} />
                                         <SelectionComponentTags meal={meal} />
                                         {meal.conflict && !meal.preferenceConflict?.length && (
                                           <span className="text-sm font-bold bg-yellow-100 text-yellow-700 px-3 py-1 rounded-full">

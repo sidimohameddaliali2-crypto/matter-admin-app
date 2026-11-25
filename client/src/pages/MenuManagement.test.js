@@ -151,10 +151,15 @@ test('each menu has a whole-menu non-selector button that checks only the clicke
 });
 
 test.each([
-  [{preferenceConflict:['Coriander'],carbVegAction:'kept'},[]],
-  [{carbVegAction:'replace',carbConflict:['DAIRY'],vegConflict:['MUSHROOM']},['Replace carb: Dairy','Replace veg: Mushroom']],
-  [{carbVegAction:'kept',preferenceConflict:['Dairy'],keptCarbConflict:['DAIRY']},['Keep carb: Dairy']],
-])('saved selection views scope side tags and highlight portion warnings (%s)', async (flags, labels) => {
+  [{}, [], false],
+  [{preferenceConflict:['Coriander'],carbVegAction:'kept'},[],true],
+  [{carbVegAction:'replace',carbConflict:['DAIRY'],vegConflict:['MUSHROOM']},['Replace carb: Dairy','Replace veg: Mushroom'],false],
+  [{carbVegAction:'kept',preferenceConflict:['Dairy'],keptCarbConflict:['DAIRY']},['Keep carb: Dairy'],true],
+  [{carbVegAction:'kept',carbConflict:['DAIRY']},['Keep carb: Dairy'],true],
+  [{carbVegAction:'replace',keptCarbConflict:['DAIRY'],vegConflict:['CORIANDER']},['Replace veg: Coriander','Keep carb: Dairy'],true],
+  [{isAutoAssigned:true,exclusionConflict:['Dairy'],conflict:true},[],false],
+  [{isAutoAssigned:true,preferenceConflict:['Dairy']},[],false],
+])('saved selection views show source and acknowledgement tags alongside component instructions (%s)', async (flags, labels, acknowledged) => {
   const date='2099-11-02';
   const meal={date,mealName:'Fixture dish',mealType:'main',menuItemId:'dish',quantity:1,...flags};
   const customer={_id:'person',firstName:'Test',email:'test@example.invalid',matterCustomerId:'person',selectedMeals:[meal]};
@@ -163,6 +168,10 @@ test.each([
     :url.endsWith('/selections')?[customer]:{customer_id:'person',customer_name:'Test',customer_email:customer.email,subscription_id:'sub'}}}));
   const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
   const verify=()=>{
+    const badgeTexts=[...node.querySelectorAll('span')].map(span=>span.textContent.trim());
+    expect(badgeTexts).toContain(flags.isAutoAssigned ? 'Auto assigned' : 'Selected');
+    expect(badgeTexts.includes('Exclusion acknowledged')).toBe(acknowledged);
+
     for(const label of labels)expect(node.textContent).toContain(label);
     expect(node.textContent).not.toMatch(/Keep carb\/veg|Replace carb\/veg/);
     if(flags.preferenceConflict?.length)expect(node.querySelector('.bg-yellow-50.ring-yellow-400')).not.toBeNull();
