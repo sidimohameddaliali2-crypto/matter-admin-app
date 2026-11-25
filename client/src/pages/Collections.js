@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ClipboardPaste, Plus, Search, ShoppingBag } from 'lucide-react';
+import { ClipboardPaste, Plus, Search, ShoppingBag, X } from 'lucide-react';
+import Dialog from '@mui/material/Dialog';
 import { DayPicker } from 'react-day-picker';
 import 'react-day-picker/dist/style.css';
 import api from '../utils/api';
@@ -27,6 +28,7 @@ export default function Collections() {
   const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
+  const [formOpen, setFormOpen] = useState(false);
   const addressInput = useRef(null);
   const submitting = useRef(false);
   const update = (key, value) => setForm(current => ({ ...current, [key]: value }));
@@ -98,6 +100,7 @@ export default function Collections() {
     try {
       await api.post('/collections', form);
       setForm(emptyForm()); setQuery(''); setCalendarOpen(false);
+      setFormOpen(false);
       setNotice('Collection request created. It is ready for assignment in Deliveries.');
       if (page === 1) await load(); else setPage(1);
     } catch (err) { setError(err.response?.data?.message || 'Could not create the request. Your entries have been kept.'); }
@@ -105,16 +108,17 @@ export default function Collections() {
   }
 
   return <div className="collection-page">
-    <header className="collection-heading"><div><span className="collection-eyebrow">OPERATIONS</span><h1>Collection</h1><p>Create bag collection requests and track their progress.</p></div></header>
-    <div className="collection-grid">
-      <section className="collection-card">
-        <h2><Plus size={19} /> New collection request</h2>
+    <header className="collection-heading"><div><span className="collection-eyebrow">OPERATIONS</span><h1>Collection</h1><p>Create bag collection requests and track their progress.</p></div><button type="button" className="collection-primary collection-add-button" onClick={() => { setNotice(''); setError(''); setFormOpen(true); }}><Plus size={18} /> Add collection</button></header>
+    {!formOpen && notice && <p className="collection-notice" role="status">{notice}</p>}
+    <Dialog open={formOpen} onClose={() => { if (!saving) setFormOpen(false); }} disableEscapeKeyDown={saving} fullWidth maxWidth="sm" aria-labelledby="collection-modal-title">
+      <section className="collection-page collection-card collection-modal-card">
+        <div className="collection-modal-heading"><h2 id="collection-modal-title">New collection request</h2><button type="button" className="collection-secondary" aria-label="Close add collection" disabled={saving} onClick={() => setFormOpen(false)}><X size={18} /></button></div>
         <form onSubmit={submit}>
           <fieldset disabled={saving}>
             <legend className="sr-only">Collection request details</legend>
             <div>
               <label htmlFor="collection-customer">Find an internal customer</label>
-              <div className="collection-search"><Search size={17} /><input id="collection-customer" value={query} autoComplete="off" placeholder="Search name, phone, email or customer ID" onChange={event => { setQuery(event.target.value); setForm(current => ({ ...current, customerSource: 'manual', customerId: '', ...(current.customerId ? { customerName: '', phone: '', address: '', addressLabel: '', latitude: '', longitude: '' } : {}) })); }} /></div>
+              <div className="collection-search"><Search size={17} /><input id="collection-customer" autoFocus value={query} autoComplete="off" placeholder="Search name, phone, email or customer ID" onChange={event => { setQuery(event.target.value); setForm(current => ({ ...current, customerSource: 'manual', customerId: '', ...(current.customerId ? { customerName: '', phone: '', address: '', addressLabel: '', latitude: '', longitude: '' } : {}) })); }} /></div>
               <div aria-live="polite" className="collection-hint">{form.customerId ? `Selected: ${form.customerName} · ${form.customerId}` : searching ? 'Searching…' : searchError || (query.trim().length >= 2 && !customers.length ? 'No matches. Type the customer name below.' : 'Search and select a customer to fill their information automatically.')}</div>
               {!!customers.length && <ul className="collection-results">{customers.map(customer => <li key={customer.customerId}><button type="button" onClick={() => selectCustomer(customer)}><strong>{[customer.firstName, customer.lastName].filter(Boolean).join(' ') || customer.customerId}</strong><span>{customer.customerId} · {customer.phone || customer.email || 'No contact saved'}</span></button></li>)}</ul>}
             </div>
@@ -131,7 +135,7 @@ export default function Collections() {
             <button id="collection-date" type="button" className="collection-secondary" aria-expanded={calendarOpen} aria-controls="collection-calendar" onClick={() => setCalendarOpen(current => !current)}>{selectedDate ? selectedDate.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }) : 'Choose a collection date'}</button>
             <p className="collection-hint">Collections are available every Tuesday, Friday and Saturday.</p>
             {calendarOpen && <div id="collection-calendar" className="collection-calendar"><DayPicker mode="single" selected={selectedDate} defaultMonth={selectedDate} onSelect={selectDate} disabled={{ dayOfWeek: [0, 1, 3, 4] }} weekStartsOn={1} /></div>}
-            <label className="collection-checkbox"><input type="checkbox" checked={form.refundRequestedAfterCollection} onChange={event => update('refundRequestedAfterCollection', event.target.checked)} /><span><strong>Bag refund requested after collection</strong><small>Once collection is completed, this request appears as Pending refund in the Refund tracking section below.</small></span></label>
+            <label className="collection-checkbox"><input type="checkbox" checked={form.refundRequestedAfterCollection} onChange={event => update('refundRequestedAfterCollection', event.target.checked)} /><span><strong>Bag refund requested after collection</strong><small>Once collection is completed, this request appears as Pending refund in Refund tracking.</small></span></label>
             <label htmlFor="collection-notes">Collection notes <small>(optional)</small></label><textarea id="collection-notes" maxLength={2000} value={form.notes} onChange={event => update('notes', event.target.value)} placeholder="Access instructions or collection details" />
             {error && <p className="collection-error" role="alert">{error}</p>}
             <button type="submit" className="collection-primary">{saving ? 'Creating request…' : 'Create collection request'}</button>
@@ -139,6 +143,8 @@ export default function Collections() {
         </form>
         {notice && <p className="collection-notice" role="status">{notice}</p>}
       </section>
+    </Dialog>
+    <div className="collection-grid">
       <section className="collection-card collection-register"><div className="collection-register-heading"><h2><ShoppingBag size={19} /> Collection requests <span>{total}</span></h2><button type="button" className="collection-secondary" onClick={load} disabled={loading}>Refresh</button></div>
         <p className="collection-hint">Assign requests in Deliveries. Collection and driver progress appear here.</p>
         {listError ? <p role="alert" className="collection-error">{listError}</p> : loading ? <p role="status">Loading requests…</p> : !records.length ? <div className="collection-empty"><ShoppingBag size={32} /><h3>No collection requests yet</h3><p>Create a request to arrange a bag pickup.</p></div> : <ul className="collection-records">{records.map(record => <li key={record._id}>
@@ -150,7 +156,7 @@ export default function Collections() {
         </li>)}</ul>}
         {pages > 1 && <nav className="collection-pagination" aria-label="Collection pages"><button type="button" disabled={page === 1 || loading} onClick={() => setPage(current => current - 1)}>Previous</button><span>Page {page} of {pages}</span><button type="button" disabled={page >= pages || loading} onClick={() => setPage(current => current + 1)}>Next</button></nav>}
       </section>
+      <CollectionRefundTracker />
     </div>
-    <CollectionRefundTracker />
   </div>;
 }
