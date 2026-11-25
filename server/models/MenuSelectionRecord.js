@@ -47,6 +47,9 @@ const menuSelectionRecordSchema = new mongoose.Schema({
   matterSubscriptionId: String,
 
   selectedMeals: [{
+    // Subscription applicable on this food date, including a scheduled renewal.
+    matterSubscriptionId: String,
+    isUpcomingPlan: { type: Boolean, default: false },
     date: Date,
     mealType: {
       type: String,

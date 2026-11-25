@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import router from '../routes/menus.js';
 import Customer from '../models/Customer.js';
 import MenuSelectionRecord from '../models/MenuSelectionRecord.js';
-import matter from './matterApiService.js';
+import matter, { buildNutritionResult } from './matterApiService.js';
 import WeeklyMenu from '../models/WeeklyMenu.js';
 
 const source = {
@@ -160,4 +160,56 @@ test('an incomplete set of resume dates is rejected before saving meals or writi
   assert.match(response.message, /2026-11-01/);
   assert.equal(save.mock.callCount(), 0);
   assert.equal(pause.mock.callCount(), 0);
+});
+
+
+for (const restored of [false, true]) test(`upcoming admin unpause confirms the parent snapshot after saved pauses are read (restored=${restored})`, async t => {
+  const date = '2099-11-05';
+  const raw = { subscription_id: 'current', customer_id: 'person', email: 'customer@example.com', plan: { meal_frequency: 2 }, allergens: [], exclusions: [], delivery_schedule: [],
+    upcoming_plan: { subscription_id: 'next', replaces_subscription_id: 'current', customer_id: 'person', starting_date: date, plan: { meal_frequency: 3 }, allergens: [], exclusions: [], delivery_schedule: [{ date, status: 'active' }] } };
+  const initial = buildNutritionResult(raw);
+  const skippedDays = [{ date, subscriptionId: 'next', pauseStatus: 'success', processedAt: new Date() }];
+  t.mock.method(matter, 'getKitchenNutrition', async () => initial);
+  t.mock.method(matter, 'getSubscription', async id => { assert.equal(id, 'current'); return { data: { ...raw, upcoming_plan: { ...raw.upcoming_plan, delivery_schedule: [{ date, status: restored ? 'active' : 'paused' }] } } }; });
+  t.mock.method(MenuSelectionRecord, 'findOne', () => ({ lean: async () => ({ _id: 'record', selectedMeals: [], skippedDays, weeklyMenuId: 'menu' }) }));
+  const update = t.mock.method(MenuSelectionRecord, 'updateOne', async (_, write) => { assert.equal(write.$push.unpausedDays.subscriptionId, 'next'); return { matchedCount: 1 }; });
+  const handler = router.stack.find(layer => layer.route?.path === '/customers/:email/subscription-profile').route.stack[0].handle;
+  let response;
+  const res = { json: value => { response = value; }, status: () => res };
+  await handler({ params: { email: 'customer@example.com' }, query: { menuId: 'menu' } }, res);
+  assert.equal(response.success, true);
+  assert.equal(response.data.skippedDays.length, restored ? 0 : 1);
+  assert.equal(response.data.restoredSkipDates.includes(date), restored);
+  assert.equal(update.mock.callCount(), restored ? 1 : 0);
+});
+
+
+test('a plan booked during submission routes a newly upcoming pause to the new subscription', async t => {
+  const date = '2099-11-05';
+  const raw = { subscription_id: 'current', customer_id: 'matter-person', email: source.customer_email, plan: { meal_frequency: 2 },
+    allergens: [], exclusions: [], delivery_schedule: [{ date, status: 'active' }],
+    upcoming_plan: { subscription_id: 'next', replaces_subscription_id: 'current', customer_id: 'matter-person', email: source.customer_email,
+      starting_date: date, cycle_end_date: '2099-11-20', plan: { meal_frequency: 3 }, allergens: [], exclusions: [], delivery_schedule: [{ date, status: 'active' }] } };
+  const initial = buildNutritionResult({ ...raw, upcoming_plan: null });
+  const latest = buildNutritionResult(raw);
+  let reads = 0, stored = null;
+  t.mock.method(matter, 'getKitchenNutrition', async () => ++reads === 1 ? initial : latest);
+  t.mock.method(matter, 'listSubscriptions', async () => ({ data: [{ subscription_id: 'current', subscription_status: 'active' }] }));
+  t.mock.method(matter, 'getSubscription', async id => { assert.equal(id, 'current'); return { data: raw }; });
+  t.mock.method(matter, 'getSubscriptionPauses', async () => ({ paused_days: [], resumed_days: [] }));
+  const writes = t.mock.method(matter, 'createSubscriptionPause', async () => ({}));
+  t.mock.method(MenuSelectionRecord, 'findOne', () => ({ select() { return this; }, lean: async () => stored }));
+  t.mock.method(MenuSelectionRecord, 'findOneAndUpdate', async (_, update) => { stored = update.$set; return stored; });
+  t.mock.method(MenuSelectionRecord, 'updateOne', async (_, update) => { Object.assign(stored, update.$set); return { matchedCount: 1 }; });
+  t.mock.method(MenuSelectionRecord, 'countDocuments', async () => 1);
+  t.mock.method(WeeklyMenu, 'findByIdAndUpdate', async () => ({}));
+  t.mock.method(WeeklyMenu, 'findById', () => ({ populate: () => ({ lean: async () => ({ meals: [] }) }) }));
+  const handler = router.stack.find(layer => layer.route?.path === '/customers/:email/select-meals').route.stack[0].handle;
+  const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+  await handler({ params: { email: source.customer_email }, body: { weeklyMenuId: '507f1f77bcf86cd799439012', selections: [], skippedDates: [date],
+    pauseDecisions: [{ date, action: 'pause', resumeDate: '2099-12-01', alreadyPaused: false }] } }, res);
+  assert.equal(res.body.success, true);
+  assert.equal(writes.mock.callCount(), 1);
+  assert.equal(writes.mock.calls[0].arguments[0], 'next');
+  assert.equal(stored.skippedDays[0].subscriptionId, 'next');
 });

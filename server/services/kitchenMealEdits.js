@@ -39,7 +39,7 @@ export const readMealEditContext = async (menuId, customerId, date) => {
   const menu = await Menu.findById(menuId).lean();
   validDate(menu, date);
   const window = kitchenSelectionWindow(menu, date);
-  const nutrition = await matter.getKitchenNutrition({ customerId });
+  const nutrition = await matter.getKitchenNutrition({ customerId, date });
   if (String(nutrition?.customer_id) !== customerId || !nutrition.active_delivery_dates?.includes(date)) fail('Matter does not confirm an active delivery for this customer/date.');
   if (!String(nutrition.plan_name || '').trim()) fail('Matter plan identity is unresolved. Verify the subscription before editing meals.');
   const record = await recordFor(menuId, nutrition);

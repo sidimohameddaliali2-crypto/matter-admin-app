@@ -331,7 +331,7 @@ const MenuSelectionLink = ({ token }) => {
     document.addEventListener('visibilitychange', refresh);
     return () => { clearInterval(timer); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); };
   }, []);
-  const renewalEligible = isWithinRenewalWindow(account?.cycleEndDate, renewalNow);
+  const renewalEligible = !account?.hasUpcomingPlan && isWithinRenewalWindow(account?.cycleEndDate, renewalNow);
   const [toast, setToast] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const toastTimer = useRef(null);
@@ -441,12 +441,21 @@ const MenuSelectionLink = ({ token }) => {
       const exclusionPhrases = groupExclusions(profile.mealExclusion);
 
       setAccount({
+        exclusionsKnown: (built.dayKeys.length ? built.dayKeys : [null]).every(date => {
+          const plan = profile.plansByDate?.[date] || profile;
+          return plan.exclusionsAvailable === true && typeof plan.mealExclusion === 'string';
+        }),
         name: `${profile.firstName || ''} ${profile.lastName || ''}`.trim() || profile.email || v,
         email: profile.email || v,
         matterCustomerId: profile.matterCustomerId || profile.customerId || null,
-        allergensKnown: profile.allergiesAvailable === true && Array.isArray(profile.allergies),
+        allergensKnown: (built.dayKeys.length ? built.dayKeys : [null]).every(date => {
+          const plan = profile.plansByDate?.[date] || profile;
+          return plan.allergiesAvailable === true && Array.isArray(plan.allergies);
+        }),
         plan: profile.mealPlan || 'Meal plan',
         perDay: Number(profile.mealPerDay) || 1,
+        plansByDate: profile.plansByDate || {},
+        hasUpcomingPlan: !!profile.upcomingPlanStartDate || Object.values(profile.plansByDate || {}).some(plan => plan.isUpcomingPlan),
         weekend: !!profile.weekend,
         deliveryDates: profile.deliveryDates || built.dayKeys,
         restoredSkipDates: profile.restoredSkipDates || [],
@@ -510,11 +519,18 @@ const MenuSelectionLink = ({ token }) => {
   }, [email, preview, rawMenu]);
 
   /* -- selection helpers -- */
-  const dayKeys = model?.dayKeys || [];
+  const dayKeys = useMemo(() => model?.dayKeys || [], [model]);
   const lastDay = Math.max(0, dayKeys.length - 1);
   // Menu-selection Partner members (account.unlimitedMeals) have no daily cap —
   // Infinity means addWithCap below never blocks another meal being added.
-  const target = account?.unlimitedMeals ? Infinity : (account?.perDay || 3);
+  const targetForDay = useCallback(index => account?.unlimitedMeals ? Infinity
+    : (account?.plansByDate?.[dayKeys[index]]?.mealPerDay ?? account?.perDay ?? 3), [account, dayKeys]);
+  const target = targetForDay(day);
+  const restrictionsForMeal = useCallback(meal => {
+    const plan = account?.plansByDate?.[meal.dayKey];
+    return { exclusions: plan ? groupExclusions(plan.mealExclusion) : account?.exclusionPhrases || [],
+      allergies: plan?.allergies ?? account?.allergensLc ?? [] };
+  }, [account]);
 
   // "Last day of your cycle" is the last REAL delivery day (dayKeys is
   // already filtered to the customer's own Matter calendar + the published
@@ -569,7 +585,8 @@ const MenuSelectionLink = ({ token }) => {
       if (!account) return null;
 
       if (!preview) {
-        const rule = evaluateComponentSelection(m.item, account.exclusionPhrases || [], account.allergensLc || []);
+        const restrictions = restrictionsForMeal(m);
+        const rule = evaluateComponentSelection(m.item, restrictions.exclusions, restrictions.allergies);
         if (rule.allergies.length) return { kind: 'allergen', items: rule.allergies.map(titleCase) };
         if (rule.wholeMeal || rule.publicConflicts.length) return { kind: 'exclusion', items: rule.publicConflicts, matchedCarb: rule.matchedCarb, matchedVeg: rule.matchedVeg, wholeMeal: rule.wholeMeal, hidden: !rule.publicConflicts.length };
         return null;
@@ -602,7 +619,7 @@ const MenuSelectionLink = ({ token }) => {
       }
       return null;
     },
-    [account, preview]
+    [account, preview, restrictionsForMeal]
   );
 
   const bump = useCallback((key, delta) => {
@@ -616,7 +633,8 @@ const MenuSelectionLink = ({ token }) => {
   const computeSauceGarnishFlags = useCallback(
     (m, preference) => {
       if (!preview) {
-        const result = evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []);
+        const restrictions = restrictionsForMeal(m);
+        const result = evaluateComponentSelection(m.item, restrictions.exclusions, restrictions.allergies);
         return selectionPreferenceFlags(result, preference);
       }
       const exclusionPhrases = preview ? [] : (account?.exclusionPhrases || []);
@@ -629,7 +647,7 @@ const MenuSelectionLink = ({ token }) => {
         garnishConflict: matchedGarnish,
       };
     },
-    [account, preview]
+    [account, preview, restrictionsForMeal]
   );
 
   // Adds one meal but never lets a day exceed the customer's meals-per-day.
@@ -638,21 +656,23 @@ const MenuSelectionLink = ({ token }) => {
   // and stashed per meal key so doSubmit can attach them to the selection.
   const addWithCap = useCallback(
     (m, extraFlags = {}) => {
-      if (!preview && account?.allergensKnown !== true) return false;
-      const rule = !preview && evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []);
+      if (!preview && (account?.allergensKnown !== true || account?.exclusionsKnown !== true)) return false;
+      const restrictions = restrictionsForMeal(m);
+      const rule = !preview && evaluateComponentSelection(m.item, restrictions.exclusions, restrictions.allergies);
       if (rule && rule.allergies.length) return false;
       const dayTotal = (model?.meals || [])
         .filter((mm) => mm.dayIndex === m.dayIndex)
         .reduce((a, mm) => a + (qty[mm.key] || 0), 0);
-      if (dayTotal >= target) {
-        flash(`You can pick up to ${target} meal${target === 1 ? '' : 's'} for this day.`);
+      const limit = targetForDay(m.dayIndex);
+      if (dayTotal >= limit) {
+        flash(`You can pick up to ${limit} meal${limit === 1 ? '' : 's'} for this day.`);
         return false;
       }
       bump(m.key, 1);
       setMealFlags((s) => ({ ...s, [m.key]: { ...extraFlags, ...computeSauceGarnishFlags(m, extraFlags.carbVegAction ?? s[m.key]?.carbVegPreference) } }));
       return true;
     },
-    [account, preview, bump, computeSauceGarnishFlags, flash, model, qty, target]
+    [account, preview, bump, computeSauceGarnishFlags, flash, model, qty, targetForDay, restrictionsForMeal]
   );
 
   const openAllergen = useCallback(
@@ -758,8 +778,8 @@ const MenuSelectionLink = ({ token }) => {
   // about pausing is ever recomputed server-side from this; the server
   // applies these decisions verbatim (routes/menus.js select-meals).
   const doSubmit = useCallback(async (pauseDecisions) => {
-    if (!preview && account?.allergensKnown !== true) {
-      flash('Allergy information is unavailable from Matter. Please retry or contact customer service.');
+    if (!preview && (account?.allergensKnown !== true || account?.exclusionsKnown !== true)) {
+      flash(`${account?.allergensKnown !== true ? 'Allergy' : 'Exclusion'} information is unavailable from Matter. Please retry or contact customer service.`);
       return;
     }
     // Recheck restored selections too: a customer's allergy profile may have
@@ -1017,7 +1037,8 @@ const MenuSelectionLink = ({ token }) => {
         const on = i === day;
         const isSkip = !!skipped[i];
         const n = dayCount(i);
-        const isComplete = !isSkip && (account?.unlimitedMeals ? n > 0 : target > 0 && n >= target);
+        const dayTarget = targetForDay(i);
+        const isComplete = !isSkip && (account?.unlimitedMeals ? n > 0 : dayTarget > 0 && n >= dayTarget);
         const isPastDeadline = isDayDeadlineLocked(k);
 
         // Status color always shows — skipped days are amber, fully-picked
@@ -1055,7 +1076,7 @@ const MenuSelectionLink = ({ token }) => {
           onClick: () => setDay(i),
         };
       }),
-    [account, day, dayCount, dayKeys, isDayDeadlineLocked, skipped, target]
+    [account, day, dayCount, dayKeys, isDayDeadlineLocked, skipped, targetForDay]
   );
 
   const summary = useMemo(
@@ -1078,17 +1099,17 @@ const MenuSelectionLink = ({ token }) => {
         firstName: (account.name || '').split(' ')[0],
         email: account.email,
         initials: initialsOf(account.name),
-        plan: account.plan,
-        perDay: account.unlimitedMeals ? 'Unlimited' : `${account.perDay} meal${account.perDay === 1 ? '' : 's'}`,
+        plan: account.plansByDate?.[dayKeys[day]]?.mealPlan || account.plan,
+        perDay: account.unlimitedMeals ? 'Unlimited' : `${target} meal${target === 1 ? '' : 's'}`,
         // Split so allergens (hard-block, from the customer's profile) and
         // dietary exclusions (soft-warn, from mealExclusion) each get their
         // own labeled section instead of one merged, ambiguous tag list.
-        allergenFlags: account.allergensDisplay.map((x) => ({
+        allergenFlags: (account.plansByDate?.[dayKeys[day]]?.allergies || account.allergensDisplay).map((x) => ({
           label: x,
           bg: 'var(--color-accent-200)',
           fg: 'var(--color-accent-900)',
         })),
-        exclusionFlags: account.exclusionsDisplay.map((x) => ({
+        exclusionFlags: (account.plansByDate?.[dayKeys[day]] ? groupExclusions(account.plansByDate[dayKeys[day]].mealExclusion) : account.exclusionsDisplay).map((x) => ({
           label: x,
           bg: 'var(--color-accent-2-200)',
           fg: 'var(--color-accent-2-900)',
@@ -1187,11 +1208,11 @@ const MenuSelectionLink = ({ token }) => {
     </div>
   );
 
-  const renderMenu = () => (!preview && account?.allergensKnown !== true ? (
+  const renderMenu = () => (!preview && (account?.allergensKnown !== true || account?.exclusionsKnown !== true) ? (
     <main style={{ padding: '40px 28px', maxWidth: 520, margin: 'auto', textAlign: 'center' }}>
       <MatterLogo height={24} />
-      <h2>Allergy information unavailable</h2>
-      <p>We could not verify your allergy information. Please retry or contact customer service before choosing meals.</p>
+      <h2>{account?.allergensKnown !== true ? 'Allergy' : 'Exclusion'} information unavailable</h2>
+      <p>We could not verify your {account?.allergensKnown !== true ? 'allergy' : 'exclusion'} information. Please retry or contact customer service before choosing meals.</p>
       <button className="btn btn-primary" onClick={signIn}>Try again</button>
       <button className="btn btn-secondary" onClick={() => { setAccount(null); setStep('signin'); }} style={{ marginTop: 12 }}>Sign out</button>
     </main>

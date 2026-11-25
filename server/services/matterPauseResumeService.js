@@ -1,4 +1,5 @@
-import matterApiService, { describeMatterApiError } from './matterApiService.js';
+import { menuNutritionForDate, menuPlanDates, menuReservedDates } from './menuPlanSchedule.js';
+import matterApiService, { describeMatterApiError, buildNutritionResult } from './matterApiService.js';
 import { matterWeekendEnabled } from './matterSubscriptionContract.js';
 
 // Menu-link pauses use only resume dates explicitly chosen by the customer.
@@ -37,7 +38,7 @@ export function expandSaturdaySkips(dates, deliveryDates) {
  * Returns { subscription, subscriptionId, existingPaused: Set,
  * usedReturn: Set } on success, or { error } when nothing could be resolved.
  */
-export async function resolveSubscriptionContext({ email, matterSubscriptionId, matterCustomerId }) {
+export async function resolveSubscriptionContext({ email, matterSubscriptionId, matterCustomerId, date }) {
   let subscription = null;
   try {
     let detailData = null;
@@ -72,24 +73,34 @@ export async function resolveSubscriptionContext({ email, matterSubscriptionId, 
       const detail = await matterApiService.getSubscription(subscription.subscription_id);
       detailData = detail?.data || null;
     }
+    const rootNutrition = buildNutritionResult(detailData || {});
+    const selectedPlan = date ? menuNutritionForDate(rootNutrition, date) : rootNutrition;
+    const hasUpcomingPlan = !!detailData?.upcoming_plan;
+    const allActiveDeliveryDates = hasUpcomingPlan ? menuPlanDates(rootNutrition) : null;
+    if (selectedPlan !== rootNutrition) {
+      detailData = detailData.upcoming_plan;
+      subscription = detailData;
+    }
     if (!Array.isArray(detailData?.delivery_schedule)) {
       return { error: 'Unable to verify active deliveries with Matter. Please retry.' };
     }
     const activeDeliveryDates = new Set(detailData.delivery_schedule
       .filter((entry) => entry.status === 'active').map((entry) => toDayKey(entry.date)));
-    let existingPaused = new Set();
-    let usedReturn = new Set();
+    let existingPaused = new Set([...(selectedPlan.paused_delivery_dates || []), ...(detailData.pauses?.paused_days || []).map(toDayKey)]);
+    let usedReturn = new Set((detailData.pauses?.resumed_days || []).map(toDayKey));
     try {
       const pauseState = await matterApiService.getSubscriptionPauses(subscription.subscription_id);
-      existingPaused = new Set((pauseState?.paused_days || pauseState?.data?.paused_days || []).map(toDayKey));
-      usedReturn = new Set((pauseState?.resumed_days || pauseState?.data?.resumed_days || []).map(toDayKey));
+      existingPaused = new Set([...existingPaused, ...(pauseState?.paused_days || pauseState?.data?.paused_days || []).map(toDayKey)]);
+      usedReturn = new Set([...usedReturn, ...(pauseState?.resumed_days || pauseState?.data?.resumed_days || []).map(toDayKey)]);
     } catch (err) {
       // Non-fatal — we can still validate/apply chosen dates, just can't dedupe
       // against days Matter already has paused/reserved.
       console.error('resolveSubscriptionContext: failed to read existing pauses:', err.message);
     }
 
-    return { subscription, subscriptionId: subscription.subscription_id, existingPaused, usedReturn, activeDeliveryDates, weekendEnabled: matterWeekendEnabled(detailData) };
+    const allUnavailableDates = [...new Set([...menuReservedDates(rootNutrition), ...existingPaused, ...usedReturn])];
+    const allPausedDeliveryDates = [...new Set([rootNutrition, rootNutrition.upcoming_plan].filter(Boolean).flatMap(plan => plan.paused_delivery_dates || []))];
+    return { allUnavailableDates, allPausedDeliveryDates, subscription, subscriptionId: subscription.subscription_id, existingPaused, usedReturn, activeDeliveryDates, allActiveDeliveryDates, hasUpcomingPlan, weekendEnabled: matterWeekendEnabled(detailData) };
   } catch (err) {
     return { error: describeMatterApiError(err) || err.message || 'Failed to reach the Matter API' };
   }
@@ -120,8 +131,8 @@ export function validateRequiredResumeDates({ skippedDateKeys, decisions, alread
  * Read-only orchestration for the pre-submit preview the customer sees in the
  * pause-confirmation calendar. Never calls createSubscriptionPause.
  */
-export async function previewSkipPauses({ email, matterSubscriptionId, matterCustomerId, skippedDateKeys, restoredSkipDates = [] }) {
-  const ctx = await resolveSubscriptionContext({ email, matterSubscriptionId, matterCustomerId });
+export async function previewSkipPauses({ email, matterSubscriptionId, matterCustomerId, skippedDateKeys, restoredSkipDates = [], expandWeekends = true }) {
+  const ctx = await resolveSubscriptionContext({ email, matterSubscriptionId, matterCustomerId, date: skippedDateKeys?.[0] });
   if (ctx.error) {
     return {
       subscriptionId: null,
@@ -130,16 +141,26 @@ export async function previewSkipPauses({ email, matterSubscriptionId, matterCus
     };
   }
   const explicitDates = new Set(skippedDateKeys);
-  skippedDateKeys = expandSaturdaySkips(skippedDateKeys, new Set([...ctx.activeDeliveryDates, ...ctx.existingPaused]))
-    .filter((date) => explicitDates.has(date) || !restoredSkipDates.includes(date));
+  if (expandWeekends) skippedDateKeys = expandSaturdaySkips(skippedDateKeys,
+    new Set([...(ctx.allActiveDeliveryDates || ctx.activeDeliveryDates), ...(ctx.allPausedDeliveryDates || []), ...ctx.existingPaused]))
+    .filter(date => explicitDates.has(date) || !restoredSkipDates.includes(date));
+  if (ctx.hasUpcomingPlan && (skippedDateKeys || []).length > 1) {
+    const previews = await Promise.all(skippedDateKeys.map(date => previewSkipPauses({ email, matterSubscriptionId, matterCustomerId, skippedDateKeys: [date], restoredSkipDates, expandWeekends: false })));
+    const error = previews.find(preview => preview.availabilityError);
+    if (error) return error;
+    return { subscriptionId: null, weekendEnabled: previews.some(preview => preview.weekendEnabled),
+      activeDeliveryDates: [...new Set(previews.flatMap(preview => preview.activeDeliveryDates || []))],
+      unavailableDates: [...new Set(previews.flatMap(preview => preview.unavailableDates || []))],
+      pauses: [...new Map(previews.flatMap(preview => preview.pauses || []).map(pause => [pause.date, pause])).values()] };
+  }
   return {
     subscriptionId: ctx.subscriptionId,
     weekendEnabled: ctx.weekendEnabled,
-    activeDeliveryDates: [...ctx.activeDeliveryDates],
-    unavailableDates: [...new Set([...ctx.existingPaused, ...ctx.usedReturn])],
+    activeDeliveryDates: ctx.allActiveDeliveryDates || [...ctx.activeDeliveryDates],
+    unavailableDates: ctx.allUnavailableDates,
     pauses: (skippedDateKeys || []).map((date) => {
       const key = toDayKey(date);
-      return { date: key, alreadyPaused: ctx.existingPaused.has(key), resumeDate: null };
+      return { date: key, subscriptionId: ctx.subscriptionId, alreadyPaused: ctx.existingPaused.has(key), resumeDate: null };
     })
   };
 }
@@ -155,7 +176,7 @@ export async function previewSkipPauses({ email, matterSubscriptionId, matterCus
  * Returns an array of { date, pauseStatus: 'success'|'already_paused'|
  * 'failed'|'declined', resumeDate, subscriptionId, error }.
  */
-export async function applyConfirmedPauses({ subscriptionId, decisions }) {
+export async function applyConfirmedPauses({ subscriptionId, decisions, matterCustomerId }) {
   const results = [];
   // Recheck the live schedule at confirmation: a delivery may have been
   // added after the customer opened the calendar. Never write on lookup failure.
@@ -163,9 +184,19 @@ export async function applyConfirmedPauses({ subscriptionId, decisions }) {
   let scheduleError = null;
   if (subscriptionId && (decisions || []).some((d) => d.action !== 'decline' && !d.alreadyPaused)) {
     try {
-      const detail = await matterApiService.getSubscription(subscriptionId);
-      if (!Array.isArray(detail?.data?.delivery_schedule)) throw new Error('Matter delivery schedule is unavailable');
-      activeDates = new Set(detail.data.delivery_schedule.filter((d) => d.status === 'active').map((d) => toDayKey(d.date)));
+      if (matterCustomerId) {
+        const current = await matterApiService.getKitchenNutrition({ customerId: matterCustomerId });
+        for (const decision of decisions) {
+          if (decision.action === 'decline') continue;
+          const plan = menuNutritionForDate(current, decision.date);
+          if (String(plan.subscription_id) !== String(subscriptionId) || !Array.isArray(plan.active_delivery_dates)) throw new Error('Your Matter plan changed. Reopen the menu before pausing.');
+        }
+        activeDates = new Set([...(current.upcoming_plan ? menuPlanDates(current) : current.active_delivery_dates), ...menuReservedDates(current)]);
+      } else {
+        const detail = await matterApiService.getSubscription(subscriptionId);
+        if (!Array.isArray(detail?.data?.delivery_schedule)) throw new Error('Matter delivery schedule is unavailable');
+        activeDates = new Set(detail.data.delivery_schedule.filter((d) => d.status === 'active').map((d) => toDayKey(d.date)));
+      }
     } catch (err) {
       scheduleError = describeMatterApiError(err) || err.message;
     }

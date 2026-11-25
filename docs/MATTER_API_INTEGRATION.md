@@ -331,6 +331,24 @@ allergy profiles are never queried or merged in this flow.
 Legacy partner assignment based on Internal
 Customer membership is disabled; these members need verified Matter accounts.
 
+Customer menu links use the full subscription detail's nested `upcoming_plan`
+for scheduled renewals. Its `starting_date` switches the dated meal allowance,
+plan, exclusions and allergens; its active delivery calendar determines which
+days can open. List summaries do not supply meal counts, and a scheduled plan's
+standalone detail endpoint may return 404 before activation. Verify the nested
+permanent customer ID and replacement link; unavailable or ambiguous inputs
+must not be inferred from the current plan. A menu spanning two plans keeps one
+customer/menu record, with authoritative `matterSubscriptionId` and
+`isUpcomingPlan` saved on each selected or newly auto-assigned meal. Staff tags
+show Selected upcoming plan or Auto assign upcoming plan. Submission rechecks
+each dated allowance and allergy profile; browser subscription IDs are ignored.
+Missing exclusions remain unavailable and block selecting/saving meals for
+affected dates; only an explicit empty exclusion array means no exclusions.
+Pause previews and confirmation route each day to its applicable subscription
+and block resume dates with active deliveries on either plan. No live pause
+writes were used to validate this behavior; scheduled pause acceptance remains
+subject to Matter's API response.
+
 `GET /api/matter/subscriptions/kitchen-inputs` requires staff authentication and
 accepts `customerId` (permanent Matter ID), or email for discovery. It reads Matter
 fresh and never relinks Internal records. A legacy selection's captured

@@ -141,3 +141,38 @@ test('missing Core rotation returns the actual date and missing main slots witho
   assert.deepEqual(res.body.failures.map(({ stage, mealType, count }) => ({ stage, mealType, count })), [{ stage: 'Matter Core', mealType: 'main', count: 2 }]);
   assert.equal(JSON.stringify(res.body).includes('carbohydrates'), false);
 });
+
+
+test('menu profile exposes upcoming dates and meal counts from its start, preserving the permanent customer', async t => {
+  blockInternal(t);
+  const nutrition = { ...source, meal_frequency: 2, active_delivery_dates: ['2099-11-02'],
+    upcoming_plan: { ...source, subscription_id: 'next', replaces_subscription_id: 'renewal', starting_date: '2099-11-05', cycle_end_date: '2099-11-08', meal_frequency: 3,
+      allergens: [], is_upcoming_plan: true, active_delivery_dates: ['2099-11-03', '2099-11-05'] } };
+  t.mock.method(matter, 'getKitchenNutrition', async () => nutrition);
+  t.mock.method(Record, 'findOne', () => query(null));
+  const res = response();
+  await route('/customers/:email/subscription-profile', 'get')({ params: { email: source.customer_email }, query: { menuId: 'menu' } }, res);
+  assert.equal(res.body.success, true);
+  assert.deepEqual(res.body.data.deliveryDates, ['2099-11-02', '2099-11-05']);
+  assert.equal(res.body.data.plansByDate['2099-11-02'].mealPerDay, 2);
+  assert.equal(res.body.data.plansByDate['2099-11-05'].mealPerDay, 3);
+  assert.equal(res.body.data.plansByDate['2099-11-05'].subscriptionId, 'next');
+  assert.equal(res.body.data.plansByDate['2099-11-05'].isUpcomingPlan, true);
+});
+
+
+test('menu profile distinguishes unknown upcoming exclusions from a known empty current list', async t => {
+  blockInternal(t);
+  const date = '2099-11-05';
+  const nutrition = { ...source, meal_frequency: 2, active_delivery_dates: [],
+    upcoming_plan: { ...source, subscription_id: 'next', replaces_subscription_id: source.subscription_id, starting_date: date,
+      cycle_end_date: date, meal_frequency: 3, allergens: [], exclusions: null, is_upcoming_plan: true, active_delivery_dates: [date] } };
+  t.mock.method(matter, 'getKitchenNutrition', async () => nutrition);
+  t.mock.method(Record, 'findOne', () => query(null));
+  const res = response();
+  await route('/customers/:email/subscription-profile', 'get')({ params: { email: source.customer_email }, query: { menuId: 'menu' } }, res);
+  assert.equal(res.body.success, true);
+  assert.equal(res.body.data.exclusionsAvailable, true);
+  assert.equal(res.body.data.plansByDate[date].exclusionsAvailable, false);
+  assert.equal(res.body.data.plansByDate[date].mealExclusion, null);
+});

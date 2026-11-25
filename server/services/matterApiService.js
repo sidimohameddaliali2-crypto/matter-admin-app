@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { cacheGet, cacheSet } from '../config/cache.js';
 import { boundedMap } from './boundedMap.js';
 import { normalizeMatterAllergens } from './matterAllergens.js';
+import { menuNutritionForDate } from './menuPlanSchedule.js';
 import { readMatterGet } from './matterReadRetry.js';
 import { resolveMatterDeliveryAddress, matterMealContract, matterWeekendEnabled, matterDoubleDeliveryDates } from './matterSubscriptionContract.js';
 
@@ -79,7 +80,12 @@ const activeDeliveryDates = (subscription) => (subscription?.delivery_schedule |
 // One shape for every nutrition lookup (by email, subscription id, or Matter
 // customer id), so the Kitchen List gets the same fields whichever path found
 // the subscription. customer_id is Matter's permanent id for the customer.
-export const buildNutritionResult = (subscription) => ({
+export const buildNutritionResult = (subscription, upcoming = false, parentSubscriptionId = null) => ({
+  replaces_subscription_id: subscription.replaces_subscription_id ?? null,
+  starting_date: subscription.starting_date ? String(subscription.starting_date).slice(0, 10) : null,
+  is_upcoming_plan: upcoming,
+  source_parent_subscription_id: parentSubscriptionId,
+  upcoming_plan: !upcoming && subscription.upcoming_plan ? buildNutritionResult(subscription.upcoming_plan, true, subscription.subscription_id) : null,
   delivery_address_resolution: resolveMatterDeliveryAddress(subscription.customer_addresses),
   meal_contract: matterMealContract(subscription),
   double_delivery_dates: matterDoubleDeliveryDates(subscription),
@@ -100,6 +106,10 @@ export const buildNutritionResult = (subscription) => ({
   active_delivery_dates: Array.isArray(subscription.delivery_schedule)
     ? activeDeliveryDates(subscription)
     : null,
+  paused_delivery_dates: Array.isArray(subscription.delivery_schedule)
+    ? [...new Set([...subscription.delivery_schedule.filter(day => day.status === 'paused').map(day => String(day.date).slice(0, 10)),
+      ...(subscription.pauses?.paused_days || []).map(day => String(day).slice(0, 10))])] : null,
+  reserved_resume_dates: Array.isArray(subscription.pauses?.resumed_days) ? subscription.pauses.resumed_days.map(day => String(day).slice(0, 10)) : null,
   weekend_enabled: Array.isArray(subscription.delivery_schedule) ? matterWeekendEnabled(subscription) : null,
   // The subscription's billing-cycle boundary — used by the menu-selection
   // screen's "last day of your cycle" banner/Renew prompt, and by
@@ -170,7 +180,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionByEmail(email) {
     const normalizedEmail = String(email || '').trim().toLowerCase();
-    const cacheKey = `matter:nutrition:v4:email:${normalizedEmail}`;
+    const cacheKey = `matter:nutrition:v5:email:${normalizedEmail}`;
     const cached = normalizedEmail ? await cacheGet(cacheKey) : null;
     if (cached) return cached;
 
@@ -198,7 +208,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionBySubscriptionId(subscriptionId) {
     if (!subscriptionId) return null;
-    const cacheKey = `matter:nutrition:v4:sub:${subscriptionId}`;
+    const cacheKey = `matter:nutrition:v5:sub:${subscriptionId}`;
     const cached = await cacheGet(cacheKey);
     if (cached) return cached;
 
@@ -219,7 +229,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionByCustomerId(customerId) {
     if (!customerId) return null;
-    const cacheKey = `matter:nutrition:v4:cust:${customerId}`;
+    const cacheKey = `matter:nutrition:v5:cust:${customerId}`;
     const cached = await cacheGet(cacheKey);
     if (cached) return cached;
 
@@ -240,7 +250,7 @@ class MatterApiService {
   // Owner (2026-10-20): permanent Matter customer ID owns kitchen identity.
   // Email discovers that ID at sign-in. Subscription IDs are legacy references.
   // Every read is from Matter; no Internal Customer lookup or relinking occurs.
-  async getKitchenNutrition({ subscriptionId, customerId, email } = {}) {
+  async getKitchenNutrition({ subscriptionId, customerId, email, date } = {}) {
     try {
       const normalize = (value) => String(value || '').trim().toLowerCase();
       const fail = (message) => { const error = new Error(message); error.statusCode = 409; throw error; };
@@ -290,7 +300,8 @@ class MatterApiService {
         subscription = await byCustomer(legacy.customer_id);
       } else fail('A Matter customer ID or verified website email is required.');
       if (!String(subscription?.customer_id ?? '').trim()) fail('Permanent Matter customer ID is missing. Verify this account in Matter.');
-      return buildNutritionResult(subscription);
+      const nutrition = buildNutritionResult(subscription);
+      return date ? menuNutritionForDate(nutrition, date) : nutrition;
     } catch (error) {
       if (!error.isAxiosError) throw error;
       const safe = new Error(describeMatterApiError(error) || 'Matter lookup failed. Please retry.');
@@ -365,8 +376,10 @@ class MatterApiService {
   async findSubscriptionsWithDeliveryInRange(startDateKey, endDateKey, { includeKitchenInputs = false, onProgress } = {}) {
     const all = await this.listAllSubscriptions({ onProgress });
     const candidates = all.filter((sub) =>
-      ['active', 'paused', 'cancelled'].includes(sub.subscription_status)
-      && String(sub.cycle_end_date || '').slice(0, 10) >= startDateKey
+      (['active', 'paused', 'cancelled'].includes(sub.subscription_status)
+        && String(sub.cycle_end_date || '').slice(0, 10) >= startDateKey)
+      || (sub.upcoming_plan && (!sub.upcoming_plan.cycle_end_date
+        || String(sub.upcoming_plan.cycle_end_date).slice(0, 10) >= startDateKey))
     );
 
     const CONCURRENCY = 20;
@@ -379,62 +392,81 @@ class MatterApiService {
         try {
           const detail = await this.getSubscription(sub.subscription_id);
           if (includeKitchenInputs && String(detail?.data?.subscription_id ?? '') !== String(sub.subscription_id)) throw new Error('Matter subscription identity could not be verified');
-          const schedule = detail?.data?.delivery_schedule;
-          if (!Array.isArray(schedule)) throw new Error('Delivery schedule is missing');
-          const deliveryDates = schedule
-            .filter((entry) => {
-              const d = String(entry.date).slice(0, 10);
-              return entry.status === 'active' && d >= startDateKey && d <= endDateKey;
-            })
-            .map((entry) => String(entry.date).slice(0, 10))
-            .sort();
-          if (deliveryDates.length === 0) return [];
-          return deliveryDates.map((deliveryDate) => ({
-            ...(includeKitchenInputs ? { kitchen_inputs: buildNutritionResult({ ...detail.data, email: detail.data.email || sub.email }) } : {}),
-            subscription_id: sub.subscription_id,
-            customer_id: detail.data.customer_id ?? sub.customer_id,
-            // The list/summary endpoint's `name` can be sparser than the
-            // full detail record (same reason `phone`/`address` below are
-            // sourced from `detail.data`, not `sub`) — falling back to the
-            // list row only if detail genuinely has nothing, so bulk name
-            // matching (customerMatchService) doesn't silently miss a real
-            // customer just because the summary row omitted their name.
-            name: detail.data.name || sub.name,
-            // Same reasoning as `name` above — email is the highest-
-            // confidence matcher in customerMatchService, so it shouldn't be
-            // more likely to be missing than the lower-confidence fallbacks.
-            email: detail.data.email || sub.email,
-            phone: detail.data.phone || '',
-            address: formatAddress(resolveMatterDeliveryAddress(detail.data.customer_addresses).address),
-            // Raw best-match address (building/floor/unit/coordinates) and
-            // the delivery time window — detail is already fetched above for
-            // every candidate, so surfacing these costs nothing extra. Added
-            // for the Delivery-import job (matterDeliveryImportService.js),
-            // which needs real coordinates/address parts and a wall-clock
-            // time, not just the flattened display string.
-            address_detail: resolveMatterDeliveryAddress(detail.data.customer_addresses).address,
-            address_resolution: resolveMatterDeliveryAddress(detail.data.customer_addresses),
-            source_fetched_at: new Date().toISOString(),
-            source_updated_at: detail.data.updated_at ?? null,
-            // Raw list too (not just the already-picked best one) — lets a
-            // caller tell "exactly one plausible address, picked with zero
-            // ambiguity" apart from "guessed among several candidates" (see
-            // matterDeliveryImportService.js's unambiguousActiveAddress).
-            customer_addresses: detail.data.customer_addresses || [],
-            delivery_window: detail.data.delivery_window || null,
-            meal_frequency: detail.data.plan?.meal_frequency ?? null,
-            active_delivery_dates: activeDeliveryDates(detail.data),
-            double_delivery_dates: matterDoubleDeliveryDates(detail.data),
-            snacks_per_day: detail.data.snacks_per_day ?? null,
-            breakfast_included: typeof detail.data.breakfast_included === 'boolean' ? detail.data.breakfast_included : null,
-            exclusions: (detail.data.exclusions || []).map((ex) => ex.title).filter(Boolean),
-            subscription_status: sub.subscription_status,
-            plan_name: detail.data.plan?.name ?? null,
-            cycle_end_date: sub.cycle_end_date ?? null,
-            renewal_due_date: sub.renewal_due_date ?? null,
-            renewal_eligible: sub.renewal_eligible ?? null,
-            delivery_date: deliveryDate
-          }));
+          const root = { ...detail.data, name: detail.data.name || sub.name, email: detail.data.email || sub.email };
+          const versions = [root];
+          if (root.upcoming_plan) {
+            // Validate the nested permanent identity/start boundary before it
+            // can participate in any kitchen or delivery roster.
+            menuNutritionForDate(buildNutritionResult(root), root.upcoming_plan.starting_date);
+            if (String(root.upcoming_plan.starting_date).slice(0, 10) <= endDateKey
+              && (!root.upcoming_plan.cycle_end_date || String(root.upcoming_plan.cycle_end_date).slice(0, 10) >= startDateKey)) {
+              versions.push({ ...root.upcoming_plan, is_upcoming_plan: true });
+            }
+          }
+          return versions.flatMap(version => {
+            const detail = { data: version };
+            const sub = version;
+            const schedule = detail?.data?.delivery_schedule;
+            if (!Array.isArray(schedule)) throw new Error('Delivery schedule is missing');
+            const deliveryDates = schedule
+              .filter((entry) => {
+                const d = String(entry.date).slice(0, 10);
+                return entry.status === 'active' && d >= startDateKey && d <= endDateKey
+                  && (!version.starting_date || d >= String(version.starting_date).slice(0, 10))
+                  && (!version.cycle_end_date || d <= String(version.cycle_end_date).slice(0, 10))
+                  && (version.is_upcoming_plan || !root.upcoming_plan || d < String(root.upcoming_plan.starting_date).slice(0, 10));
+              })
+              .map((entry) => String(entry.date).slice(0, 10))
+              .sort();
+            if (deliveryDates.length === 0) return [];
+            return deliveryDates.map((deliveryDate) => ({
+              ...(includeKitchenInputs ? { kitchen_inputs: buildNutritionResult({ ...detail.data, email: detail.data.email || sub.email }, version.is_upcoming_plan === true, version.is_upcoming_plan ? root.subscription_id : null) } : {}),
+              subscription_id: sub.subscription_id,
+              customer_id: detail.data.customer_id ?? sub.customer_id,
+              // The list/summary endpoint's `name` can be sparser than the
+              // full detail record (same reason `phone`/`address` below are
+              // sourced from `detail.data`, not `sub`) — falling back to the
+              // list row only if detail genuinely has nothing, so bulk name
+              // matching (customerMatchService) doesn't silently miss a real
+              // customer just because the summary row omitted their name.
+              name: detail.data.name || sub.name,
+              // Same reasoning as `name` above — email is the highest-
+              // confidence matcher in customerMatchService, so it shouldn't be
+              // more likely to be missing than the lower-confidence fallbacks.
+              email: detail.data.email || sub.email,
+              phone: detail.data.phone || '',
+              address: formatAddress(resolveMatterDeliveryAddress(detail.data.customer_addresses).address),
+              // Raw best-match address (building/floor/unit/coordinates) and
+              // the delivery time window — detail is already fetched above for
+              // every candidate, so surfacing these costs nothing extra. Added
+              // for the Delivery-import job (matterDeliveryImportService.js),
+              // which needs real coordinates/address parts and a wall-clock
+              // time, not just the flattened display string.
+              address_detail: resolveMatterDeliveryAddress(detail.data.customer_addresses).address,
+              address_resolution: resolveMatterDeliveryAddress(detail.data.customer_addresses),
+              source_fetched_at: new Date().toISOString(),
+              source_updated_at: detail.data.updated_at ?? null,
+              // Raw list too (not just the already-picked best one) — lets a
+              // caller tell "exactly one plausible address, picked with zero
+              // ambiguity" apart from "guessed among several candidates" (see
+              // matterDeliveryImportService.js's unambiguousActiveAddress).
+              customer_addresses: detail.data.customer_addresses || [],
+              delivery_window: detail.data.delivery_window || null,
+              meal_frequency: detail.data.plan?.meal_frequency ?? null,
+              active_delivery_dates: activeDeliveryDates(detail.data),
+              double_delivery_dates: matterDoubleDeliveryDates(detail.data),
+              snacks_per_day: detail.data.snacks_per_day ?? null,
+              breakfast_included: typeof detail.data.breakfast_included === 'boolean' ? detail.data.breakfast_included : null,
+              exclusions: (detail.data.exclusions || []).map((ex) => ex.title).filter(Boolean),
+              is_upcoming_plan: version.is_upcoming_plan === true,
+              subscription_status: sub.subscription_status,
+              plan_name: detail.data.plan?.name ?? null,
+              cycle_end_date: sub.cycle_end_date ?? null,
+              renewal_due_date: sub.renewal_due_date ?? null,
+              renewal_eligible: sub.renewal_eligible ?? null,
+              delivery_date: deliveryDate
+            }));
+          });
         } catch (error) {
           if (error.code === 'MATTER_IMPORT_INTERRUPTED') throw error;
           console.error(`delivery-in-range check failed for subscription ${sub.subscription_id}:`, error.message);

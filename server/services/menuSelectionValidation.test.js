@@ -190,8 +190,8 @@ test('fresh Matter allergens block stored hidden ingredients despite forged brow
   const stored = { meals: [{ date: '2099-11-02', mealType: 'main', items: [item([c('s', 'Sauce', 'Butter')])] }] };
   t.mock.method(Menu, 'findById', () => ({ populate: () => ({ lean: async () => stored }) }));
   const args = { menuId: '507f1f77bcf86cd799439011', selections: [{ ...selection, allergies: [], allergyOverride: true, carbVegAction: 'kept' }] };
-  await assert.rejects(validatedMenuSelections({ ...args, nutrition: buildNutritionResult({ allergens: [{ id: 1, name: 'Milk' }] }) }), { statusCode: 409 });
-  assert.equal((await validatedMenuSelections({ ...args, nutrition: { allergens: [] } })).length, 1);
+  await assert.rejects(validatedMenuSelections({ ...args, nutrition: buildNutritionResult({ allergens: [{ id: 1, name: 'Milk' }], exclusions: [] }) }), { statusCode: 409 });
+  assert.equal((await validatedMenuSelections({ ...args, nutrition: { allergens: [], exclusions: [] } })).length, 1);
 });
 
 test('unverified Matter allergy data rejects submissions before querying menu', async t => {
