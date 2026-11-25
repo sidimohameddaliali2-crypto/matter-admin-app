@@ -1,4 +1,5 @@
 import { kitchenInputErrors, KITCHEN_FORMULA_VERSION } from './kitchenIntegrity';
+import { findKitchenFallbackSnackPreset } from '../constants/kitchenFallbackSnacks';
 
 const normalizeText = (value) => String(value || '').trim().toLowerCase();
 
@@ -253,6 +254,9 @@ const getSnackPresetIndex = (map) => {
 export const resolveSnackPresetForMeal = (meal, snackPresetsByName = {}) => {
   const mealSnackName = String(meal?.mealName || meal?.menuItemName || meal?.menuItemId?.mealName || '').trim();
   if (!mealSnackName) return null;
+  if (meal.fallbackSnackRecipeId || meal.fallbackSnackRecipeVersion) {
+    return findKitchenFallbackSnackPreset(mealSnackName, snackPresetsByName);
+  }
 
   const exactKey = normalizeBreakfastName(mealSnackName);
   const simplifiedMealKey = simplifyBreakfastName(mealSnackName);

@@ -5,6 +5,7 @@ import useKitchenSelectionWindow from '../lib/useKitchenSelectionWindow';
 import { KitchenWorkspaceHeader, KitchenEmptyState } from '../components/KitchenWorkspace';
 import KitchenCustomerBrowser from '../components/KitchenCustomerBrowser';
 import { snackPresetChanges } from '../lib/kitchenSnackPresetChanges';
+import { KITCHEN_FALLBACK_SNACKS, findKitchenFallbackSnackPreset } from '../constants/kitchenFallbackSnacks';
 import useKitchenCurrentScope from '../lib/useKitchenCurrentScope';
 import { formatKitchenDay, visibleKitchenCustomer, kitchenCustomerDay } from '../lib/kitchenDayScope';
 import { loadKitchenSnapshot, verifiedKitchenRoster } from '../lib/kitchenSnapshot';
@@ -16,7 +17,7 @@ import api from '../utils/api';
 import { calculateKitchenListEntry, breakfastNameHasMacros, snackNameHasMacros, resolveSnackPresetForMeal } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
 import { downloadCustomerPaperPdf, downloadCustomerPaperWord, isLargeBreakfast, kitchenPaperAutoLabel,
-  kitchenPaperMealPdfText, kitchenPaperMealWordHtml, kitchenPaperAllergies, kitchenPaperAllergyLine } from '../utils/kitchenPaperCustomer';
+  kitchenPaperMealPdfText, kitchenPaperMealWordHtml, kitchenPaperAllergies, kitchenPaperAllergyLine, kitchenPaperExclusions } from '../utils/kitchenPaperCustomer';
 import {
   emptyBreakfast,
   normalizeBreakfastKey,
@@ -245,18 +246,6 @@ const buildRemarkFromParts = (checked, extras) => [
   ...extras
 ].join(' + ');
 
-// Owner (2026-10-10): every customer's food exclusions (Matter's dietary
-// restrictions) are printed on the kitchen paper, PDF and Word. "None" when the
-// customer has none; "Not available" when no Matter subscription data loaded,
-// so a missing lookup is never mistaken for "no exclusions".
-const exclusionsText = (entry) => {
-  const list = (Array.isArray(entry?.dietaryRestrictions) ? entry.dietaryRestrictions : [])
-    .map((item) => String(item || '').trim()).filter(Boolean);
-  if (list.length > 0) return list.join(', ');
-  return entry?.planName ? 'None' : 'Not available';
-};
-
-
 const normalizeSelectionForSave = (meal) => ({
   date: meal?.date,
   mealType: meal?.mealType,
@@ -310,6 +299,18 @@ const KitchenList = () => {
   const [error, setError] = useState('');
   const [breakfastPreset, setBreakfastPreset] = useState(emptyBreakfast);
   const [snackPreset, setSnackPreset] = useState({ presetsByName: {} });
+  const [fallbackSnackRecipes, setFallbackSnackRecipes] = useState(null);
+  useEffect(() => {
+    let active = true;
+    api.get('/menus/kitchen-fallback-snacks', { timeout: 30000 }).then(({ data }) => {
+      if (!active) return;
+      if (!data?.success || !Array.isArray(data.data)) throw new Error('Fallback snack recipes could not be verified.');
+      setFallbackSnackRecipes({ recipes: data.data });
+    }).catch(() => {
+      if (active) setFallbackSnackRecipes({ recipes: [], failed: true });
+    });
+    return () => { active = false; };
+  }, []);
   const [snackPresetForm, setSnackPresetForm] = useState({ name: '', C: '', P: '', F: '' });
   // The global snack macro table is ~80 rows long, so it lives in a dropdown
   // that starts closed instead of pushing the rest of the panel down.
@@ -1743,7 +1744,7 @@ const KitchenList = () => {
           'Meals/day': entry.mealsPerDay ?? '',
           'Snacks/day': entry.snacksPerDay ?? '',
           'Breakfast included': yesNo(entry.breakfastIncluded),
-          Exclusions: exclusionsText(entry),
+          Exclusions: kitchenPaperExclusions(entry, dateKey),
           Allergies: allergies,
           Address: entry.partner ? '' : formatAddress(entry.deliveryAddress),
           Type: label.mealType,
@@ -1801,7 +1802,7 @@ const KitchenList = () => {
       entry = snapshot.entries.find((row) => String(row.email || '').toLowerCase() === customerPaperEmail.toLowerCase());
       if (!entry) throw new Error('No confirmed meals for this customer in the chosen date range.');
       assertKitchenExportReady([entry]);
-      const helpers = { getDateKey, formatDateLabel, getMealLabel, exclusionsText, formatAddress, parseDeliveryHour, formatDeliveryHourLabel, loadJsPDF, loadAutoTable };
+      const helpers = { getDateKey, formatDateLabel, getMealLabel, exclusionsText: kitchenPaperExclusions, formatAddress, parseDeliveryHour, formatDeliveryHourLabel, loadJsPDF, loadAutoTable };
       const result = format === 'word'
         ? downloadCustomerPaperWord({ entry, fromKey, toKey, helpers })
         : await downloadCustomerPaperPdf({ entry, fromKey, toKey, helpers });
@@ -1882,7 +1883,7 @@ const KitchenList = () => {
           <p style="margin:0;font-size:10.5pt;page-break-after:avoid">${esc(subLine)}</p>
           ${entry.noDeliveryDate === dateKey ? '<p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>NO MATTER DELIVERY ON THIS DATE - confirm before cooking</b></p>' : ''}
           <p style="margin:0;font-size:10.5pt;page-break-after:avoid"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
-          <p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
+          <p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>Exclusions: ${esc(kitchenPaperExclusions(entry, dateKey))}</b></p>
           <p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>${esc(kitchenPaperAllergyLine(entry, dateKey))}</b></p>
           ${dayNote ? `<p style="margin:0;font-size:10.5pt;color:#b45309;page-break-after:avoid"><b>Note: ${esc(dayNote)}</b></p>` : ''}
           <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;width:100%;font-size:10.5pt;margin-top:4pt">
@@ -2086,7 +2087,7 @@ ${body}${partnerPaperHtml(partnerData)}
         y += 5.6;
 
         // Food exclusions, in red so the kitchen can't miss them.
-        const exclusionLines = doc.splitTextToSize(`Exclusions: ${exclusionsText(entry)}\n${kitchenPaperAllergyLine(entry, dateKey)}`, pageWidth - 28);
+        const exclusionLines = doc.splitTextToSize(`Exclusions: ${kitchenPaperExclusions(entry, dateKey)}\n${kitchenPaperAllergyLine(entry, dateKey)}`, pageWidth - 28);
         doc.setFont(undefined, 'bold');
         doc.setTextColor(190, 18, 60);
         doc.text(exclusionLines, 14, y);
@@ -2728,6 +2729,27 @@ ${body}${partnerPaperHtml(partnerData)}
                   </div>
                 ))}
               </div>
+
+              <section className="mt-4" aria-label="Fallback snacks">
+                <h3 className="text-xs font-semibold text-slate-600">Fallback snacks</h3>
+                <p className="mt-1 text-xs text-slate-500">Used when both daily snack pools conflict with the customer’s exclusions or allergies. For Matter Core, only allergies trigger fallback. Each fallback needs a Meal Library recipe and saved macros.</p>
+                <ul className="mt-2 grid gap-2 lg:grid-cols-3">
+                  {KITCHEN_FALLBACK_SNACKS.map(name => {
+                    const recipe = fallbackSnackRecipes?.recipes.find(option => option.name === name);
+                    const preset = recipe && findKitchenFallbackSnackPreset(recipe.mealName, snackPreset.presetsByName);
+                    return (
+                      <li key={name} className="rounded-xl bg-slate-50 px-3 py-2 text-sm">
+                        <span className="font-medium text-slate-800">{name}</span>
+                        {recipe && recipe.mealName !== name && <p className="text-xs text-slate-500">{recipe.mealName}</p>}
+                        {preset && <p className="text-xs text-slate-500">C {preset.C} · P {preset.P} · F {preset.F}</p>}
+                        {recipe && !preset && renderMissingMacrosForm('snack', recipe.mealName)}
+                        {!recipe && <p className="text-xs text-slate-500">{!fallbackSnackRecipes ? 'Checking Meal Library…'
+                          : fallbackSnackRecipes.failed ? 'Meal Library check unavailable' : 'Needs a verified Meal Library recipe'}</p>}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
 
             </div>
 

@@ -44,6 +44,13 @@ export const isLargeBreakfast = (meal) => String(meal?.mealType || '').toLowerCa
 export const kitchenPaperAutoLabel = meal => meal?.isAutoAssigned === true ? 'Auto' : '';
 export const kitchenPaperPdfAutoSuffix = (meal, spacing = ' ') => kitchenPaperAutoLabel(meal) ? `${spacing}[AUTO]` : '';
 
+export const kitchenPaperExclusions = (entry, date) => {
+  const profile = entry?.dietaryProfilesByDate?.[date] || entry;
+  if (String(profile?.planName || '').trim().toLowerCase() === 'matter core') return 'Matter Core (allergy checks only)';
+  if (!Array.isArray(profile?.dietaryRestrictions)) return 'Not available';
+  return profile.dietaryRestrictions.map(item => String(item || '').trim()).filter(Boolean).join(', ') || 'None';
+};
+
 export const kitchenPaperAllergies = (entry, date) => {
   const profile = entry.allergyProfilesByDate?.[date] || entry.allergyProfile;
   return profile?.allergiesAvailable && Array.isArray(profile.allergies)
@@ -124,7 +131,7 @@ export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers 
     y += planLines.length * 5.2 + 0.8;
 
     doc.setTextColor(190, 18, 60);
-    const exclusionLines = doc.splitTextToSize(`Exclusions: ${exclusionsText(entry)}\n${kitchenPaperAllergyLine(entry, day.dateKey)}`, pageWidth - 28);
+    const exclusionLines = doc.splitTextToSize(`Exclusions: ${exclusionsText(entry, day.dateKey)}\n${kitchenPaperAllergyLine(entry, day.dateKey)}`, pageWidth - 28);
     doc.text(exclusionLines, 14, y);
     doc.setTextColor(0);
     y += exclusionLines.length * 5.2 + 0.8;
@@ -224,7 +231,7 @@ export const downloadCustomerPaperWord = ({ entry, fromKey, toKey, helpers }) =>
       <p style="margin:8pt 0 0 0;font-size:15pt"><b>${esc(name)}</b>${tag ? ` &nbsp;&nbsp;<span style="background:${tag.has ? '#1e293b' : '#94a3b8'};color:#ffffff;font-size:10pt;font-weight:bold">&nbsp;${esc(tag.text)}&nbsp;</span>` : ''}</p>
       <p style="margin:0;font-size:11pt">${esc(entry.partner ? `Partner: ${entry.partner?.businessName || 'Partner'}` : `Address: ${formatAddress(entry.deliveryAddress)}`)}</p>
       <p style="margin:0;font-size:11pt"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orNA(entry.mealsPerDay))} | Snacks/day: ${esc(orNA(entry.snacksPerDay))} | Breakfast included: ${breakfastLabelFor(entry)}</b></p>
-      <p style="margin:0;font-size:11pt;color:#be123c"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
+      <p style="margin:0;font-size:11pt;color:#be123c"><b>Exclusions: ${esc(exclusionsText(entry, day.dateKey))}</b></p>
       <p style="margin:0;font-size:11pt;color:#be123c"><b>${esc(kitchenPaperAllergyLine(entry, day.dateKey))}</b></p>
       ${dayNote ? `<p style="margin:0;font-size:11pt;color:#b45309"><b>Note: ${esc(dayNote)}</b></p>` : ''}
       ${summary.length ? `<p style="margin:4pt 0 0 0;font-size:9.5pt;color:#787878">${esc(summary.join('   |   '))}</p>` : ''}

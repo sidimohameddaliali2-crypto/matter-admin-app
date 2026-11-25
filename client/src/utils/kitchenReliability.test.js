@@ -1,13 +1,43 @@
 import { calculateKitchenListEntry } from './kitchenListCalculations';
-import { assertKitchenExportReady, createKitchenRequestGuard, kitchenMealWarnings, prepareKitchenSelections, kitchenMealChanges } from './kitchenIntegrity';
+import { assertKitchenExportReady, createKitchenRequestGuard, kitchenMealWarnings, prepareKitchenSelections, kitchenMealChanges, kitchenInputErrors } from './kitchenIntegrity';
 import { enrichSelectionsWithNutrition } from '../lib/kitchenData';
 import { loadKitchenSnapshot, assertKitchenRosterCovered, verifiedKitchenRoster, hasKitchenDeliveryOnDate } from '../lib/kitchenSnapshot';
-import { downloadCustomerPaperPdf, downloadCustomerPaperWord } from './kitchenPaperCustomer';
+import { downloadCustomerPaperPdf, downloadCustomerPaperWord, kitchenPaperExclusions } from './kitchenPaperCustomer';
 
 const date = '2026-10-20';
 const meal = { date, mealType: 'main', mealName: 'Fixture', quantity: 1 };
 const customer = { email: 'fixture@example.invalid', planName: 'Custom', targetMacros: { C: 38, P: 32, F: 10 } };
 const calculate = (overrides = {}, meals = [meal]) => calculateKitchenListEntry({ customer: { ...customer, ...overrides }, selectedMeals: meals });
+
+test('missing dietary exclusion data does not block Matter Core kitchen output', () => {
+  const inputs = { ...customer, matterSourceSubscriptionId: 'sub', matterName: 'Fixture',
+    mealsPerDay: 1, snacksPerDay: 0, breakfastIncluded: false, dietaryRestrictions: null };
+  expect(kitchenInputErrors(inputs)).toContain('Matter dietary exclusions are unresolved.');
+  expect(kitchenInputErrors({ ...inputs, planName: 'Matter Core' })).toEqual([]);
+});
+
+test('Kitchen Paper labels Core restrictions using the plan verified for each date', () => {
+  const next = '2026-10-21';
+  const entry = { planName: 'Custom', dietaryRestrictions: ['Soy'], dietaryProfilesByDate: {
+    [date]: { planName: 'Matter Core', dietaryRestrictions: ['Soy'] },
+    [next]: { planName: 'Custom', dietaryRestrictions: ['Milk'] },
+  } };
+  expect(kitchenPaperExclusions(entry, date)).toBe('Matter Core (allergy checks only)');
+  expect(kitchenPaperExclusions(entry, next)).toBe('Milk');
+  expect(kitchenPaperExclusions({ planName: 'Custom', dietaryRestrictions: null })).toBe('Not available');
+});
+
+test('fallback snack macros only follow the preset for the exact recipe', () => {
+  const snack = { date, mealType: 'snack', mealName: 'CHEESECAKE BITES (W/ MILK)', fallbackSnackRecipeId: 'cake',
+    snackMacros: { C: 18, P: 10, F: 8 } };
+  const cook = presetsByName => calculateKitchenListEntry({
+    customer, selectedMeals: [meal, snack], snackPreset: { presetsByName },
+  }).selectedMeals.find(item => item.mealType === 'snack').macros;
+  const similar = { 'cheesecake bites - w milk': { C: 1, P: 2, F: 3 } };
+  expect(cook(similar)).toMatchObject(snack.snackMacros);
+  expect(cook({ ...similar, 'cheesecake bites (w/ milk)': { C: 19, P: 11, F: 7 } }))
+    .toMatchObject({ C: 19, P: 11, F: 7 });
+});
 
 test('component conflicts produce readable preparation changes without changing weights', () => {
   const entry = calculate();
