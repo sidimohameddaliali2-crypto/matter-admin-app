@@ -139,6 +139,40 @@ test('meal confirmations require a note and unlock day exports only after all ca
   expect(dayPdf().disabled).toBe(false);
 });
 
+test('after cutoff only an allergy-flagged meal card can open the change editor', async () => {
+  const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-23T08:00:00Z'));
+  const originalGet = api.get.getMockImplementation();
+  const review = { mealId: 'flagged', mealName: 'Peanut chicken', recordId: 'selection', fingerprint: 'allergy',
+    date: friday, customerId: '42', canConfirm: true, message: 'Peanut chicken conflicts with Peanuts' };
+  const meals = [
+    { _id: 'flagged', date: friday, mealType: 'main', mealName: review.mealName, kitchenAllergyCases: [review] },
+    { _id: 'safe', date: friday, mealType: 'main', mealName: 'Lemon chicken' },
+  ];
+  api.get.mockImplementation(async (path, options) => {
+    if (path.endsWith('/meal-editor')) return { data: { success: true, data: {
+      canEdit: false, meals, choices: [], allergyReplacementMealIds: ['flagged'],
+    } } };
+    if (!path.endsWith('/kitchen-state')) return originalGet(path, options);
+    return { data: { state: 'allergy-review', data: { success: true, preparation: 'allergy-review', data: {
+      kitchenSelections: [{ _id: 'selection', email, matterCustomerId: '42', selectedMeals: meals }],
+      kitchenInputs: [{ ...input(), customer_id: '42' }], rosterComplete: true,
+      kitchenRoster: [{ customer_id: '42', email, subscription_id: 'matter-current', meal_frequency: 1 }],
+      kitchenAllergyCases: [review], kitchenAllergyReview: 'One allergy review pending.',
+    } } } };
+  });
+  try {
+    await select(dateSelect(), friday);
+    const button = label => [...container.querySelectorAll('.kitchen-meal button')].find(item => item.textContent === label);
+    expect(button('Change meal').disabled).toBe(true);
+    expect(button('Delete meal').disabled).toBe(true);
+    const change = button('Change meal for allergy');
+    expect(change.disabled).toBe(false);
+    await act(async () => change.click());
+    expect(api.get).toHaveBeenCalledWith('/menus/menu/kitchen-customers/42/meal-editor', { params: { date: friday }, timeout: 30000 });
+    expect(container.querySelector('[aria-label="Current meal"]').value).toBe('flagged');
+  } finally { now.mockRestore(); }
+});
+
 test.each(['main', 'snack'])('open-date %s-only partial selection stays in Missing without assigning or hiding saved choices', async mealType => {
   const originalGet = api.get.getMockImplementation();
   const writes = api.post.mock.calls.length;
