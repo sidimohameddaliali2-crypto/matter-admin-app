@@ -56,7 +56,7 @@ const sourceVersion = async menuId => {
     MenuItem.find({ _id: { $in: (menu.meals || []).flatMap(day => day.items || []) } }).select('_id updatedAt __v').sort({ _id: 1 }).lean(),
     Archive.find({ 'original.weeklyMenuId': menuId }).select('_id createdAt updatedAt').sort({ _id: 1 }).lean(),
   ]);
-  return createHash('sha256').update(JSON.stringify(['kitchen-allergy-confirmations-v1', menu, records, breakfast, snack, items, archives])).digest('hex');
+  return createHash('sha256').update(JSON.stringify(['kitchen-upcoming-plans-v2', menu, records, breakfast, snack, items, archives])).digest('hex');
 };
 
 const capture = async menuId => {
@@ -119,10 +119,8 @@ const readKitchenPreview = async (menuId, date, selectionWindow) => {
   const kitchenInputs = withMenuAllergyProfiles(roster.map(row => row.kitchen_inputs).filter(Boolean));
   const cases = await collectCapturedKitchenAllergies(menuId, date, inputs.kitchenSelections, kitchenInputs);
   for (const sub of roster) {
-    const exists = inputs.kitchenSelections.some(row => row.matterCustomerId
-      ? String(row.matterCustomerId) === String(sub.customer_id)
-      : (sub.subscription_id != null && String(row.matterSubscriptionId || '') === String(sub.subscription_id))
-        || (!!sub.email && String(row.matterEmail || row.email || '').toLowerCase() === String(sub.email).toLowerCase()));
+    const identity = sub.kitchen_inputs || { ...sub, customer_email: sub.email };
+    const exists = inputs.kitchenSelections.some(row => matchesKitchenAllergyRecord(row, identity));
     if (!exists) inputs.kitchenSelections.push({ email: sub.email, matterEmail: sub.email,
       matterCustomerId: sub.customer_id == null ? null : String(sub.customer_id), matterSubscriptionId: sub.subscription_id == null ? null : String(sub.subscription_id),
       firstName: sub.name || '', selectedMeals: [], _missingSelection: true, _missingSelectionDate: date });

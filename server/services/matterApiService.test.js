@@ -11,7 +11,37 @@
 // practice) where nothing is flagged current.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { selectBestAddress } from './matterApiService.js';
+import matter, { selectBestAddress } from './matterApiService.js';
+
+test('dated kitchen nutrition uses the old paid delivery during a renewal', async t => {
+  const deliveryDate = '2026-11-26';
+  const old = { subscription_id: '10', customer_id: '42', subscription_status: 'cancelled', cycle_end_date: deliveryDate,
+    email: 'fixture@example.invalid', allergens: ['Peanuts'], delivery_schedule: [{ date: deliveryDate, status: 'active' }] };
+  const renewed = { ...old, subscription_id: '11', subscription_status: 'active', cycle_end_date: '2026-12-26',
+    allergens: [], delivery_schedule: [{ date: '2026-11-27', status: 'active' }] };
+  t.mock.method(matter, 'listSubscriptions', async options => {
+    assert.equal(options.customerId, '42');
+    return { data: [old, renewed] };
+  });
+  t.mock.method(matter, 'getSubscription', async id => ({ data: id === '10' ? old : renewed }));
+  assert.equal((await matter.getKitchenNutrition({ customerId: '42' })).subscription_id, '11');
+  const dated = await matter.getKitchenNutrition({ customerId: '42', date: deliveryDate });
+  assert.equal(dated.subscription_id, '10');
+  assert.deepEqual(dated.allergens, ['Peanuts']);
+
+  renewed.starting_date = '2026-11-27';
+  delete renewed.delivery_schedule;
+  assert.equal((await matter.getKitchenNutrition({ customerId: '42', date: deliveryDate })).subscription_id, '10');
+  old.cycle_end_date = '2026-11-25';
+  await assert.rejects(() => matter.getKitchenNutrition({ customerId: '42', date: deliveryDate }), /beyond its plan cycle/);
+  delete renewed.starting_date;
+  renewed.delivery_schedule = [{ date: deliveryDate, status: 'active' }];
+  assert.equal((await matter.getKitchenNutrition({ customerId: '42', date: deliveryDate })).subscription_id, '11');
+  old.cycle_end_date = deliveryDate;
+  await assert.rejects(() => matter.getKitchenNutrition({ customerId: '42', date: deliveryDate }), { statusCode: 409 });
+  renewed.customer_id = '43';
+  await assert.rejects(() => matter.getKitchenNutrition({ customerId: '42', date: deliveryDate }), /Matter customer identity/);
+});
 
 test('picks the address flagged current_delivery_address, ignoring completeness entirely (the real fix)', () => {
   const addresses = [

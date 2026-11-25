@@ -3,6 +3,7 @@ import { toBusinessDateKey } from '../utils/businessDate.js';
 import { isMatterCoreDoubleDay } from '../utils/matterCoreDelivery.js';
 import { dayHeld } from './kitchenMealEditPolicy.js';
 import { normalizeMatterEmail } from './matterKitchenIdentity.js';
+import { matchSavedKitchenInputs } from './kitchenSelectionWrite.js';
 
 const quantity = meal => Math.max(1, Math.floor(Number(meal.quantity) || 1));
 const onDate = (meal, date) => meal.date && new Date(meal.date).toISOString().slice(0, 10) === date;
@@ -93,9 +94,9 @@ export const reconcileCoreDoubleAddOns = async (record, date, nutrition, now = n
     return next ? [next] : [];
   });
   const result = await Record.updateOne({
-    _id: record._id, ...selectionIdentity, selectedMeals: meals,
+    _id: record._id, ...selectionIdentity,
     'kitchenAutoHolds.date': { $ne: date },
-    $expr: { $eq: [{ $ifNull: ['$skippedDays', []] }, record.skippedDays || []] },
+    $expr: matchSavedKitchenInputs(record),
   }, {
     $set: { selectedMeals },
     $push: { kitchenAudit: { date, action: 'reconcile-core-double-add-ons', at: now, subscriptionId: String(nutrition.subscription_id),
@@ -143,7 +144,7 @@ export const reconcileCoreMainMeals = async (record, date, nutrition, now = new 
     return count ? [count === quantity(meal) ? meal : { ...meal, quantity: count }] : [];
   });
   const result = await Record.updateOne({ _id: record._id, matterCustomerId: record.matterCustomerId,
-    selectedMeals: meals, $expr: { $eq: [{ $ifNull: ['$skippedDays', []] }, record.skippedDays || []] } }, {
+    $expr: matchSavedKitchenInputs(record) }, {
     $set: { selectedMeals },
     $push: { kitchenAudit: { date, action: 'remove-excess-auto-core-mains', at: now,
       subscriptionId: String(nutrition.subscription_id),

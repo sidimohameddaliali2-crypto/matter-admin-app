@@ -72,6 +72,33 @@ test('Kitchen List shows the three fallback snacks and the condition for using t
   expect(fallback.textContent).toContain('Needs a verified Meal Library recipe');
 });
 
+test('the Upcoming badge follows the verified delivery day while keeping the selected meal visible', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, options) => {
+    if (!path.endsWith('/kitchen-state')) return originalGet(path, options);
+    const isUpcoming = options?.params?.date === friday;
+    const subscriptionId = isUpcoming ? 'matter-next' : 'matter-current';
+    return { data: { state: 'selection-open', data: { success: true, preparation: 'selection-open', data: {
+      kitchenSelections: [{ email: 'former@example.invalid', matterSubscriptionId: 'matter-current', selectedMeals: [
+        { date: thursday, mealType: 'main', mealName: 'Current choice', isUpcomingPlan: true },
+        { date: friday, mealType: 'main', mealName: 'Upcoming choice', matterSubscriptionId: 'matter-next', isUpcomingPlan: true },
+      ] }],
+      kitchenInputs: [{ ...input(), subscription_id: subscriptionId, is_upcoming_plan: isUpcoming,
+        source_parent_subscription_id: isUpcoming ? 'matter-current' : null }],
+      rosterComplete: true,
+      kitchenRoster: [{ customer_id: 'permanent', email, subscription_id: subscriptionId, meal_frequency: 1, is_upcoming_plan: isUpcoming }],
+    } } } };
+  });
+  const profile = () => container.querySelector('[aria-label="Selected customer"]');
+  const hasBadge = () => [...profile().querySelectorAll('span')].some(span => span.textContent === 'Upcoming');
+  await select(dateSelect(), friday);
+  expect(profile().textContent).toContain('Upcoming choice');
+  expect(hasBadge()).toBe(true);
+  await select(dateSelect(), thursday);
+  expect(profile().textContent).toContain('Current choice');
+  expect(hasBadge()).toBe(false);
+});
+
 test.each(['selection-open', 'allergy-review'])('%s shows the conflicting saved choice without starting assignment', async state => {
   const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse(state === 'selection-open' ? '2026-10-01T00:00:00Z' : '2026-10-24T00:00:00Z'));
   const originalGet = api.get.getMockImplementation();

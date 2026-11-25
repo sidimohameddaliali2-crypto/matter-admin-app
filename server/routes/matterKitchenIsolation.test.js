@@ -36,6 +36,93 @@ test('preparation follows permanent Matter ID across renewal without Internal re
   assert.equal(writes[0].$set.customerId, '42');
 });
 
+for (const [chosenCount, legacy] of [[0, false], [1, false], [2, false], [1, true]]) {
+  test(`preparation keeps ${chosenCount} upcoming choices and only fills missing portions (legacy: ${legacy})`, async t => {
+    blockInternal(t);
+    const date = '2026-10-22';
+    const previousDate = '2026-10-21';
+    const menuId = 'upcoming-menu';
+    const parent = {
+      subscription_id: 'current', customer_id: '42', name: source.customer_name, email: source.customer_email,
+      subscription_status: 'active', cycle_end_date: previousDate,
+      delivery_schedule: [{ date: previousDate, status: 'active' }],
+      upcoming_plan: {
+        subscription_id: 'next', replaces_subscription_id: 'current', customer_id: '42',
+        email: source.customer_email, name: source.customer_name, subscription_status: 'scheduled',
+        starting_date: date, cycle_end_date: '2026-11-20', plan: { name: 'Custom', meal_frequency: 2 },
+        delivery_schedule: [{ date, status: 'active' }], breakfast_included: false, snacks_per_day: 0, exclusions: [], allergens: [],
+      },
+    };
+    t.mock.method(Lease, 'findOneAndUpdate', async () => ({}));
+    t.mock.method(Lease, 'deleteOne', async () => ({}));
+    t.mock.method(matter, 'listAllSubscriptions', async () => [parent]);
+    t.mock.method(matter, 'getSubscription', async id => {
+      assert.equal(id, 'current', 'Use embedded upcoming detail before that subscription activates');
+      return { data: parent };
+    });
+    const current = { date: new Date(previousDate), mealType: 'main', mealName: 'Previous choice', matterSubscriptionId: 'current' };
+    const upcoming = Array.from({ length: chosenCount }, () => ({
+      date: new Date(date), mealType: 'main', mealName: 'Customer choice',
+      quantity: 1, matterSubscriptionId: 'next', isUpcomingPlan: true,
+    }));
+    let saved = chosenCount ? { _id: 'selection',
+      ...(legacy ? { email: 'former@example.invalid' } : { email: source.customer_email, matterCustomerId: '42', matterEmail: source.customer_email }),
+      matterSubscriptionId: 'current', selectedMeals: [current, ...upcoming], skippedDays: [] } : null;
+    t.mock.method(Record, 'find', () => query(saved ? [saved] : []));
+    t.mock.method(Record, 'findOne', () => query(saved));
+    const relink = t.mock.method(Record, 'updateOne', async (filter, update) => {
+      assert.equal(legacy, true, 'Only the unlinked legacy row needs an identity update');
+      assert.equal(filter._id, 'selection');
+      assert.equal(update.$set.matterCustomerId, '42');
+      assert.equal(update.$set.matterSubscriptionId, 'current');
+      assert.equal(update.$set.legacyStorageEmail, 'former@example.invalid');
+      assert.equal('selectedMeals' in update.$set, false);
+      return { matchedCount: 1 };
+    });
+    const write = t.mock.method(Record, 'findOneAndUpdate', async (filter, update, options) => {
+      if (saved) {
+        assert.equal(options.upsert, false);
+        assert.equal(filter._id, saved._id);
+        assert.deepEqual(filter.$expr.$and[0].$eq[1].$literal, saved.selectedMeals);
+      } else {
+        assert.equal(options.upsert, true);
+        assert.equal(update.$setOnInsert.matterSubscriptionId, 'next');
+        assert.equal(update.$setOnInsert.matterCustomerId, '42');
+        saved = { ...update.$setOnInsert, _id: 'selection', selectedMeals: [], skippedDays: [] };
+      }
+      saved = { ...saved, selectedMeals: [...saved.selectedMeals, ...update.$push.selectedMeals.$each] };
+      return saved;
+    });
+    const dishes = [
+      { _id: '507f1f77bcf86cd799439013', mealName: 'Rotation chicken', portionType: 'chicken' },
+      { _id: '507f1f77bcf86cd799439014', mealName: 'Rotation beef', portionType: 'beef' },
+    ].map(item => ({ ...item, mealType: 'main', rotationCategory: 'main', itemDate: new Date(date) }));
+    t.mock.method(Menu, 'findById', () => query({ meals: [{ date, items: dishes.map(item => item._id) }] }));
+    t.mock.method(MenuItem, 'find', filter => query(filter.mealType === 'main' ? dishes : []));
+
+    const prepare = () => runAutoPopulateMissing(menuId, date, { freshInputs: true, collectAllergyReviews: true });
+    const result = await prepare();
+    assert.equal(result.failure, undefined, result.failure?.message);
+    assert.equal(result.data.kitchenRoster[0].is_upcoming_plan, true);
+    const today = saved.selectedMeals.filter(meal => new Date(meal.date).toISOString().startsWith(date));
+    assert.equal(today.length, 2);
+    assert.deepEqual(today.slice(0, chosenCount), upcoming);
+    for (const meal of today.slice(chosenCount)) {
+      assert.equal(meal.matterSubscriptionId, 'next');
+      assert.equal(meal.isUpcomingPlan, true);
+      assert.equal(meal.isAutoAssigned, true);
+    }
+    if (chosenCount) {
+      assert.equal(saved.matterSubscriptionId, 'current');
+      assert.deepEqual(saved.selectedMeals[0], current);
+    }
+    const retry = await prepare();
+    assert.equal(retry.data.alreadyCovered, 1);
+    assert.equal(write.mock.callCount(), chosenCount === 2 ? 0 : 1);
+    assert.equal(relink.mock.callCount(), Number(legacy));
+  });
+}
+
 test('kitchen preparation releases a confirmed skip when Matter restores the active date', async (t) => {
   blockInternal(t);
   t.mock.method(Lease, 'findOneAndUpdate', async () => ({}));
@@ -158,6 +245,33 @@ test('menu profile exposes upcoming dates and meal counts from its start, preser
   assert.equal(res.body.data.plansByDate['2099-11-05'].mealPerDay, 3);
   assert.equal(res.body.data.plansByDate['2099-11-05'].subscriptionId, 'next');
   assert.equal(res.body.data.plansByDate['2099-11-05'].isUpcomingPlan, true);
+});
+
+test('after activation the customer still sees earlier paid days and their prior plan in the same menu', async t => {
+  blockInternal(t);
+  const menuId = '507f1f77bcf86cd799439012', previousDate = '2099-11-02', currentDate = '2099-11-05';
+  const plan = { customer_id: '42', email: source.customer_email, name: 'Matter Name', allergens: [], exclusions: [] };
+  const previous = { ...plan, subscription_status: 'cancelled', subscription_id: 'previous',
+    plan: { name: 'Lean', meal_frequency: 2 }, cycle_end_date: previousDate,
+    delivery_schedule: [{ date: previousDate, status: 'active' }] };
+  const active = { ...plan, subscription_status: 'active', subscription_id: 'renewal', replaces_subscription_id: 'previous',
+    starting_date: currentDate, plan: { name: 'Thrive', meal_frequency: 3 },
+    delivery_schedule: [{ date: currentDate, status: 'active' }] };
+  previous.upcoming_plan = { ...active, subscription_status: 'scheduled' };
+  t.mock.method(matter, 'listSubscriptions', async () => ({ data: [previous, active] }));
+  t.mock.method(matter, 'getSubscription', async id => ({ data: id === 'previous' ? previous : active }));
+  t.mock.method(Menu, 'findById', () => query({ startDate: previousDate }));
+  const selectedMeals = [{ date: new Date(previousDate), mealName: 'Previous choice', matterSubscriptionId: 'previous' }];
+  t.mock.method(Record, 'findOne', () => query({ selectedMeals, skippedDays: [], matterCustomerId: '42' }));
+  const res = response();
+  await route('/customers/:email/subscription-profile', 'get')({ params: { email: source.customer_email }, query: { menuId } }, res);
+  assert.equal(res.body.success, true);
+  assert.deepEqual(res.body.data.deliveryDates, [previousDate, currentDate]);
+  assert.deepEqual(res.body.data.selectedMeals, selectedMeals);
+  assert.equal(res.body.data.plansByDate[previousDate].mealPerDay, 2);
+  assert.equal(res.body.data.plansByDate[previousDate].subscriptionId, 'previous');
+  assert.equal(res.body.data.plansByDate[currentDate].subscriptionId, 'renewal');
+  assert.equal(res.body.data.plansByDate[currentDate].isUpcomingPlan, false);
 });
 
 

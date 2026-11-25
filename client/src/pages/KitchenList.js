@@ -3105,6 +3105,9 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
                 {entry.planName}
               </span>
             )}
+            {entry.isUpcomingPlan && (
+              <span className="rounded-full bg-sky-100 px-2 py-0.5 text-xs font-semibold text-sky-800">Upcoming</span>
+            )}
             {entry.kitchenProductionExcluded && <span className="text-xs text-slate-500">Not scheduled for {formatDateLabel(entry.kitchenExclusionDate)}</span>}
             {entry.missingSelection && (
               <span className="text-xs font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">

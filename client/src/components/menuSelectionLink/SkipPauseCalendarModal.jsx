@@ -14,6 +14,7 @@ const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, we
     if (!open) return;
     setDrafts((pauses || []).map((p) => ({
       date: p.date,
+      subscriptionId: p.subscriptionId,
       alreadyPaused: !!p.alreadyPaused,
       resumeDate: null,
       action: 'pause',
@@ -33,7 +34,8 @@ const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, we
   const editable = drafts.filter((d) => !d.alreadyPaused);
   const selected = editable.map((d) => d.resumeDate).filter(Boolean);
   const blockedDates = [...activeDeliveryDates, ...unavailableDates, ...drafts.map((d) => d.date), ...drafts.filter((d) => d.alreadyPaused && d.resumeDate).map((d) => d.resumeDate)];
-  const allResolved = !availabilityError && drafts.length > 0 && editable.every((d) => d.resumeDate && !blockedDates.includes(d.resumeDate));
+  const allResolved = !availabilityError && drafts.length > 0 && drafts.every(d => d.subscriptionId != null)
+    && editable.every((d) => d.resumeDate && !blockedDates.includes(d.resumeDate));
   const initialMonth = [...activeDeliveryDates, ...unavailableDates, ...(pauses || []).map((p) => p.date)]
     .filter(Boolean).sort().pop();
   const minResumeDate = editable.map((d) => d.date).sort().pop() || null;
@@ -79,7 +81,7 @@ const SkipPauseCalendarModal = ({ open, loading, pauses, submitting, preview, we
         <div className="dialog-actions">
           <button className="btn btn-secondary" onClick={onCancel} disabled={submitting}>Back</button>
           <button className="btn btn-primary" disabled={loading || submitting || !allResolved}
-            onClick={() => onConfirm(drafts.map(({ date, action, resumeDate, alreadyPaused }) => ({ date, action, resumeDate, alreadyPaused })))}>
+            onClick={() => onConfirm(drafts)}>
             {submitting ? 'Confirming…' : 'Confirm'}
           </button>
         </div>
