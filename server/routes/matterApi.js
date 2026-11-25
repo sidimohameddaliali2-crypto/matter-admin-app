@@ -5,6 +5,7 @@ import { protect, authorize } from '../middleware/auth.js';
 import matterApiService, { describeMatterApiError } from '../services/matterApiService.js';
 import { detectAreaFromAddress } from '../config/areas.js';
 import { getNutritionForCustomerLink } from '../services/matterNutritionLookup.js';
+import { resolveMenuAllergyProfile } from '../services/menuAllergyProfileService.js';
 import Delivery from '../models/Delivery.js';
 import Customer from '../models/Customer.js';
 import { isDateKey, getBusinessDayBounds, toBusinessDateKey } from '../utils/businessDate.js';
@@ -64,7 +65,8 @@ router.get('/subscriptions/kitchen-inputs', protect, async (req, res) => {
   }
   try {
     const data = await matterApiService.getKitchenNutrition({ subscriptionId, customerId, email });
-    res.json({ success: true, data });
+    const allergyProfile = await resolveMenuAllergyProfile(data);
+    res.json({ success: true, data: { ...data, allergyProfile } });
   } catch (error) {
     res.status(error.statusCode || error.response?.status || 502).json({ success: false, code: error.code, message: describeMatterApiError(error) || error.message });
   }

@@ -27,8 +27,38 @@ test('allergy matching handles full ingredient names, plurals and declared categ
   expect(allergenMatchesAny('Egg', ['Eggplant'])).toBe(false);
 });
 
-test('a free claim never suppresses an explicit matching allergen', () => {
+test.each([['Soya', 'Tofu'], ['Tree Nuts', 'Almond flour'], ['Crustaceans', 'SHRIMPS'],
+  ['Sesame Seeds', 'Tahina'], ['Cereals Containing Gluten', 'Wheat flour'], ['Fish', 'Anchovies'],
+  ['Shellfish', 'Clams'], ['Molluscs', 'Squid'], ['Gluten', 'Pasta'], ['Wheat', 'Durum Semolina'],
+  ['Milk', 'Cooking cream'], ['Milk', 'Labneh'], ['Milk', 'Paneer'], ['Egg', 'Mayonnaise'], ['Peanuts', 'Groundnut Oil'],
+  ['Sulphites', 'Sulfites'], ['Sulfites', 'Sodium metabisulphite']])('Matter label %s blocks %s', (allergy, ingredient) => {
+  expect(allergenMatchesAny(allergy, [ingredient])).toBe(true);
+});
+
+test('the catalog gluten-free flour does not override a separate Gluten declaration', () => {
+  expect(allergenMatchesAny('Gluten', ['Gluten Free Flour'])).toBe(false);
   expect(allergenMatchesAny('Gluten', ['Gluten Free Flour', 'Gluten'])).toBe(true);
+});
+
+test.each([['Soy', 'Soya meat'], ['Sesame', 'Tahina'], ['Gluten', 'Wheat flour'],
+  ['Dairy', 'Butter'], ['Peanuts', 'Nuts']])('recorded %s blocks %s', (allergy, ingredient) => {
+  expect(allergenMatchesAny(allergy, [ingredient])).toBe(true);
+});
+
+test('a specific plant butter is not the dairy ingredient butter', () => {
+  expect(allergenMatchesAny('Dairy', ['Peanut butter'])).toBe(false);
+  expect(allergenMatchesAny('Peanuts', ['Peanut butter'])).toBe(true);
+  expect(allergenMatchesAny('Dairy', ['Coconut Milk', 'Cream Dory'])).toBe(false);
+});
+
+test('a Tree Nuts allergy distinguishes peanut-only ingredients from generic nut declarations', () => {
+  expect(allergenMatchesAny('Tree Nuts', ['Peanuts', 'Peanut Butter'])).toBe(false);
+  expect(allergenMatchesAny('Tree Nuts', ['Mixed Nuts'])).toBe(true);
+});
+
+test('a Wheat allergy distinguishes wheat from other gluten-containing grains', () => {
+  expect(allergenMatchesAny('Wheat', ['Barley'])).toBe(false);
+  expect(allergenMatchesAny('Gluten', ['Barley'])).toBe(true);
 });
 
 test('Raw Onion requires the full phrase while Onion remains a general exclusion', () => {

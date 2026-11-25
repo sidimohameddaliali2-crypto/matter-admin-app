@@ -9,6 +9,8 @@ import Archive from '../models/MenuSelectionArchive.js';
 import MenuItem from '../models/MenuItem.js';
 import Breakfast from '../models/KitchenBreakfastPreset.js';
 import Snack from '../models/KitchenSnackPreset.js';
+import matterApiService from './matterApiService.js';
+import { withMenuAllergyProfiles } from './menuAllergyProfileService.js';
 
 test('a production snapshot is invalidated by source edits, expiry, failure or a future timestamp', () => {
   const now = Date.now();
@@ -29,6 +31,11 @@ test('background preparation publishes one source version and an input edit inva
   t.mock.method(MenuItem, 'find', () => query([]));
   t.mock.method(Breakfast, 'findOne', () => query(null));
   t.mock.method(Snack, 'findOne', () => query(null));
+  let matterAllergies = [];
+  const readMatter = t.mock.method(matterApiService, 'getSubscription', async id => ({ data: {
+    subscription_id: id, customer_id: 'person', allergens: matterAllergies,
+    delivery_schedule: [{ status: 'active', date: '2026-10-30' }],
+  } }));
   let job, finish;
   const saved = new Promise(resolve => { finish = resolve; });
   t.mock.method(Snapshot, 'findOne', filter => query(job && (filter._id || filter.status === job.status) ? job : null));
@@ -37,14 +44,28 @@ test('background preparation publishes one source version and an input edit inva
     return job;
   });
   let preparations = 0;
-  const started = await beginKitchenState('menu', '2026-10-30', async () => { preparations++; return { data: { kitchenRoster: [], kitchenInputs: [], rosterComplete: true } }; });
+  const prepare = async () => {
+    preparations++;
+    const kitchenInputs = withMenuAllergyProfiles([{ customer_id: 'person', subscription_id: 'subscription', allergens: [] }]);
+    return { data: { kitchenRoster: [], kitchenInputs, rosterComplete: true } };
+  };
+  const started = await beginKitchenState('menu', '2026-10-30', prepare);
   assert.equal(started.state, 'running');
   await saved;
   const ready = await readKitchenState('menu', '2026-10-30');
   assert.equal(ready.state, 'ready');
   assert.equal(ready.data.snapshotId, String(job._id));
   assert.equal(preparations, 1);
-  const refresh = await beginKitchenState('menu', '2026-10-30', async () => { preparations++; return { data: { kitchenRoster: [], kitchenInputs: [], rosterComplete: true } }; }, { refresh: true });
+  assert.equal(readMatter.mock.callCount(), 0);
+  const exportOptions = { verifyAllergies: true };
+  assert.equal((await readKitchenState('menu', '2026-10-30', job._id, exportOptions)).state, 'ready');
+  matterAllergies = [{ title: 'Peanuts' }];
+  const exportCheck = await readKitchenState('menu', '2026-10-30', job._id, exportOptions);
+  assert.equal(exportCheck.state, 'stale');
+  assert.match(exportCheck.message, /Matter allergies/);
+  assert.equal((await readKitchenState('menu', '2026-10-30', undefined, exportOptions)).state, 'stale');
+  matterAllergies = [];
+  const refresh = await beginKitchenState('menu', '2026-10-30', prepare, { refresh: true });
   assert.equal(refresh.state, 'running', 'explicit refresh bypasses the cached ready snapshot');
   const joined = await beginKitchenState('menu', '2026-10-30', () => assert.fail('Do not duplicate the running preparation'), { refresh: true });
   assert.equal(joined.jobId, refresh.jobId);
@@ -53,4 +74,41 @@ test('background preparation publishes one source version and an input edit inva
   assert.equal((await readKitchenState('menu', '2026-10-30')).state, 'ready');
   menu.updatedAt = new Date('2026-10-28T10:01:00Z');
   assert.equal((await readKitchenState('menu', '2026-10-30')).state, 'missing');
+});
+
+test('a saved allergy conflict after cutoff returns a read-only customer preview', async t => {
+  t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-26T14:00:00Z') });
+  const date = '2026-11-26';
+  const query = value => ({ select() { return this; }, sort() { return this; }, populate() { return this; }, lean: async () => value });
+  const selection = { _id: 'record', matterCustomerId: 'person', email: 'fixture@example.invalid',
+    selectedMeals: [{ date, mealType: 'main', mealName: 'Peanut chicken', isAutoAssigned: false }] };
+  t.mock.method(Menu, 'findById', () => query({ meals: [] }));
+  t.mock.method(Record, 'find', () => query([selection]));
+  t.mock.method(Record, 'updateOne', () => assert.fail('A preview must not alter the saved choice'));
+  t.mock.method(Archive, 'find', () => query([]));
+  t.mock.method(MenuItem, 'find', () => query([]));
+  t.mock.method(Breakfast, 'findOne', () => query(null));
+  t.mock.method(Snack, 'findOne', () => query(null));
+  t.mock.method(matterApiService, 'findSubscriptionsWithDeliveryOnDate', () => assert.fail('Reuse the verified roster'));
+  let job, finish;
+  const saved = new Promise(resolve => { finish = resolve; });
+  t.mock.method(Snapshot, 'findOne', filter => query(job && (filter._id || filter.status === job.status) ? job : null));
+  t.mock.method(Snapshot, 'create', async values => {
+    job = { ...values, _id: '507f1f77bcf86cd799439011', createdAt: new Date() };
+    return job;
+  });
+  t.mock.method(Snapshot, 'updateOne', async (_filter, update) => { Object.assign(job, update.$set); finish(); });
+  const kitchenInputs = [{ customer_id: 'person', customer_email: selection.email, allergyProfile: { allergies: ['Peanuts'] } }];
+  const kitchenRoster = [{ customer_id: 'person', email: selection.email }];
+  const started = await beginKitchenState('menu', date, async () => {
+    throw Object.assign(new Error('Peanut chicken conflicts with recorded allergies (Peanuts).'), {
+      code: 'KITCHEN_ALLERGY_REVIEW', kitchenAllergyInputs: { kitchenInputs, kitchenRoster },
+    });
+  });
+  await saved;
+  const result = await readKitchenState('menu', date, started.jobId, { verifyAllergies: true });
+  assert.equal(result.state, 'allergy-review');
+  assert.equal(result.data.selectionWindow.canAutoAssign, true);
+  assert.deepEqual(result.data.data.kitchenSelections, [selection]);
+  assert.match(result.data.data.kitchenAllergyReview, /Peanut chicken.*Peanuts/);
 });

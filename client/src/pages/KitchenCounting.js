@@ -143,6 +143,7 @@ const KitchenCounting = () => {
       // Explicit preparation must finish before the selections snapshot is read.
       const preparation = await prepareKitchenSelections(api, selectedMenuId, selectedDate, current);
       if (!current()) return;
+      if (preparation.data?.kitchenAllergyReview) throw new Error(preparation.data.kitchenAllergyReview);
       const response = preparation.data?.kitchenSelections ? { data: { success: true, data: preparation.data.kitchenSelections } } : await api.get(`/menus/${selectedMenuId}/selections`, { timeout: 30000 });
       if (!response.data?.success) throw new Error(response.data?.message || 'Selections could not be verified.');
       const rawSelections = response.data?.success ? (response.data.data || []) : [];

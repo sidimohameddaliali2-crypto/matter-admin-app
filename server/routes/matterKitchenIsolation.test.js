@@ -23,7 +23,7 @@ test('preparation follows permanent Matter ID across renewal without Internal re
   blockInternal(t);
   const record = { _id: 'record', matterCustomerId: '42', matterSubscriptionId: 'expired', email: 'old-storage@example.invalid', selectedMeals: [{ date: '2026-10-22', mealType: 'main', quantity: 1 }] };
   t.mock.method(Lease, 'findOneAndUpdate', async () => ({})); t.mock.method(Lease, 'deleteOne', async () => ({}));
-  t.mock.method(matter, 'findSubscriptionsWithDeliveryOnDate', async () => [{ subscription_id: 'renewal', customer_id: '42', email: source.customer_email, kitchen_inputs: source }]);
+  t.mock.method(matter, 'findSubscriptionsWithDeliveryOnDate', async () => [{ subscription_id: 'renewal', customer_id: '42', email: source.customer_email, kitchen_inputs: { ...source, allergens: [] } }]);
   t.mock.method(Record, 'find', () => query([record]));
   const writes = [];
   t.mock.method(Record, 'updateOne', async (_filter, update) => { writes.push(update); return {}; });
@@ -44,7 +44,7 @@ test('kitchen preparation releases a confirmed skip when Matter restores the act
   t.mock.method(matter, 'getSubscription', async () => ({ data: {
     subscription_id: source.subscription_id, delivery_schedule: [{ date, status: 'active' }],
   } }));
-  const nutrition = { ...source, active_delivery_dates: [date] };
+  const nutrition = { ...source, active_delivery_dates: [date], allergens: [] };
   const record = { _id: 'record', weeklyMenuId: 'menu', matterCustomerId: '42', matterSubscriptionId: 'renewal',
     email: source.customer_email, matterEmail: source.customer_email,
     selectedMeals: [{ date, mealType: 'main', quantity: 1 }],
@@ -140,4 +140,24 @@ test('missing Core rotation returns the actual date and missing main slots witho
   assert.match(res.body.message, /Also tag for Core Plan/);
   assert.deepEqual(res.body.failures.map(({ stage, mealType, count }) => ({ stage, mealType, count })), [{ stage: 'Matter Core', mealType: 'main', count: 2 }]);
   assert.equal(JSON.stringify(res.body).includes('carbohydrates'), false);
+});
+
+test('preparation stops a previously saved automatic portion with a newly reported Matter allergy', async t => {
+  blockInternal(t);
+  const date = '2026-10-23';
+  const nutrition = { ...source, active_delivery_dates: [date], allergens: ['Peanuts'] };
+  const meal = { date, mealType: 'main', mealName: 'Fixture bowl', menuItemId: 'dish', isAutoAssigned: true };
+  const record = { email: source.customer_email, matterCustomerId: '42', matterEmail: source.customer_email,
+    matterSubscriptionId: 'renewal', selectedMeals: [meal] };
+  t.mock.method(Lease, 'findOneAndUpdate', async () => ({}));
+  t.mock.method(Lease, 'deleteOne', async () => ({}));
+  t.mock.method(matter, 'findSubscriptionsWithDeliveryOnDate', async () => [{ kitchen_inputs: nutrition }]);
+  t.mock.method(Record, 'find', () => query([record]));
+  t.mock.method(Menu, 'findById', () => query({ meals: [{ items: ['dish'] }] }));
+  t.mock.method(MenuItem, 'find', () => query([{ _id: 'dish', mealType: 'main', mealName: 'Fixture bowl',
+    cycleMeal: { components: [{ type: 'Garnish', name: 'Crumbled peanuts' }] } }]));
+  for (const write of ['updateOne', 'findOneAndUpdate', 'create']) t.mock.method(Record, write, () => assert.fail('Do not change saved selection'));
+  await assert.rejects(runAutoPopulateMissing('allergy-review', date, { freshInputs: true }),
+    { code: 'KITCHEN_ALLERGY_REVIEW', message: /Matter Name.*Fixture bowl.*Peanuts/ });
+  assert.deepEqual(record.selectedMeals, [meal]);
 });

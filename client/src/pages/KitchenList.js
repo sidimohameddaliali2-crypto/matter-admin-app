@@ -15,7 +15,8 @@ import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, 
 import api from '../utils/api';
 import { calculateKitchenListEntry, breakfastNameHasMacros, snackNameHasMacros, resolveSnackPresetForMeal } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
-import { downloadCustomerPaperPdf, downloadCustomerPaperWord } from '../utils/kitchenPaperCustomer';
+import { downloadCustomerPaperPdf, downloadCustomerPaperWord, isLargeBreakfast, kitchenPaperAutoLabel,
+  kitchenPaperMealPdfText, kitchenPaperMealWordHtml, kitchenPaperAllergies, kitchenPaperAllergyLine } from '../utils/kitchenPaperCustomer';
 import {
   emptyBreakfast,
   normalizeBreakfastKey,
@@ -340,6 +341,7 @@ const KitchenList = () => {
   const [generatingPdf, setGeneratingPdf] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState('');
+  const [allergyReview, setAllergyReview] = useState('');
   const exportInFlight = useRef(false);
   const [missingSelectionEntries, setMissingSelectionEntries] = useState([]);
   const [showOnlyMissing, setShowOnlyMissing] = useState(false);
@@ -442,6 +444,7 @@ const KitchenList = () => {
     setLoadedSelectionScope('');
     setDayRoster(null);
     setExportError('');
+    setAllergyReview('');
     if (!selectedMenuId || !missingCheckDate) { setLoadingSelections(false); return []; }
     nutritionCacheRef.current.clear();
     setDeliveryCheck(null);
@@ -465,6 +468,7 @@ const KitchenList = () => {
         // still throws to the outer catch below.
         const preparation = await prepareKitchenSelections(api, selectedMenuId, missingCheckDate, current, { refresh });
         if (!current()) return [];
+        setAllergyReview(preparation.data?.kitchenAllergyReview || '');
         const roster = preparation.data?.rosterComplete === true && Array.isArray(preparation.data.kitchenRoster)
           ? preparation.data.kitchenRoster
           : verifiedKitchenRoster((await api.get('/matter/subscriptions/delivery-on-date', { params: { date: missingCheckDate }, timeout: 180000 })).data);
@@ -499,7 +503,8 @@ const KitchenList = () => {
           if (!current()) return [];
           preparedSnapshot.current = { menuId: selectedMenuId, date: missingCheckDate, receivedAt: Date.now(), checkedAt: preparation.preparedAt,
             snapshotId: preparation.snapshotId,
-            complete: preparation.preparation !== 'selection-open' && !preparation.cached && preparation.data?.rosterComplete === true, roster: preparation.data?.kitchenRoster,
+            complete: preparation.preparation !== 'selection-open' && !preparation.data?.kitchenAllergyReview
+              && !preparation.cached && preparation.data?.rosterComplete === true, roster: preparation.data?.kitchenRoster,
             selections: keyedSelections, breakfastPreset: breakfastState, snackPreset: snackState };
           setMenuSelections(keyedSelections);
           setDayRoster({ scope, rows: roster });
@@ -1727,6 +1732,7 @@ const KitchenList = () => {
       const deliveryTime = windowHour === 999
         ? 'No delivery window'
         : (/^\s*by\b/i.test(String(entry.deliveryWindow?.label || '')) ? `By ${formatDeliveryHourLabel(windowHour)}` : formatDeliveryHourLabel(windowHour));
+      const allergies = kitchenPaperAllergies(entry, dateKey);
       return dayMeals.map((meal, index) => {
         const label = getMealLabel(meal);
         return {
@@ -1738,9 +1744,11 @@ const KitchenList = () => {
           'Snacks/day': entry.snacksPerDay ?? '',
           'Breakfast included': yesNo(entry.breakfastIncluded),
           Exclusions: exclusionsText(entry),
+          Allergies: allergies,
           Address: entry.partner ? '' : formatAddress(entry.deliveryAddress),
           Type: label.mealType,
           Meal: label.mealName,
+          'Auto Assigned': kitchenPaperAutoLabel(meal),
           Changes: kitchenMealChanges(meal),
           'P (g)': Number(meal.proteinWeight) || 0,
           'C (g)': Number(meal.carbWeight) || 0,
@@ -1755,7 +1763,7 @@ const KitchenList = () => {
     rows.push(...partnerPaperRows(partnerData));
     const worksheet = XLSX.utils.json_to_sheet(rows);
     // Readable out of the box: sensible column widths and a filter on the header row.
-    const widths = { Section: 24, 'Delivery time': 14, Customer: 28, Plan: 16, 'Meals/day': 9, 'Snacks/day': 10, 'Breakfast included': 11, Exclusions: 34, Address: 48, Type: 10, Meal: 44, 'P (g)': 7, 'C (g)': 7, 'V (g)': 7, 'Total C': 8, 'Total P': 8, 'Total F': 8, Note: 30 };
+    const widths = { Section: 24, 'Delivery time': 14, Customer: 28, Plan: 16, 'Meals/day': 9, 'Snacks/day': 10, 'Breakfast included': 11, Exclusions: 34, Allergies: 29, Address: 48, Type: 10, Meal: 44, 'Auto Assigned': 17, 'P (g)': 7, 'C (g)': 7, 'V (g)': 7, 'Total C': 8, 'Total P': 8, 'Total F': 8, Note: 30 };
     const headers = [...new Set(rows.flatMap(row => Object.keys(row)))];
     worksheet['!cols'] = headers.map((h) => ({ wch: widths[h] || 12 }));
     worksheet['!autofilter'] = { ref: worksheet['!ref'] };
@@ -1859,11 +1867,7 @@ const KitchenList = () => {
       const dayNote = (entry.dayNotes || []).find((n) => n.date === dateKey)?.note;
       const rows = dayMeals.map((meal) => {
         const label = getMealLabel(meal);
-        const isLarge = String(meal?.mealType || '').toLowerCase() === 'breakfast' && !!meal?.flags?.isLargeBreakfast;
-        const largeTag = isLarge
-          ? ' <span style="background:#6d28d9;color:#ffffff;font-size:10.5pt;font-weight:bold">&nbsp;LARGE&nbsp;</span>'
-          : '';
-        return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}${largeTag}${kitchenMealChanges(meal) ? `<br/><b>${esc(kitchenMealChanges(meal))}</b>` : ''}</td>`
+        return `<tr><td>${esc(label.mealType)}</td><td>${kitchenPaperMealWordHtml(meal, label.mealName, esc, 10.5)}</td>`
           + `<td>${esc(meal.proteinWeight || 0)}g</td><td>${esc(meal.carbWeight || 0)}g</td><td>${esc(meal.vegWeight || 0)}g</td></tr>`;
       }).join('');
       // The whole customer block sits in ONE table row that Word may not split
@@ -1879,6 +1883,7 @@ const KitchenList = () => {
           ${entry.noDeliveryDate === dateKey ? '<p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>NO MATTER DELIVERY ON THIS DATE - confirm before cooking</b></p>' : ''}
           <p style="margin:0;font-size:10.5pt;page-break-after:avoid"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
           <p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
+          <p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>${esc(kitchenPaperAllergyLine(entry, dateKey))}</b></p>
           ${dayNote ? `<p style="margin:0;font-size:10.5pt;color:#b45309;page-break-after:avoid"><b>Note: ${esc(dayNote)}</b></p>` : ''}
           <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;width:100%;font-size:10.5pt;margin-top:4pt">
             <tr style="background:#1e293b;color:#ffffff"><th>Type</th><th>Meal</th><th>P</th><th>C</th><th>V</th></tr>
@@ -2081,7 +2086,7 @@ ${body}${partnerPaperHtml(partnerData)}
         y += 5.6;
 
         // Food exclusions, in red so the kitchen can't miss them.
-        const exclusionLines = doc.splitTextToSize(`Exclusions: ${exclusionsText(entry)}`, pageWidth - 28);
+        const exclusionLines = doc.splitTextToSize(`Exclusions: ${exclusionsText(entry)}\n${kitchenPaperAllergyLine(entry, dateKey)}`, pageWidth - 28);
         doc.setFont(undefined, 'bold');
         doc.setTextColor(190, 18, 60);
         doc.text(exclusionLines, 14, y);
@@ -2103,12 +2108,12 @@ ${body}${partnerPaperHtml(partnerData)}
         }
 
         // A breakfast served at the Large portion gets a LARGE tag on its row.
-        const isLargeRow = dayMeals.map((meal) => String(meal?.mealType || '').toLowerCase() === 'breakfast' && !!meal?.flags?.isLargeBreakfast);
-        const tableRows = dayMeals.map((meal, mealIndex) => {
+        const isLargeRow = dayMeals.map(isLargeBreakfast);
+        const tableRows = dayMeals.map((meal) => {
           const label = getMealLabel(meal);
           return [
             label.mealType,
-            `${label.mealName}${isLargeRow[mealIndex] ? '   [LARGE]' : ''}${kitchenMealChanges(meal) ? `\n${kitchenMealChanges(meal)}` : ''}`,
+            kitchenPaperMealPdfText(meal, label.mealName),
             `${meal.proteinWeight || 0}g`,
             `${meal.carbWeight || 0}g`,
             `${meal.vegWeight || 0}g`
@@ -2520,6 +2525,7 @@ ${body}${partnerPaperHtml(partnerData)}
 
         {!missingCheckDate && !loadingMenus && <KitchenEmptyState hasMenu={!!selectedMenuId} />}
         {selectedMenu && missingCheckDate && !selectionWindow.canAutoAssign && <p role="status" className="rounded-xl bg-amber-50 p-4 text-sm text-amber-900">{selectionWindow.message}</p>}
+        {allergyReview && <p role="alert" className="rounded-xl bg-rose-50 p-4 text-sm text-rose-900">{allergyReview}</p>}
 
 
         {menuDateKeys.length > 0 && (

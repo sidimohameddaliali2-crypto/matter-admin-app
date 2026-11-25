@@ -6,6 +6,7 @@ import { assertPreparedCoverage } from './kitchenCoverage.js';
 import Record from '../models/MenuSelectionRecord.js';
 import Menu from '../models/WeeklyMenu.js';
 import Item from '../models/MenuItem.js';
+import Customer from '../models/Customer.js';
 import { runAssignMainMeals, runAssignSnacks, runAssignMatterCoreMeals } from '../routes/menus.js';
 
 const date = '2026-11-16';
@@ -17,6 +18,7 @@ test('standard, snack and Core auto-assignment all respect a persisted staff hol
   t.mock.method(Item, 'find', () => query([]));
   t.mock.method(Record, 'find', () => query([record]));
   t.mock.method(Record, 'findOne', () => query(record));
+  t.mock.method(Customer, 'find', () => query([]));
   for (const method of ['updateOne', 'findOneAndUpdate', 'create']) t.mock.method(Record, method, () => assert.fail('Held date cannot be auto-filled'));
   const nutrition = { customer_id: '42', customer_name: 'Fixture', customer_email: record.email, subscription_id: 'sub',
     active_delivery_dates: [date], double_delivery_dates: [], meal_frequency: 2, breakfast_included: true, snacks_per_day: 0, exclusions: [] };

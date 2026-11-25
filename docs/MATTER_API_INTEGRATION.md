@@ -334,6 +334,13 @@ meal selection/submission until Matter can be verified. Both the browser and
 server check stored recipe/component metadata, including private ingredients;
 customer-submitted flags cannot waive an allergen block. Internal Customer
 allergy profiles are never queried or merged in this flow.
+
+Kitchen Paper displays the Matter allergy labels alongside exclusions in
+Excel and below exclusions in PDF and Word. Auto-assignment checks the dated
+recipe and component tags against the recorded allergies before choosing a dish,
+including in fallback pools. A conflicting saved choice stays visible for
+review and blocks the production download.
+
 Legacy partner assignment based on Internal
 Customer membership is disabled; these members need verified Matter accounts.
 
