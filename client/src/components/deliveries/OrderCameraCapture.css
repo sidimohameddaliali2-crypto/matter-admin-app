@@ -1,0 +1,55 @@
+.order-viewfinder {
+  position: absolute;
+  inset: 12% 10%;
+  max-width: 30rem;
+  margin-inline: auto;
+  pointer-events: none;
+  --tick: #fff8f5;
+  background:
+    linear-gradient(var(--tick), var(--tick)) left top / 26px 2px,
+    linear-gradient(var(--tick), var(--tick)) left top / 2px 26px,
+    linear-gradient(var(--tick), var(--tick)) right top / 26px 2px,
+    linear-gradient(var(--tick), var(--tick)) right top / 2px 26px,
+    linear-gradient(var(--tick), var(--tick)) left bottom / 26px 2px,
+    linear-gradient(var(--tick), var(--tick)) left bottom / 2px 26px,
+    linear-gradient(var(--tick), var(--tick)) right bottom / 26px 2px,
+    linear-gradient(var(--tick), var(--tick)) right bottom / 2px 26px;
+  background-repeat: no-repeat;
+  filter: drop-shadow(0 1px 2px rgb(0 0 0 / 60%));
+}
+
+.order-shutter-button {
+  display: grid;
+  width: 3.5rem;
+  height: 3.5rem;
+  place-items: center;
+  border: 3px solid #181311;
+  border-radius: 50%;
+  outline: 2px solid #ffe1d3;
+  background: #fbeae2;
+  color: #822813;
+  transition: transform 120ms ease-out;
+}
+
+button:not(:disabled):active > .order-shutter-button {
+  transform: scale(0.9);
+}
+
+.order-camera-shutter {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: #fff5ef;
+  animation: order-shutter 240ms ease-out both;
+}
+
+@keyframes order-shutter {
+  0% { opacity: 0.6; }
+  100% { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .order-camera-shutter { display: none; }
+  .order-shutter-button { transition: none; }
+  button:not(:disabled):active > .order-shutter-button { transform: none; }
+}

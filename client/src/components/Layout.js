@@ -60,6 +60,7 @@ const NAV_ITEMS = [
   { name: 'Cycle Menu', href: '/admin/meal-selection-v2/weekly-menu', icon: Calendar, permission: 'menus', group: 'Menu Creation' },
   { name: 'Components', href: '/admin/meal-selection-v2/components', icon: UtensilsCrossed, permission: 'menus', group: 'Menu Creation' },
   { name: 'Kitchen List', href: '/kitchen-list', icon: UtensilsCrossed, permission: 'kitchen_list', group: 'Kitchen & Menus' },
+  { name: 'Yellow Block Kitchen', href: '/yellowblock/kitchen', icon: UtensilsCrossed, roles: ['admin', 'kitchen', 'yellowblock_user'], group: 'Kitchen & Menus' },
   { name: 'Kitchen Counting', href: '/kitchen-counting', icon: BarChart3, permission: 'kitchen_counting', group: 'Kitchen & Menus' },
   { name: 'Matter Core', href: '/matter-core', icon: FileText, permission: 'matter_core', group: 'Kitchen & Menus' },
 

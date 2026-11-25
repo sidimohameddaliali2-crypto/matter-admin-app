@@ -43,6 +43,11 @@ import MatterCore from './pages/MatterCore';
 import MatterCorePdfPage from './pages/MatterCorePdfPage';
 import PrivacyPolicy from './pages/PrivacyPolicy';
 import YellowblockApp from './pages/YellowblockApp';
+import YellowblockKitchen from './pages/YellowblockKitchen';
+import YellowblockDriver from './pages/YellowblockDriver';
+import YellowblockMobileMetadata from './components/YellowblockMobileMetadata';
+import { KITCHEN_LOGIN_PATH, KITCHEN_PATH } from './utils/yellowblockKitchenPaths';
+import { DRIVER_LOGIN_PATH, DRIVER_PATH } from './utils/yellowblockDriverPaths';
 import PartnerLogin from './pages/PartnerLogin';
 import PartnerPortal from './pages/PartnerPortal';
 import MemberJoin from './pages/MemberJoin';
@@ -158,11 +163,11 @@ const BagOperationsRoute = ({warehouse=false}) => {
     : <Layout><BagTracking /></Layout>;
 };
 
-const ProtectedRoute = ({ children, allowDrivers = false, allowDispatchers = false, allowStoreKeepers = false, allowYellowblock = false, allowKitchen = false }) => {
+const ProtectedRoute = ({ children, allowDrivers = false, allowDispatchers = false, allowStoreKeepers = false, allowYellowblock = false, allowKitchen = false, loginPath = '/login' }) => {
   const authUser = useSelector((state) => state.auth.user);
   const token = localStorage.getItem('token');
   if (!token) {
-    return <Navigate to="/login" />;
+    return <Navigate to={loginPath} replace />;
   }
   const user = authUser || safeGetUser();
   
@@ -252,6 +257,7 @@ function App() {
       <SocketProvider>
       <Router>
         <AuthBootstrap />
+        <YellowblockMobileMetadata />
         <div className="App">
           <Routes>
             <Route path="/traceability" element={
@@ -264,6 +270,8 @@ function App() {
               </ProtectedRoute>
             } />
             <Route path="/login" element={<Login />} />
+            <Route path={KITCHEN_LOGIN_PATH} element={<Login kitchen />} />
+            <Route path={DRIVER_LOGIN_PATH} element={<Login yellowblockDriver />} />
             <Route path="/privacy-policy" element={<PrivacyPolicy />} />
             <Route path="/partner/login" element={<PartnerLogin />} />
             <Route path="/partner/portal" element={<PartnerRoute><PartnerPortal /></PartnerRoute>} />
@@ -642,9 +650,25 @@ function App() {
               </ProtectedRoute>
             } />
 
+            <Route path={DRIVER_PATH} element={
+              <ProtectedRoute allowDrivers loginPath={DRIVER_LOGIN_PATH}>
+                <RoleBasedRoute allowedRoles={['driver']}>
+                  <YellowblockDriver />
+                </RoleBasedRoute>
+              </ProtectedRoute>
+            } />
+
+            <Route path={KITCHEN_PATH} element={
+              <ProtectedRoute allowYellowblock allowKitchen loginPath={KITCHEN_LOGIN_PATH}>
+                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'yellowblock_user', 'kitchen']}>
+                  <YellowblockKitchen />
+                </RoleBasedRoute>
+              </ProtectedRoute>
+            } />
+
             <Route path="/yellowblock/*" element={
-              <ProtectedRoute allowYellowblock>
-                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'yellowblock_user']}>
+              <ProtectedRoute allowYellowblock allowKitchen>
+                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'yellowblock_user', 'kitchen']}>
                   <YellowblockApp />
                 </RoleBasedRoute>
               </ProtectedRoute>

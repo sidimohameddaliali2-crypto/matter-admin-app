@@ -1,6 +1,7 @@
 import React, { Suspense, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
+import { DRIVER_PATH } from '../utils/yellowblockDriverPaths';
 import '../styles/driver-mobile-lite.css';
 import {
   Package,
@@ -5469,6 +5470,11 @@ const DriverMobile = () => {
                 >
                   <MapPin className="w-5 h-5" />
                   <span>Delivery Map</span>
+                </button>
+                <button type="button" onClick={() => navigate(DRIVER_PATH)}
+                  className="w-full flex items-center space-x-3 p-3 text-gray-700 hover:bg-gray-100 rounded-lg text-left">
+                  <MapPin className="w-5 h-5" aria-hidden="true" />
+                  <span>Yellow Block deliveries</span>
                 </button>
                 <button className="w-full flex items-center space-x-3 p-3 text-gray-700 hover:bg-gray-100 rounded-lg text-left">
                   <Bell className="w-5 h-5" />

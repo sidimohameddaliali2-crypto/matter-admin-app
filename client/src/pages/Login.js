@@ -4,8 +4,10 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Eye, EyeOff, Mail, Lock } from 'lucide-react';
 import { login, clearError } from '../store/slices/authSlice';
+import { KITCHEN_PATH } from '../utils/yellowblockKitchenPaths';
+import { DRIVER_PATH } from '../utils/yellowblockDriverPaths';
 
-const Login = () => {
+const Login = ({ kitchen = false, yellowblockDriver = false }) => {
   const [formData, setFormData] = useState({
     email: '',
     password: '',
@@ -16,11 +18,16 @@ const Login = () => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
   const { isLoading, error, user } = useSelector(state => state.auth);
+  const yellowblock = kitchen || yellowblockDriver;
 
   useEffect(() => {
     if (user) {
       // Redirect based on role
-      if (user.role === 'driver') {
+      if (kitchen) {
+        navigate(KITCHEN_PATH, { replace: true });
+      } else if (yellowblockDriver) {
+        navigate(DRIVER_PATH, { replace: true });
+      } else if (user.role === 'driver') {
         navigate('/driver-mobile');
       } else if (user.role === 'dispatcher') {
         navigate('/dispatcher');
@@ -30,7 +37,7 @@ const Login = () => {
         navigate('/dashboard');
       }
     }
-  }, [user, navigate]);
+  }, [user, navigate, kitchen, yellowblockDriver]);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -50,7 +57,7 @@ const Login = () => {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+    <div className={`flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8 ${yellowblock ? 'min-h-[100dvh] bg-[#faf9f7]' : 'min-h-screen bg-gray-50'}`}>
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -60,13 +67,13 @@ const Login = () => {
         <div>
           <div className="flex justify-center">
             <img
-              className="w-15 h-15"
-              src="/images/matter-logo24-dark.png"
-              alt="Matter"
+              className={yellowblock ? 'w-36' : 'w-15 h-15'}
+              src={yellowblock ? '/images/yellow-block-logo.png.png' : '/images/matter-logo24-dark.png'}
+              alt={yellowblock ? 'Yellow Block' : 'Matter'}
             />
           </div>
           <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-            Sign in to your account
+            {kitchen ? 'Sign in to Kitchen' : yellowblockDriver ? 'Sign in to Yellow Block Driver' : 'Sign in to your account'}
           </h2>
         </div>
         
