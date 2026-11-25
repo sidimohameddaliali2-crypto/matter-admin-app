@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import Record from '../models/MenuSelectionRecord.js';
-import matterApiService, { buildNutritionResult } from './matterApiService.js';
+import matterApiService from './matterApiService.js';
 import { withMenuAllergyProfiles } from './menuAllergyProfileService.js';
 import { collectSavedKitchenAllergies, matchesKitchenAllergyRecord } from './kitchenAllergyReview.js';
 
@@ -20,9 +20,9 @@ export async function confirmKitchenAllergy({ menuId, customerId, body, user }) 
   const filter = { _id: recordId, weeklyMenuId: menuId, 'selectedMeals._id': mealId };
   const record = await Record.findOne(filter).select('+kitchenAllergyConfirmations').lean();
   if (!record) throw changed();
-  const subscription = (await matterApiService.getSubscription(subscriptionId))?.data;
-  if (String(subscription?.customer_id) !== customerId || String(subscription?.subscription_id) !== subscriptionId) throw changed();
-  const [nutrition] = withMenuAllergyProfiles([buildNutritionResult(subscription)]);
+  const live = await matterApiService.getKitchenNutrition({ customerId, date });
+  if (String(live?.customer_id) !== customerId || String(live?.subscription_id) !== subscriptionId) throw changed();
+  const [nutrition] = withMenuAllergyProfiles([live]);
   if (!nutrition.allergyProfile.allergiesAvailable || !nutrition.active_delivery_dates?.includes(date)
     || !matchesKitchenAllergyRecord(record, nutrition)) throw changed();
 

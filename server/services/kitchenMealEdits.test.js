@@ -206,3 +206,18 @@ test('a valid snack cannot replace an allergy-flagged main after cutoff', async 
   await assert.rejects(() => editKitchenMeals(f.args), /same meal type/);
   assert.equal(f.write.mock.callCount(), 0);
 });
+
+
+test('Core double-delivery staff additions use the four-portion entitlement rather than the two-meal customer cap', async t => {
+  const f = fixture(t);
+  f.nutrition.meal_frequency = 2;
+  f.nutrition.double_delivery_dates = [date];
+  f.row.selectedMeals = [];
+  await editKitchenMeals({ menuId, customerId: '42', date, user,
+    body: { action: 'add', menuItemId: itemId, quantity: 4, token: mealEditToken(f.row) } });
+  assert.equal(f.write.mock.callCount(), 1);
+  assert.equal(f.committed[0].update.$set.selectedMeals[0].quantity, 4);
+  await assert.rejects(editKitchenMeals({ menuId, customerId: '42', date, user,
+    body: { action: 'add', menuItemId: itemId, quantity: 5, token: mealEditToken(f.row) } }), /entitlement is 4/);
+  assert.equal(f.write.mock.callCount(), 1);
+});

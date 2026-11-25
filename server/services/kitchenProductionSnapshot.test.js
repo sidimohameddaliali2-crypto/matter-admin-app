@@ -79,7 +79,7 @@ test('background preparation publishes one source version and an input edit inva
   assert.equal((await readKitchenState('menu', '2026-10-30')).state, 'missing');
 });
 
-test('after cutoff every saved conflict must be confirmed, then an ingredient change requires a new review', async t => {
+for (const upcoming of [false, true]) test(`after cutoff every saved conflict must be confirmed, then an ingredient change requires a new review (upcoming: ${upcoming})`, async t => {
   t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-26T14:00:00Z') });
   const date = '2026-11-26';
   const id = num => String(num).padStart(24, '0');
@@ -110,10 +110,16 @@ test('after cutoff every saved conflict must be confirmed, then an ingredient ch
   t.mock.method(Breakfast, 'findOne', () => query(null));
   t.mock.method(Snack, 'findOne', () => query(null));
   t.mock.method(matterApiService, 'findSubscriptionsWithDeliveryOnDate', () => assert.fail('Reuse the verified roster'));
-  const input = { customer_id: '42', subscription_id: '45', allergens: ['Peanuts'], customer_email: selection.email };
-  t.mock.method(matterApiService, 'getSubscription', async () => ({ data: {
-    ...input, email: selection.email, delivery_schedule: [{ date, status: 'active' }],
-  } }));
+  const input = { customer_id: '42', subscription_id: '45', allergens: ['Peanuts'], customer_email: selection.email,
+    is_upcoming_plan: upcoming, source_parent_subscription_id: upcoming ? '44' : null };
+  t.mock.method(matterApiService, 'listSubscriptions', async () => ({ data: [{ subscription_id: upcoming ? '44' : '45', subscription_status: 'active' }] }));
+  t.mock.method(matterApiService, 'getSubscription', async subscriptionId => {
+    assert.equal(String(subscriptionId), upcoming ? '44' : '45', 'Scheduled standalone detail must not be used');
+    const detail = { ...input, email: selection.email, delivery_schedule: [{ date, status: 'active' }] };
+    return { data: upcoming ? { ...detail, subscription_id: '44', allergens: [], upcoming_plan: {
+      ...detail, replaces_subscription_id: '44', starting_date: date, cycle_end_date: '2026-12-10',
+    } } : detail };
+  });
   let job;
   t.mock.method(Snapshot, 'findOne', filter => query(job && (filter._id || filter.status === job.status) ? job : null));
   t.mock.method(Snapshot, 'create', async values => {

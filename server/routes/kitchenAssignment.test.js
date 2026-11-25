@@ -260,8 +260,8 @@ for (const kind of ['standard', 'core', 'snacks']) test(`direct ${kind} assignme
   assert.deepEqual(record.selectedMeals, [meal]);
 });
 
-for (const tagged of [false, true]) {
-  test(`Core assignment ${tagged ? 'uses only dated tagged dishes' : 'leaves slots empty despite an old rotation when no dishes are tagged'}`, async t => {
+for (const [tagged, upcoming] of [[false, false], [true, false], [true, true]]) {
+  test(`Core assignment${upcoming ? ' on an upcoming plan' : ''} ${tagged ? 'uses only dated tagged dishes' : 'leaves slots empty despite an old rotation when no dishes are tagged'}`, async t => {
     t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-04T08:00:00Z') });
     const date = '2026-11-06';
     const query = value => ({ select() { return this; }, sort() { return this; }, lean: async () => value });
@@ -281,10 +281,12 @@ for (const tagged of [false, true]) {
     t.mock.method(Record, 'findOneAndUpdate', async (_, update) => { writes.push(...update.$push.selectedMeals.$each); return {}; });
     const nutrition = { customer_id: 'fixture', customer_email: 'core@example.invalid', subscription_id: 'sub', plan_name: 'Matter Core',
       meal_frequency: 2, breakfast_included: false, snacks_per_day: 0, exclusions: [], active_delivery_dates: [date], double_delivery_dates: [] };
+    if (upcoming) nutrition.upcoming_plan = { ...nutrition, subscription_id: 'future-sub', replaces_subscription_id: 'sub', starting_date: date, meal_frequency: 3, is_upcoming_plan: true };
     const result = await runAssignMatterCoreMeals('menu', date, [{ email: nutrition.customer_email }], { matterInputs: [nutrition] });
-    assert.equal(result.data.assignedMainMeals, tagged ? 2 : 0);
+    assert.equal(result.data.assignedMainMeals, tagged ? (upcoming ? 3 : 2) : 0);
     assert.equal(result.data.skippedNoOption, tagged ? 0 : 2);
-    assert.equal(writes.length, tagged ? 2 : 0);
+    assert.equal(writes.length, tagged ? (upcoming ? 3 : 2) : 0);
+    assert.ok(writes.every(meal => meal.matterSubscriptionId === (upcoming ? 'future-sub' : 'sub') && meal.isUpcomingPlan === upcoming));
     assert.ok(writes.every(meal => meal.menuItemId === id && meal.mealName === 'Tagged Core chicken'));
     assert.equal(preparationHasFailures({ assignedMatterCore: result.data }), !tagged);
   });

@@ -47,7 +47,7 @@ export const readMealEditContext = async (menuId, customerId, date) => {
   const menu = await Menu.findById(menuId).lean();
   validDate(menu, date);
   const window = kitchenSelectionWindow(menu, date);
-  const nutrition = await matter.getKitchenNutrition({ customerId });
+  const nutrition = await matter.getKitchenNutrition({ customerId, date });
   if (String(nutrition?.customer_id) !== customerId || !nutrition.active_delivery_dates?.includes(date)) fail('Matter does not confirm an active delivery for this customer/date.');
   if (!String(nutrition.plan_name || '').trim()) fail('Matter plan identity is unresolved. Verify the subscription before editing meals.');
   const record = await recordFor(menuId, nutrition);
@@ -113,7 +113,8 @@ export const editKitchenMeals = async ({ menuId, customerId, date, body, user })
     // allergy/profile validation rather than trusting Matter exclusions alone.
     // Validate only the newly added/replaced portions; existing unsafe choices
     // must still be removable, and unrelated saved rows stay untouched.
-    [replacement] = await validatedMenuSelections({ menuId, nutrition: context.nutrition,
+    // The editor enforces its dated entitlement below, including Core double days.
+    [replacement] = await validatedMenuSelections({ menuId, nutrition: context.nutrition, enforceCustomerAllowance: false,
       selections: [{ ...replacement, date, quantity: body.quantity ?? 1 }] });
   }
   let saved;

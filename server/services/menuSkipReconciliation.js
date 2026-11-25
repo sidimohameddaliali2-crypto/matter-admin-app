@@ -6,6 +6,7 @@ import matterApiService from './matterApiService.js';
 // Only an explicitly active date on the SAME subscription proves that undo;
 // missing dates, renewals, failed pauses and unavailable calendars do not.
 export async function reconcileMenuSkippedDays(record, nutrition) {
+  if (nutrition?.upcoming_plan) await reconcileMenuSkippedDays(record, nutrition.upcoming_plan);
   if (!record || !Array.isArray(nutrition?.active_delivery_dates)) return record;
   const active = new Set(nutrition.active_delivery_dates);
   const candidates = (record.skippedDays || []).filter((skip) =>
@@ -18,7 +19,8 @@ export async function reconcileMenuSkippedDays(record, nutrition) {
   // Keep the conditional write below to protect pauses changed after this read.
   let subscription;
   try {
-    subscription = (await matterApiService.getSubscription(nutrition.subscription_id))?.data;
+    subscription = (await matterApiService.getSubscription(nutrition.source_parent_subscription_id || nutrition.subscription_id))?.data;
+    if (nutrition.source_parent_subscription_id) subscription = subscription?.upcoming_plan;
   } catch {
     // Avoid passing Axios request configuration/credentials into route logs.
     const error = new Error('Could not confirm your delivery calendar. Reopen the menu before continuing.');
@@ -70,7 +72,8 @@ export async function reconcileMenuSkippedDays(record, nutrition) {
 export function restoredMenuSkipDates(record, nutrition) {
   const active = new Set(nutrition?.active_delivery_dates || []);
   const skipped = new Set((record?.skippedDays || []).map((s) => s.date));
-  return [...new Set((record?.unpausedDays || []).filter((s) =>
+  const upcoming = nutrition?.upcoming_plan ? restoredMenuSkipDates(record, nutrition.upcoming_plan) : [];
+  return [...new Set([...upcoming, ...(record?.unpausedDays || []).filter((s) =>
     String(s.subscriptionId) === String(nutrition?.subscription_id)
-    && active.has(s.date) && !skipped.has(s.date)).map((s) => s.date))];
+    && active.has(s.date) && !skipped.has(s.date)).map((s) => s.date)])];
 }

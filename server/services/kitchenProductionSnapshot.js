@@ -10,7 +10,8 @@ import Snack from '../models/KitchenSnackPreset.js';
 import { excludeRecreatedArchivedAliases } from './archivedMenuAliases.js';
 import { assertPreparedCoverage } from './kitchenCoverage.js';
 import { readKitchenSelectionWindow } from './kitchenSelectionDeadline.js';
-import matterApiService from './matterApiService.js';
+import matterApiService, { buildNutritionResult } from './matterApiService.js';
+import { menuNutritionForDate } from './menuPlanSchedule.js';
 import { normalizeMatterAllergens } from './matterAllergens.js';
 import { boundedMap } from './boundedMap.js';
 import { withMenuAllergyProfiles } from './menuAllergyProfileService.js';
@@ -31,13 +32,15 @@ const datedFallback = (meal, date) => isFallbackSnack(meal) && String(meal.date 
 
 const matterAllergiesAreCurrent = async (inputs, date, verifyExclusions) => {
   const unchanged = await boundedMap(inputs, 20, async input => {
-    const subscription = (await matterApiService.getSubscription(input.subscription_id))?.data;
-    const exclusions = Array.isArray(subscription?.exclusions) ? subscription.exclusions.map(item => item?.title).filter(Boolean) : null;
-    const live = { plan_name: subscription?.plan?.name, exclusions };
-    return subscription?.subscription_id != null && String(subscription.subscription_id) === String(input.subscription_id)
-      && String(subscription.customer_id) === String(input.customer_id)
-      && (subscription.delivery_schedule || []).some(day => day?.status === 'active' && String(day.date).slice(0, 10) === date)
-      && sameTerms(normalizeMatterAllergens(subscription.allergens), normalizeMatterAllergens(input.allergens))
+    // Scheduled standalone details can be unavailable. Read the verified
+    // parent when known, then resolve the applicable plan on this food date.
+    const live = input.is_upcoming_plan && !input.source_parent_subscription_id
+      ? await matterApiService.getKitchenNutrition({ customerId: input.customer_id, date })
+      : menuNutritionForDate(buildNutritionResult((await matterApiService.getSubscription(input.source_parent_subscription_id || input.subscription_id))?.data || {}), date);
+    return live?.subscription_id != null && String(live.subscription_id) === String(input.subscription_id)
+      && String(live.customer_id) === String(input.customer_id)
+      && live.active_delivery_dates?.includes(date)
+      && sameTerms(normalizeMatterAllergens(live.allergens), normalizeMatterAllergens(input.allergens))
       && (!verifyExclusions || (Boolean(String(live.plan_name || '').trim()) && usesKitchenDietaryExclusions(live) === usesKitchenDietaryExclusions(input)
         && sameTerms(kitchenDietaryExclusions(live), kitchenDietaryExclusions(input))));
   });

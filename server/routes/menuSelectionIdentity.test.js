@@ -196,3 +196,13 @@ test('missing Matter allergens reject a customer submission without saving', () 
   assert.equal(res.statusCode, 502);
   assert.equal(state.writes.length, 0);
 }));
+
+
+test('upcoming meals save against the new subscription despite a forged browser subscription', () => withSelectionFixtures(async state => {
+  state.nutrition.upcoming_plan = { ...state.nutrition, subscription_id: 'future-sub', replaces_subscription_id: 'sub', starting_date: '2026-10-22', meal_frequency: 3,
+    is_upcoming_plan: true, active_delivery_dates: ['2026-10-22'] };
+  const res = await post([{ ...submitted(), quantity: 3, matterSubscriptionId: 'forged', isUpcomingPlan: false }]);
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.writes[0].update.$set.selectedMeals[0].matterSubscriptionId, 'future-sub');
+  assert.equal(state.writes[0].update.$set.selectedMeals[0].isUpcomingPlan, true);
+}));
