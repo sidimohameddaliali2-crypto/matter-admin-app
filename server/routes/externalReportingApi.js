@@ -10,6 +10,7 @@ import VehicleLocationCaptureBatch from '../models/VehicleLocationCaptureBatch.j
 import { CAPTURE_MAX_ROWS, captureObservationId, captureTickId } from '../services/vehicleLocationCaptureStore.js';
 import { CAPTURE_FIELDS, serializeHistoryPoint } from '../services/vehicleLocationView.js';
 import { inspectReportingMongoTopology, readReportingChanges, readReportingWatermark, reportingCaptureEnabled } from '../services/reportingOutbox.js';
+import { reportingPhotoInstructions } from '../services/reportingPhotoInstructions.js';
 import { serializeDelivery } from './externalDeliveryApi.js';
 
 const router = express.Router();
@@ -78,7 +79,10 @@ router.get('/deliveries/:id', async (req, res) => {
     if (!Number.isSafeInteger(delivery?.reportingVersion) || delivery.reportingVersion < 1) {
       return res.status(404).json({ success: false, message: 'Versioned reporting delivery not found' });
     }
-    return res.json({ success: true, data: serializeReportingDelivery(delivery) });
+    const data = serializeReportingDelivery(delivery);
+    const instructions = data.type === 'Delivery' ? reportingPhotoInstructions(delivery.addressDetails, delivery.address) : null;
+    if (instructions) data.photoInstructions = instructions;
+    return res.json({ success: true, data });
   } catch {
     console.error('Reporting delivery snapshot is unavailable');
     return res.status(503).json({ success: false, message: 'Reporting delivery snapshot is unavailable' });

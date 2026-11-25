@@ -7,11 +7,13 @@ on:
       - 'server/scripts/reporting-source-operator*.mjs'
       - 'server/middleware/apiKeyAuth.js'
       - 'server/middleware/reportingVercelIdentity*.js'
+      - 'server/routes/externalDeliveryApi.js'
       - 'server/routes/externalReportingApi.js'
       - 'server/routes/deliveries.js'
       - 'server/models/Delivery.js'
       - 'server/models/ReportingOutbox.js'
       - 'server/services/reportingOutbox*.js'
+      - 'server/services/reportingPhotoInstructions*.js'
       - 'server/services/truckoomVisitSync*.js'
       - 'server/services/vehicleLocationCaptureStore.js'
       - 'server/services/matterDeliveryImportService.js'
@@ -35,6 +37,8 @@ jobs:
         run: node --test server/middleware/reportingVercelIdentity.test.js
       - name: Verify protected reporting operator settings and rollback
         run: node --test server/scripts/reporting-source-operator.test.mjs
+      - name: Verify dated delivery photo instructions
+        run: node --test server/services/reportingPhotoInstructions.test.js
   reporting-mongo:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
