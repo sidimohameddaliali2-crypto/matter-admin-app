@@ -1580,7 +1580,7 @@ const savedCoreMealSlots = (meals, total) => {
  * to the old menu-wide behavior (every customer's selection record, every
  * date they have non-snack meals for).
  */
-async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs = [] } = {}) {
+async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs = [], collectAllergyReviews = false } = {}) {
     if (Array.isArray(customers)) customers = await canonicalizeAssignCustomers(menuId, customers, matterInputs);
     const scopedDateKey = date ? toDateKey(date) : null;
     const scopedEmails = Array.isArray(customers)
@@ -1669,7 +1669,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
           if (!dayRecord || await kitchenDateUnavailable(dayRecord, dateKey, nutrition)) continue;
         }
         if (hasCoreSnack) dayRecord = await reconcileCoreDoubleAddOns(dayRecord, dateKey, nutrition, new Date(), { onlySnacks: true });
-        await reviewSavedKitchenAllergies(menuId, dateKey, dayRecord, nutrition, allergyOptionsByDate, 'snack');
+        if (!collectAllergyReviews) await reviewSavedKitchenAllergies(menuId, dateKey, dayRecord, nutrition, allergyOptionsByDate, 'snack');
         if (snacksPerDay <= 0) continue;
         const newSnacks = [];
         const existingSnackCount = (dayRecord.selectedMeals || []).filter(
@@ -1782,7 +1782,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
     let skippedNoOptions = results.reduce((sum, r) => sum + r.skippedNoOptions, 0);
     const datesWithNoOptions = new Set(results.flatMap((r) => r.datesWithNoOptions));
     for (const [dateKey, batch] of coreSnackBatches) {
-      const result = await runAssignMatterCoreMeals(menuId, dateKey, batch.customers, { onlySnacks: true, matterInputs: batch.inputs });
+      const result = await runAssignMatterCoreMeals(menuId, dateKey, batch.customers, { onlySnacks: true, matterInputs: batch.inputs, collectAllergyReviews });
       if (result.error) return result;
       assigned += result.data.assignedSnacks;
       skippedNoOptions += result.data.skippedSnackNoOption;
@@ -1863,7 +1863,7 @@ const mapWithConcurrency = async (items, limit, mapper) => {
  * `onlySnacks`: the standalone snack action skips main and breakfast writes
  * and can fall back to the other eligible pool.
  */
-async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly = false, includeBreakfast = false, onlySnacks = false, matterInputs = [] } = {}) {
+async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly = false, includeBreakfast = false, onlySnacks = false, matterInputs = [], collectAllergyReviews = false } = {}) {
 
   const menu = await WeeklyMenu.findById(menuId)
     .select('breakfastOptionsByDate snackOptionsByDate meals selectionDeadlines')
@@ -1964,7 +1964,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
       existingRecord = await reconcileCoreMainMeals(existingRecord, dateKey, customer.nutrition);
     }
     existingRecord = await reconcileCoreDoubleAddOns(existingRecord, dateKey, customer.nutrition, new Date(), { onlySnacks });
-    await reviewSavedKitchenAllergies(menuId, dateKey, existingRecord, customer.nutrition, allergyOptionsByDate, onlySnacks ? 'snack' : undefined);
+    if (!collectAllergyReviews) await reviewSavedKitchenAllergies(menuId, dateKey, existingRecord, customer.nutrition, allergyOptionsByDate, onlySnacks ? 'snack' : undefined);
     const existingMainMeals = (existingRecord?.selectedMeals || []).filter(
       (m) => toDateKey(m.date) === dateKey && m.mealType === 'main'
     );
@@ -2324,7 +2324,7 @@ async function runAutoPopulateMissing(menuId, dateKey, options) {
   return withKitchenPreparation(`menu:${menuId}:${dateKey}`, () => populateMissingKitchenSelections(menuId, dateKey, options));
 }
 
-async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs = false } = {}) {
+async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs = false, collectAllergyReviews = false } = {}) {
   const cacheKey = `menu:${menuId}:autoPopulated:v7:${dateKey}`;
   const cached = freshInputs ? null : await cacheGet(cacheKey);
   if (cached && !freshInputs) return { data: cached, cached: true };
@@ -2353,16 +2353,14 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
   const existingRecords = await MenuSelectionRecord.find({ weeklyMenuId: menuId })
     .select('email legacyStorageEmail matterEmail matterCustomerId matterSubscriptionId selectedMeals skippedDays unpausedDays weeklyMenuId kitchenAutoHolds').lean();
   const matterInputs = withMenuAllergyProfiles(subscriptions.map(sub => sub.kitchen_inputs));
-  const sourceOptions = { matterInputs };
+  const sourceOptions = { matterInputs, collectAllergyReviews };
   const roster = subscriptions.map(({ kitchen_inputs, ...subscription }) => subscription);
   let alreadyCovered = 0;
   const newlyCreatedCustomers = 0; // Compatibility: kitchen never creates Internal customers.
   const needsAssignment = [], needsMatterCoreAssignment = [], needsSnackOnly = [], needsMatterCoreSnackOnly = [];
   const allergyOptionsByDate = new Map();
-  const reviewSaved = (record, nutrition) => reviewSavedKitchenAllergies(menuId, dateKey, record, nutrition, allergyOptionsByDate).catch(error => {
-    if (error.code === 'KITCHEN_ALLERGY_REVIEW') error.kitchenAllergyInputs = { kitchenInputs: matterInputs, kitchenRoster: roster };
-    throw error;
-  });
+  const reviewSaved = (record, nutrition) => collectAllergyReviews
+    ? undefined : reviewSavedKitchenAllergies(menuId, dateKey, record, nutrition, allergyOptionsByDate);
   for (const nutrition of matterInputs) {
     const identity = matterSelectionIdentity(nutrition);
     const matches = existingRecords.filter((record) => record.matterCustomerId
@@ -2468,7 +2466,9 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
   // again soon.
   if (preparationHasFailures(summary)) {
     await cacheDelete(cacheKey);
-    throw kitchenPreparationFailure(summary, dateKey);
+    const failure = kitchenPreparationFailure(summary, dateKey);
+    if (collectAllergyReviews) return { data: summary, failure };
+    throw failure;
   }
   const cachedSummary = { ...summary };
   delete cachedSummary.kitchenInputs;
@@ -2490,7 +2490,8 @@ router.get('/:id/kitchen-state', protect, async (req, res) => {
 router.post('/:id/kitchen-state', protect, async (req, res) => {
   try {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(req.body.date || '') || toDateKey(req.body.date) !== req.body.date) return res.status(400).json({ success: false, message: 'Select a valid date.' });
-    const state = await beginKitchenState(req.params.id, req.body.date, () => runAutoPopulateMissing(req.params.id, req.body.date, { freshInputs: true }), { refresh: req.body.refresh === true });
+    const state = await beginKitchenState(req.params.id, req.body.date,
+      () => runAutoPopulateMissing(req.params.id, req.body.date, { freshInputs: true, collectAllergyReviews: true }), { refresh: req.body.refresh === true });
     return res.status(state.state === 'running' ? 202 : 200).json({ success: true, ...state });
   } catch (error) { return res.status(error.statusCode || 503).json({ success: false, message: error.message, code: error.code, selectionWindow: error.selectionWindow }); }
 });
@@ -2722,7 +2723,7 @@ router.put('/:id/matter-core-meal-options', protect, async (req, res) => {
  * submitted a selection at all). `customers` here is the same shape both
  * callers already use: [{ email, name, customerId, mealFrequency, exclusions }].
  */
-async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [] } = {}) {
+async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [], collectAllergyReviews = false } = {}) {
 
     const menu = await WeeklyMenu.findById(menuId)
       .select('mainMealOptionsByDate breakfastOptionsByDate meals selectionDeadlines')
@@ -2799,7 +2800,7 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
       const existingRecord = await MenuSelectionRecord.findOne({ weeklyMenuId: menuId, email }).lean();
       await reconcileMenuSkippedDays(existingRecord, customer.nutrition);
       if (await kitchenDateUnavailable(existingRecord, dateKey, customer.nutrition)) continue;
-      await reviewSavedKitchenAllergies(menuId, dateKey, existingRecord, customer.nutrition, allergyOptionsByDate);
+      if (!collectAllergyReviews) await reviewSavedKitchenAllergies(menuId, dateKey, existingRecord, customer.nutrition, allergyOptionsByDate);
       const existingMainMeals = (existingRecord?.selectedMeals || []).filter(
         (m) => toDateKey(m.date) === dateKey && m.mealType === 'main'
       );

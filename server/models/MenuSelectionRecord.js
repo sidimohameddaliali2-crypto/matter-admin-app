@@ -172,6 +172,19 @@ const menuSelectionRecordSchema = new mongoose.Schema({
   }],
 
   kitchenAudit: [{ date: String, action: String, at: Date, subscriptionId: String, reason: String }],
+  kitchenAllergyConfirmations: { select: false, type: [{
+    _id: false,
+    fingerprint: String,
+    mealId: String,
+    mealName: String,
+    date: String,
+    subscriptionId: String,
+    conflicts: [String],
+    note: String,
+    actorId: String,
+    actorName: String,
+    at: Date,
+  }] },
   // Historical menu-link pauses explicitly restored to active delivery by Matter.
   // Kept separately so they no longer block selection or kitchen assignment.
   unpausedDays: [{

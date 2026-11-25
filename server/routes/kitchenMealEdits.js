@@ -1,6 +1,7 @@
 import express from 'express';
 import { effectivePermissions } from '../models/User.js';
 import { readMealEditContext, mealEditView, editKitchenMeals, readMealEditLog } from '../services/kitchenMealEdits.js';
+import { confirmKitchenAllergy } from '../services/kitchenAllergyConfirmations.js';
 
 const router = express.Router({ mergeParams: true });
 router.use((req, res, next) => {
@@ -16,4 +17,6 @@ router.get('/meal-editor', handle(async req => mealEditView(await readMealEditCo
 router.post('/meal-editor', handle(req => editKitchenMeals({ menuId: req.params.id, customerId: req.params.customerId,
   date: req.body.date, body: req.body, user: req.user })));
 router.get('/meal-log', handle(req => readMealEditLog({ menuId: req.params.id, customerId: req.params.customerId, before: req.query.before })));
+router.post('/allergy-confirmations', handle(req => confirmKitchenAllergy({ menuId: req.params.id, customerId: req.params.customerId,
+  body: req.body || {}, user: req.user })));
 export default router;

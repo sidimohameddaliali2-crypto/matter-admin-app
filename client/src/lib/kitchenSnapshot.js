@@ -92,15 +92,22 @@ const collectDatedKitchenSelections = preparations => {
   return [...entries.values()];
 };
 
+export const verifyKitchenSnapshot = async (api, menuId, date, snapshotId) => {
+  const verified = (await api.get(`/menus/${menuId}/kitchen-state`, {
+    params: { date, job: snapshotId, verifyAllergies: true }, timeout: 180000,
+  })).data;
+  if (verified?.state !== 'ready') {
+    throw new Error(verified?.data?.data?.kitchenAllergyReview || verified?.message
+      || 'The prepared kitchen version changed or expired. Reload the selected date before exporting.');
+  }
+};
+
 // Every retained production paper uses the same prepared inputs and formula.
 export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => true, transformSelection = (entry) => entry, prepared = null) => {
   const dayKeys = [...new Set(dates)].sort();
   if (!menuId || !dayKeys.length) throw new Error('Select a menu and delivery date first.');
   if (prepared?.snapshotId && dayKeys.length === 1 && prepared.menuId === menuId && prepared.date === dayKeys[0]) {
-    const verified = (await api.get(`/menus/${menuId}/kitchen-state`, {
-      params: { date: prepared.date, job: prepared.snapshotId, verifyAllergies: true }, timeout: 180000,
-    })).data;
-    if (verified?.state !== 'ready') throw new Error(verified?.message || 'The prepared kitchen version changed or expired. Reload the selected date before exporting.');
+    await verifyKitchenSnapshot(api, menuId, prepared.date, prepared.snapshotId);
   }
   // Export the exact verified load version for up to 60 seconds. This is
   // request-local memory, never a persistent/offline cache. Failed refreshes

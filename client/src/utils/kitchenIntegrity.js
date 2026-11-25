@@ -9,6 +9,8 @@ export const kitchenMealChanges = meal => [
   meal?.needsSauceChange ? 'Change sauce' : '',
   meal?.needsGarnishChange ? 'Change garnish' : '',
   meal?.exclusionConflict?.length ? `Excluded: ${meal.exclusionConflict.join(', ')}; replace before preparation` : '',
+  ...(meal?.kitchenAllergyCases || []).filter(item => item.confirmation).map(item =>
+    `Allergy handling (${item.conflicts.join(', ')}): ${item.confirmation.note}`),
 ].filter(Boolean).join(' | ');
 
 const validNumber = (value) => (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))

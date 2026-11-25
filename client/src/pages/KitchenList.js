@@ -187,6 +187,7 @@ const parseBreakfastRow = (row) => {
 // "Needs attention only" filter and the explanation shown on each customer card.
 const getAttentionReasons = (meal) => {
   const reasons = [...(meal?.inputErrors || [])];
+  if (meal?.kitchenAllergyCases?.some(item => !item.confirmation)) reasons.push('Saved meal needs allergy review.');
   if (meal?.remark) {
     reasons.push(`Flagged via Upload Meal Remarks: "${meal.remark}" — swap this before it goes out.`);
   }
@@ -343,6 +344,9 @@ const KitchenList = () => {
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState('');
   const [allergyReview, setAllergyReview] = useState('');
+  const [allergyCases, setAllergyCases] = useState([]);
+  const pendingAllergyCases = allergyCases.filter(item => !item.confirmation);
+  const exportsAwaitAllergyReview = allergyCases.length ? pendingAllergyCases.length > 0 : !!allergyReview;
   const exportInFlight = useRef(false);
   const [missingSelectionEntries, setMissingSelectionEntries] = useState([]);
   const [showOnlyMissing, setShowOnlyMissing] = useState(false);
@@ -446,6 +450,7 @@ const KitchenList = () => {
     setDayRoster(null);
     setExportError('');
     setAllergyReview('');
+    setAllergyCases([]);
     if (!selectedMenuId || !missingCheckDate) { setLoadingSelections(false); return []; }
     nutritionCacheRef.current.clear();
     setDeliveryCheck(null);
@@ -470,6 +475,7 @@ const KitchenList = () => {
         const preparation = await prepareKitchenSelections(api, selectedMenuId, missingCheckDate, current, { refresh });
         if (!current()) return [];
         setAllergyReview(preparation.data?.kitchenAllergyReview || '');
+        setAllergyCases(preparation.data?.kitchenAllergyCases || []);
         const roster = preparation.data?.rosterComplete === true && Array.isArray(preparation.data.kitchenRoster)
           ? preparation.data.kitchenRoster
           : verifiedKitchenRoster((await api.get('/matter/subscriptions/delivery-on-date', { params: { date: missingCheckDate }, timeout: 180000 })).data);
@@ -1252,6 +1258,10 @@ const KitchenList = () => {
       if (activeSelectionScope.current !== scope) return;
       // Commit the displayed correction only after the server has accepted it.
       setMealTypeOverrides(prev => ({ ...prev, [key]: normalizedValue }));
+      if (row.selectedMeals.some(saved => saved.kitchenAllergyCases?.length)) {
+        await loadSelections();
+        return;
+      }
       const savedMeals = response.data.record?.selectedMeals || updatedSelections;
       setMenuSelections(prev => prev.map(current => {
         if (!sameCustomer(current)) return current;
@@ -1270,7 +1280,7 @@ const KitchenList = () => {
       overrideInFlight.current = false;
       setSavingOverrideKey('');
     }
-  }, [selectedMenuId, menuSelections]);
+  }, [selectedMenuId, menuSelections, loadSelections]);
 
   // Saves a kitchen-only note for one customer on one specific delivery day.
   // An empty note removes that date's entry server-side. Updates
@@ -1598,6 +1608,27 @@ const KitchenList = () => {
     catch (err) { if (activePaperScope.current === scope) setExportError(err.response?.data?.message || err.message || 'Download failed. Please retry.'); }
     finally { exportInFlight.current = false; setExportBusy(false); }
   };
+
+  const confirmAllergyReview = useCallback(async (item, note) => {
+    const scope = `${selectedMenuId}:${item.date}`;
+    const { data } = await api.post(`/menus/${selectedMenuId}/kitchen-customers/${item.customerId}/allergy-confirmations`, {
+      recordId: item.recordId, mealId: item.mealId, date: item.date,
+      subscriptionId: item.subscriptionId, fingerprint: item.fingerprint, note,
+    });
+    if (!data?.success || !data.data) throw new Error('The confirmation could not be saved. Please retry.');
+    const confirmation = data.data;
+    if (activeSelectionScope.current !== scope) return;
+    const recordConfirmation = review => review.fingerprint === item.fingerprint ? { ...review, confirmation } : review;
+    preparedSnapshot.current = null;
+    setExportError('');
+    setAllergyCases(previous => previous.map(recordConfirmation));
+    setMenuSelections(previous => previous.map(entry => String(entry._id) !== item.recordId ? entry : {
+      ...entry,
+      selectedMeals: entry.selectedMeals.map(meal => String(meal._id) !== item.mealId ? meal : {
+        ...meal, kitchenAllergyCases: (meal.kitchenAllergyCases || []).map(recordConfirmation),
+      }),
+    }));
+  }, [selectedMenuId]);
 
   const getDeliverableRows = async (dateKey, allowEmpty = false) => {
     if (allowEmpty && partnerOnlyDate === dateKey) return [];
@@ -2375,7 +2406,7 @@ ${body}${partnerPaperHtml(partnerData)}
               <button
                 type="button"
                 onClick={() => runKitchenExport(() => downloadDayKitchenPaper(paperDate))}
-                disabled={!paperDate || exportBusy || generatingPdf || (!partnerOnlyDate && (loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
+                disabled={!paperDate || exportBusy || generatingPdf || (!partnerOnlyDate && (exportsAwaitAllergyReview || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
                 <FileText size={16} className={generatingPdf ? 'animate-pulse' : ''} /> {generatingPdf ? 'Generating...' : 'Download Day PDF'}
@@ -2383,7 +2414,7 @@ ${body}${partnerPaperHtml(partnerData)}
               <button
                 type="button"
                 onClick={() => runKitchenExport(() => downloadDayKitchenPaperWord(paperDate))}
-                disabled={!paperDate || exportBusy || (!partnerOnlyDate && (loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
+                disabled={!paperDate || exportBusy || (!partnerOnlyDate && (exportsAwaitAllergyReview || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
                 title="Word version of the Day PDF — same sections, order and per-customer tables"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
@@ -2392,7 +2423,7 @@ ${body}${partnerPaperHtml(partnerData)}
               <button
                 type="button"
                 onClick={() => runKitchenExport(() => exportDayKitchenPaperToExcel(paperDate))}
-                disabled={!paperDate || exportBusy || (!partnerOnlyDate && (loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
+                disabled={!paperDate || exportBusy || (!partnerOnlyDate && (exportsAwaitAllergyReview || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
                 title="Excel version of the Day PDF — one row per meal (emirate, delivery window, customer, plan, P/C/V weights, remark, day note), in the same order as the PDF"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
@@ -2401,7 +2432,7 @@ ${body}${partnerPaperHtml(partnerData)}
               <button
                 type="button"
                 onClick={() => runKitchenExport(() => exportCustomerMacrosToExcel(pdfDate))}
-                disabled={!!partnerOnlyDate || !pdfDate || exportBusy || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
+                disabled={!!partnerOnlyDate || !pdfDate || exportBusy || exportsAwaitAllergyReview || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
                 title="Export customer ID, name, CPF, meal plan, the customer's total daily C/P/F, meal name, and that meal's C/P/F/calories — one row per meal, in the same customer/meal order as the Day PDF above"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
@@ -2526,7 +2557,16 @@ ${body}${partnerPaperHtml(partnerData)}
 
         {!missingCheckDate && !loadingMenus && <KitchenEmptyState hasMenu={!!selectedMenuId} />}
         {selectedMenu && missingCheckDate && !selectionWindow.canAutoAssign && <p role="status" className="rounded-xl bg-amber-50 p-4 text-sm text-amber-900">{selectionWindow.message}</p>}
-        {allergyReview && <p role="alert" className="rounded-xl bg-rose-50 p-4 text-sm text-rose-900">{allergyReview}</p>}
+        {exportsAwaitAllergyReview && <div role="alert" className="rounded-xl bg-rose-50 p-4 text-sm text-rose-900">
+          <p>{allergyCases.length
+            ? `Exports are blocked until all allergy cases are resolved. ${pendingAllergyCases.length} remaining.`
+            : allergyReview}</p>
+          {pendingAllergyCases.length > 0 && <ul className="mt-2 list-disc pl-5">
+            {pendingAllergyCases.map(item => <li key={item.fingerprint}>{item.message}</li>)}
+          </ul>}
+        </div>}
+        {allergyCases.length > 0 && !exportsAwaitAllergyReview &&
+          <p role="status" className="rounded-xl bg-emerald-50 p-4 text-sm text-emerald-950">All saved meal allergy reviews are confirmed.</p>}
 
 
         {menuDateKeys.length > 0 && (
@@ -2971,7 +3011,8 @@ ${body}${partnerPaperHtml(partnerData)}
           onShowMore={() => setVisibleCustomers(count => count + 50)}
           renderCustomer={entry => <CustomerCard key={entry.email || entry.customerId} entry={entry} persistMealTypeOverride={persistMealTypeOverride}
             saveMealRemark={saveMealRemark} savingOverrideKey={savingOverrideKey} saveDayNote={saveDayNote} savingDayNoteKey={savingDayNoteKey} snackPreset={snackPreset}
-            menuId={selectedMenuId} date={missingCheckDate} canEdit={!!selectionWindow.deadlineAt && !selectionWindow.canAutoAssign} onMealsChanged={loadSelections} />}
+            menuId={selectedMenuId} date={missingCheckDate} canEdit={!!selectionWindow.deadlineAt && !selectionWindow.canAutoAssign}
+            onMealsChanged={loadSelections} onAllergyConfirmation={confirmAllergyReview} />}
         />
         </div>
 
@@ -2992,7 +3033,52 @@ ${body}${partnerPaperHtml(partnerData)}
 // here (keyed by date only, since email is fixed per card instance) instead
 // of a shared object in the parent, which is what made every card re-render
 // together before.
-const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemark, savingOverrideKey, saveDayNote, savingDayNoteKey, snackPreset, menuId, date, canEdit, onMealsChanged }) => {
+function MealAllergyReview({ item, onConfirm }) {
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const save = async () => {
+    if (saving || !note.trim()) return;
+    setSaving(true);
+    setError('');
+    try {
+      await onConfirm(item, note.trim());
+      setOpen(false);
+    } catch (failure) {
+      setError(failure.response?.data?.message || failure.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  if (item.confirmation) return (
+    <div className="my-2 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-950">
+      <p>Allergy review confirmed by <strong>{item.confirmation.actorName}</strong> on {new Date(item.confirmation.at).toLocaleString('en-GB', { timeZone: 'Asia/Dubai' })} Dubai time.</p>
+      <p>{item.confirmation.note}</p>
+    </div>
+  );
+  return (
+    <div className="my-2 space-y-2 rounded-lg bg-rose-50 p-3 text-sm text-rose-950">
+      <p>{item.message}</p>
+      {item.canConfirm && !open && <button type="button" className="kitchen-button-secondary px-3 py-1"
+        onClick={() => setOpen(true)}>Confirm allergy review</button>}
+      {item.canConfirm && open && <>
+        <label className="block">
+          Verify the Matter allergy and dated ingredients, then record how the kitchen will avoid the allergen.
+          <textarea rows={2} className="mt-1 block w-full rounded border p-2 text-slate-900" maxLength={500}
+            value={note} onChange={event => setNote(event.target.value)} disabled={saving} />
+        </label>
+        <button type="button" className="kitchen-button-primary mr-2 px-3 py-1 disabled:opacity-50"
+          disabled={saving || !note.trim()} onClick={save}>{saving ? 'Saving…' : 'Confirm and log'}</button>
+        <button type="button" disabled={saving} onClick={() => setOpen(false)}>Cancel</button>
+      </>}
+      {!item.canConfirm && <p>Resolve the source data and refresh preparation.</p>}
+      {error && <p role="alert">{error}</p>}
+    </div>
+  );
+}
+
+const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemark, savingOverrideKey, saveDayNote, savingDayNoteKey, snackPreset, menuId, date, canEdit, onMealsChanged, onAllergyConfirmation }) => {
   const [mealIntent, setMealIntent] = useState(null);
   const [localDayNoteDrafts, setLocalDayNoteDrafts] = useState({});
   // Each day's full meal grid starts collapsed — with a realistic customer
@@ -3141,6 +3227,7 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
             {isExpanded && (
             <div className="kitchen-meal-list">
               {dayGroup.meals.map((meal, index) => {
+                const showAllergyCases = meal.kitchenAllergyCases?.length && dayGroup.meals.findIndex(item => item._id === meal._id) === index;
                 const savedSnackMacros = meal.flags?.invalidInput && String(meal.mealType).toLowerCase() === 'snack'
                   ? resolveSnackPresetForMeal(meal, snackPreset?.presetsByName || {}) : null;
                 return (
@@ -3156,6 +3243,9 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
                       <button type="button" disabled={!canEdit || !/^[1-9]\d*$/.test(String(entry.matterCustomerId || ''))} className="text-rose-700" onClick={() => setMealIntent({ action: 'delete', mealId: String(meal._id) })}>Delete meal</button>
                     </div>}
                   </div>
+                  {!!showAllergyCases && meal.kitchenAllergyCases.map(item => (
+                    <MealAllergyReview key={item.fingerprint} item={item} onConfirm={onAllergyConfirmation} />
+                  ))}
                   <div className="mt-2 flex items-center gap-2 text-sm font-medium text-slate-700">
                     <span className="truncate">{getMealLabel(meal).mealName}</span>
                     {meal?.isAutoAssigned && (

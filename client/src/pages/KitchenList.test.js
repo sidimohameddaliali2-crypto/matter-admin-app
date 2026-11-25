@@ -93,6 +93,52 @@ test.each(['selection-open', 'allergy-review'])('%s shows the conflicting saved 
   } finally { now.mockRestore(); }
 });
 
+test('meal confirmations require a note and unlock day exports only after all cases are logged', async () => {
+  const originalGet = api.get.getMockImplementation();
+  const cases = ['Peanut chicken', 'Peanut beef'].map((mealName, index) => ({
+    mealName, mealId: `meal-${index}`, fingerprint: `review-${index}`, recordId: 'selection',
+    date: friday, customerId: 'permanent', subscriptionId: 'matter-current',
+    canConfirm: true, message: `${mealName} conflicts with Peanuts`, conflicts: ['Peanuts'], confirmation: null,
+  }));
+  api.get.mockImplementation(async (path, options) => path.endsWith('/kitchen-state') ? { data: {
+    state: 'allergy-review', data: { success: true, preparation: 'allergy-review', data: {
+      kitchenSelections: [{ _id: 'selection', email, matterCustomerId: 'permanent',
+        selectedMeals: cases.map(item => ({ _id: item.mealId, date: friday, mealType: 'main', mealName: item.mealName, kitchenAllergyCases: [item] })) }],
+      kitchenAllergyReview: 'Two meal reviews needed.', kitchenAllergyCases: cases,
+      kitchenInputs: [input()], rosterComplete: true, kitchenRoster: [{ customer_id: 'permanent', email, subscription_id: 'matter-current', meal_frequency: 1 }],
+    } },
+  } } : originalGet(path, options));
+  await select(dateSelect(), friday);
+  await select(paperSelect(), friday);
+  const dayPdf = () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Download Day PDF'));
+  expect(dayPdf().disabled).toBe(true);
+  expect(container.textContent).toContain('2 remaining');
+
+  for (const item of cases) {
+    const meal = [...container.querySelectorAll('.kitchen-meal')].find(element => element.textContent.includes(item.mealName));
+    await act(async () => [...meal.querySelectorAll('button')].find(button => button.textContent === 'Confirm allergy review').click());
+    const submit = [...meal.querySelectorAll('button')].find(button => button.textContent === 'Confirm and log');
+    expect(submit.disabled).toBe(true);
+    const note = 'Use the verified peanut-free preparation.';
+    await act(async () => {
+      const field = meal.querySelector('textarea');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, note);
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    api.post.mockResolvedValueOnce({ data: { success: true, data: { actorName: 'Kitchen Lead', at: '2026-10-23T08:00:00Z', note } } });
+    await act(async () => submit.click());
+    expect(api.post).toHaveBeenLastCalledWith('/menus/menu/kitchen-customers/permanent/allergy-confirmations', {
+      recordId: 'selection', mealId: item.mealId, date: friday, subscriptionId: 'matter-current', fingerprint: item.fingerprint, note,
+    });
+    expect(meal.textContent).toContain('confirmed by Kitchen Lead');
+    if (item === cases[0]) {
+      expect(container.textContent).toContain('1 remaining');
+      expect(dayPdf().disabled).toBe(true);
+    }
+  }
+  expect(dayPdf().disabled).toBe(false);
+});
+
 test.each(['main', 'snack'])('open-date %s-only partial selection stays in Missing without assigning or hiding saved choices', async mealType => {
   const originalGet = api.get.getMockImplementation();
   const writes = api.post.mock.calls.length;
