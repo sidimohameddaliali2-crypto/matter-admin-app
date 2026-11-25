@@ -14,7 +14,7 @@ import matterApiService from './matterApiService.js';
 import { normalizeMatterAllergens } from './matterAllergens.js';
 import { boundedMap } from './boundedMap.js';
 import { withMenuAllergyProfiles } from './menuAllergyProfileService.js';
-import { reviewSavedKitchenAllergies } from './kitchenAllergyReview.js';
+import { collectSavedKitchenAllergies, matchesKitchenAllergyRecord } from './kitchenAllergyReview.js';
 import { isFallbackSnack } from './kitchenFallbackSnacks.js';
 import { kitchenDietaryExclusions, usesKitchenDietaryExclusions } from './kitchenDietaryExclusions.js';
 
@@ -53,12 +53,12 @@ const sourceVersion = async menuId => {
     MenuItem.find({ _id: { $in: (menu.meals || []).flatMap(day => day.items || []) } }).select('_id updatedAt __v').sort({ _id: 1 }).lean(),
     Archive.find({ 'original.weeklyMenuId': menuId }).select('_id createdAt updatedAt').sort({ _id: 1 }).lean(),
   ]);
-  return createHash('sha256').update(JSON.stringify(['kitchen-fallback-snacks-v6', menu, records, breakfast, snack, items, archives])).digest('hex');
+  return createHash('sha256').update(JSON.stringify(['kitchen-allergy-confirmations-v1', menu, records, breakfast, snack, items, archives])).digest('hex');
 };
 
 const capture = async menuId => {
   const [records, breakfast, snack] = await Promise.all([
-    Record.find({ weeklyMenuId: menuId }).populate({ path: 'selectedMeals.menuItemId',
+    Record.find({ weeklyMenuId: menuId }).select('+kitchenAllergyConfirmations').populate({ path: 'selectedMeals.menuItemId',
       select: '_id mealName mealType itemDate portionType rotationCategory usedForCorePlan',
       transform: (item, id) => item || id }).sort({ submittedAt: -1 }).lean(),
     Breakfast.findOne({ key: 'global' }).lean(), Snack.findOne({ key: 'global' }).lean(),
@@ -72,34 +72,49 @@ const capture = async menuId => {
   };
 };
 
-const reviewCapturedKitchenAllergies = async (menuId, date, selections, kitchenInputs, { fallbackOnly = false } = {}) => {
+const collectCapturedKitchenAllergies = async (menuId, date, selections, kitchenInputs, { fallbackOnly = false } = {}) => {
   const optionsByDate = new Map();
   const fallbackRows = selections.filter(row => (row.selectedMeals || []).some(meal => datedFallback(meal, date)));
+  const cases = [];
   for (const nutrition of kitchenInputs) {
-    const rows = !fallbackOnly && nutrition.allergyProfile?.allergies?.length ? selections : fallbackRows;
-    const matches = rows.filter(row => row.matterCustomerId
-      ? String(row.matterCustomerId) === String(nutrition.customer_id)
-      : (nutrition.subscription_id != null && String(row.matterSubscriptionId || '') === String(nutrition.subscription_id))
-        || (!!nutrition.customer_email && String(row.matterEmail || row.email || '').toLowerCase() === nutrition.customer_email.toLowerCase()));
-    for (const row of matches) await reviewSavedKitchenAllergies(menuId, date,
-      fallbackOnly ? { selectedMeals: row.selectedMeals.filter(isFallbackSnack) } : row, nutrition, optionsByDate);
-  }
-};
-
-const readKitchenPreview = async (menuId, date, selectionWindow, { verified, reviewMessage } = {}) => {
-  const [roster, inputs] = await Promise.all([
-    verified?.kitchenRoster || matterApiService.findSubscriptionsWithDeliveryOnDate(date, { includeKitchenInputs: true }), capture(menuId),
-  ]);
-  const kitchenInputs = verified?.kitchenInputs || withMenuAllergyProfiles(roster.map(row => row.kitchen_inputs).filter(Boolean));
-  let kitchenAllergyReview = reviewMessage;
-  if (!kitchenAllergyReview) {
-    try {
-      await reviewCapturedKitchenAllergies(menuId, date, inputs.kitchenSelections, kitchenInputs);
-    } catch (error) {
-      if (error.code !== 'KITCHEN_ALLERGY_REVIEW') throw error;
-      kitchenAllergyReview = error.message;
+    const profile = nutrition.allergyProfile;
+    const rows = !fallbackOnly && (profile?.allergies?.length || profile?.allergiesAvailable === false) ? selections : fallbackRows;
+    for (const row of rows.filter(row => matchesKitchenAllergyRecord(row, nutrition))) {
+      cases.push(...await collectSavedKitchenAllergies(menuId, date, row, nutrition, optionsByDate, { fallbackOnly }));
     }
   }
+  return cases;
+};
+
+const withAllergyCases = (inputs, cases) => {
+  const casesByMeal = new Map();
+  for (const item of cases) {
+    if (!item.mealId) continue;
+    const key = `${item.recordId}:${item.mealId}`;
+    if (!casesByMeal.has(key)) casesByMeal.set(key, []);
+    casesByMeal.get(key).push(item);
+  }
+  const pending = cases.filter(item => !item.confirmation);
+  return {
+    ...inputs,
+    kitchenSelections: inputs.kitchenSelections.map(({ kitchenAllergyConfirmations, ...row }) => ({
+      ...row,
+      selectedMeals: (row.selectedMeals || []).map(meal => {
+        const reviews = casesByMeal.get(`${row._id}:${meal._id}`);
+        return reviews ? { ...meal, kitchenAllergyCases: reviews } : meal;
+      }),
+    })),
+    kitchenAllergyCases: cases,
+    ...(pending.length && { kitchenAllergyReview: `${pending.length} saved meal allergy review(s) still need attention. Review each flagged meal in Kitchen List before exporting.` }),
+  };
+};
+
+const readKitchenPreview = async (menuId, date, selectionWindow) => {
+  const [roster, inputs] = await Promise.all([
+    matterApiService.findSubscriptionsWithDeliveryOnDate(date, { includeKitchenInputs: true }), capture(menuId),
+  ]);
+  const kitchenInputs = withMenuAllergyProfiles(roster.map(row => row.kitchen_inputs).filter(Boolean));
+  const cases = await collectCapturedKitchenAllergies(menuId, date, inputs.kitchenSelections, kitchenInputs);
   for (const sub of roster) {
     const exists = inputs.kitchenSelections.some(row => row.matterCustomerId
       ? String(row.matterCustomerId) === String(sub.customer_id)
@@ -109,9 +124,9 @@ const readKitchenPreview = async (menuId, date, selectionWindow, { verified, rev
       matterCustomerId: sub.customer_id == null ? null : String(sub.customer_id), matterSubscriptionId: sub.subscription_id == null ? null : String(sub.subscription_id),
       firstName: sub.name || '', selectedMeals: [], _missingSelection: true, _missingSelectionDate: date });
   }
-  return { success: true, preparation: reviewMessage ? 'allergy-review' : 'selection-open', selectionWindow,
-    preparedAt: new Date().toISOString(), data: { ...inputs, kitchenRoster: roster, rosterComplete: true,
-      kitchenInputs, ...(kitchenAllergyReview && { kitchenAllergyReview }) } };
+  return { success: true, preparation: 'selection-open', selectionWindow,
+    preparedAt: new Date().toISOString(), data: { ...withAllergyCases(inputs, cases),
+      kitchenRoster: roster, rosterComplete: true, kitchenInputs } };
 };
 
 export const readKitchenState = async (menuId, date, jobId, { refresh = false, verifyAllergies = false } = {}) => {
@@ -127,16 +142,13 @@ export const readKitchenState = async (menuId, date, jobId, { refresh = false, v
     if (!job) return { state: 'missing' };
     if (job.status === 'running' && Date.now() - new Date(job.createdAt).getTime() > 300000) return { state: 'failed', message: 'Preparation expired. Retry the selected date.' };
     if (job.status === 'ready') return await verifyReadyKitchenState(job, menuId, date, verifyAllergies);
-    if (job.status === 'failed' && job.payload?.preparation === 'allergy-review') {
-      return { state: 'allergy-review', data: job.payload };
-    }
     return { state: job.status, jobId: String(job._id), message: job.error };
   }
   const version = await sourceVersion(menuId);
   const ready = await Snapshot.findOne({ menuId, date, status: 'ready' }).sort({ createdAt: -1 }).lean();
   if (!refresh && ready) {
     const checked = await verifyReadyKitchenState(ready, menuId, date, verifyAllergies, version);
-    if (checked.state === 'ready' || verifyAllergies && checked.allergyChanged) return checked;
+    if (['ready', 'allergy-review'].includes(checked.state) || verifyAllergies && checked.allergyChanged) return checked;
   }
   const running = await Snapshot.findOne({ menuId, date, status: 'running', createdAt: { $gte: new Date(Date.now() - 300000) } }).sort({ createdAt: -1 }).lean();
   return running ? { state: 'running', jobId: String(running._id) } : { state: 'missing' };
@@ -146,6 +158,7 @@ const verifyReadyKitchenState = async (snapshot, menuId, date, verifyAllergies, 
   const stale = { state: 'stale', message: 'Kitchen inputs changed or expired. Reload the selected date before exporting.' };
   const before = version ?? await sourceVersion(menuId);
   if (!snapshotIsFresh(snapshot, before)) return stale;
+  if (snapshot.payload?.data?.kitchenAllergyReview) return { state: 'allergy-review', data: snapshot.payload };
   const inputs = snapshot.payload?.data?.kitchenInputs || [];
   const selections = snapshot.payload?.data?.kitchenSelections || [];
   const hasFallbackSnacks = selections.some(row => (row.selectedMeals || []).some(meal => datedFallback(meal, date)));
@@ -153,11 +166,14 @@ const verifyReadyKitchenState = async (snapshot, menuId, date, verifyAllergies, 
     const source = hasFallbackSnacks ? 'Matter allergies, exclusions, or delivery status' : 'Matter allergies or delivery status';
     return { state: 'stale', allergyChanged: true, message: `${source} changed. Refresh preparation before exporting.` };
   }
-  try {
-    if (hasFallbackSnacks) await reviewCapturedKitchenAllergies(menuId, date, selections, inputs, { fallbackOnly: true });
-  } catch (error) {
-    if (error.code !== 'KITCHEN_ALLERGY_REVIEW') throw error;
-    return { state: 'stale', allergyChanged: true, message: error.message };
+  if (hasFallbackSnacks) {
+    // Restore only the active confirmations already verified by this snapshot.
+    const records = selections.map(row => ({ ...row, kitchenAllergyConfirmations: (row.selectedMeals || [])
+      .flatMap(meal => (meal.kitchenAllergyCases || []).filter(item => item.confirmation)
+        .map(item => ({ fingerprint: item.fingerprint, ...item.confirmation }))) }));
+    const pending = (await collectCapturedKitchenAllergies(menuId, date, records, inputs, { fallbackOnly: true }))
+      .find(item => !item.confirmation);
+    if (pending) return { state: 'stale', allergyChanged: true, message: pending.message };
   }
   if (verifyAllergies && before !== await sourceVersion(menuId)) return stale;
   return { state: 'ready', data: snapshot.payload };
@@ -168,27 +184,28 @@ export const beginKitchenState = async (menuId, date, prepare, options = {}) => 
   if (current.state !== 'missing') return current;
   const job = await Snapshot.create({ menuId, date, status: 'running', expiresAt: new Date(Date.now() + 7 * 86400000) });
   setImmediate(async () => {
-    let result;
     try {
-      result = await prepare();
+      const result = await prepare();
+      if (result.data?.rosterComplete !== true || !Array.isArray(result.data.kitchenRoster) || !Array.isArray(result.data.kitchenInputs)) {
+        throw new Error('The verified Matter roster is incomplete. Retry preparation before exporting.');
+      }
       const before = await sourceVersion(menuId);
       const inputs = await capture(menuId);
-      assertPreparedCoverage({ ...result.data, ...inputs }, date, { allowManualHolds: true });
-      await reviewCapturedKitchenAllergies(menuId, date, inputs.kitchenSelections, result.data.kitchenInputs || []);
+      const cases = await collectCapturedKitchenAllergies(menuId, date, inputs.kitchenSelections, result.data.kitchenInputs || []);
+      const data = { ...result.data, ...withAllergyCases(inputs, cases) };
+      if (!data.kitchenAllergyReview) {
+        if (result.failure) throw result.failure;
+        assertPreparedCoverage(data, date, { allowManualHolds: true });
+      }
+      const selectionWindow = await readKitchenSelectionWindow(menuId, date);
       if (before !== await sourceVersion(menuId)) throw new Error('Selections changed during preparation. Retry this date.');
-      job.payload = { success: true, preparation: 'completed', preparedAt: new Date().toISOString(), snapshotId: String(job._id), data: { ...result.data, ...inputs } };
+      job.payload = { success: true, preparation: data.kitchenAllergyReview ? 'allergy-review' : 'completed',
+        selectionWindow, preparedAt: new Date().toISOString(), snapshotId: String(job._id), data };
       job.sourceVersion = before;
       job.status = 'ready';
       await job.save();
     } catch (error) {
       const failure = { status: 'failed', error: error.message || 'Kitchen preparation failed' };
-      if (error.code === 'KITCHEN_ALLERGY_REVIEW') {
-        const message = `${failure.error} Verify the Matter allergy and the dated recipe ingredients, then refresh preparation.`;
-        const preview = await readKitchenSelectionWindow(menuId, date).then(window => readKitchenPreview(menuId, date, window, {
-          verified: error.kitchenAllergyInputs || result?.data, reviewMessage: message,
-        })).catch(() => null);
-        if (preview) failure.payload = preview;
-      }
       await Snapshot.updateOne({ _id: job._id }, { $set: failure }).catch(() => {});
     }
   });

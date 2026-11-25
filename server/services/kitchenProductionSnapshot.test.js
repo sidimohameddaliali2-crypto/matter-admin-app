@@ -13,6 +13,7 @@ import MealCreationState from '../models/MealCreationState.js';
 import { loadFallbackSnackRecipes } from './kitchenFallbackSnacks.js';
 import matterApiService from './matterApiService.js';
 import { withMenuAllergyProfiles } from './menuAllergyProfileService.js';
+import { confirmKitchenAllergy } from './kitchenAllergyConfirmations.js';
 
 test('a production snapshot is invalidated by source edits, expiry, failure or a future timestamp', () => {
   const now = Date.now();
@@ -78,41 +79,84 @@ test('background preparation publishes one source version and an input edit inva
   assert.equal((await readKitchenState('menu', '2026-10-30')).state, 'missing');
 });
 
-test('a saved allergy conflict after cutoff returns a read-only customer preview', async t => {
+test('after cutoff every saved conflict must be confirmed, then an ingredient change requires a new review', async t => {
   t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-11-26T14:00:00Z') });
   const date = '2026-11-26';
+  const id = num => String(num).padStart(24, '0');
+  const menuId = id(1);
   const query = value => ({ select() { return this; }, sort() { return this; }, populate() { return this; }, lean: async () => value });
-  const selection = { _id: 'record', matterCustomerId: 'person', email: 'fixture@example.invalid',
-    selectedMeals: [{ date, mealType: 'main', mealName: 'Peanut chicken', isAutoAssigned: false }] };
-  t.mock.method(Menu, 'findById', () => query({ meals: [] }));
+  const item = { _id: id(2), itemDate: date, mealType: 'main', mealName: 'Peanut chicken',
+    rotationCategory: 'main', cycleMeal: { allergens: ['Peanuts'] } };
+  const selection = { _id: id(3), matterCustomerId: '42', email: 'fixture@example.invalid',
+    selectedMeals: [4, 5].map(slot => ({ _id: id(slot), date, mealType: 'main', mealName: item.mealName, slotNumber: slot,
+      menuItemId: item._id, isAutoAssigned: false })) };
+  t.mock.method(Menu, 'findById', () => query({ meals: [{ items: [item._id] }] }));
   t.mock.method(Record, 'find', () => query([selection]));
-  t.mock.method(Record, 'updateOne', () => assert.fail('A preview must not alter the saved choice'));
+  t.mock.method(Record, 'findOne', filter => {
+    assert.equal(filter._id, selection._id);
+    assert.equal(filter.weeklyMenuId, menuId);
+    assert.ok(selection.selectedMeals.some(meal => meal._id === filter['selectedMeals._id']));
+    return query(selection);
+  });
+  const writes = t.mock.method(Record, 'updateOne', async (filter, update) => {
+    const entry = update.$push.kitchenAllergyConfirmations;
+    assert.equal(filter['kitchenAllergyConfirmations.fingerprint'].$ne, entry.fingerprint);
+    assert.deepEqual(Object.keys(update.$push), ['kitchenAllergyConfirmations']);
+    (selection.kitchenAllergyConfirmations ??= []).push(entry);
+    return { modifiedCount: 1 };
+  });
   t.mock.method(Archive, 'find', () => query([]));
-  t.mock.method(MenuItem, 'find', () => query([]));
+  t.mock.method(MenuItem, 'find', () => query([item]));
   t.mock.method(Breakfast, 'findOne', () => query(null));
   t.mock.method(Snack, 'findOne', () => query(null));
   t.mock.method(matterApiService, 'findSubscriptionsWithDeliveryOnDate', () => assert.fail('Reuse the verified roster'));
-  let job, finish;
-  const saved = new Promise(resolve => { finish = resolve; });
+  const input = { customer_id: '42', subscription_id: '45', allergens: ['Peanuts'], customer_email: selection.email };
+  t.mock.method(matterApiService, 'getSubscription', async () => ({ data: {
+    ...input, email: selection.email, delivery_schedule: [{ date, status: 'active' }],
+  } }));
+  let job;
   t.mock.method(Snapshot, 'findOne', filter => query(job && (filter._id || filter.status === job.status) ? job : null));
   t.mock.method(Snapshot, 'create', async values => {
-    job = { ...values, _id: '507f1f77bcf86cd799439011', createdAt: new Date() };
+    job = { ...values, _id: '507f1f77bcf86cd799439011', createdAt: new Date(), save: async () => { job.updatedAt = new Date(); } };
     return job;
   });
-  t.mock.method(Snapshot, 'updateOne', async (_filter, update) => { Object.assign(job, update.$set); finish(); });
-  const kitchenInputs = [{ customer_id: 'person', customer_email: selection.email, allergyProfile: { allergies: ['Peanuts'] } }];
-  const kitchenRoster = [{ customer_id: 'person', email: selection.email }];
-  const started = await beginKitchenState('menu', date, async () => {
-    throw Object.assign(new Error('Peanut chicken conflicts with recorded allergies (Peanuts).'), {
-      code: 'KITCHEN_ALLERGY_REVIEW', kitchenAllergyInputs: { kitchenInputs, kitchenRoster },
-    });
-  });
-  await saved;
-  const result = await readKitchenState('menu', date, started.jobId, { verifyAllergies: true });
+  t.mock.method(Snapshot, 'updateOne', async (_filter, update) => { Object.assign(job, update.$set); });
+  const prepare = async () => ({ data: { kitchenInputs: withMenuAllergyProfiles([input]),
+    kitchenRoster: [{ customer_id: '42', email: selection.email, meal_frequency: 2 }], rosterComplete: true } });
+  const read = async () => {
+    const started = await beginKitchenState(menuId, date, prepare);
+    assert.equal(started.state, 'running');
+    await new Promise(resolve => setImmediate(resolve));
+    return readKitchenState(menuId, date, started.jobId, { verifyAllergies: true });
+  };
+  const result = await read();
   assert.equal(result.state, 'allergy-review');
   assert.equal(result.data.selectionWindow.canAutoAssign, true);
-  assert.deepEqual(result.data.data.kitchenSelections, [selection]);
-  assert.match(result.data.data.kitchenAllergyReview, /Peanut chicken.*Peanuts/);
+  const [first, second] = result.data.data.kitchenAllergyCases;
+  assert.notEqual(first.fingerprint, second.fingerprint);
+  assert.match(first.message, /Peanut chicken.*Peanuts/);
+  assert.equal(result.data.data.kitchenSelections[0].selectedMeals[0].kitchenAllergyCases[0].fingerprint, first.fingerprint);
+  const confirm = (item, note = 'Kitchen will use the verified allergen-free preparation.') => confirmKitchenAllergy({
+    menuId, customerId: item.customerId, body: { ...item, note, actorName: 'untrusted' },
+    user: { _id: 'staff-1', profile: { firstName: 'Kitchen', lastName: 'Lead' } },
+  });
+  await assert.rejects(confirm(first, ' '), { statusCode: 400 });
+  await assert.rejects(confirm({ ...first, fingerprint: second.fingerprint }), { statusCode: 409 });
+  assert.equal((await confirm(first)).actorName, 'Kitchen Lead');
+  assert.equal((await confirm(first)).actorName, 'Kitchen Lead');
+  assert.equal(writes.mock.callCount(), 1);
+  assert.equal(selection.kitchenAllergyConfirmations[0].actorId, 'staff-1');
+  const partial = await read();
+  assert.equal(partial.state, 'allergy-review');
+  assert.match(partial.data.data.kitchenAllergyReview, /^1 saved/);
+  assert.equal(partial.data.data.kitchenSelections[0].kitchenAllergyConfirmations, undefined);
+  await confirm(second);
+  const ready = await read();
+  assert.equal(ready.state, 'ready');
+  assert.ok(ready.data.data.kitchenAllergyCases.every(item => item.confirmation));
+  item.cycleMeal.ingredients = ['New ingredient'];
+  await assert.rejects(confirm(second), { statusCode: 409 });
+  assert.equal((await read()).state, 'allergy-review');
 });
 
 for (const planName of ['Custom', 'Matter Core']) test(`a ready paper rechecks fallback recipe changes and applicable exclusions (${planName})`, async t => {

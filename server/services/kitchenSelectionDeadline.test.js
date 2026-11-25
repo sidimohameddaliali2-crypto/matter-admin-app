@@ -94,6 +94,7 @@ test('open preview keeps the saved choice but marks an allergy conflict for prod
     kitchen_inputs: { customer_id: '42', customer_email: record.email, allergens: ['Peanuts'] } }]);
   const result = await beginKitchenState('menu', date, () => assert.fail('Open preview cannot assign'));
   assert.equal(result.state, 'selection-open');
-  assert.match(result.data.data.kitchenAllergyReview, /House bowl.*Peanuts/);
+  assert.match(result.data.data.kitchenAllergyReview, /^1 saved/);
+  assert.match(result.data.data.kitchenAllergyCases[0].message, /House bowl.*Peanuts/);
   assert.deepEqual(result.data.data.kitchenSelections[0].selectedMeals, [meal]);
 });
