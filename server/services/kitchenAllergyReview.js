@@ -1,9 +1,15 @@
 import WeeklyMenu from '../models/WeeklyMenu.js';
 import MenuItem from '../models/MenuItem.js';
 import { buildLegacyKitchenMainRotation, datedKitchenProtein, identifyKitchenMenuItem, kitchenAllergyConflicts, resolveLegacyKitchenChoices } from './kitchenExclusions.js';
+import { fallbackSnackReview, isFallbackSnack, loadFallbackSnackRecipes } from './kitchenFallbackSnacks.js';
 
 const nameKey = value => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 const idOf = value => String(value?._id || value || '');
+const fallbackRecipesKey = Symbol('fallback snack recipes');
+const savedMealReviewError = (date, nutrition, meal, reason) => Object.assign(
+  new Error(`${date}: ${nutrition.customer_name || nutrition.customer_email} has a saved meal, ${meal.mealName}, that ${reason}. Review the selection before preparing or exporting this date.`),
+  { statusCode: 409, code: 'KITCHEN_ALLERGY_REVIEW' },
+);
 const isLegacyBuildYourOwn = meal => meal.mealType === 'main' && meal.isAutoAssigned !== true
   && [meal.proteinChoice, meal.vegChoice, meal.carbChoice].every(choice => typeof choice === 'string' && choice.trim())
   && meal.mealName === `Meal ${meal.slotNumber} - Protein: ${meal.proteinChoice}, Veg: ${meal.vegChoice}, Carb: ${meal.carbChoice}`;
@@ -34,7 +40,6 @@ export async function loadDatedKitchenAllergyOptions(menuId, date) {
 
 export function assertSavedKitchenAllergies(meals, options, nutrition, date) {
   const allergies = nutrition.allergyProfile.allergies;
-  const name = nutrition.customer_name || nutrition.customer_email;
   const core = String(nutrition.plan_name || '').trim().toLowerCase() === 'matter core';
   for (const meal of meals) {
     const typed = options.items.filter(item => item.mealType === meal.mealType);
@@ -63,20 +68,28 @@ export function assertSavedKitchenAllergies(meals, options, nutrition, date) {
     if (conflicts.length || !verified) {
       const reason = conflicts.length ? `conflicts with recorded allergies (${conflicts.join(', ')})`
         : custom ? `has unverified dated components (${custom.unverified.join(', ')})` : 'has no verified dated recipe';
-      throw Object.assign(new Error(`${date}: ${name} has a saved meal, ${meal.mealName}, that ${reason}. Review the selection before preparing or exporting this date.`),
-        { statusCode: 409, code: 'KITCHEN_ALLERGY_REVIEW' });
+      throw savedMealReviewError(date, nutrition, meal, reason);
     }
   }
 }
 
 export async function reviewSavedKitchenAllergies(menuId, date, record, nutrition, optionsByDate, mealType) {
-  if (!nutrition.allergyProfile?.allergies?.length) return;
   const meals = (record?.selectedMeals || []).filter(meal => {
     if (mealType && meal.mealType !== mealType) return false;
     const time = meal.date && new Date(meal.date);
     return time && Number.isFinite(time.getTime()) && time.toISOString().slice(0, 10) === date;
   });
-  if (!meals.length) return;
+  const fallback = meals.filter(isFallbackSnack);
+  if (fallback.length) {
+    if (!optionsByDate.has(fallbackRecipesKey)) optionsByDate.set(fallbackRecipesKey, loadFallbackSnackRecipes());
+    const recipes = await optionsByDate.get(fallbackRecipesKey);
+    for (const meal of fallback) {
+      const reason = fallbackSnackReview(meal, recipes, nutrition);
+      if (reason) throw savedMealReviewError(date, nutrition, meal, reason);
+    }
+  }
+  const regular = meals.filter(meal => !isFallbackSnack(meal));
+  if (!regular.length || !nutrition.allergyProfile?.allergies?.length) return;
   if (!optionsByDate.has(date)) optionsByDate.set(date, loadDatedKitchenAllergyOptions(menuId, date));
-  assertSavedKitchenAllergies(meals, await optionsByDate.get(date), nutrition, date);
+  assertSavedKitchenAllergies(regular, await optionsByDate.get(date), nutrition, date);
 }

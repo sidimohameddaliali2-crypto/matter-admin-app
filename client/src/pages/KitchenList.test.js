@@ -62,6 +62,16 @@ const select = async (element, value) => {
 const dateSelect = () => [...container.querySelectorAll('h3')].find((node) => node.textContent === 'Missing Meal Selections').parentElement.querySelector('select');
 const paperSelect = () => [...container.querySelectorAll('label')].find((node) => node.textContent === 'Day kitchen paper').parentElement.querySelector('select');
 
+test('Kitchen List shows the three fallback snacks and the condition for using them', async () => {
+  await select(dateSelect(), friday);
+  const fallback = container.querySelector('[aria-label="Fallback snacks"]');
+  expect([...fallback.querySelectorAll('li > span')].map(label => label.textContent))
+    .toEqual(['CRACKER BLISS BALL', 'CHOCO PEANUT BUTTER TRUFFLE', 'CHEESECAKE BITES']);
+  expect(fallback.textContent).toContain('both daily snack pools conflict');
+  expect(fallback.textContent).toContain('CRACKER BLISS BALL (W/ SOY)');
+  expect(fallback.textContent).toContain('Needs a verified Meal Library recipe');
+});
+
 test.each(['selection-open', 'allergy-review'])('%s shows the conflicting saved choice without starting assignment', async state => {
   const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse(state === 'selection-open' ? '2026-10-01T00:00:00Z' : '2026-10-24T00:00:00Z'));
   const originalGet = api.get.getMockImplementation();
@@ -109,6 +119,9 @@ beforeEach(async () => {
   localStorage.clear();
   mockExcelRows.mockImplementation((rows) => rows);
   api.get.mockImplementation(async (path, config) => {
+    if (path === '/menus/kitchen-fallback-snacks') return { data: { success: true, data: [
+      { name: 'CRACKER BLISS BALL', mealName: 'CRACKER BLISS BALL (W/ SOY)' },
+    ] } };
     if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}};
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', isActive: true, isPublished: true, startDate: thursday, endDate: friday }, { _id: 'old-menu', title: 'Old menu', isActive: false, isPublished: true, startDate: thursday, endDate: friday }] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [{ email, firstName: 'Internal stale name', matterCustomerId: 'permanent', mealPerDay: 9, skippedDays: [{ date: thursday, pauseStatus: 'success' }], selectedMeals: [thursday, friday].map((date) => ({ date, mealType: 'main', mealName: 'Fixture dish' })) }] } };

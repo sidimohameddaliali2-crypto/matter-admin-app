@@ -1,6 +1,9 @@
+import { KITCHEN_FALLBACK_SNACKS, kitchenFallbackSnackKey } from '../../client/src/constants/kitchenFallbackSnacks.js';
+
 const invalid = message => { throw Object.assign(new Error(message), { statusCode: 400 }); };
 const keyOf = value => String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
 const safeKey = key => { if (!key || key.includes('.') || key.includes('$') || ['__proto__', 'constructor', 'prototype'].includes(key)) invalid('Invalid snack preset name.'); return key; };
+const fallbackNames = new Set(KITCHEN_FALLBACK_SNACKS.map(kitchenFallbackSnackKey));
 
 // Per-entry atomic writes preserve names added by another tab or a menu upload.
 // Removal is explicit; omitting a name must never erase it.
@@ -15,6 +18,9 @@ export const snackPresetUpdate = ({ presets = [], removeKeys = [] } = {}) => {
       const raw = row?.[field];
       if (raw == null || String(raw).trim() === '' || !Number.isFinite(Number(raw)) || Number(raw) < 0) invalid(`Enter a valid ${field} value for ${snackName}.`);
       value[field] = Number(raw);
+    }
+    if (fallbackNames.has(kitchenFallbackSnackKey(snackName)) && value.C + value.P + value.F === 0) {
+      invalid(`Enter at least one non-zero macro for fallback snack "${snackName}".`);
     }
     set[`presetsByName.${key}`] = value;
   }

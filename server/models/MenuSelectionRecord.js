@@ -92,6 +92,8 @@ const menuSelectionRecordSchema = new mongoose.Schema({
       P: Number,
       F: Number
     },
+    fallbackSnackRecipeId: String,
+    fallbackSnackRecipeVersion: String,
     // True for meals filled in by kitchen staff via "Auto-Assign Main Meals" /
     // "Auto-Assign Snacks" (server/routes/menus.js) rather than picked by the
     // customer. Kept out of the customer-facing menu-selection preview

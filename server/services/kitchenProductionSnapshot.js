@@ -15,6 +15,8 @@ import { normalizeMatterAllergens } from './matterAllergens.js';
 import { boundedMap } from './boundedMap.js';
 import { withMenuAllergyProfiles } from './menuAllergyProfileService.js';
 import { reviewSavedKitchenAllergies } from './kitchenAllergyReview.js';
+import { isFallbackSnack } from './kitchenFallbackSnacks.js';
+import { kitchenDietaryExclusions, usesKitchenDietaryExclusions } from './kitchenDietaryExclusions.js';
 
 export const snapshotIsFresh = (snapshot, sourceVersion, now = Date.now()) => snapshot?.status === 'ready'
   && snapshot.sourceVersion === sourceVersion && now >= new Date(snapshot.updatedAt).getTime()
@@ -22,14 +24,22 @@ export const snapshotIsFresh = (snapshot, sourceVersion, now = Date.now()) => sn
 
 // Production downloads check the already identified dated subscriptions.
 // Ordinary preview reads keep the lightweight snapshot path.
-const matterAllergiesAreCurrent = async (inputs, date) => {
+const sortedTerms = terms => Array.isArray(terms) ? [...terms].sort() : null;
+const sameTerms = (left, right) => JSON.stringify(sortedTerms(left)) === JSON.stringify(sortedTerms(right));
+const datedFallback = (meal, date) => isFallbackSnack(meal) && String(meal.date instanceof Date
+  ? meal.date.toISOString() : meal.date).slice(0, 10) === date;
+
+const matterAllergiesAreCurrent = async (inputs, date, verifyExclusions) => {
   const unchanged = await boundedMap(inputs, 20, async input => {
     const subscription = (await matterApiService.getSubscription(input.subscription_id))?.data;
+    const exclusions = Array.isArray(subscription?.exclusions) ? subscription.exclusions.map(item => item?.title).filter(Boolean) : null;
+    const live = { plan_name: subscription?.plan?.name, exclusions };
     return subscription?.subscription_id != null && String(subscription.subscription_id) === String(input.subscription_id)
       && String(subscription.customer_id) === String(input.customer_id)
       && (subscription.delivery_schedule || []).some(day => day?.status === 'active' && String(day.date).slice(0, 10) === date)
-      && JSON.stringify(normalizeMatterAllergens(subscription.allergens)?.sort() ?? null)
-        === JSON.stringify(normalizeMatterAllergens(input.allergens)?.sort() ?? null);
+      && sameTerms(normalizeMatterAllergens(subscription.allergens), normalizeMatterAllergens(input.allergens))
+      && (!verifyExclusions || (Boolean(String(live.plan_name || '').trim()) && usesKitchenDietaryExclusions(live) === usesKitchenDietaryExclusions(input)
+        && sameTerms(kitchenDietaryExclusions(live), kitchenDietaryExclusions(input))));
   });
   return unchanged.every(Boolean);
 };
@@ -43,7 +53,7 @@ const sourceVersion = async menuId => {
     MenuItem.find({ _id: { $in: (menu.meals || []).flatMap(day => day.items || []) } }).select('_id updatedAt __v').sort({ _id: 1 }).lean(),
     Archive.find({ 'original.weeklyMenuId': menuId }).select('_id createdAt updatedAt').sort({ _id: 1 }).lean(),
   ]);
-  return createHash('sha256').update(JSON.stringify(['kitchen-allergies-v5', menu, records, breakfast, snack, items, archives])).digest('hex');
+  return createHash('sha256').update(JSON.stringify(['kitchen-fallback-snacks-v6', menu, records, breakfast, snack, items, archives])).digest('hex');
 };
 
 const capture = async menuId => {
@@ -62,15 +72,17 @@ const capture = async menuId => {
   };
 };
 
-const reviewCapturedKitchenAllergies = async (menuId, date, selections, kitchenInputs) => {
+const reviewCapturedKitchenAllergies = async (menuId, date, selections, kitchenInputs, { fallbackOnly = false } = {}) => {
   const optionsByDate = new Map();
+  const fallbackRows = selections.filter(row => (row.selectedMeals || []).some(meal => datedFallback(meal, date)));
   for (const nutrition of kitchenInputs) {
-    if (!nutrition.allergyProfile?.allergies?.length) continue;
-    const matches = selections.filter(row => row.matterCustomerId
+    const rows = !fallbackOnly && nutrition.allergyProfile?.allergies?.length ? selections : fallbackRows;
+    const matches = rows.filter(row => row.matterCustomerId
       ? String(row.matterCustomerId) === String(nutrition.customer_id)
       : (nutrition.subscription_id != null && String(row.matterSubscriptionId || '') === String(nutrition.subscription_id))
         || (!!nutrition.customer_email && String(row.matterEmail || row.email || '').toLowerCase() === nutrition.customer_email.toLowerCase()));
-    for (const row of matches) await reviewSavedKitchenAllergies(menuId, date, row, nutrition, optionsByDate);
+    for (const row of matches) await reviewSavedKitchenAllergies(menuId, date,
+      fallbackOnly ? { selectedMeals: row.selectedMeals.filter(isFallbackSnack) } : row, nutrition, optionsByDate);
   }
 };
 
@@ -135,8 +147,17 @@ const verifyReadyKitchenState = async (snapshot, menuId, date, verifyAllergies, 
   const before = version ?? await sourceVersion(menuId);
   if (!snapshotIsFresh(snapshot, before)) return stale;
   const inputs = snapshot.payload?.data?.kitchenInputs || [];
-  if (verifyAllergies && !await matterAllergiesAreCurrent(inputs, date)) {
-    return { state: 'stale', allergyChanged: true, message: 'Matter allergies or delivery status changed. Refresh preparation before exporting.' };
+  const selections = snapshot.payload?.data?.kitchenSelections || [];
+  const hasFallbackSnacks = selections.some(row => (row.selectedMeals || []).some(meal => datedFallback(meal, date)));
+  if (verifyAllergies && !await matterAllergiesAreCurrent(inputs, date, hasFallbackSnacks)) {
+    const source = hasFallbackSnacks ? 'Matter allergies, exclusions, or delivery status' : 'Matter allergies or delivery status';
+    return { state: 'stale', allergyChanged: true, message: `${source} changed. Refresh preparation before exporting.` };
+  }
+  try {
+    if (hasFallbackSnacks) await reviewCapturedKitchenAllergies(menuId, date, selections, inputs, { fallbackOnly: true });
+  } catch (error) {
+    if (error.code !== 'KITCHEN_ALLERGY_REVIEW') throw error;
+    return { state: 'stale', allergyChanged: true, message: error.message };
   }
   if (verifyAllergies && before !== await sourceVersion(menuId)) return stale;
   return { state: 'ready', data: snapshot.payload };

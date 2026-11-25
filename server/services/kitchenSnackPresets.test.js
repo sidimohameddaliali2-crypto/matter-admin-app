@@ -17,3 +17,11 @@ test('deletion requires an explicit name, and invalid or partial macros cannot z
   }
   assert.throws(() => snackPresetUpdate({ presets: [{ snackName: 'A', C: 1, P: 2, F: 3 }], removeKeys: ['A'] }), /same snack/);
 });
+
+test('fallback snack presets reject 0/0/0 while allowing individual zero values', () => {
+  const snackName = 'CHEESECAKE BITES (W/ MILK)';
+  assert.throws(() => snackPresetUpdate({ presets: [{ snackName, C: 0, P: 0, F: 0 }] }),
+    { statusCode: 400, message: /at least one non-zero macro/ });
+  const update = snackPresetUpdate({ presets: [{ snackName, C: 15, P: 0, F: 0 }] });
+  assert.deepEqual(update.$set['presetsByName.cheesecake bites (w/ milk)'], { snackName, C: 15, P: 0, F: 0 });
+});

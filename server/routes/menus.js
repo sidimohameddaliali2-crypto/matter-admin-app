@@ -23,6 +23,8 @@ import { reconcileCoreBreakfast } from '../services/kitchenBreakfastEntitlement.
 import { reconcileCoreDoubleAddOns, reconcileCoreMainMeals } from '../services/kitchenCoreEntitlement.js';
 import { toKitchenOption, kitchenAllergyAllows, kitchenConflictList, kitchenConflictFields, mergeKitchenMetadata, buildLegacyKitchenMainRotation, identifyKitchenMenuItem } from '../services/kitchenExclusions.js';
 import { coreSnackPoolForSlot, missingCoreSnackSlots } from '../services/kitchenSnackSlots.js';
+import { canUseFallbackSnacks, eligibleFallbackSnacks, fallbackSnackSelection, kitchenSnackConflicts, loadFallbackSnackOptions, loadFallbackSnackRecipes } from '../services/kitchenFallbackSnacks.js';
+import { kitchenDietaryExclusions } from '../services/kitchenDietaryExclusions.js';
 import { kitchenUpload } from '../services/kitchenUpload.js';
 import { saveManagedMenu } from '../services/managedMenuSave.js';
 import { ensureShortMenuToken, menuShareFilter, invalidateMenuShareCache } from '../services/menuShareLinks.js';
@@ -1022,6 +1024,16 @@ router.get('/kitchen-snack-presets', protect, async (req, res) => {
   }
 });
 
+router.get('/kitchen-fallback-snacks', protect, async (_req, res) => {
+  try {
+    const recipes = await loadFallbackSnackRecipes();
+    return res.json({ success: true, data: recipes.map(({ name, mealName }) => ({ name, mealName })) });
+  } catch (error) {
+    console.error('Error reading fallback snack recipes:', error);
+    return res.status(503).json({ success: false, message: 'Fallback snack recipes could not be verified.' });
+  }
+});
+
 /**
  * PUT /api/menus/kitchen-snack-presets
  * Saves individual global snack entries without replacing unrelated presets.
@@ -1178,17 +1190,18 @@ const canonicalizeAssignCustomers = async (menuId, customers, matterInputs = [],
       subscriptionId: record?.matterSubscriptionId || target.subscriptionId,
     });
     const identity = matterSelectionIdentity(nutrition);
+    const exclusions = kitchenDietaryExclusions(nutrition);
     const unresolvedMeals = !onlySnacks && (!Number.isInteger(Number(nutrition.meal_frequency)) || Number(nutrition.meal_frequency) < 1
       || typeof nutrition.breakfast_included !== 'boolean');
     if (unresolvedMeals || nutrition.snacks_per_day == null
       || !Number.isInteger(Number(nutrition.snacks_per_day)) || Number(nutrition.snacks_per_day) < 0
-      || !Array.isArray(nutrition.exclusions)) throw new Error('Matter meal entitlements or exclusions are unresolved. Retry after checking Matter.');
+      || !Array.isArray(exclusions)) throw new Error('Matter meal entitlements or exclusions are unresolved. Retry after checking Matter.');
     const existing = records.find((entry) => String(entry.matterCustomerId || '') === identity.matterCustomerId)
       || record;
     return { ...target, email: existing?.email || identity.matterEmail, ...identity,
       name: nutrition.customer_name, subscriptionId: identity.matterSubscriptionId,
       mealFrequency: nutrition.meal_frequency, breakfastIncluded: nutrition.breakfast_included,
-      exclusions: nutrition.exclusions || [], nutrition,
+      exclusions, nutrition,
     };
   });
   const profiles = withMenuAllergyProfiles(verified.map(customer => customer.nutrition));
@@ -1596,6 +1609,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
     const ingredientReads = new Map();
     const allergyOptionsByDate = new Map();
     const coreSnackBatches = new Map();
+    let fallbackOptions;
     const verifiedInputs = await mapWithConcurrency(records, 8, async (record) => {
       const prepared = scopedNutrition.get(normalizeMatterEmail(record.email));
       const nutrition = prepared || matterInputs.find((input) => record.matterCustomerId
@@ -1621,7 +1635,8 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
           && !(record.selectedMeals || []).some(meal => meal.mealType === 'snack' && meal.coreDeliveryFoodDay)) return stats;
       }
 
-      const exclusions = (nutrition.exclusions || []).map((value) => String(value).trim().toLowerCase()).filter(Boolean);
+      const sourceExclusions = kitchenDietaryExclusions(nutrition);
+      const exclusions = (sourceExclusions || []).map((value) => String(value).trim().toLowerCase()).filter(Boolean);
 
       // Scoped runs only ever touch the one requested date — even if the
       // customer has meals on other dates already, this call has no business
@@ -1675,12 +1690,21 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
         }).lean().exec());
         const ingredients = await ingredientReads.get(dateKey);
         const eligible = option => kitchenAllergyAllows(option, nutrition.allergyProfile.allergies)
-          && !optionExcludedByCustomer(option, exclusions);
+          && !kitchenSnackConflicts(option, exclusions).length;
         const snackRotation = [...dayPools.first, ...dayPools.second];
-        const eligibleFirst = mergeKitchenMetadata(dayPools.first, ingredients, snackRotation).filter(eligible);
-        const eligibleSecond = mergeKitchenMetadata(dayPools.second, ingredients, snackRotation).filter(eligible);
+        const scheduled = {
+          first: mergeKitchenMetadata(dayPools.first, ingredients, snackRotation),
+          second: mergeKitchenMetadata(dayPools.second, ingredients, snackRotation),
+        };
+        const eligibleFirst = scheduled.first.filter(eligible);
+        const eligibleSecond = scheduled.second.filter(eligible);
+        const allergies = nutrition.allergyProfile.allergies;
+        const fallback = !eligibleFirst.length && !eligibleSecond.length && nutrition.allergyProfile.allergiesAvailable
+          && Array.isArray(sourceExclusions)
+          && canUseFallbackSnacks(scheduled, exclusions, allergies)
+          ? eligibleFallbackSnacks(await (fallbackOptions ||= loadFallbackSnackOptions()), scheduled, exclusions, allergies) : [];
 
-        if (eligibleFirst.length === 0 && eligibleSecond.length === 0) {
+        if (!eligibleFirst.length && !eligibleSecond.length && !fallback.length) {
           stats.skippedNoOptions += 1;
           stats.datesWithNoOptions.push(dateKey);
           continue;
@@ -1691,12 +1715,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
           const preferFirst = overallSlotIndex % 2 === 0;
           let pool = preferFirst ? eligibleFirst : eligibleSecond;
           if (pool.length === 0) pool = preferFirst ? eligibleSecond : eligibleFirst;
-          if (pool.length === 0) {
-            stats.skippedNoOptions += 1;
-            continue;
-          }
-
-          const choice = pool[Math.floor(Math.random() * pool.length)];
+          const choice = fallback.length ? fallback[overallSlotIndex % fallback.length] : pool[Math.floor(Math.random() * pool.length)];
           newSnacks.push({
             date: new Date(dateKey),
             mealType: 'snack',
@@ -1708,6 +1727,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
               P: (Number(choice.P) || 0) / snacksPerDay,
               F: (Number(choice.F) || 0) / snacksPerDay
             },
+            ...(fallback.length && fallbackSnackSelection(choice)),
             isAutoAssigned: true
           });
         }
@@ -1930,6 +1950,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
   let skippedSnackNoOption = 0;
   let doubleDeliveryCustomers = 0;
   const allergyOptionsByDate = new Map();
+  let fallbackOptions;
 
   for (const customer of sortedCustomers) {
     const email = String(customer.email || '').trim();
@@ -2166,8 +2187,8 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     // customer-eligible candidates used for assignment, with an original
     // pool fallback for saved snacks that have since become ineligible.
     const eligibleSnackPools = {
-      first: snackPools.first.filter(eligible),
-      second: snackPools.second.filter(eligible),
+      first: snackPools.first.filter(option => allergyAllows(option) && !kitchenSnackConflicts(option, exclusions).length),
+      second: snackPools.second.filter(option => allergyAllows(option) && !kitchenSnackConflicts(option, exclusions).length),
     };
     const poolForSlot = slot => {
       const preferred = coreSnackPoolForSlot(slot, snacksPerDay);
@@ -2177,6 +2198,11 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     };
     const requiredSnacks = snacksPerDay * addOnMultiplier;
     let missingSnackSlots = missingCoreSnackSlots(existingSnacks, requiredSnacks, eligibleSnackPools, snackPools, snacksPerDay);
+    const allergyProfile = customer.nutrition.allergyProfile;
+    const fallback = missingSnackSlots.length > 0 && !eligibleSnackPools.first.length && !eligibleSnackPools.second.length
+      && allergyProfile.allergiesAvailable
+      && canUseFallbackSnacks(snackPools, exclusions, allergyProfile.allergies)
+      ? eligibleFallbackSnacks(await (fallbackOptions ||= loadFallbackSnackOptions()), snackPools, exclusions, allergyProfile.allergies) : [];
     if (addOnMultiplier === 2 || existingSnacks.some(meal => meal.coreDeliveryFoodDay)) {
       const savedPortions = existingSnacks.reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
       const stillNeeded = Math.max(0, requiredSnacks - savedPortions);
@@ -2187,7 +2213,8 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     if (missingSnackSlots.length > 0) {
       for (const overallSlotIndex of missingSnackSlots) {
         const pool = poolForSlot(overallSlotIndex);
-        const choice = onlySnacks ? pool[Math.floor(Math.random() * pool.length)] : pool[0];
+        const choice = fallback.length ? fallback[(overallSlotIndex % snacksPerDay) % fallback.length]
+          : onlySnacks ? pool[Math.floor(Math.random() * pool.length)] : pool[0];
         if (!choice) {
           skippedSnackNoOption += 1;
           continue;
@@ -2208,6 +2235,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
             P: (Number(choice.P) || 0) / snacksPerDay,
             F: (Number(choice.F) || 0) / snacksPerDay
           },
+          ...(fallback.length && fallbackSnackSelection(choice)),
           isAutoAssigned: true
         });
         assignedSnacks += 1;

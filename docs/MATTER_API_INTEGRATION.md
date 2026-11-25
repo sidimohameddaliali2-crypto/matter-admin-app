@@ -347,6 +347,11 @@ recipe and component tags against the recorded allergies before choosing a dish,
 including in fallback pools. A conflicting saved choice stays visible for
 review and blocks the production download.
 
+Kitchen auto-assignment for Matter Core ignores dietary exclusions and still
+checks recorded allergies on meals, breakfasts and snacks. For Matter Core,
+only an allergy conflict in both scheduled snack pools can trigger the three
+fallback snacks. Other plans also check dietary exclusions.
+
 Legacy partner assignment based on Internal
 Customer membership is disabled; these members need verified Matter accounts.
 
