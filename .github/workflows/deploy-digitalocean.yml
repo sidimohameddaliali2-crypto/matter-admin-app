@@ -94,22 +94,8 @@ on:
       sync_min_free_disk_bytes:
         description: Minimum free disk from the reviewed isolated sync replay
         type: string
-  push:
-    branches:
-      - main
-    # A diagnostics-only release must not restart the worker it is inspecting.
-    paths-ignore:
-      - '.github/workflows/deploy-digitalocean.yml'
-      - '.github/workflows/reporting-vercel-identity-checks.yml'
-      - 'server/scripts/reporting-source-operator.mjs'
-      - 'server/scripts/reporting-source-operator.test.mjs'
-      - '.github/workflows/audit-sync-status.yml'
-      - '.github/scripts/audit-sync-status.mjs'
-      - '.github/scripts/audit-sync-status.test.mjs'
-      - '.github/workflows/driver-audit-native-handoff.yml'
-      - '.github/scripts/driver-audit-native-handoff.mjs'
-      - '.github/scripts/driver-audit-native-*.mjs'
-      - '.github/scripts/driver-audit-supabase-*.mjs'
+  # Automatic production deployment is paused by the owner.
+  # Manual workflow_dispatch operations remain available.
 
 concurrency:
   group: production-deploy
