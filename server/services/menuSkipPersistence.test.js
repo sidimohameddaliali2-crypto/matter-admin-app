@@ -79,7 +79,8 @@ test('an old tab cannot silently resubmit a confirmed skip after an admin unpaus
   assert.equal(pause.mock.callCount(), 0);
 });
 
-test('meals on an admin-unpaused date are saved instead of being discarded as a prior skip', async (t) => {
+test('meals on an admin-unpaused date still open for selection are saved instead of discarded as a prior skip', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-13T10:00Z') });
   confirmActive(t);
   const record = savedRecord();
   t.mock.method(matter, 'getKitchenNutrition', async () => source);
@@ -125,7 +126,8 @@ test('the menu profile restores a submission consisting entirely of skipped days
 test('an incomplete set of resume dates is rejected before saving meals or writing any Matter pauses', async (t) => {
   const menuId = '507f1f77bcf86cd799439012';
   const customer = { _id: 'customer', email: 'customer@example.com' };
-  t.mock.method(matter, 'getKitchenNutrition', async () => ({ subscription_id: 'current', customer_name: 'Customer', customer_id: 'matter-person', customer_email: 'customer@example.com' }));
+  t.mock.method(matter, 'getKitchenNutrition', async () => ({ subscription_id: 'current', customer_name: 'Customer', customer_id: 'matter-person',
+    customer_email: 'customer@example.com', active_delivery_dates: ['2026-10-31', '2026-11-01'] }));
   t.mock.method(matter, 'getSubscription', async () => ({ data: { subscription_id: 'current', cycle_end_date: '2026-11-11', delivery_schedule: [
     { date: '2026-10-31', status: 'active' }, { date: '2026-11-01', status: 'active' },
   ] } }));
@@ -163,14 +165,23 @@ test('an incomplete set of resume dates is rejected before saving meals or writi
 });
 
 
-for (const restored of [false, true]) test(`upcoming admin unpause confirms the parent snapshot after saved pauses are read (restored=${restored})`, async t => {
+for (const [restored, activated] of [[false, false], [true, false], [false, true], [true, true]]) test(`upcoming pause is rechecked after loading the record (restored=${restored}, activated=${activated})`, async t => {
   const date = '2099-11-05';
   const raw = { subscription_id: 'current', customer_id: 'person', email: 'customer@example.com', plan: { meal_frequency: 2 }, allergens: [], exclusions: [], delivery_schedule: [],
     upcoming_plan: { subscription_id: 'next', replaces_subscription_id: 'current', customer_id: 'person', starting_date: date, plan: { meal_frequency: 3 }, allergens: [], exclusions: [], delivery_schedule: [{ date, status: 'active' }] } };
   const initial = buildNutritionResult(raw);
   const skippedDays = [{ date, subscriptionId: 'next', pauseStatus: 'success', processedAt: new Date() }];
   t.mock.method(matter, 'getKitchenNutrition', async () => initial);
-  t.mock.method(matter, 'getSubscription', async id => { assert.equal(id, 'current'); return { data: { ...raw, upcoming_plan: { ...raw.upcoming_plan, delivery_schedule: [{ date, status: restored ? 'active' : 'paused' }] } } }; });
+  const updated = { ...raw.upcoming_plan, delivery_schedule: [{ date, status: restored ? 'active' : 'paused' }] };
+  const read = t.mock.method(matter, 'getSubscription', async id => {
+    if (id === 'next') {
+      if (activated) return { data: { ...updated, subscription_status: 'active' } };
+      throw Object.assign(new Error('Scheduled renewal has no standalone detail'), { response: { status: 404 } });
+    }
+    assert.equal(id, 'current');
+    // After activation this copy may still advertise the wrong active state.
+    return { data: { ...raw, upcoming_plan: activated ? raw.upcoming_plan : updated } };
+  });
   t.mock.method(MenuSelectionRecord, 'findOne', () => ({ lean: async () => ({ _id: 'record', selectedMeals: [], skippedDays, weeklyMenuId: 'menu' }) }));
   const update = t.mock.method(MenuSelectionRecord, 'updateOne', async (_, write) => { assert.equal(write.$push.unpausedDays.subscriptionId, 'next'); return { matchedCount: 1 }; });
   const handler = router.stack.find(layer => layer.route?.path === '/customers/:email/subscription-profile').route.stack[0].handle;
@@ -179,12 +190,13 @@ for (const restored of [false, true]) test(`upcoming admin unpause confirms the 
   await handler({ params: { email: 'customer@example.com' }, query: { menuId: 'menu' } }, res);
   assert.equal(response.success, true);
   assert.equal(response.data.skippedDays.length, restored ? 0 : 1);
+  assert.deepEqual(read.mock.calls.map(call => call.arguments[0]), activated ? ['next'] : ['next', 'current']);
   assert.equal(response.data.restoredSkipDates.includes(date), restored);
   assert.equal(update.mock.callCount(), restored ? 1 : 0);
 });
 
 
-test('a plan booked during submission routes a newly upcoming pause to the new subscription', async t => {
+test('pauses stay bound to the previewed subscription when a renewal is booked', async t => {
   const date = '2099-11-05';
   const raw = { subscription_id: 'current', customer_id: 'matter-person', email: source.customer_email, plan: { meal_frequency: 2 },
     allergens: [], exclusions: [], delivery_schedule: [{ date, status: 'active' }],
@@ -205,10 +217,18 @@ test('a plan booked during submission routes a newly upcoming pause to the new s
   t.mock.method(WeeklyMenu, 'findByIdAndUpdate', async () => ({}));
   t.mock.method(WeeklyMenu, 'findById', () => ({ populate: () => ({ lean: async () => ({ meals: [] }) }) }));
   const handler = router.stack.find(layer => layer.route?.path === '/customers/:email/select-meals').route.stack[0].handle;
-  const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
-  await handler({ params: { email: source.customer_email }, body: { weeklyMenuId: '507f1f77bcf86cd799439012', selections: [], skippedDates: [date],
-    pauseDecisions: [{ date, action: 'pause', resumeDate: '2099-12-01', alreadyPaused: false }] } }, res);
-  assert.equal(res.body.success, true);
+  const confirm = async subscriptionId => {
+    const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+    await handler({ params: { email: source.customer_email }, body: { weeklyMenuId: '507f1f77bcf86cd799439012', selections: [], skippedDates: [date],
+      pauseDecisions: [{ date, subscriptionId, action: 'pause', resumeDate: '2099-12-01', alreadyPaused: false }] } }, res);
+    return res;
+  };
+  const duringSave = await confirm('current');
+  assert.equal(duringSave.body.pauseResults[0].pauseStatus, 'failed');
+  assert.equal((await confirm('current')).code, 409);
+  assert.equal(writes.mock.callCount(), 0);
+  const afterPreview = await confirm('next');
+  assert.equal(afterPreview.body.pauseResults[0].pauseStatus, 'success');
   assert.equal(writes.mock.callCount(), 1);
   assert.equal(writes.mock.calls[0].arguments[0], 'next');
   assert.equal(stored.skippedDays[0].subscriptionId, 'next');

@@ -3,6 +3,7 @@ import WeeklyMenu from '../models/WeeklyMenu.js';
 import MenuItem from '../models/MenuItem.js';
 import { buildLegacyKitchenMainRotation, datedKitchenProtein, identifyKitchenMenuItem, kitchenAllergyConflicts, resolveLegacyKitchenChoices } from './kitchenExclusions.js';
 import { fallbackSnackReview, isFallbackSnack, loadFallbackSnackRecipes } from './kitchenFallbackSnacks.js';
+import { matchesMatterSelectionRecord } from './matterKitchenIdentity.js';
 
 const nameKey = value => String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 const idOf = value => String(value?._id || value || '');
@@ -86,11 +87,7 @@ export function assertSavedKitchenAllergies(meals, options, nutrition, date) {
   if (finding) throw savedMealReviewError(date, nutrition, finding.meal, finding.reason);
 }
 
-export function matchesKitchenAllergyRecord(record, nutrition) {
-  return record.matterCustomerId ? String(record.matterCustomerId) === String(nutrition.customer_id)
-    : (nutrition.subscription_id != null && String(record.matterSubscriptionId || '') === String(nutrition.subscription_id))
-      || (!!nutrition.customer_email && nameKey(record.matterEmail || record.email) === nameKey(nutrition.customer_email));
-}
+export const matchesKitchenAllergyRecord = matchesMatterSelectionRecord;
 
 function reviewCase(record, nutrition, date, { meal, reason, conflicts = [], evidence }) {
   const recordId = idOf(record._id);

@@ -62,7 +62,7 @@ export const kitchenCustomerDay = (entry, date, subscription = null) => {
     if (doubleDelivery && snacks < requiredSnacks) missingReasons.push(`${snacks} of ${requiredSnacks} snack portion(s) selected.`);
   }
   const missing = coverage ? missingReasons.length > 0 : empty || !!entry.missingSelection;
-  return { ...entry, selectedMeals,
+  return { ...entry, selectedMeals, isUpcomingPlan: !entry.partner && subscription?.is_upcoming_plan === true,
     mealsByDay: (entry.mealsByDay || []).filter(day => day.dateKey === date),
     totalWeight: incomplete ? null : selectedMeals.reduce((sum, meal) => sum + Number(meal.weight || 0) * (Number(meal.quantity) || 1), 0),
     totalCalories: incomplete ? null : selectedMeals.reduce((sum, meal) => sum + Number(meal.macros?.calories || 0) * (Number(meal.quantity) || 1), 0),

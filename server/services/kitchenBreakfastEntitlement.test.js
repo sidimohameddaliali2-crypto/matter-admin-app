@@ -13,7 +13,7 @@ test('removes only the dated Core auto breakfast, preserving choices, other date
   const before = JSON.stringify(record);
   t.mock.method(Record, 'updateOne', async (filter, update) => {
     assert.equal(filter._id, record._id);
-    assert.equal(filter.selectedMeals, meals, 'optimistic compare protects a concurrent menu edit');
+    assert.equal(filter.$expr.$and[0].$eq[1].$literal, meals, 'optimistic compare protects a concurrent menu edit');
     assert.deepEqual(update.$set.selectedMeals, [meals[0], meals[2], meals[3]]);
     assert.equal(update.$push.kitchenAudit.action, 'remove-unentitled-auto-breakfast');
     assert.equal(update.$push.kitchenAudit.date, date);

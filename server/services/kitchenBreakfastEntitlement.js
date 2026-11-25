@@ -1,5 +1,6 @@
 import Record from '../models/MenuSelectionRecord.js';
 import { toBusinessDateKey } from '../utils/businessDate.js';
+import { matchSavedKitchenInputs } from './kitchenSelectionWrite.js';
 
 // Reconcile obsolete kitchen-generated extras only. Never remove a customer's
 // breakfast choice, another date's food, or anything based on missing inputs.
@@ -16,8 +17,7 @@ export const reconcileCoreBreakfast = async (record, date, nutrition, now = new 
     throw new Error('Cannot reconcile breakfast without a verified selection identity.');
   }
   const selectedMeals = record.selectedMeals.filter(meal => !removed.includes(meal));
-  const result = await Record.updateOne({ _id: record._id, selectedMeals: record.selectedMeals,
-    $expr: { $eq: [{ $ifNull: ['$skippedDays', []] }, record.skippedDays || []] } }, {
+  const result = await Record.updateOne({ _id: record._id, $expr: matchSavedKitchenInputs(record) }, {
     $set: { selectedMeals },
     $push: { kitchenAudit: { date, action: 'remove-unentitled-auto-breakfast', at: new Date(),
       subscriptionId: String(nutrition.subscription_id), reason: `Matter breakfast_included=false; removed only auto-assigned breakfast: ${removed.map(meal => meal.mealName).join(', ')}` } },

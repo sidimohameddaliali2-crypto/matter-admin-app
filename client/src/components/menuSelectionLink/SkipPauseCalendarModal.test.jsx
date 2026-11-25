@@ -18,8 +18,8 @@ const button = (label) => [...container.querySelectorAll('button')].find((b) => 
 const day = (key) => container.querySelector('button[aria-label^="' + key + '"]');
 const click = (element) => act(() => element.click());
 const pauses = [
-  { date: '2099-10-21' },
-  { date: '2099-10-22' },
+  { date: '2099-10-21', subscriptionId: 'current' },
+  { date: '2099-10-22', subscriptionId: 'next' },
 ];
 
 test('opens directly in multiple selection, requires all dates, and submits the displayed chronological pairs', () => {
@@ -46,8 +46,8 @@ test('opens directly in multiple selection, requires all dates, and submits the 
   click(day('2099-11-05'));
   click(button('Confirm'));
   expect(onConfirm).toHaveBeenCalledWith([
-    { date: '2099-10-21', action: 'pause', resumeDate: '2099-11-05', alreadyPaused: false },
-    { date: '2099-10-22', action: 'pause', resumeDate: '2099-11-06', alreadyPaused: false },
+    { date: '2099-10-21', subscriptionId: 'current', action: 'pause', resumeDate: '2099-11-05', alreadyPaused: false },
+    { date: '2099-10-22', subscriptionId: 'next', action: 'pause', resumeDate: '2099-11-06', alreadyPaused: false },
   ]);
 });
 

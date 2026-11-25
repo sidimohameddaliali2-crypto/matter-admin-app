@@ -109,6 +109,22 @@ test('a portion preference warns and allows keeping the meal without changing sa
   expect(saved.carbVegAction).toBeUndefined();expect(saved.carbVegPreference).toBeUndefined();
 });
 
+test('a saved Saturday skip leaves a new Sunday delivery selectable', async () => {
+  const item = cycleItem([privateComponent('portion', 'Protein')]);
+  const saturday = '2099-10-24', sunday = '2099-10-25';
+  await signIn(item, {
+    weekend: true, deliveryDates: [sunday], skippedDays: [{ date: saturday, pauseStatus: 'success' }],
+  }, {
+    startDate: saturday, endDate: sunday,
+    meals: [saturday, sunday].map(date => ({ date, mealType: 'main', items: [item] })),
+  });
+  await click(button('Save and go to next day'));
+  expect(node.textContent).not.toContain('You skipped this day');
+  await click(button('+', card()));
+  await click(button('Submit my week'));
+  expect(api.post.mock.calls[0][1].dates).toEqual([saturday]);
+});
+
 test.each(['portion','mixed'])('restored %s preference conflicts can submit with computed warning flags', async scenario => {
   const components=scenario==='portion'?[privateComponent('portion','Protein',['Coriander'])]:[privateComponent('portion','Protein'),privateComponent('carb','Carb',['Coriander']),privateComponent('veg','Vegetable')];
   const item=cycleItem(components);if(scenario==='mixed')item.cycleMeal.carbCombined='Yes';
@@ -300,6 +316,29 @@ test('a week crossing renewal allows two current meals then three upcoming meals
   await click(button('+',card())); expect(button('+',card()).disabled).toBe(true);
   await click(button('Submit my week'));
   expect(api.post.mock.calls[0][1].selections.map(meal=>[meal.date,meal.quantity])).toEqual([[DELIVERY_DATE,2],[nextDate,3]]);
+});
+
+test.each([false, true])('saving an open day leaves the closed day alone (failed pause: %s)', async failedPause => {
+  jest.useFakeTimers();
+  jest.setSystemTime(new Date('2099-10-19T10:00Z'));
+  try {
+    const nextDate = '2099-10-22';
+    const closed = cycleItem([privateComponent('portion', 'Protein')]);
+    const open = { ...closed, _id: 'open-item', itemDate: nextDate };
+    await signIn(closed, {
+      deliveryDates: [DELIVERY_DATE, nextDate], hasSubmittedForRequestedMenu: true,
+      selectedMeals: failedPause ? [] : [{ date: DELIVERY_DATE, mealType: 'main', menuItemId: closed._id, quantity: 1, isAutoAssigned: true }],
+      skippedDays: failedPause ? [{ date: DELIVERY_DATE, pauseStatus: 'failed' }] : [],
+    }, { endDate: nextDate, meals: [{ date: DELIVERY_DATE, mealType: 'main', items: [closed] }, { date: nextDate, mealType: 'main', items: [open] }] });
+    await click(button('+', card()));
+    await click(button('Submit my week'));
+    expect(api.post).toHaveBeenCalledTimes(1);
+    expect(api.post.mock.calls[0][0]).toContain('/select-meals');
+    expect(api.post.mock.calls[0][1].selections.map(meal => meal.date)).toEqual([nextDate]);
+    expect(api.post.mock.calls[0][1].pauseDecisions).toBeUndefined();
+  } finally {
+    jest.useRealTimers();
+  }
 });
 
 test('the dated upcoming allergy profile blocks a meal even when the current plan has no allergies', async () => {

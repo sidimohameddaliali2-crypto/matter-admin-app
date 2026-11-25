@@ -15,7 +15,7 @@ test('Friday excess auto main is removed, retaining earliest slot, other days, b
   const other = meal({ date: '2026-11-04' }), breakfast = meal({ mealType: 'breakfast' }), snack = meal({ mealType: 'snack' });
   const r = record([b, other, a, breakfast, snack]), original = JSON.stringify(r);
   const write = t.mock.method(Record, 'updateOne', async (filter, update) => {
-    assert.equal(filter.selectedMeals, r.selectedMeals);
+    assert.equal(filter.$expr.$and[0].$eq[1].$literal, r.selectedMeals);
     assert.equal(filter.matterCustomerId, 'person');
     assert.deepEqual(update.$set.selectedMeals, [other, a, breakfast, snack]);
     assert.equal(update.$push.kitchenAudit.action, 'remove-excess-auto-core-mains');
@@ -72,7 +72,7 @@ test('verified Core single days remove only surplus automatic doubles for that d
   const r = record([savedBreakfast, extraBreakfast, savedSnack, extraSnack, otherDay]);
   const expected = [savedBreakfast, savedSnack, otherDay];
   const update = t.mock.method(Record, 'updateOne', async (filter, write) => {
-    assert.equal(filter.selectedMeals, r.selectedMeals);
+    assert.equal(filter.$expr.$and[0].$eq[1].$literal, r.selectedMeals);
     assert.equal(filter.matterCustomerId, r.matterCustomerId);
     assert.deepEqual(filter['kitchenAutoHolds.date'], { $ne: date });
     assert.deepEqual(write.$set.selectedMeals, expected);

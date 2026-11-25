@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { menuNutritionForDate, menuMealPlanFields, menuPlanDates } from './menuPlanSchedule.js';
+import { requiresDatedMenuCalendar, menuNutritionForDate, menuMealPlanFields, menuPlanDates } from './menuPlanSchedule.js';
 import Menu from '../models/WeeklyMenu.js';
 import { resolveMenuAllergyProfile } from './menuAllergyProfileService.js';
 import { evaluateComponentSelection, selectionPreferenceFlags } from '../../client/src/constants/componentSelectionRules/index.js';
@@ -118,7 +118,7 @@ export function validateStaffMenuSelections({ menu, selections, existingSelectio
   });
 }
 
-export async function validatedMenuSelections({ menuId, selections, nutrition, staffRecord, enforceCustomerAllowance = true }) {
+export async function validatedMenuSelections({ menuId, selections, nutrition, staffRecord, enforceCustomerAllowance = true, loadedMenu }) {
   if (!mongoose.isValidObjectId(menuId) || !nutrition) throw failure();
   const groups = new Map();
   if (!Array.isArray(selections)) throw failure();
@@ -137,19 +137,19 @@ export async function validatedMenuSelections({ menuId, selections, nutrition, s
     if (!Array.isArray(plan.exclusions)) throw Object.assign(new Error('Exclusion information is unavailable from Matter. Please retry before selecting meals.'), { statusCode: 502, code: 'MATTER_EXCLUSIONS_UNAVAILABLE' });
     profiles.set(plan, profile);
   }
-  const menu = await Menu.findById(menuId).populate({ path: 'meals.items', model: 'MenuItem' }).lean();
+  const menu = loadedMenu ?? await Menu.findById(menuId).populate({ path: 'meals.items', model: 'MenuItem' }).lean();
   const checked = new Map();
   for (const [plan, rows] of groups) {
     const profile = profiles.get(plan);
     if (!staffRecord && enforceCustomerAllowance) {
-      const eligible = nutrition.upcoming_plan ? new Set(menuPlanDates(nutrition)) : null;
+      const eligible = requiresDatedMenuCalendar(nutrition) ? new Set(menuPlanDates(nutrition)) : null;
       const totals = new Map();
       for (const row of rows) {
         const date = dateKey(row.date);
         if (eligible && !eligible.has(date)) throw failure();
         totals.set(date, (totals.get(date) || 0) + (row.quantity === undefined ? 1 : Number(row.quantity)));
       }
-      if (nutrition.upcoming_plan && (!Number.isInteger(plan.meal_frequency) || plan.meal_frequency < 1)) throw failure();
+      if (eligible && (!Number.isInteger(plan.meal_frequency) || plan.meal_frequency < 1)) throw failure();
       for (const count of totals.values()) if (Number.isInteger(plan.meal_frequency) && count > plan.meal_frequency) throw failure();
     }
     const inputs = { menu, selections: rows, exclusions: plan.exclusions, allergies: profile.allergies };

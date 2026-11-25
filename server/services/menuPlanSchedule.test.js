@@ -32,6 +32,107 @@ test('Matter lookup and dated roster use embedded upcoming detail without callin
   assert.deepEqual(rows.map(row => [row.delivery_date, row.subscription_id, row.kitchen_inputs.meal_frequency, row.is_upcoming_plan]), [[monday, 1, 2, false], [thursday, 2, 3, true]]);
 });
 
+test('an activated renewal replaces its embedded copy in the roster and dated lookup', async t => {
+  const parent = { ...raw(), subscription_status: 'cancelled' };
+  const active = { ...parent.upcoming_plan, subscription_status: 'active', cycle_end_date: null, delivery_schedule: [{ date: thursday, status: 'active' }] };
+  const subscriptions = [parent, active];
+  t.mock.method(matter, 'listAllSubscriptions', async () => subscriptions);
+  t.mock.method(matter, 'listSubscriptions', async () => ({ data: subscriptions }));
+  t.mock.method(matter, 'getSubscription', async id => ({ data: id === 1 ? parent : active }));
+  const readRoster = () => matter.findSubscriptionsWithDeliveryOnDate(thursday, { includeKitchenInputs: true });
+  const readKitchen = () => matter.getKitchenNutrition({ customerId: 8, date: thursday });
+  assert.deepEqual((await readRoster()).map(row => [row.subscription_id, row.is_upcoming_plan]), [[2, false]]);
+  assert.equal((await readKitchen()).is_upcoming_plan, false);
+
+  // The embedded copy can lag a pause made on the activated subscription.
+  active.delivery_schedule = [{ date: thursday, status: 'paused' }];
+  assert.deepEqual(await readRoster(), []);
+  await assert.rejects(readKitchen, { statusCode: 409 });
+
+  // A stale embedded copy can even advertise a later end date than the
+  // activated cycle. The roster must suppress it without a detail lookup.
+  active.cycle_end_date = '2099-11-04';
+  assert.deepEqual(await readRoster(), []);
+  await assert.rejects(readKitchen, { statusCode: 409 });
+});
+
+test('a stale embedded start does not hide an earlier paid day when the standalone renewal starts later', async t => {
+  const parent = { ...raw(), subscription_status: 'cancelled', cycle_end_date: thursday };
+  const friday = '2099-11-06';
+  const active = { ...parent.upcoming_plan, subscription_status: 'active', starting_date: friday,
+    delivery_schedule: [{ date: friday, status: 'active' }] };
+  const subscriptions = [parent, { ...active, starting_date: thursday }];
+  t.mock.method(matter, 'listAllSubscriptions', async () => subscriptions);
+  t.mock.method(matter, 'listSubscriptions', async () => ({ data: subscriptions }));
+  t.mock.method(matter, 'getSubscription', async id => ({ data: id === 1 ? parent : active }));
+  const check = async () => {
+    const roster = await matter.findSubscriptionsWithDeliveryInRange(thursday, friday, { includeKitchenInputs: true });
+    assert.deepEqual(roster.map(row => [row.subscription_id, row.delivery_date]), [[1, thursday], [2, friday]]);
+    assert.equal(roster[0].kitchen_inputs.upcoming_plan, null);
+    assert.equal((await matter.getKitchenNutrition({ customerId: 8, date: thursday })).subscription_id, 1);
+  };
+  await check();
+  delete parent.upcoming_plan;
+  await check();
+  assert.equal((await matter.getKitchenNutrition({ customerId: 8, date: friday })).subscription_id, 2);
+});
+
+test('customer lookup and pause preview agree with the roster when the activated renewal is paused', async t => {
+  const parent = { ...raw(), subscription_status: 'active' };
+  const active = { ...parent.upcoming_plan, subscription_status: 'paused', delivery_schedule: [{ date: thursday, status: 'paused' }] };
+  const subscriptions = [parent, active];
+  t.mock.method(matter, 'listAllSubscriptions', async () => subscriptions);
+  t.mock.method(matter, 'listSubscriptions', async () => ({ data: subscriptions }));
+  t.mock.method(matter, 'getSubscription', async id => ({ data: id === 1 ? parent : active }));
+  t.mock.method(matter, 'getSubscriptionPauses', async () => ({}));
+  assert.deepEqual(await matter.findSubscriptionsWithDeliveryOnDate(thursday, { includeKitchenInputs: true }), []);
+  const customer = await matter.getKitchenNutrition({ email: active.email });
+  assert.equal(customer.subscription_id, 2);
+  assert.deepEqual(customer.active_delivery_dates, []);
+  assert.deepEqual(customer.paused_delivery_dates, [thursday]);
+  const preview = await previewSkipPauses({ matterCustomerId: 8, skippedDateKeys: [thursday] });
+  assert.deepEqual(preview.pauses.map(row => [row.date, row.subscriptionId, row.alreadyPaused]), [[thursday, 2, true]]);
+  parent.subscription_status = 'cancelled';
+  assert.equal((await matter.getKitchenNutrition({ email: active.email })).subscription_id, 2);
+  parent.subscription_status = 'active';
+  active.subscription_status = 'active';
+  assert.equal((await matter.getKitchenNutrition({ customerId: 8 })).subscription_id, 2);
+});
+
+test('an activated standalone renewal still rejects stale choices for a paused date', async t => {
+  const details = raw().upcoming_plan;
+  const activated = buildNutritionResult({ ...details, subscription_status: 'active' });
+  const paused = '2099-11-06';
+  const menu = { meals: [thursday, paused].map(date => ({ date, mealType: 'main', items: [
+    { _id: date, itemDate: date, mealName: 'Plain dish', mealType: 'main' },
+  ] })) };
+  t.mock.method(Menu, 'findById', () => ({ populate: () => ({ lean: async () => menu }) }));
+  const validate = date => validatedMenuSelections({ menuId: '507f1f77bcf86cd799439011', nutrition: activated,
+    selections: [{ date, mealName: 'Plain dish', menuItemId: date, mealType: 'main' }] });
+  assert.equal((await validate(thursday))[0].matterSubscriptionId, '2');
+  await assert.rejects(() => validate(paused), { statusCode: 409 });
+});
+
+test('pause preview and confirmation use the predecessor for its own dates after renewal activates', async t => {
+  const prior = { ...raw(), cycle_end_date: monday, subscription_status: 'cancelled',
+    delivery_schedule: [{ date: monday, status: 'active' }] };
+  const active = { ...prior.upcoming_plan, subscription_status: 'active' };
+  t.mock.method(matter, 'listSubscriptions', async () => ({ data: [prior, active] }));
+  t.mock.method(matter, 'getSubscription', async id => ({ data: id === 1 ? prior : active }));
+  t.mock.method(matter, 'getSubscriptionPauses', async () => ({}));
+  const preview = await previewSkipPauses({ matterCustomerId: 8, skippedDateKeys: [monday, thursday] });
+  assert.deepEqual(preview.pauses.map(row => [row.date, row.subscriptionId]), [[monday, 1], [thursday, 2]]);
+  const write = t.mock.method(matter, 'createSubscriptionPause', async () => ({}));
+  const confirm = (subscriptionId, date) => applyConfirmedPauses({ subscriptionId, matterCustomerId: 8,
+    decisions: [{ date, action: 'pause', resumeDate: '2099-12-01' }] });
+  assert.equal((await confirm(2, monday))[0].pauseStatus, 'failed');
+  assert.equal((await confirm(2, '2099-11-06'))[0].pauseStatus, 'failed');
+  assert.equal(write.mock.callCount(), 0);
+  assert.equal((await confirm(1, monday))[0].pauseStatus, 'success');
+  assert.deepEqual(write.mock.calls[0].arguments.slice(0, 1), [1]);
+  assert.deepEqual(write.mock.calls[0].arguments[1].pausedDays, [monday]);
+});
+
 test('mixed-week submission enforces each date allowance and stamps trusted subscription IDs', async t => {
   const meals = [monday, thursday].map(date => ({ date, mealType: 'main', items: [{ _id: date, itemDate: date, mealName: 'Plain dish', mealType: 'main' }] }));
   t.mock.method(Menu, 'findById', () => ({ populate: () => ({ lean: async () => ({ meals }) }) }));
@@ -78,6 +179,14 @@ test('Saturday skip includes Sunday starting the upcoming plan and its existing 
   const preview = await previewSkipPauses({ matterCustomerId: 8, skippedDateKeys: [saturday] });
   assert.deepEqual(preview.pauses.map(pause => [pause.date, pause.subscriptionId, pause.alreadyPaused]), [[saturday, 1, false], [sunday, 2, true]]);
   assert.ok(preview.unavailableDates.includes('2026-12-07'));
+  const existing = await previewSkipPauses({ matterCustomerId: 8, skippedDateKeys: [saturday], existingSkips: [saturday] });
+  assert.deepEqual(existing.pauses.map(pause => pause.date), [saturday]);
+
+  source.delivery_schedule.push({ date: sunday, status: 'paused' });
+  source.upcoming_plan.delivery_schedule = [];
+  source.upcoming_plan.pauses = { paused_days: [], resumed_days: [] };
+  const stalePredecessor = await previewSkipPauses({ matterCustomerId: 8, skippedDateKeys: [saturday] });
+  assert.deepEqual(stalePredecessor.pauses.map(pause => pause.date), [saturday]);
 });
 
 test('a changed start date rechecks the subscription for every pause decision before any write', async t => {

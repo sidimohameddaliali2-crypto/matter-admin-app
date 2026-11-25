@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/publicMenuApi';
 import { evaluateComponentSelection, selectionPreferenceFlags } from '../../constants/componentSelectionRules';
-import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
+import { FIXED_SELECTION_DEADLINES, isPastSelectionDeadline } from '../../utils/selectionDeadlines';
 import { isWithinRenewalWindow } from '../../utils/subscriptionRenewal';
 import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm, allergenMatchesAny } from '../../constants/exclusionList';
 import { toTitleCase } from '../../utils/textFormat';
@@ -291,6 +291,7 @@ const MenuSelectionLink = ({ token }) => {
   const [loadError, setLoadError] = useState('');
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [rawMenu, setRawMenu] = useState(null); // real weeklyMenu (for submit)
+  const selectionDeadlines = rawMenu?.selectionDeadlines?.length ? rawMenu.selectionDeadlines : FIXED_SELECTION_DEADLINES;
 
   const [step, setStep] = useState('signin'); // signin | menu | done
   const [email, setEmail] = useState('');
@@ -299,17 +300,20 @@ const MenuSelectionLink = ({ token }) => {
   const [day, setDay] = useState(0);
   const [qty, setQty] = useState({});
   const [manualSkipped, setSkipped] = useState({});
-  const skipped = useMemo(() => {
-    const keys = model?.dayKeys || [];
-    const dates = new Set(expandSaturdaySkips(keys.filter((_, i) => manualSkipped[i]), keys, account?.restoredSkipDates));
-    return Object.fromEntries(keys.map((key, i) => [i, dates.has(key)]));
-  }, [manualSkipped, model, account?.restoredSkipDates]);
   // Snapshot of `skipped` taken at the moment of a successful submit. Once a
   // day has been submitted as skipped, "Change my selections" can no longer
   // un-skip (or re-skip) it — a skip actually pauses that delivery on the
   // backend once submitted, so undoing it here would silently desync from
   // that. Days that had real meal selections stay fully editable.
   const [lockedSkipDays, setLockedSkipDays] = useState({});
+  const skippedDateKeys = useMemo(() => {
+    const keys = model?.dayKeys || [];
+    const saved = keys.filter((_, index) => lockedSkipDays[index]);
+    const draft = keys.filter((_, index) => manualSkipped[index] && !lockedSkipDays[index]);
+    return new Set([...saved, ...expandSaturdaySkips(draft, account?.deliveryDates || keys, account?.restoredSkipDates)]);
+  }, [manualSkipped, lockedSkipDays, model, account?.deliveryDates, account?.restoredSkipDates]);
+  const skipped = useMemo(() => Object.fromEntries((model?.dayKeys || []).map((date, index) => [index, skippedDateKeys.has(date)])),
+    [model, skippedDateKeys]);
   const [acknowledged, setAcknowledged] = useState({});
   // Per-meal-key exclusion flags to carry through to submit: carbVegAction
   // ('kept'/'replace', from the modal below) plus the silent sauce/garnish
@@ -502,7 +506,7 @@ const MenuSelectionLink = ({ token }) => {
       setAcknowledged({});
       // Land on the first day that isn't already closed, instead of always
       // opening on Monday even when Monday (and maybe more) has passed.
-      setDay(firstAvailableDayIndex(built.dayKeys, rawMenu?.selectionDeadlines));
+      setDay(firstAvailableDayIndex(built.dayKeys, selectionDeadlines));
       setStep('menu');
     } catch (err) {
       // Prefer the server's own message (e.g. "We could not find an account
@@ -516,7 +520,7 @@ const MenuSelectionLink = ({ token }) => {
           : 'Could not load your plan. Please try again.')
       );
     }
-  }, [email, preview, rawMenu]);
+  }, [email, preview, rawMenu, selectionDeadlines]);
 
   /* -- selection helpers -- */
   const dayKeys = useMemo(() => model?.dayKeys || [], [model]);
@@ -574,8 +578,8 @@ const MenuSelectionLink = ({ token }) => {
   // MenuSelection.jsx / the Menu Management admin tools. Preview/demo mode
   // never locks — there's no real menu (or real deadlines) behind it.
   const isDayDeadlineLocked = useCallback(
-    (dateKey) => (preview ? false : isPastSelectionDeadline(dateKey, rawMenu?.selectionDeadlines)),
-    [preview, rawMenu]
+    (dateKey) => (preview ? false : isPastSelectionDeadline(dateKey, selectionDeadlines)),
+    [preview, selectionDeadlines]
   );
 
   const deadlineLockedToday = isDayDeadlineLocked(dayKeys[day]);
@@ -784,7 +788,8 @@ const MenuSelectionLink = ({ token }) => {
     }
     // Recheck restored selections too: a customer's allergy profile may have
     // changed since their previous submission, without going through tryAdd.
-    const blockedMeal = (model?.meals || []).find((m) => qty[m.key] > 0 && !skipped[m.dayIndex] && conflictOf(m)?.kind === 'allergen');
+    const blockedMeal = (model?.meals || []).find((m) => qty[m.key] > 0 && !skipped[m.dayIndex]
+      && !isDayDeadlineLocked(m.dayKey) && conflictOf(m)?.kind === 'allergen');
     if (blockedMeal) {
       flash(`Remove ${blockedMeal.name} before submitting: it conflicts with your allergy profile.`);
       return;
@@ -799,7 +804,7 @@ const MenuSelectionLink = ({ token }) => {
       const selections = [];
       (model?.meals || []).forEach((m) => {
         const n = qty[m.key] || 0;
-        if (!n || skipped[m.dayIndex]) return;
+        if (!n || skipped[m.dayIndex] || isDayDeadlineLocked(m.dayKey)) return;
         selections.push({
           date: m.dayKey,
           mealType: m.type,
@@ -813,7 +818,7 @@ const MenuSelectionLink = ({ token }) => {
         });
       });
       const skippedDates = [...new Set([
-        ...expandSaturdaySkips(dayKeys.filter((_, i) => skipped[i]), account.deliveryDates || dayKeys, account.restoredSkipDates),
+        ...skippedDateKeys,
         ...(pauseDecisions || []).map((d) => d.date),
       ])];
       const res = await api.post(`/menus/customers/${encodeURIComponent(account.email)}/select-meals`, {
@@ -849,7 +854,7 @@ const MenuSelectionLink = ({ token }) => {
     } finally {
       setSubmitting(false);
     }
-  }, [account, computeSauceGarnishFlags, conflictOf, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped]);
+  }, [account, computeSauceGarnishFlags, conflictOf, flash, isDayDeadlineLocked, mealFlags, model, preview, qty, rawMenu, skipped, skippedDateKeys]);
 
   // Fetches available dates for the currently-skipped days and opens
   // the pause-confirmation calendar. Never calls select-meals itself — the
@@ -904,13 +909,13 @@ const MenuSelectionLink = ({ token }) => {
       setDay((d) => d + 1);
       return;
     }
-    const skippedDateKeys = expandSaturdaySkips(dayKeys.filter((_, i) => skipped[i]), account?.deliveryDates || dayKeys, account?.restoredSkipDates);
-    if (preview || skippedDateKeys.length === 0) {
+    const datesNeedingReview = [...skippedDateKeys].sort().filter(date => !(lockedSkipDays[dayKeys.indexOf(date)] && isDayDeadlineLocked(date)));
+    if (preview || datesNeedingReview.length === 0) {
       doSubmit();
       return;
     }
-    openSkipPauseReview(skippedDateKeys);
-  }, [account, day, dayCount, dayKeys, deadlineLockedToday, doSubmit, flash, lastDay, openSkipPauseReview, preview, skipped, target]);
+    openSkipPauseReview(datesNeedingReview);
+  }, [account, day, dayCount, dayKeys, doSubmit, flash, isDayDeadlineLocked, lastDay, lockedSkipDays, openSkipPauseReview, preview, deadlineLockedToday, skipped, skippedDateKeys, target]);
 
   const resetAll = useCallback(() => {
     setStep('signin');
@@ -937,7 +942,8 @@ const MenuSelectionLink = ({ token }) => {
   const currentDate = dayKeys[day] ? dateFromKey(dayKeys[day]) : null;
   const previousDate = currentDate ? new Date(currentDate) : null;
   previousDate?.setDate(previousDate.getDate() - 1);
-  const sundayIncluded = currentDate?.getDay() === 0 && !!skipped[dayKeys.indexOf(toDateKey(previousDate))]
+  const previousDayIndex = dayKeys.indexOf(toDateKey(previousDate));
+  const sundayIncluded = currentDate?.getDay() === 0 && skippedToday && skipped[previousDayIndex] && !lockedSkipDays[previousDayIndex]
     && !(account?.restoredSkipDates || []).includes(dayKeys[day]);
   const dayHeading = dayKeys[day] ? fmtDayLong(dayKeys[day]) : `Day ${day + 1}`;
   const selectedToday = dayCount(day);
@@ -1028,7 +1034,7 @@ const MenuSelectionLink = ({ token }) => {
         }),
       };
     }).filter((c) => c.meals.length > 0);
-  }, [account, acknowledged, bump, conflictOf, day, dayFull, deadlineLockedToday, model, openAllergen, openExclusion, qty, tryAdd]);
+  }, [account, acknowledged, bump, conflictOf, day, dayFull, model, openAllergen, openExclusion, qty, deadlineLockedToday, tryAdd]);
 
   const dayTabs = useMemo(
     () =>

@@ -6,6 +6,7 @@ import { cacheGet, cacheSet } from '../config/cache.js';
 import { boundedMap } from './boundedMap.js';
 import { normalizeMatterAllergens } from './matterAllergens.js';
 import { menuNutritionForDate } from './menuPlanSchedule.js';
+import { isDateKey } from '../utils/businessDate.js';
 import { readMatterGet } from './matterReadRetry.js';
 import { resolveMatterDeliveryAddress, matterMealContract, matterWeekendEnabled, matterDoubleDeliveryDates } from './matterSubscriptionContract.js';
 
@@ -76,11 +77,53 @@ const activeDeliveryDates = (subscription) => (subscription?.delivery_schedule |
   .filter((entry) => entry?.status === 'active' && entry?.date)
   .map((entry) => String(entry.date).slice(0, 10))
   .sort();
+const deliverySubscriptionStatuses = ['active', 'paused', 'cancelled'];
+const deliverySubscriptionKey = (subscription) => subscription.customer_id == null || subscription.subscription_id == null
+  ? null : JSON.stringify([String(subscription.customer_id), String(subscription.subscription_id)]);
+const activatedDeliverySubscriptions = (subscriptions) => {
+  const byId = new Map(subscriptions
+    .filter(subscription => deliverySubscriptionStatuses.includes(subscription.subscription_status) && deliverySubscriptionKey(subscription))
+    .map(subscription => [deliverySubscriptionKey(subscription), subscription]));
+  const byPredecessor = new Map();
+  for (const sub of byId.values()) {
+    const key = deliverySubscriptionKey({ customer_id: sub.customer_id, subscription_id: sub.replaces_subscription_id });
+    if (!key) continue;
+    if (!byPredecessor.has(key)) byPredecessor.set(key, []);
+    byPredecessor.get(key).push(sub);
+  }
+  return { byId, byPredecessor };
+};
+const activatedSuccessorFor = (root, activated) => {
+  const successors = activated.byPredecessor.get(deliverySubscriptionKey(root)) || [];
+  if (successors.length > 1) throw Object.assign(new Error('Multiple activated Matter renewals match this subscription.'), { statusCode: 409 });
+  return successors[0] || (root.upcoming_plan && activated.byId.get(deliverySubscriptionKey(root.upcoming_plan)));
+};
+const resolveRenewalBoundary = (root, activated) => {
+  const successor = activatedSuccessorFor(root, activated);
+  if (!successor) {
+    if (!root.upcoming_plan) return { effectiveRoot: root, nextStart: null, standalone: false };
+    const embedded = menuNutritionForDate(buildNutritionResult(root), root.upcoming_plan.starting_date);
+    return { effectiveRoot: root, nextStart: embedded.starting_date, standalone: false };
+  }
+  const nextStart = String(successor.starting_date ?? '').slice(0, 10);
+  if (!isDateKey(nextStart) || String(successor.customer_id) !== String(root.customer_id)
+    || String(successor.subscription_id) === String(root.subscription_id)
+    || String(successor.replaces_subscription_id ?? '') !== String(root.subscription_id)) {
+    throw Object.assign(new Error('The activated Matter renewal or its start date could not be verified.'), { statusCode: 409 });
+  }
+  return { effectiveRoot: { ...root, upcoming_plan: null, next_subscription_starting_date: nextStart }, nextStart, standalone: true };
+};
+const canSupplyDelivery = (subscription, date) =>
+  (deliverySubscriptionStatuses.includes(subscription.subscription_status)
+    && (!subscription.cycle_end_date || String(subscription.cycle_end_date).slice(0, 10) >= date))
+  || (subscription.upcoming_plan && (!subscription.upcoming_plan.cycle_end_date
+    || String(subscription.upcoming_plan.cycle_end_date).slice(0, 10) >= date));
 
 // One shape for every nutrition lookup (by email, subscription id, or Matter
 // customer id), so the Kitchen List gets the same fields whichever path found
 // the subscription. customer_id is Matter's permanent id for the customer.
 export const buildNutritionResult = (subscription, upcoming = false, parentSubscriptionId = null) => ({
+  ...(subscription.next_subscription_starting_date && { next_subscription_starting_date: subscription.next_subscription_starting_date }),
   replaces_subscription_id: subscription.replaces_subscription_id ?? null,
   starting_date: subscription.starting_date ? String(subscription.starting_date).slice(0, 10) : null,
   is_upcoming_plan: upcoming,
@@ -257,14 +300,36 @@ class MatterApiService {
       const one = (list) => {
         const rows = list?.data || [];
         const active = rows.filter((row) => row.subscription_status === 'active');
-        const candidates = active.length === 1 ? active : rows;
-        if (candidates.length !== 1 || Number(list?.meta?.total_pages || 1) > 1) fail('Kitchen subscription lookup is missing or ambiguous; verify the Matter customer ID and website email.');
-        return candidates[0];
+        const current = rows.filter(row => ['active', 'paused'].includes(row.subscription_status));
+        const candidates = active.length === 1 ? active : current.length ? current : rows;
+        if (Number(list?.meta?.total_pages || 1) === 1) {
+          if (current.length === 2) {
+            const [a, b] = current;
+            if (a.customer_id != null && String(a.customer_id) === String(b.customer_id)) {
+              if (String(a.replaces_subscription_id ?? '') === String(b.subscription_id)) return a;
+              if (String(b.replaces_subscription_id ?? '') === String(a.subscription_id)) return b;
+            }
+          }
+          if (candidates.length === 1) return candidates[0];
+        }
+        fail('Kitchen subscription lookup is missing or ambiguous; verify the Matter customer ID and website email.');
       };
       const load = async (id) => {
         const data = (await this.getSubscription(id))?.data;
         if (!data || String(data.subscription_id) !== String(id)) fail('The current Matter subscription could not be verified.');
         return data;
+      };
+      const loadPrimary = async (row, rows) => {
+        const source = await load(row.subscription_id);
+        const successor = activatedSuccessorFor(source, activatedDeliverySubscriptions(rows));
+        if (!successor) return source;
+        const renewal = await load(successor.subscription_id);
+        if (String(renewal.customer_id) !== String(source.customer_id)
+          || String(renewal.subscription_id) === String(source.subscription_id)
+          || String(renewal.replaces_subscription_id) !== String(source.subscription_id)) {
+          fail('The activated Matter renewal could not be verified.');
+        }
+        return renewal;
       };
       const byCustomer = async (id) => {
         if (!String(id ?? '').trim()) fail('Permanent Matter customer ID is missing. Verify this account in Matter.');
@@ -275,8 +340,38 @@ class MatterApiService {
           error.code = 'MATTER_SUBSCRIPTION_UNAVAILABLE';
           throw error;
         }
+        if (date) {
+          if (list?.success === false || !Array.isArray(list?.data) || Number(list.meta?.total_pages || 1) > 1) {
+            fail('Matter subscriptions could not be verified for this delivery date.');
+          }
+          // Ended cycles can still have active make-up deliveries, including
+          // on dates that also appear in a renewal's calendar.
+          const candidates = list.data.filter(row => deliverySubscriptionStatuses.includes(row.subscription_status)
+            || row.upcoming_plan);
+          const roots = await boundedMap(candidates, 5, async row => {
+            const data = await load(row.subscription_id);
+            if (String(data.customer_id ?? '') !== String(id)) fail('Matter customer identity could not be verified.');
+            return { ...data, email: data.email || row.email, subscription_status: data.subscription_status || row.subscription_status };
+          });
+          const activated = activatedDeliverySubscriptions(roots);
+          const scheduled = roots.flatMap(root => {
+            const { effectiveRoot, nextStart, standalone } = resolveRenewalBoundary(root, activated);
+            if (standalone && date >= nextStart) return [];
+            const plan = menuNutritionForDate(buildNutritionResult(effectiveRoot), date);
+            if (plan.starting_date && date < plan.starting_date) return [];
+            if (!Array.isArray(plan.active_delivery_dates)) fail('Matter delivery schedule could not be verified.');
+            return plan.active_delivery_dates.includes(date) ? [{ root: effectiveRoot, plan }] : [];
+          });
+          // Match the preparation roster's in-cycle delivery eligibility.
+          const matches = scheduled.filter(({ plan }) => !plan.cycle_end_date || date <= plan.cycle_end_date);
+          if (!matches.length && scheduled.length) {
+            fail('Matter lists this delivery beyond its plan cycle. Verify the scheduled date and cycle in Matter before editing.');
+          }
+          if (matches.length !== 1) fail('Matter could not verify one active delivery for this customer/date.');
+          return matches[0].root;
+        }
         const row = one(list);
-        const data = await load(row.subscription_id);
+        const data = await loadPrimary(row, list.data);
         if (String(data.customer_id ?? '') !== String(id)) fail('Matter customer identity does not match the requested permanent ID.');
         return data;
       };
@@ -288,7 +383,7 @@ class MatterApiService {
         if ((list?.data || []).length) {
           const row = one(list);
           if (normalize(row.email) !== requestedEmail) fail('Matter subscription email does not match the requested customer.');
-          subscription = await load(row.subscription_id);
+          subscription = await loadPrimary(row, list.data);
           if (normalize(subscription.email) !== requestedEmail) fail('Matter subscription email does not match the requested customer.');
         } else if (subscriptionId) {
           // Recover only a verifiable legacy reference, then follow the stable ID.
@@ -309,6 +404,24 @@ class MatterApiService {
       safe.code = error.code;
       throw safe;
     }
+  }
+
+  // The active renewal can share a menu week with its verified predecessor.
+  async withPriorKitchenSubscription(nutrition, earliestDate) {
+    const previousId = nutrition?.replaces_subscription_id;
+    if (!previousId || !isDateKey(earliestDate) || !isDateKey(nutrition.starting_date) || earliestDate >= nutrition.starting_date) return nutrition;
+    const unavailable = () => Object.assign(new Error('Matter could not verify the previous plan for this menu. Please reopen the menu and try again.'), { statusCode: 409 });
+    let previous;
+    try {
+      previous = (await this.getSubscription(previousId))?.data;
+    } catch {
+      throw unavailable();
+    }
+    if (!previous || String(previousId) === String(nutrition.subscription_id)
+      || String(previous.subscription_id) !== String(previousId)
+      || String(previous.customer_id) !== String(nutrition.customer_id)
+      || !Array.isArray(previous.delivery_schedule)) throw unavailable();
+    return { ...nutrition, previous_plan: buildNutritionResult({ ...previous, upcoming_plan: null }) };
   }
 
   /**
@@ -375,29 +488,41 @@ class MatterApiService {
    */
   async findSubscriptionsWithDeliveryInRange(startDateKey, endDateKey, { includeKitchenInputs = false, onProgress } = {}) {
     const all = await this.listAllSubscriptions({ onProgress });
-    const candidates = all.filter((sub) =>
-      (['active', 'paused', 'cancelled'].includes(sub.subscription_status)
-        && String(sub.cycle_end_date || '').slice(0, 10) >= startDateKey)
-      || (sub.upcoming_plan && (!sub.upcoming_plan.cycle_end_date
-        || String(sub.upcoming_plan.cycle_end_date).slice(0, 10) >= startDateKey))
-    );
+    const candidates = all.filter(sub => canSupplyDelivery(sub, startDateKey));
 
     const CONCURRENCY = 20;
-    const matches = [];
     const failures = [];
+    const recordFailure = (error, subscriptionId) => {
+      if (error.code === 'MATTER_IMPORT_INTERRUPTED') throw error;
+      console.error(`delivery-in-range check failed for subscription ${subscriptionId}:`, error.message);
+      failures.push({ subscriptionId: String(subscriptionId), message: 'Unable to verify delivery schedule' });
+    };
     let checked = 0;
     await onProgress?.({ phase: 'checking', completed: 0, total: candidates.length, failed: 0 });
 
-    const results = await boundedMap(candidates, CONCURRENCY, async (sub) => {
+    const details = (await boundedMap(candidates, CONCURRENCY, async (sub) => {
+      try {
+        const detail = (await this.getSubscription(sub.subscription_id))?.data;
+        if (!detail || (includeKitchenInputs && String(detail.subscription_id ?? '') !== String(sub.subscription_id))) {
+          throw new Error('Matter subscription identity could not be verified');
+        }
+        return { ...detail, name: detail.name || sub.name, email: detail.email || sub.email,
+          subscription_status: detail.subscription_status || sub.subscription_status };
+      } catch (error) {
+        recordFailure(error, sub.subscription_id);
+        return null;
+      } finally {
+        await onProgress?.({ phase: 'checking', completed: ++checked, total: candidates.length, failed: failures.length });
+      }
+    })).filter(Boolean);
+    // Resolve precedence after the bounded reads so detail wins over the
+    // list summary. An ended standalone can still suppress a stale copy.
+    const activated = activatedDeliverySubscriptions([...all, ...details]);
+    const matches = details.flatMap((detail) => {
         try {
-          const detail = await this.getSubscription(sub.subscription_id);
-          if (includeKitchenInputs && String(detail?.data?.subscription_id ?? '') !== String(sub.subscription_id)) throw new Error('Matter subscription identity could not be verified');
-          const root = { ...detail.data, name: detail.data.name || sub.name, email: detail.data.email || sub.email };
+          const { effectiveRoot: root, nextStart } = resolveRenewalBoundary(detail, activated);
           const versions = [root];
           if (root.upcoming_plan) {
-            // Validate the nested permanent identity/start boundary before it
-            // can participate in any kitchen or delivery roster.
-            menuNutritionForDate(buildNutritionResult(root), root.upcoming_plan.starting_date);
             if (String(root.upcoming_plan.starting_date).slice(0, 10) <= endDateKey
               && (!root.upcoming_plan.cycle_end_date || String(root.upcoming_plan.cycle_end_date).slice(0, 10) >= startDateKey)) {
               versions.push({ ...root.upcoming_plan, is_upcoming_plan: true });
@@ -414,7 +539,7 @@ class MatterApiService {
                 return entry.status === 'active' && d >= startDateKey && d <= endDateKey
                   && (!version.starting_date || d >= String(version.starting_date).slice(0, 10))
                   && (!version.cycle_end_date || d <= String(version.cycle_end_date).slice(0, 10))
-                  && (version.is_upcoming_plan || !root.upcoming_plan || d < String(root.upcoming_plan.starting_date).slice(0, 10));
+                  && (version.is_upcoming_plan || !nextStart || d < nextStart);
               })
               .map((entry) => String(entry.date).slice(0, 10))
               .sort();
@@ -468,15 +593,10 @@ class MatterApiService {
             }));
           });
         } catch (error) {
-          if (error.code === 'MATTER_IMPORT_INTERRUPTED') throw error;
-          console.error(`delivery-in-range check failed for subscription ${sub.subscription_id}:`, error.message);
-          failures.push({ subscriptionId: String(sub.subscription_id), message: 'Unable to verify delivery schedule' });
+          recordFailure(error, detail.subscription_id);
           return [];
-        } finally {
-          await onProgress?.({ phase: 'checking', completed: ++checked, total: candidates.length, failed: failures.length });
         }
     });
-    matches.push(...results.flat());
 
     if (failures.length) {
       const error = new Error(`Delivery roster is incomplete: ${failures.length} subscription lookup(s) failed. Retry before preparing kitchen quantities or importing deliveries.`);

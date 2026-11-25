@@ -262,6 +262,11 @@ export const mapWithConcurrency = async (items, limit, mapper) => {
  * dietaryRestrictions for its customer-detail card; KitchenCounting only
  * needs the macro/snack fields it aggregates from, so leaves it false.
  */
+const matterNutritionSubscriptionIds = input => [...new Set([
+  input?.subscription_id, input?.replaces_subscription_id,
+  input?.is_upcoming_plan === true ? input.source_parent_subscription_id : null,
+].map(value => String(value ?? '').trim()).filter(Boolean))];
+
 export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritionCacheRef, {
   concurrency = 8,
   extended = false,
@@ -275,7 +280,7 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
     if (input.subscription_id == null || !input.customer_email) continue;
     add(byCustomer, String(input.customer_id), input);
     add(byEmail, String(input.customer_email).trim().toLowerCase(), input);
-    add(bySubscription, String(input.subscription_id), input);
+    for (const id of matterNutritionSubscriptionIds(input)) add(bySubscription, id, input);
   }
   const rosterIds = new Set((Array.isArray(productionScope?.roster) ? productionScope.roster : []).map(sub => String(sub.customer_id)));
   // Freshness is still checked at use time, including workers queued behind
@@ -325,7 +330,9 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
       });
     if (nutritionResponse.data?.success === false) throw new Error('Matter inputs could not be verified.');
     const nutrition = nutritionResponse.data?.data;
-    if (!email && subscriptionId && String(nutrition?.subscription_id || '') !== subscriptionId) throw new Error('Matter subscription link does not match.');
+    if (!email && subscriptionId && !matterNutritionSubscriptionIds(nutrition).includes(subscriptionId)) {
+      throw new Error('Matter subscription link does not match.');
+    }
     const websiteMacros = nutrition?.macros
       ? { C: nutrition.macros.carbohydrates, P: nutrition.macros.protein, F: nutrition.macros.fat }
       : null;

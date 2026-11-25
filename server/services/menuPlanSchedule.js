@@ -1,10 +1,13 @@
 const key = value => String(value || '').slice(0, 10);
 const fail = message => { throw Object.assign(new Error(message), { statusCode: 409 }); };
+export const hasDatedMenuPlans = nutrition => Boolean(nutrition?.previous_plan || nutrition?.upcoming_plan);
+export const requiresDatedMenuCalendar = nutrition => hasDatedMenuPlans(nutrition) || Boolean(nutrition?.replaces_subscription_id);
 
 // A scheduled renewal is embedded in the current subscription detail. Its own
 // standalone endpoint may return 404 until activation; never infer its meals
 // from the list summary or from the customer's current plan.
 export function menuNutritionForDate(nutrition, date) {
+  if (nutrition?.previous_plan && key(date) < key(nutrition.starting_date)) return nutrition.previous_plan;
   const next = nutrition?.upcoming_plan;
   if (!next) return nutrition;
   const parentId = String(nutrition.subscription_id ?? '').trim();
@@ -24,14 +27,25 @@ export function menuPlanDates(nutrition) {
   if (nutrition.upcoming_plan && !Array.isArray(nutrition.upcoming_plan.active_delivery_dates)) {
     return fail('The upcoming Matter delivery calendar is unavailable. Please retry.');
   }
-  const candidates = [...(nutrition.active_delivery_dates || []), ...(nutrition.upcoming_plan?.active_delivery_dates || [])];
+  const candidates = [...(nutrition.previous_plan?.active_delivery_dates || []),
+    ...(nutrition.active_delivery_dates || []), ...(nutrition.upcoming_plan?.active_delivery_dates || [])];
   return [...new Set(candidates)].sort().filter(date => {
     const plan = menuNutritionForDate(nutrition, date);
-    return (!plan.starting_date || date >= key(plan.starting_date))
-      && (!plan.cycle_end_date || date <= key(plan.cycle_end_date))
-      && plan.active_delivery_dates?.includes(date);
+    return planCoversDate(plan, date) && plan.active_delivery_dates?.includes(date);
   });
 }
+
+const planCoversDate = (plan, date) => (!plan.starting_date || date >= key(plan.starting_date))
+  && (!plan.cycle_end_date || date <= key(plan.cycle_end_date))
+  && (!plan.next_subscription_starting_date || date < key(plan.next_subscription_starting_date));
+
+export const menuPlanOwnsDate = (nutrition, plan, date) =>
+  menuNutritionForDate(nutrition, date) === plan && planCoversDate(plan, date);
+
+export const menuPausedDeliveryDates = nutrition => [...new Set(
+  [nutrition.previous_plan, nutrition, nutrition.upcoming_plan].filter(Boolean).flatMap(plan =>
+    (plan.paused_delivery_dates || []).filter(date => menuPlanOwnsDate(nutrition, plan, date)))
+)];
 
 export function menuMealPlanFields(nutrition) {
   return { matterSubscriptionId: String(nutrition.subscription_id), isUpcomingPlan: nutrition.is_upcoming_plan === true };
@@ -39,6 +53,6 @@ export function menuMealPlanFields(nutrition) {
 
 
 export function menuReservedDates(nutrition) {
-  return [...new Set([nutrition, nutrition?.upcoming_plan].filter(Boolean)
+  return [...new Set([nutrition?.previous_plan, nutrition, nutrition?.upcoming_plan].filter(Boolean)
     .flatMap(plan => [...(plan.paused_delivery_dates || []), ...(plan.reserved_resume_dates || [])]))];
 }
