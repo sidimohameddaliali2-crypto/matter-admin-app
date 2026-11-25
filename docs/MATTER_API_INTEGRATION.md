@@ -1,5 +1,11 @@
 # Matter API integration
 
+## Customer profile allergens (24 November 2026)
+
+Website Customer Management displays the subscription detail's `allergens[].name` as red badges with white text in the macro/dietary profile card. Allergens have their own labelled section; `exclusions[].title` stays in Dietary Restrictions. No allergen names are inferred from exclusions or internal preferences. Missing or empty allergen arrays produce no badges and do not imply a verified allergy-free profile.
+
+This applies to every selected website customer, not a specific subscription. Each profile reads `/api/matter/subscriptions/:id`, whose server handler fetches the corresponding Matter API detail. Internal customer/database allergy fields never supply these badges. Profile-switch coverage verifies different API allergen lists, an empty list and a missing list, even when internal allergy records exist.
+
 ## Customer Management labels (23 November 2026)
 
 Customer type appears as a blue `New`/`Returning` badge in the profile header after the customer name, rather than inside Matter customer details. The header's subscription status and `Renews` badges are removed. The same type badge is retained on list cards; the dropdown remains below search.
@@ -17,6 +23,12 @@ The snapshot is stored in `Customer.matterMetadata`, exposed by `GET /api/custom
 The Upcoming plan filter and badge use `upcoming_plan.starting_date` against today's Dubai calendar date (including today); a past start is excluded. Do not infer paid service from subscription status. Missing start dates remain explicitly unavailable. Customer type filtering combines with search and existing plan/status filters. Profiles show source update/capture times, type, tags, upcoming plan name, subscription and start date.
 
 Scope check: this changes the existing logistics Customer Management page (`client/src/pages/Customers.js`) and MongoDB customer labels. It does not change the separate Customer Service components, Supabase directory, conversation identity, actions or reports; the shared Customer Service review pack remains applicable to that unchanged journey. Local acceptance covers persistence, pagination failures, identity/renewal ambiguity, date rules, filters, profiles and saved-data recovery. Live provider reads verified these list fields; deployment and real staff acceptance remain separate.
+
+## Upcoming profile section (24 November 2026)
+
+Website Customer Management includes a keyboard-accessible, collapsible **Upcoming** section below the customer header. The upcoming plan name and `starting_date` remain visible when collapsed. Expanding shows the nested subscription's plan/status, dates, meal and delivery counts, breakfast/snacks, calories/macros, red allergen badges, exclusions, delivery window, every supplied address and coordinate, delivery schedule/pauses, prices/discount/VAT and payments. Matter Core portions are labelled as food weights.
+
+Every value comes from the selected current subscription response's `upcoming_plan`. The view does not fetch the scheduled ID directly, write data, or fill missing upcoming fields from current-plan/internal records. Empty and unavailable sections are explicit. Changing customers resets the disclosure. Current plan controls remain separate; the upcoming details have no pause or invoice actions.
 
 This app reads live subscription/nutrition/delivery data from Matter's own
 backend (the website people subscribe through) and, in one place, writes to
@@ -328,6 +340,18 @@ meal selection/submission until Matter can be verified. Both the browser and
 server check stored recipe/component metadata, including private ingredients;
 customer-submitted flags cannot waive an allergen block. Internal Customer
 allergy profiles are never queried or merged in this flow.
+
+Kitchen Paper displays the Matter allergy labels alongside exclusions in
+Excel and below exclusions in PDF and Word. Auto-assignment checks the dated
+recipe and component tags against the recorded allergies before choosing a dish,
+including in fallback pools. A conflicting saved choice stays visible for
+review and blocks the production download.
+
+Kitchen auto-assignment for Matter Core ignores dietary exclusions and still
+checks recorded allergies on meals, breakfasts and snacks. For Matter Core,
+only an allergy conflict in both scheduled snack pools can trigger the three
+fallback snacks. Other plans also check dietary exclusions.
+
 Legacy partner assignment based on Internal
 Customer membership is disabled; these members need verified Matter accounts.
 

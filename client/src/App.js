@@ -14,6 +14,7 @@ import FleetManagement from './pages/FleetManagement';
 import LiveTracking from './pages/LiveTracking';
 import DriverDetail from './pages/DriverDetail';
 import Deliveries from './pages/Deliveries';
+import Collections from './pages/Collections';
 import DeliveryDetail from './pages/DeliveryDetail';
 import AddDelivery from './pages/AddDelivery';
 import BagTracking from './pages/BagOperations';
@@ -392,6 +393,15 @@ function App() {
               </ProtectedRoute>
             } />
 
+            <Route path="/collections" element={
+              <ProtectedRoute allowDispatchers>
+                <RoleBasedRoute allowedRoles={['super_admin', 'admin', 'manager', 'dispatcher']}>
+                  <PermissionBasedRoute permission="deliveries">
+                    <Layout><Collections /></Layout>
+                  </PermissionBasedRoute>
+                </RoleBasedRoute>
+              </ProtectedRoute>
+            } />
             <Route path="/customers" element={
               <ProtectedRoute>
                 <PermissionBasedRoute permission="customers">

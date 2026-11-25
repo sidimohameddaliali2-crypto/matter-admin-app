@@ -69,8 +69,8 @@ export const kitchenPreparationFailure = (summary, dateKey) => {
       const count = Number(result[counter]) || 0;
       if (count > 0) failures.push({ stage: label, mealType, count,
         reason: mealType === 'main' && label === 'Matter Core'
-          ? 'Tag meals "Also tag for Core Plan" for this date in Menu Management, save the menu, and refresh preparation. Main slots stay empty until Core-tagged meals are available.'
-          : `No available ${mealType} option for the remaining selections. Check this date's menu options and customer exclusions.` });
+          ? 'Check that this date has eligible meals tagged "Also tag for Core Plan" in Menu Management, then refresh preparation. A meal that conflicts with a recorded allergy cannot fill the slot.'
+          : `No available ${mealType} option for the remaining selections. Check this date's menu options and customer allergies and exclusions.` });
     }
   }
   const detail = failures.map(({ stage, mealType, count, reason }) =>

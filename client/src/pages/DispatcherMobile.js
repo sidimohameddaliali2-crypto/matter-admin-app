@@ -161,10 +161,10 @@ const DispatcherMobile = () => {
 
   useEffect(() => {
     // Fetch deliveries for the selected date
-    const start = new Date(`${selectedDate}T00:00:00`);
+    const start = new Date(`${selectedDate}T00:00:00+04:00`);
     if (!Number.isNaN(start.getTime())) {
       const end = new Date(start);
-      end.setDate(end.getDate() + 1);
+      end.setUTCDate(end.getUTCDate() + 1);
       
       console.log('Fetching deliveries for date:', selectedDate);
       console.log('Start:', start.toISOString());
@@ -173,7 +173,7 @@ const DispatcherMobile = () => {
       dispatch(fetchDeliveries({ 
         dateRange: 'custom',
         dateFrom: start.toISOString(),
-        dateTo: end.toISOString(),
+        dateTo: new Date(end.getTime() - 1).toISOString(),
         limit: 1000 
       }));
     }
@@ -578,13 +578,13 @@ const DispatcherMobile = () => {
         error: false
       });
       // Keep the selected date instead of fetching 'today' which might show yesterday's deliveries
-      const start = new Date(`${selectedDate}T00:00:00`);
+      const start = new Date(`${selectedDate}T00:00:00+04:00`);
       const end = new Date(start);
-      end.setDate(end.getDate() + 1);
+      end.setUTCDate(end.getUTCDate() + 1);
       dispatch(fetchDeliveries({ 
         dateRange: 'custom',
         dateFrom: start.toISOString(),
-        dateTo: end.toISOString(),
+        dateTo: new Date(end.getTime() - 1).toISOString(),
         limit: 1000 
       }));
       setDriverListOpen(false);
@@ -626,13 +626,13 @@ const DispatcherMobile = () => {
         message: data?.message || 'Driver unassigned',
         error: false
       });
-      const start = new Date(`${selectedDate}T00:00:00`);
+      const start = new Date(`${selectedDate}T00:00:00+04:00`);
       const end = new Date(start);
-      end.setDate(end.getDate() + 1);
+      end.setUTCDate(end.getUTCDate() + 1);
       dispatch(fetchDeliveries({
         dateRange: 'custom',
         dateFrom: start.toISOString(),
-        dateTo: end.toISOString(),
+        dateTo: new Date(end.getTime() - 1).toISOString(),
         limit: 1000
       }));
       clearDeliverySelection();
@@ -910,14 +910,14 @@ const DispatcherMobile = () => {
 
   return (
     <div className="min-h-screen bg-slate-50 text-gray-900">
-      <div className="safe-area-top px-4 pb-4 flex items-center justify-between">
+      <div className="safe-area-top px-4 pb-4 flex items-center justify-between flex-wrap gap-3">
         <div>
           <p className="text-sm text-gray-500">Dispatcher Hub</p>
           <h1 className="text-2xl font-semibold text-gray-900">
             {user?.profile?.firstName ? `Hello, ${user.profile.firstName}` : 'Dispatcher Mobile'}
           </h1>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <button
             type="button"
             onClick={() => { dispatch(fetchEvents()); navigate('/dispatcher/events'); }}
@@ -2010,13 +2010,13 @@ const DispatcherMobile = () => {
                   }
                   await api.put(`/deliveries/${editingDelivery._id}`, payload);
                   setEditingDelivery(null);
-                  const start = new Date(`${selectedDate}T00:00:00`);
+                  const start = new Date(`${selectedDate}T00:00:00+04:00`);
                   const end = new Date(start);
-                  end.setDate(end.getDate() + 1);
+                  end.setUTCDate(end.getUTCDate() + 1);
                   dispatch(fetchDeliveries({
                     dateRange: 'custom',
                     dateFrom: start.toISOString(),
-                    dateTo: end.toISOString(),
+                    dateTo: new Date(end.getTime() - 1).toISOString(),
                     limit: 1000
                   }));
                   setFeedback({ message: 'Delivery updated successfully', error: false });

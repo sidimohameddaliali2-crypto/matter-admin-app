@@ -26,6 +26,7 @@ import { recalculateDriverKPI } from '../services/driverKpiService.js';
 import { businessRangeBounds, getTimingOverview, getTimingRecords } from '../services/deliveryTimingHistory.js';
 import { businessOffsetMs, getBusinessDayBounds, isDateKey, setBusinessTimeOfDay } from '../utils/businessDate.js';
 import { protectMatterRevenueInput } from '../middleware/matterRevenueInput.js';
+import { protectCollectionRefundInput } from '../middleware/collectionRefundInput.js';
 import { fillProofAddressInBackground, resolveProofAddressWithin } from '../services/proofLocationAddress.js';
 import { recordProofReceipt } from '../services/truckoomVisitRules.js';
 import {
@@ -371,6 +372,7 @@ async function checkAndApplyPendingChanges(delivery) {
 router.use(protect);
 router.use(protectMatterRevenueInput);
 router.use(protectMatterImportIdentityInput);
+router.use(protectCollectionRefundInput);
 // Tracker verdicts, their baseline evidence, and receipt timestamps are server-owned.
 router.use(function protectTrackerEvidence(req, res, next) {
   const clean = value => {

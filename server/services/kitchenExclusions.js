@@ -1,4 +1,4 @@
-import { exclusionMatchesAny } from '../../client/src/constants/exclusionMatching/index.js';
+import { allergenMatchesAny, exclusionMatchesAny } from '../../client/src/constants/exclusionMatching/index.js';
 import { mealFingerprint } from './mealLibraryDuplicates.js';
 
 const terms = value => Array.isArray(value) ? value.flatMap(item => terms(item?.name ?? item))
@@ -54,19 +54,28 @@ export const datedKitchenIngredientKey = item => {
   return ingredients.length ? JSON.stringify(ingredients) : null;
 };
 
+export const identifyKitchenMenuItem = item => ({
+  ...item, ...datedKitchenRecipeKeys(item), assignmentProtein: datedKitchenProtein(item),
+  assignmentRestrictionKey: datedKitchenRestrictionKey(item), assignmentIngredientKey: datedKitchenIngredientKey(item),
+});
+
 export const toKitchenOption = item => ({
   ...item, name: item.name || item.mealName, type: item.type || item.portionType,
+  kitchenMenuItemId: item.kitchenMenuItemId || item._id,
   exclusions: [...new Set([...terms(item.exclusions), ...terms(item.intolerances)])],
 });
 
 const mergeKitchenOption = (option, item) => toKitchenOption({ ...item, ...option,
+  kitchenMenuItemId: item._id,
+  allergyAlternatives: [item],
   cycleMeal: item.cycleMeal || option.cycleMeal,
   exclusions: [...terms(item.exclusions), ...terms(option.exclusions)],
 });
 
-export const mergeKitchenMetadata = (options, items) => options.map(option => {
-  const item = items.find(candidate => nameKey(candidate.mealName) === nameKey(option.name));
-  return item ? mergeKitchenOption(option, item) : option;
+export const mergeKitchenMetadata = (options, items, allergyRotations = options) => options.map(option => {
+  const matches = items.filter(candidate => nameKey(candidate.mealName) === nameKey(option.name));
+  const matchingRotations = allergyRotations.filter(candidate => candidate !== option && compactName(candidate.name) === compactName(option.name));
+  return matches.length ? { ...mergeKitchenOption(option, matches[0]), allergyAlternatives: [...matches, ...matchingRotations] } : option;
 });
 
 // Older rotations store only names and tags. Use the real dated recipes for
@@ -106,7 +115,37 @@ export const hydrateMainRotation = (options, items, rotation = options, role) =>
     rotationExclusions: terms(option.exclusions) }, item)) : [option];
 });
 
-export const kitchenMealConflicts = (option, exclusions = []) => {
+export const buildLegacyKitchenMainRotation = (dayOptions, items) => {
+  const main = dayOptions?.mainMeals || [];
+  const sub = dayOptions?.subMeals || [];
+  const rotations = [...main, ...sub];
+  const mains = hydrateMainRotation(main, items, rotations, 'main');
+  const subs = hydrateMainRotation(sub, items, rotations, 'sub');
+  const linked = [...mains, ...subs].filter(meal => meal._id);
+  const linkedIds = new Set(linked.map(meal => String(meal._id)));
+  const restrictions = new Map();
+  const copiesByRecipe = new Map();
+  for (const item of items) {
+    if (!item.assignmentCopyKey) continue;
+    const copies = copiesByRecipe.get(item.assignmentCopyKey) || [];
+    copies.push(item);
+    copiesByRecipe.set(item.assignmentCopyKey, copies);
+  }
+  for (const meal of linked) {
+    const verifiedCopies = (copiesByRecipe.get(meal.assignmentCopyKey) || []).filter(item =>
+      !linkedIds.has(String(item._id)) && (!meal.assignmentIngredientKey || !item.assignmentIngredientKey
+        || meal.assignmentIngredientKey === item.assignmentIngredientKey));
+    for (const id of new Set([meal._id, ...verifiedCopies.map(item => item._id)].map(String))) {
+      restrictions.set(id, [...new Set([...(restrictions.get(id) || []), ...meal.rotationExclusions, meal.rotationName].filter(Boolean))]);
+    }
+  }
+  const withSharedRestrictions = meal => restrictions.has(String(meal._id))
+    ? { ...meal, exclusions: [...new Set([...meal.exclusions, ...restrictions.get(String(meal._id))])] } : meal;
+  const remainingSubs = items.filter(item => item.rotationCategory === 'sub' && !linkedIds.has(String(item._id))).map(toKitchenOption);
+  return { mains: mains.map(withSharedRestrictions), subs: [...subs, ...remainingSubs].map(withSharedRestrictions), restrictions };
+};
+
+const kitchenMealGroups = option => {
   const snapshot = option.cycleMeal || {};
   const main = option.mealType === 'main' || !option.mealType && ['chicken', 'beef', 'fish'].includes(option.type);
   const components = {
@@ -142,11 +181,71 @@ export const kitchenMealConflicts = (option, exclusions = []) => {
     components[groupOf(component)].push(...terms(component.name), ...terms(component.exclusions),
       ...terms(component.allergens), ...terms(component.ingredients));
   }
+  return { main, components };
+};
+
+export const kitchenMealConflicts = (option, exclusions = []) => {
+  const { main, components } = kitchenMealGroups(option);
   return Object.fromEntries(Object.entries(components).map(([component, ingredients]) => {
     const names = main ? ingredients.map(compactName) : ingredients;
     return [component, exclusions.filter(exclusion => exclusionMatchesAny(main ? compactName(exclusion) : exclusion, names))];
   }));
 };
+
+export const kitchenAllergyConflicts = (option, allergies = []) => {
+  if (!allergies.length) return [];
+  const ingredients = [option, ...(option.allergyAlternatives || [])].flatMap(candidate => [
+    ...Object.values(kitchenMealGroups(candidate).components).flat(),
+    ...['ingredients', 'exclusions', 'allergens'].flatMap(field => terms(candidate.cycleMeal?.[field])),
+  ]);
+  return allergies.filter(allergy => allergenMatchesAny(allergy, ingredients));
+};
+
+const legacyChoiceFields = {
+  proteinChoice: ['proteinSource', 'portionIngredients', ['Protein', 'Portion']],
+  carbChoice: ['carbs', 'carbIngredients', ['Carb']],
+  vegChoice: ['veg', 'vegIngredients', ['Vegetable', 'Salad']],
+  sauceChoice: ['sauce', 'sauceIngredients', ['Sauce', 'Sauce 2', 'Extra sauce / topping']],
+};
+
+export const resolveLegacyKitchenChoices = (meal, items, restrictionsById) => {
+  const ingredients = [];
+  const unverified = [];
+  const sources = new Set();
+  for (const [choice, [label, legacyIngredients, types]] of Object.entries(legacyChoiceFields)) {
+    const chosen = compactName(meal[choice]);
+    if (!chosen) continue;
+    let verified = false;
+    for (const item of items) {
+      if ([item[label], ...terms(item[label])].some(value => compactName(value) === chosen)) {
+        verified = true;
+        sources.add(item);
+        ingredients.push(...terms(item[legacyIngredients]));
+      }
+      const components = Array.isArray(item.cycleMeal?.components) ? item.cycleMeal.components : [];
+      for (const component of components) {
+        if (!types.includes(component?.type) || compactName(component.name) !== chosen) continue;
+        verified = true;
+        sources.add(item);
+        ingredients.push(...[component.ingredients, component.allergens, component.exclusions].flatMap(terms));
+      }
+    }
+    if (!verified) unverified.push(meal[choice]);
+  }
+  // Legacy choices don't identify an exact component source. Keep general
+  // declarations on every dated recipe that could have supplied the choice.
+  for (const item of sources) {
+    ingredients.push(...[item.ingredients, item.allergens, item.exclusions, item.intolerances,
+      item.cycleMeal?.ingredients, item.cycleMeal?.allergens, item.cycleMeal?.exclusions,
+      restrictionsById?.get(String(item._id))].flatMap(terms));
+  }
+  return { ingredients, unverified };
+};
+
+// When a customer has recorded allergies, a name-only rotation is not
+// enough to verify a dish's ingredients.
+export const kitchenAllergyAllows = (option, allergies = []) => !allergies.length
+  || Boolean(option.kitchenMenuItemId) && !kitchenAllergyConflicts(option, allergies).length;
 
 export const kitchenConflictList = (option, exclusions) => [...new Set(Object.values(kitchenMealConflicts(option, exclusions)).flat())];
 

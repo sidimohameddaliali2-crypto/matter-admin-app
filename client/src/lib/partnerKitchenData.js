@@ -15,7 +15,9 @@ export const partnerCountingRows = data => data.counts.map(item => ({
 }));
 export const partnerPaperRows = data => data.orders.flatMap(order => order.lines.map(item => ({
   Section: 'Partner', 'Delivery time': order.deliveryTime || '', Customer: order.partnerName,
+  Allergies: '',
   Type: PARTNER_MEAL_LABELS[item.mealType] || item.mealType, Meal: item.name,
+  'Auto Assigned': '',
   Quantity: item.quantity, Order: order.reference, Note: order.notes || ''
 })));
 

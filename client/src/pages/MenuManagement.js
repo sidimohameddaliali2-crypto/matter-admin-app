@@ -9,6 +9,7 @@ import api from '../utils/api';
 import { activityReference, recordActivityChange } from '../utils/activityCapture';
 import { loadKitchenSnapshot } from '../lib/kitchenSnapshot';
 import { assertKitchenExportReady } from '../utils/kitchenIntegrity';
+import { kitchenPaperAllergyLine, kitchenPaperPdfAutoSuffix, kitchenPaperExclusions } from '../utils/kitchenPaperCustomer';
 import { copyManagedMenuItem, managedMenuPayload } from '../utils/managedMenuItems';
 import { importCycleMenu } from '../utils/cycleMenuImport';
 import { mealCreationStore } from '../utils/mealCreationStore';
@@ -1331,7 +1332,6 @@ const MenuManagement = () => {
       const totalP = selectedMeals.reduce((sum, meal) => sum + Number(meal.macros?.P || 0), 0);
       const totalF = selectedMeals.reduce((sum, meal) => sum + Number(meal.macros?.F || 0), 0);
       const totalCalories = entry.totalCalories;
-      const exclusion = entry.dietaryRestrictions?.join(', ') || 'None';
       const submittedAt = selectedCustomerDetail.lastMenuSelectionDate
         ? new Date(selectedCustomerDetail.lastMenuSelectionDate).toLocaleString('en-US', {
             weekday: 'short', month: 'short', day: 'numeric', year: 'numeric', hour: '2-digit', minute: '2-digit'
@@ -1379,7 +1379,12 @@ const MenuManagement = () => {
         currentY += addTextLines(`Customer ID: ${selectedCustomerDetail.customerId}`, margin, currentY);
       }
       currentY += addTextLines(`Submitted: ${submittedAt}`, margin, currentY);
-      currentY += addTextLines(`Meal exclusion: ${exclusion}`, margin, currentY);
+      const exclusions = sortedDateKeys.map(date => kitchenPaperExclusions(entry, date));
+      if (new Set(exclusions).size <= 1) currentY += addTextLines(`Meal exclusion: ${exclusions[0] || kitchenPaperExclusions(entry)}`, margin, currentY);
+      else sortedDateKeys.forEach((date, index) => { currentY += addTextLines(`${date} Meal exclusion: ${exclusions[index]}`, margin, currentY); });
+      const allergyLines = sortedDateKeys.map(date => kitchenPaperAllergyLine(entry, date));
+      if (new Set(allergyLines).size <= 1) currentY += addTextLines(allergyLines[0] || kitchenPaperAllergyLine(entry), margin, currentY);
+      else sortedDateKeys.forEach((date, index) => { currentY += addTextLines(`${date} ${allergyLines[index]}`, margin, currentY); });
       currentY += addTextLines(`Total meals selected: ${totalSelectedMeals}`, margin, currentY);
       currentY += addTextLines(`Meals in profile: ${profileMeals}`, margin, currentY);
 
@@ -1420,7 +1425,7 @@ const MenuManagement = () => {
             const name = meal.mealName || meal.menuItemId?.mealName || 'Meal';
             const type = meal.mealType || meal.menuItemId?.mealType || 'Meal';
             const quantity = Number(meal.quantity) || 1;
-            const mealLine = `• ${name} (${type})${quantity > 1 ? ` x${quantity}` : ''}`;
+            const mealLine = `• ${name} (${type})${quantity > 1 ? ` x${quantity}` : ''}${kitchenPaperPdfAutoSuffix(meal)}`;
             const height = addTextLines(mealLine, margin + 2, currentY);
             currentY += height;
             currentY += addTextLines(`  P: ${meal.proteinWeight}g | C: ${meal.carbWeight}g | V: ${meal.vegWeight}g`, margin + 4, currentY);

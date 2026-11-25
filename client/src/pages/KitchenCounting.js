@@ -1,7 +1,7 @@
 import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady } from '../utils/kitchenIntegrity';
 import { recordActivityChange } from '../utils/activityCapture';
 import useKitchenSelectionWindow from '../lib/useKitchenSelectionWindow';
-import { assertKitchenRosterCovered, verifiedKitchenRoster, hasKitchenDeliveryOnDate } from '../lib/kitchenSnapshot';
+import { assertKitchenRosterCovered, verifiedKitchenRoster, hasKitchenDeliveryOnDate, verifyKitchenSnapshot } from '../lib/kitchenSnapshot';
 import React, { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { Download, Loader, RefreshCw } from 'lucide-react';
 import { KitchenWorkspaceHeader, KitchenEmptyState, KitchenAutoScopeControl } from '../components/KitchenWorkspace';
@@ -50,6 +50,7 @@ const KitchenCounting = () => {
   const [exportError, setExportError] = useState('');
   const [exporting, setExporting] = useState(false);
   const exportInFlight = useRef(false);
+  const preparedForCounting = useRef(null);
   const [loading, setLoading] = useState(false);
   const [loadProgress, setLoadProgress] = useState({ done: 0, total: 0 });
   const [error, setError] = useState('');
@@ -135,6 +136,7 @@ const KitchenCounting = () => {
     const current = () => requestGuard.current.isCurrent(request) && activeScope.current === scope;
     setCustomerEntries([]);
     setLoadedScope('');
+    preparedForCounting.current = null;
     if (!selectedMenuId || !selectedDate) { setLoading(false); return; }
     nutritionCacheRef.current.clear();
     setLoading(true);
@@ -143,6 +145,7 @@ const KitchenCounting = () => {
       // Explicit preparation must finish before the selections snapshot is read.
       const preparation = await prepareKitchenSelections(api, selectedMenuId, selectedDate, current);
       if (!current()) return;
+      if (preparation.data?.kitchenAllergyReview) throw new Error(preparation.data.kitchenAllergyReview);
       const response = preparation.data?.kitchenSelections ? { data: { success: true, data: preparation.data.kitchenSelections } } : await api.get(`/menus/${selectedMenuId}/selections`, { timeout: 30000 });
       if (!response.data?.success) throw new Error(response.data?.message || 'Selections could not be verified.');
       const rawSelections = response.data?.success ? (response.data.data || []) : [];
@@ -201,6 +204,7 @@ const KitchenCounting = () => {
       // exactly as Kitchen List does. Another day's lookup cannot block it.
       const deliverable = computed.map(entry => kitchenCustomerDay(entry, selectedDate));
       assertKitchenExportReady(deliverable);
+      preparedForCounting.current = { scope, snapshotId: preparation.snapshotId, selectionOpen: preparation.preparation === 'selection-open' };
       setCustomerEntries(deliverable);
       setLoadedScope(scope);
     } catch (err) {
@@ -273,6 +277,18 @@ const KitchenCounting = () => {
   const countingExportReady = partnerOnlyDate
     || (!loading && !error && loadedScope === `${selectedMenuId}:${selectedDate}` && (!hasCustomerCountRows || componentsReady));
 
+  const verifyCountingExport = async scope => {
+    const prepared = preparedForCounting.current;
+    if (prepared?.scope !== scope) throw new Error('Reload the selected date before exporting.');
+    if (prepared.snapshotId) await verifyKitchenSnapshot(api, selectedMenuId, selectedDate, prepared.snapshotId);
+    else if (prepared.selectionOpen) {
+      const state = await prepareKitchenSelections(api, selectedMenuId, selectedDate,
+        () => activeScope.current === scope, { verifyAllergies: true });
+      if (state.data?.kitchenAllergyReview) throw new Error(state.data.kitchenAllergyReview);
+      if (state.preparation !== 'selection-open') throw new Error('Selections closed. Reload kitchen counts before exporting.');
+    }
+  };
+
   // Per-meal drill-down: every customer who has THIS specific meal (same
   // category + name) on the selected date, with their own portion weight —
   // a customer who picked the same dish twice (quantity: 2) gets two rows
@@ -282,6 +298,12 @@ const KitchenCounting = () => {
     const scope = `${selectedMenuId}:${selectedDate}`;
     if (!customerDownloadsReady || loading || error || loadedScope !== scope) return;
     const componentVersion = componentRequest.current;
+    try { await verifyCountingExport(scope); }
+    catch (err) {
+      if (activeScope.current === scope) setExportError(err.response?.data?.message || err.message);
+      return;
+    }
+    if (activeScope.current !== scope || preparedForCounting.current?.scope !== scope) return;
     assertKitchenExportReady(customerEntries);
     const rows = [];
     kitchenCountMeals(customerEntries, selectedDate, componentCatalog, Boolean(componentWarning))
@@ -329,6 +351,7 @@ const KitchenCounting = () => {
         hasCustomerCountRows ? refreshComponentSettings.current?.() : null,
         loadPartnerKitchenOrders(api, productionDate, () => activeScope.current === scope),
         loadXLSX(),
+        partnerOnlyDate ? null : verifyCountingExport(scope),
       ]);
       if (activeScope.current !== scope) return;
       if (hasCustomerCountRows && (!settings || componentRequest.current !== settings.version)) {
@@ -354,7 +377,7 @@ const KitchenCounting = () => {
     exportInFlight.current = true; setExporting(true); setExportError('');
     try {
       assertKitchenExportReady(customerEntries);
-      const [settings, module] = await Promise.all([refreshComponentSettings.current?.(), import('xlsx-js-style')]);
+      const [settings, module] = await Promise.all([refreshComponentSettings.current?.(), import('xlsx-js-style'), verifyCountingExport(scope)]);
       if (activeScope.current !== scope) return;
       if (!settings || componentRequest.current !== settings.version) {
         throw new Error('Component settings could not be verified for this download. Please try again.');

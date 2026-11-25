@@ -572,7 +572,9 @@ router.get('/', async (req, res) => {
         { customerId: regex },
         { firstName: regex },
         { lastName: regex },
-        { email: regex }
+        { email: regex },
+        { phone: regex },
+        { $expr: { $regexMatch: { input: { $concat: [{ $ifNull: ['$firstName', ''] }, ' ', { $ifNull: ['$lastName', ''] }] }, regex: escaped, options: 'i' } } }
       ];
     }
 

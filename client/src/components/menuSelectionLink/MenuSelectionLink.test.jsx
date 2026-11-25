@@ -128,6 +128,30 @@ test('separate carb and vegetable conflicts retain existing messages and submit 
   expect(api.post.mock.calls[0][1].selections[0]).toMatchObject({carbVegAction:'replace',carbConflict:['Coriander'],vegConflict:['Mushroom']});
 });
 
+test.each(['main', 'breakfast'])('fixed %s offers a whole-meal choice and never submits carb or veg swaps', async mealType => {
+  const item = cycleItem([privateComponent('portion', 'Protein'), privateComponent('carb', 'Carb', ['Dairy']), privateComponent('veg', 'Vegetable', ['Mushroom'])], { mealType });
+  item.cycleMeal.isFixedMeal = true; item.cycleMeal.mealKind = mealType === 'breakfast' ? 'Breakfast' : 'Main meal';
+  await signIn(item, { mealExclusion: 'Dairy; Mushroom' }); await click(button('+', card()));
+  expect(button('Replace it')).toBeUndefined(); expect(button('Keep as is')).toBeUndefined();
+  expect(button('Replace with another')).toBeDefined(); await click(button('Keep selection'));
+  await click(button('Submit my week'));
+  const saved = api.post.mock.calls[0][1].selections[0];
+  expect(saved.carbVegAction).toBeUndefined(); expect(saved.carbVegPreference).toBeUndefined();
+  expect(saved.carbConflict).toEqual([]); expect(saved.vegConflict).toEqual([]);
+  expect(saved.preferenceConflict).toEqual(['Dairy', 'Mushroom']);
+});
+
+test('fixed salad dressing remains private and cannot generate a vegetable replacement', async () => {
+  const item = cycleItem([privateComponent('portion', 'Protein'), privateComponent('salad', 'Salad'), privateComponent('dressing', 'Sauce 2', ['Mushroom'])]);
+  item.cycleMeal.isFixedMeal = true; item.cycleMeal.isSaladBase = true;
+  await signIn(item, { mealExclusion: 'Mushroom' });
+  expect(card().textContent).not.toContain('Mushroom'); await click(button('+', card()));
+  expect(node.querySelector('.dialog')).toBeNull(); await click(button('Submit my week'));
+  const saved = api.post.mock.calls[0][1].selections[0];
+  expect(saved.carbVegAction).toBeUndefined(); expect(saved.vegConflict).toEqual([]);
+  expect(saved.preferenceConflict).toEqual(['Mushroom']);
+});
+
 test.each(['salad','dressing'])('a private %s conflict adds silently and submits the replace-veg flag', async source => {
   const components=[privateComponent('portion','Protein'),privateComponent('salad','Salad',source==='salad'?['Mushroom']:[]),privateComponent('dressing','Sauce 2',source==='dressing'?['Mushroom']:[])];
   const item=cycleItem(components);item.cycleMeal.isSaladBase=true;

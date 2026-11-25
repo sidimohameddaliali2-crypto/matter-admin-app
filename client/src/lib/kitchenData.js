@@ -367,6 +367,7 @@ export const enrichSelectionsWithNutrition = async (api, rawSelections, nutritio
       deliveryDates: Array.isArray(nutrition?.active_delivery_dates) ? nutrition.active_delivery_dates : null,
       doubleDeliveryDates: Array.isArray(nutrition?.double_delivery_dates) ? nutrition.double_delivery_dates : null,
       dietaryRestrictions: Array.isArray(nutrition?.exclusions) ? nutrition.exclusions : null,
+      allergyProfile: nutrition?.allergyProfile || null,
       ...(extended ? {
         deliveryAddress: nutrition?.delivery_address_resolution?.address || null,
         deliveryAddressStatus: nutrition?.delivery_address_resolution?.status || 'unresolved',

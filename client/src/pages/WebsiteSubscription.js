@@ -7,6 +7,7 @@ import DeliveryCalendar from '../components/DeliveryCalendar';
 import { matchLabels } from '../components/subscriptionUi';
 import { formatDate, formatMoney, isCycleEnded, daysUntil } from '../utils/subscriptionFormat';
 import CustomerMatterDetails, { CustomerTypeTag, CustomerTagBadges } from '../components/CustomerMatterDetails';
+import UpcomingPlanSection from '../components/UpcomingPlanSection';
 import { websiteMetadataCustomer, hasUpcomingPlan, typeLabel, matchesCustomerType } from '../utils/customerMatterMetadata';
 
 // "Due for renewal" = fewer than 6 days left until renewal_due_date, and the
@@ -699,6 +700,11 @@ function CustomerProfilePanel({ subscriptionId, refreshVersion }) {
   };
 
   const websiteExclusions = profile?.exclusions || [];
+  // Owner (2026-11-24): apply to every selected Matter subscription; never
+  // substitute internal customer allergies or exclusions for API allergens.
+  const websiteAllergens = Array.isArray(profile?.allergens)
+    ? profile.allergens.filter(allergen => typeof allergen?.name === 'string' && allergen.name.trim())
+    : [];
   const internalExclusionNames = (match?.customer?.mealExclusion || '')
     .split(',')
     .map((s) => s.trim())
@@ -788,6 +794,7 @@ function CustomerProfilePanel({ subscriptionId, refreshVersion }) {
       </div>
 
       {/* Subscription details + Macro profile */}
+      <UpcomingPlanSection key={profile.subscription_id} subscription={profile} />
       <div className="mb-4"><CustomerMatterDetails customer={websiteMetadataCustomer(profile)} /></div>
       <div className="grid grid-cols-12 gap-4 mb-4">
         <div className="col-span-12 lg:col-span-7 bg-white rounded-2xl border border-matter-dust/40 shadow-md p-6">
@@ -834,6 +841,18 @@ function CustomerProfilePanel({ subscriptionId, refreshVersion }) {
               <MacroBlock key={m.key} label={m.label} grams={profile.macros?.[m.key]} max={macroMax} box={m.box} track={m.track} fill={m.fill} text={m.text} />
             ))}
           </div>
+          {websiteAllergens.length > 0 && (
+            <section aria-label="Allergens" className="mt-4 pt-4 border-t border-gray-100">
+              <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-2">Allergens</p>
+              <div className="flex flex-wrap gap-1.5">
+                {websiteAllergens.map((allergen, index) => (
+                  <span key={allergen.id ?? `${allergen.name}-${index}`} className="inline-flex items-center rounded-full bg-red-600 px-2.5 py-1 text-xs font-semibold text-white">
+                    {allergen.name}
+                  </span>
+                ))}
+              </div>
+            </section>
+          )}
           {(websiteExclusions.length > 0 || missingFromWebsite.length > 0) && (
             <div className="mt-4 pt-4 border-t border-gray-100">
               <p className="flex items-center gap-1.5 text-[11px] font-semibold text-gray-400 uppercase tracking-widest mb-2">

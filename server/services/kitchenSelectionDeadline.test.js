@@ -7,6 +7,8 @@ import Snapshot from '../models/KitchenProductionSnapshot.js';
 import Breakfast from '../models/KitchenBreakfastPreset.js';
 import Snack from '../models/KitchenSnackPreset.js';
 import Archive from '../models/MenuSelectionArchive.js';
+import Customer from '../models/Customer.js';
+import Item from '../models/MenuItem.js';
 import matter from './matterApiService.js';
 import { beginKitchenState } from './kitchenProductionSnapshot.js';
 import { runAssignMainMeals, runAssignSnacks, runAssignMatterCoreMeals, runAutoPopulateMissing } from '../routes/menus.js';
@@ -76,4 +78,23 @@ test('open preview preserves saved choices, adds transient missing rows, and nev
   assert.deepEqual(result.data.data.kitchenSelections[1].selectedMeals, []);
   const refreshed = await beginKitchenState('menu', '2099-11-02', () => assert.fail('Refresh must not assign before the deadline'), { refresh: true });
   assert.equal(refreshed.state, 'selection-open');
+});
+
+test('open preview keeps the saved choice but marks an allergy conflict for production export', async t => {
+  const date = '2099-11-02';
+  const meal = { date, mealType: 'main', menuItemId: 'dish', mealName: 'House bowl' };
+  const record = { email: 'fixture@example.invalid', matterCustomerId: '42', selectedMeals: [meal] };
+  t.mock.method(Menu, 'findById', () => query({ meals: [{ items: ['dish'] }] }));
+  t.mock.method(Record, 'find', () => query([record]));
+  t.mock.method(Breakfast, 'findOne', () => query(null));
+  t.mock.method(Snack, 'findOne', () => query(null));
+  t.mock.method(Customer, 'find', () => query([]));
+  t.mock.method(Item, 'find', () => query([{ _id: 'dish', mealType: 'main', mealName: 'House bowl', allergens: ['Nuts'] }]));
+  t.mock.method(matter, 'findSubscriptionsWithDeliveryOnDate', async () => [{ customer_id: '42', email: record.email,
+    kitchen_inputs: { customer_id: '42', customer_email: record.email, allergens: ['Peanuts'] } }]);
+  const result = await beginKitchenState('menu', date, () => assert.fail('Open preview cannot assign'));
+  assert.equal(result.state, 'selection-open');
+  assert.match(result.data.data.kitchenAllergyReview, /^1 saved/);
+  assert.match(result.data.data.kitchenAllergyCases[0].message, /House bowl.*Peanuts/);
+  assert.deepEqual(result.data.data.kitchenSelections[0].selectedMeals, [meal]);
 });

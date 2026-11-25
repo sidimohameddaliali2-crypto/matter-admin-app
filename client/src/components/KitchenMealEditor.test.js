@@ -42,6 +42,30 @@ test('cutoff disables additions and changes while history and explicit restore r
   await act(async () => button('Confirm restore').click());
   expect(api.post.mock.calls[0][1].action).toBe('restore');
 });
+test('after cutoff, only the flagged meal and same-type replacement can be saved', async () => {
+  const p = { ...props(), canEdit: false };
+  api.get.mockResolvedValueOnce({ data: { success: true, data: { token: 'version', canEdit: false,
+    allergyReplacementMealIds: ['saved'], meals: [
+      { _id: 'saved', mealName: 'Peanut chicken', mealType: 'main', quantity: 2 },
+      { _id: 'other', mealName: 'Other meal', mealType: 'main' },
+    ], choices: [
+      { id: 'chicken', name: 'Lemon chicken', mealType: 'main', conflicts: [] },
+      { id: 'peanuts', name: 'Peanut salad', mealType: 'main', conflicts: [], allergyConflicts: ['Peanuts'] },
+      { id: 'oats', name: 'Oats', mealType: 'breakfast', conflicts: [] },
+    ] } } });
+  await act(async () => root.render(<KitchenMealEditor {...p} intent={{ action: 'change', mealId: 'saved' }} />));
+  expect(button('Add meal').disabled).toBe(true);
+  expect([...node.querySelector('[aria-label="Current meal"]').options].map(item => item.value)).toEqual(['', 'saved']);
+  const choices = node.querySelector('[aria-label="New dish"]');
+  expect([...choices.options].map(item => item.value)).toEqual(['', 'chicken', 'peanuts']);
+  expect(choices.querySelector('[value="peanuts"]').disabled).toBe(true);
+  expect(button('Confirm meal change').disabled).toBe(true);
+  await act(async () => { choices.value = 'chicken'; choices.dispatchEvent(new Event('change', { bubbles: true })); });
+  await act(async () => button('Confirm meal change').click());
+  expect(api.post).toHaveBeenCalledWith('/menus/menu/kitchen-customers/42/meal-editor',
+    expect.objectContaining({ action: 'change', mealId: 'saved', menuItemId: 'chicken' }), { timeout: 30000 });
+  expect(p.onChanged).toHaveBeenCalledTimes(1);
+});
 test('stale errors are shown without reporting success, and a late response cannot open another customer’s editor', async () => {
   const p = props();
   await act(async () => root.render(<KitchenMealEditor {...p} intent={{ action: 'delete', mealId: 'saved' }} />));

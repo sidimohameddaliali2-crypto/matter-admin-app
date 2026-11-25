@@ -3,7 +3,7 @@ import { assertKitchenExportReady, kitchenMealChanges } from './kitchenIntegrity
 //
 // One page per delivery date, each laid out like the customer's block on the
 // Day Kitchen Paper: name + delivery-time tag, address, plan line, exclusions,
-// the day note, the meal table (with the LARGE breakfast tag) and total macros.
+// the day note, the meal table and total macros.
 //
 // Owner (2026-10-12): same rule as the Day paper — a date the customer has no
 // active Matter delivery for is left out (listed on the first page instead).
@@ -40,7 +40,37 @@ const orNA = (value) => (value === null || value === undefined || value === '' ?
 const breakfastLabelFor = (entry) => (entry.breakfastIncluded === null || entry.breakfastIncluded === undefined
   ? 'N/A'
   : (entry.breakfastIncluded ? 'Yes' : 'No'));
-const isLargeBreakfast = (meal) => String(meal?.mealType || '').toLowerCase() === 'breakfast' && !!meal?.flags?.isLargeBreakfast;
+export const isLargeBreakfast = (meal) => String(meal?.mealType || '').toLowerCase() === 'breakfast' && !!meal?.flags?.isLargeBreakfast;
+export const kitchenPaperAutoLabel = meal => meal?.isAutoAssigned === true ? 'Auto' : '';
+export const kitchenPaperPdfAutoSuffix = (meal, spacing = ' ') => kitchenPaperAutoLabel(meal) ? `${spacing}[AUTO]` : '';
+
+export const kitchenPaperExclusions = (entry, date) => {
+  const profile = entry?.dietaryProfilesByDate?.[date] || entry;
+  if (String(profile?.planName || '').trim().toLowerCase() === 'matter core') return 'Matter Core (allergy checks only)';
+  if (!Array.isArray(profile?.dietaryRestrictions)) return 'Not available';
+  return profile.dietaryRestrictions.map(item => String(item || '').trim()).filter(Boolean).join(', ') || 'None';
+};
+
+export const kitchenPaperAllergies = (entry, date) => {
+  const profile = entry.allergyProfilesByDate?.[date] || entry.allergyProfile;
+  return profile?.allergiesAvailable && Array.isArray(profile.allergies)
+    ? profile.allergies.join(', ') || 'None on file' : 'Unavailable from Matter';
+};
+
+export const kitchenPaperAllergyLine = (entry, date) => `Allergies: ${kitchenPaperAllergies(entry, date)}`;
+
+export const kitchenPaperMealPdfText = (meal, name) => {
+  const changes = kitchenMealChanges(meal);
+  return `${name}${isLargeBreakfast(meal) ? '   [LARGE]' : ''}${kitchenPaperPdfAutoSuffix(meal, '   ')}${changes ? `\n${changes}` : ''}`;
+};
+
+export const kitchenPaperMealWordHtml = (meal, name, escape, tagSize) => {
+  const tag = (label, background, color) => ` <span style="background:${background};color:${color};font-size:${tagSize}pt;font-weight:bold">&nbsp;${label}&nbsp;</span>`;
+  const large = isLargeBreakfast(meal) ? tag('LARGE', '#6d28d9', '#ffffff') : '';
+  const auto = kitchenPaperAutoLabel(meal) ? tag('AUTO', '#fef3c7', '#92400e') : '';
+  const changes = kitchenMealChanges(meal);
+  return `${escape(name)}${large}${auto}${changes ? `<br/><b>${escape(changes)}</b>` : ''}`;
+};
 
 export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers }) => {
   assertKitchenExportReady([entry]);
@@ -101,7 +131,7 @@ export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers 
     y += planLines.length * 5.2 + 0.8;
 
     doc.setTextColor(190, 18, 60);
-    const exclusionLines = doc.splitTextToSize(`Exclusions: ${exclusionsText(entry)}`, pageWidth - 28);
+    const exclusionLines = doc.splitTextToSize(`Exclusions: ${exclusionsText(entry, day.dateKey)}\n${kitchenPaperAllergyLine(entry, day.dateKey)}`, pageWidth - 28);
     doc.text(exclusionLines, 14, y);
     doc.setTextColor(0);
     y += exclusionLines.length * 5.2 + 0.8;
@@ -134,10 +164,9 @@ export const downloadCustomerPaperPdf = async ({ entry, fromKey, toKey, helpers 
     autoTable(doc, {
       startY: y,
       head: [['Type', 'Meal', 'P', 'C', 'V']],
-      body: day.meals.map((meal, i) => {
+      body: day.meals.map((meal) => {
         const label = getMealLabel(meal);
-        const changes = kitchenMealChanges(meal);
-        return [label.mealType, `${label.mealName}${large[i] ? '   [LARGE]' : ''}${changes ? `\n${changes}` : ''}`, `${meal.proteinWeight || 0}g`, `${meal.carbWeight || 0}g`, `${meal.vegWeight || 0}g`];
+        return [label.mealType, kitchenPaperMealPdfText(meal, label.mealName), `${meal.proteinWeight || 0}g`, `${meal.carbWeight || 0}g`, `${meal.vegWeight || 0}g`];
       }),
       theme: 'grid',
       styles: { fontSize: 11, cellPadding: 2.4 },
@@ -185,10 +214,7 @@ export const downloadCustomerPaperWord = ({ entry, fromKey, toKey, helpers }) =>
   const pages = days.map((day, dayIndex) => {
     const rows = day.meals.map((meal) => {
       const label = getMealLabel(meal);
-      const largeTag = isLargeBreakfast(meal)
-        ? ' <span style="background:#6d28d9;color:#ffffff;font-size:9pt;font-weight:bold">&nbsp;LARGE&nbsp;</span>'
-        : '';
-      return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}${largeTag}${kitchenMealChanges(meal) ? `<br/><b>${esc(kitchenMealChanges(meal))}</b>` : ''}</td>`
+      return `<tr><td>${esc(label.mealType)}</td><td>${kitchenPaperMealWordHtml(meal, label.mealName, esc, 9)}</td>`
         + `<td>${esc(meal.proteinWeight || 0)}g</td><td>${esc(meal.carbWeight || 0)}g</td><td>${esc(meal.vegWeight || 0)}g</td></tr>`;
     }).join('');
     const dayNote = (entry.dayNotes || []).find((note) => note.date === day.dateKey)?.note;
@@ -205,7 +231,8 @@ export const downloadCustomerPaperWord = ({ entry, fromKey, toKey, helpers }) =>
       <p style="margin:8pt 0 0 0;font-size:15pt"><b>${esc(name)}</b>${tag ? ` &nbsp;&nbsp;<span style="background:${tag.has ? '#1e293b' : '#94a3b8'};color:#ffffff;font-size:10pt;font-weight:bold">&nbsp;${esc(tag.text)}&nbsp;</span>` : ''}</p>
       <p style="margin:0;font-size:11pt">${esc(entry.partner ? `Partner: ${entry.partner?.businessName || 'Partner'}` : `Address: ${formatAddress(entry.deliveryAddress)}`)}</p>
       <p style="margin:0;font-size:11pt"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orNA(entry.mealsPerDay))} | Snacks/day: ${esc(orNA(entry.snacksPerDay))} | Breakfast included: ${breakfastLabelFor(entry)}</b></p>
-      <p style="margin:0;font-size:11pt;color:#be123c"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
+      <p style="margin:0;font-size:11pt;color:#be123c"><b>Exclusions: ${esc(exclusionsText(entry, day.dateKey))}</b></p>
+      <p style="margin:0;font-size:11pt;color:#be123c"><b>${esc(kitchenPaperAllergyLine(entry, day.dateKey))}</b></p>
       ${dayNote ? `<p style="margin:0;font-size:11pt;color:#b45309"><b>Note: ${esc(dayNote)}</b></p>` : ''}
       ${summary.length ? `<p style="margin:4pt 0 0 0;font-size:9.5pt;color:#787878">${esc(summary.join('   |   '))}</p>` : ''}
       <table border="1" cellspacing="0" cellpadding="5" style="border-collapse:collapse;width:100%;font-size:11pt;margin-top:8pt">

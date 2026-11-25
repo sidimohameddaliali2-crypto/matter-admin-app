@@ -6,6 +6,7 @@ import Item from '../models/MenuItem.js';
 import Record from '../models/MenuSelectionRecord.js';
 import Log from '../models/KitchenMealEditLog.js';
 import Customer from '../models/Customer.js';
+import Snack from '../models/KitchenSnackPreset.js';
 import matter from './matterApiService.js';
 import { readMealEditContext, mealEditView, editKitchenMeals, mealEditToken } from './kitchenMealEdits.js';
 const date = '2026-11-16', menuId = '507f1f77bcf86cd799439011', itemId = '507f1f77bcf86cd799439012';
@@ -136,5 +137,87 @@ test('Matter allergy protection cannot be bypassed by browser flags and does not
     quantity: 1, token: mealEditToken(f.row), allergies: [], exclusionAcknowledged: true, needsSauceChange: false } }), { statusCode: 409 });
   assert.equal(f.write.mock.callCount(), 0);
   await editKitchenMeals({ menuId, customerId: '42', date, user, body: { action: 'delete', mealId: 'meal', quantity: 1, token: mealEditToken(f.row) } });
+  assert.equal(f.write.mock.callCount(), 1);
+});
+
+const afterCutoffAllergyFixture = t => {
+  const f = fixture(t);
+  const unsafe = { _id: '507f1f77bcf86cd799439013', itemDate: date, mealName: f.row.selectedMeals[0].mealName,
+    mealType: 'main', ingredients: 'Peanuts', usedForCorePlan: true };
+  f.menu.meals[0].items.push(unsafe._id);
+  f.row.selectedMeals[0] = { ...f.row.selectedMeals[0], menuItemId: unsafe._id, slotNumber: 0 };
+  f.nutrition.allergens = ['Peanuts'];
+  t.mock.method(Item, 'find', () => query([f.item, unsafe]));
+  t.mock.timers.tick(3700000);
+  const args = { menuId, customerId: '42', date, user,
+    body: { action: 'change', mealId: 'meal', menuItemId: itemId, quantity: 1, token: mealEditToken(f.row) } };
+  return { ...f, unsafe, args };
+};
+
+test('a verified allergy allows partial replacement after cutoff and logs the actor and allergen', async t => {
+  const f = afterCutoffAllergyFixture(t);
+  const view = mealEditView(await readMealEditContext(menuId, '42', date));
+  assert.equal(view.canEdit, false);
+  assert.deepEqual(view.allergyReplacementMealIds, ['meal']);
+  assert.deepEqual(view.choices.find(item => item.id === f.unsafe._id).allergyConflicts, ['Peanuts']);
+  await editKitchenMeals(f.args);
+  const saved = f.write.mock.calls[0].arguments[1].$set;
+  assert.deepEqual(saved.selectedMeals.map(meal => [meal.mealName, meal.quantity, meal.slotNumber]),
+    [['Chosen chicken', 1, 0], ['Core chicken', 1, 1]]);
+  assert.deepEqual(saved.kitchenAutoHolds, []);
+  const [entries] = f.logs.mock.calls[0].arguments;
+  assert.equal(entries[0].actorId, user._id);
+  assert.equal(entries[0].action, 'change');
+  assert.match(entries[0].reason, /Allergy replacement after cutoff \(Peanuts\)/);
+});
+
+test('closed-date allergy replacement cannot delete a meal, change a safe meal, or save an unsafe replacement', async t => {
+  const f = afterCutoffAllergyFixture(t);
+  await assert.rejects(() => editKitchenMeals({ ...f.args, body: { ...f.args.body, action: 'delete' } }),
+    { code: 'KITCHEN_MEAL_EDIT_CLOSED' });
+  f.item.ingredients = 'Peanuts';
+  await assert.rejects(() => editKitchenMeals(f.args), { statusCode: 409 });
+  f.item.ingredients = '';
+  f.unsafe.ingredients = '';
+  await assert.rejects(() => editKitchenMeals({ ...f.args, body: { ...f.args.body, allergies: ['Peanuts'], allergyOverride: true } }),
+    { code: 'KITCHEN_MEAL_EDIT_CLOSED' });
+  assert.equal(f.write.mock.callCount(), 0);
+  assert.equal(f.logs.mock.callCount(), 0);
+});
+
+test('the server rechecks the conflict against the dated recipe in the write transaction', async t => {
+  const f = afterCutoffAllergyFixture(t);
+  t.mock.method(Item, 'find', () => ({
+    session() { return query([f.item, { ...f.unsafe, ingredients: 'Carrots' }]); },
+    lean: async () => [f.item, f.unsafe],
+  }));
+  await assert.rejects(() => editKitchenMeals(f.args), { code: 'KITCHEN_MEAL_EDIT_CLOSED' });
+  assert.equal(f.write.mock.callCount(), 0);
+});
+
+test('a valid snack cannot replace an allergy-flagged main after cutoff', async t => {
+  const f = afterCutoffAllergyFixture(t);
+  f.item.mealType = 'snack';
+  f.item.mealName = 'Safe snack';
+  t.mock.method(Snack, 'findOne', () => query({ presetsByName: { 'Safe snack': { C: 15, P: 10, F: 6 } } }));
+  t.mock.method(Menu, 'findById', () => ({ ...query(f.menu), populate() {
+    return query({ ...f.menu, meals: [{ date, mealType: 'snack', items: [f.item] }] });
+  } }));
+  await assert.rejects(() => editKitchenMeals(f.args), /same meal type/);
+  assert.equal(f.write.mock.callCount(), 0);
+});
+
+
+test('Core double-delivery staff additions use the four-portion entitlement rather than the two-meal customer cap', async t => {
+  const f = fixture(t);
+  f.nutrition.meal_frequency = 2;
+  f.nutrition.double_delivery_dates = [date];
+  f.row.selectedMeals = [];
+  await editKitchenMeals({ menuId, customerId: '42', date, user,
+    body: { action: 'add', menuItemId: itemId, quantity: 4, token: mealEditToken(f.row) } });
+  assert.equal(f.write.mock.callCount(), 1);
+  assert.equal(f.committed[0].update.$set.selectedMeals[0].quantity, 4);
+  await assert.rejects(editKitchenMeals({ menuId, customerId: '42', date, user,
+    body: { action: 'add', menuItemId: itemId, quantity: 5, token: mealEditToken(f.row) } }), /entitlement is 4/);
   assert.equal(f.write.mock.callCount(), 1);
 });

@@ -5,8 +5,9 @@ import useKitchenSelectionWindow from '../lib/useKitchenSelectionWindow';
 import { KitchenWorkspaceHeader, KitchenEmptyState } from '../components/KitchenWorkspace';
 import KitchenCustomerBrowser from '../components/KitchenCustomerBrowser';
 import { snackPresetChanges } from '../lib/kitchenSnackPresetChanges';
+import { KITCHEN_FALLBACK_SNACKS, findKitchenFallbackSnackPreset } from '../constants/kitchenFallbackSnacks';
 import useKitchenCurrentScope from '../lib/useKitchenCurrentScope';
-import { formatKitchenDay, visibleKitchenCustomer, kitchenCustomerDay } from '../lib/kitchenDayScope';
+import { formatKitchenDay, visibleKitchenCustomer, kitchenCustomerDay, kitchenToday } from '../lib/kitchenDayScope';
 import { loadKitchenSnapshot, verifiedKitchenRoster } from '../lib/kitchenSnapshot';
 import { loadPartnerKitchenOrders, partnerPaperRows, partnerPaperHtml, appendPartnerPaperPdf } from '../lib/partnerKitchenData';
 import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealChanges } from '../utils/kitchenIntegrity';
@@ -15,7 +16,8 @@ import { Upload, Download, RefreshCw, Search, Loader, UtensilsCrossed, ChefHat, 
 import api from '../utils/api';
 import { calculateKitchenListEntry, breakfastNameHasMacros, snackNameHasMacros, resolveSnackPresetForMeal } from '../utils/kitchenListCalculations';
 import { toSentenceCase } from '../utils/textFormat';
-import { downloadCustomerPaperPdf, downloadCustomerPaperWord } from '../utils/kitchenPaperCustomer';
+import { downloadCustomerPaperPdf, downloadCustomerPaperWord, isLargeBreakfast, kitchenPaperAutoLabel,
+  kitchenPaperMealPdfText, kitchenPaperMealWordHtml, kitchenPaperAllergies, kitchenPaperAllergyLine, kitchenPaperExclusions } from '../utils/kitchenPaperCustomer';
 import {
   emptyBreakfast,
   normalizeBreakfastKey,
@@ -185,6 +187,7 @@ const parseBreakfastRow = (row) => {
 // "Needs attention only" filter and the explanation shown on each customer card.
 const getAttentionReasons = (meal) => {
   const reasons = [...(meal?.inputErrors || [])];
+  if (meal?.kitchenAllergyCases?.some(item => !item.confirmation)) reasons.push('Saved meal needs allergy review.');
   if (meal?.remark) {
     reasons.push(`Flagged via Upload Meal Remarks: "${meal.remark}" — swap this before it goes out.`);
   }
@@ -244,18 +247,6 @@ const buildRemarkFromParts = (checked, extras) => [
   ...extras
 ].join(' + ');
 
-// Owner (2026-10-10): every customer's food exclusions (Matter's dietary
-// restrictions) are printed on the kitchen paper, PDF and Word. "None" when the
-// customer has none; "Not available" when no Matter subscription data loaded,
-// so a missing lookup is never mistaken for "no exclusions".
-const exclusionsText = (entry) => {
-  const list = (Array.isArray(entry?.dietaryRestrictions) ? entry.dietaryRestrictions : [])
-    .map((item) => String(item || '').trim()).filter(Boolean);
-  if (list.length > 0) return list.join(', ');
-  return entry?.planName ? 'None' : 'Not available';
-};
-
-
 const normalizeSelectionForSave = (meal) => ({
   date: meal?.date,
   mealType: meal?.mealType,
@@ -309,6 +300,18 @@ const KitchenList = () => {
   const [error, setError] = useState('');
   const [breakfastPreset, setBreakfastPreset] = useState(emptyBreakfast);
   const [snackPreset, setSnackPreset] = useState({ presetsByName: {} });
+  const [fallbackSnackRecipes, setFallbackSnackRecipes] = useState(null);
+  useEffect(() => {
+    let active = true;
+    api.get('/menus/kitchen-fallback-snacks', { timeout: 30000 }).then(({ data }) => {
+      if (!active) return;
+      if (!data?.success || !Array.isArray(data.data)) throw new Error('Fallback snack recipes could not be verified.');
+      setFallbackSnackRecipes({ recipes: data.data });
+    }).catch(() => {
+      if (active) setFallbackSnackRecipes({ recipes: [], failed: true });
+    });
+    return () => { active = false; };
+  }, []);
   const [snackPresetForm, setSnackPresetForm] = useState({ name: '', C: '', P: '', F: '' });
   // The global snack macro table is ~80 rows long, so it lives in a dropdown
   // that starts closed instead of pushing the rest of the panel down.
@@ -340,6 +343,10 @@ const KitchenList = () => {
   const [generatingPdf, setGeneratingPdf] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState('');
+  const [allergyReview, setAllergyReview] = useState('');
+  const [allergyCases, setAllergyCases] = useState([]);
+  const pendingAllergyCases = allergyCases.filter(item => !item.confirmation);
+  const exportsAwaitAllergyReview = allergyCases.length ? pendingAllergyCases.length > 0 : !!allergyReview;
   const exportInFlight = useRef(false);
   const [missingSelectionEntries, setMissingSelectionEntries] = useState([]);
   const [showOnlyMissing, setShowOnlyMissing] = useState(false);
@@ -442,6 +449,8 @@ const KitchenList = () => {
     setLoadedSelectionScope('');
     setDayRoster(null);
     setExportError('');
+    setAllergyReview('');
+    setAllergyCases([]);
     if (!selectedMenuId || !missingCheckDate) { setLoadingSelections(false); return []; }
     nutritionCacheRef.current.clear();
     setDeliveryCheck(null);
@@ -465,6 +474,8 @@ const KitchenList = () => {
         // still throws to the outer catch below.
         const preparation = await prepareKitchenSelections(api, selectedMenuId, missingCheckDate, current, { refresh });
         if (!current()) return [];
+        setAllergyReview(preparation.data?.kitchenAllergyReview || '');
+        setAllergyCases(preparation.data?.kitchenAllergyCases || []);
         const roster = preparation.data?.rosterComplete === true && Array.isArray(preparation.data.kitchenRoster)
           ? preparation.data.kitchenRoster
           : verifiedKitchenRoster((await api.get('/matter/subscriptions/delivery-on-date', { params: { date: missingCheckDate }, timeout: 180000 })).data);
@@ -499,7 +510,8 @@ const KitchenList = () => {
           if (!current()) return [];
           preparedSnapshot.current = { menuId: selectedMenuId, date: missingCheckDate, receivedAt: Date.now(), checkedAt: preparation.preparedAt,
             snapshotId: preparation.snapshotId,
-            complete: preparation.preparation !== 'selection-open' && !preparation.cached && preparation.data?.rosterComplete === true, roster: preparation.data?.kitchenRoster,
+            complete: preparation.preparation !== 'selection-open' && !preparation.data?.kitchenAllergyReview
+              && !preparation.cached && preparation.data?.rosterComplete === true, roster: preparation.data?.kitchenRoster,
             selections: keyedSelections, breakfastPreset: breakfastState, snackPreset: snackState };
           setMenuSelections(keyedSelections);
           setDayRoster({ scope, rows: roster });
@@ -1246,6 +1258,10 @@ const KitchenList = () => {
       if (activeSelectionScope.current !== scope) return;
       // Commit the displayed correction only after the server has accepted it.
       setMealTypeOverrides(prev => ({ ...prev, [key]: normalizedValue }));
+      if (row.selectedMeals.some(saved => saved.kitchenAllergyCases?.length)) {
+        await loadSelections();
+        return;
+      }
       const savedMeals = response.data.record?.selectedMeals || updatedSelections;
       setMenuSelections(prev => prev.map(current => {
         if (!sameCustomer(current)) return current;
@@ -1264,7 +1280,7 @@ const KitchenList = () => {
       overrideInFlight.current = false;
       setSavingOverrideKey('');
     }
-  }, [selectedMenuId, menuSelections]);
+  }, [selectedMenuId, menuSelections, loadSelections]);
 
   // Saves a kitchen-only note for one customer on one specific delivery day.
   // An empty note removes that date's entry server-side. Updates
@@ -1593,6 +1609,27 @@ const KitchenList = () => {
     finally { exportInFlight.current = false; setExportBusy(false); }
   };
 
+  const confirmAllergyReview = useCallback(async (item, note) => {
+    const scope = `${selectedMenuId}:${item.date}`;
+    const { data } = await api.post(`/menus/${selectedMenuId}/kitchen-customers/${item.customerId}/allergy-confirmations`, {
+      recordId: item.recordId, mealId: item.mealId, date: item.date,
+      subscriptionId: item.subscriptionId, fingerprint: item.fingerprint, note,
+    });
+    if (!data?.success || !data.data) throw new Error('The confirmation could not be saved. Please retry.');
+    const confirmation = data.data;
+    if (activeSelectionScope.current !== scope) return;
+    const recordConfirmation = review => review.fingerprint === item.fingerprint ? { ...review, confirmation } : review;
+    preparedSnapshot.current = null;
+    setExportError('');
+    setAllergyCases(previous => previous.map(recordConfirmation));
+    setMenuSelections(previous => previous.map(entry => String(entry._id) !== item.recordId ? entry : {
+      ...entry,
+      selectedMeals: entry.selectedMeals.map(meal => String(meal._id) !== item.mealId ? meal : {
+        ...meal, kitchenAllergyCases: (meal.kitchenAllergyCases || []).map(recordConfirmation),
+      }),
+    }));
+  }, [selectedMenuId]);
+
   const getDeliverableRows = async (dateKey, allowEmpty = false) => {
     if (allowEmpty && partnerOnlyDate === dateKey) return [];
     const scope = `${selectedMenuId}:${missingCheckDate}`;
@@ -1727,6 +1764,7 @@ const KitchenList = () => {
       const deliveryTime = windowHour === 999
         ? 'No delivery window'
         : (/^\s*by\b/i.test(String(entry.deliveryWindow?.label || '')) ? `By ${formatDeliveryHourLabel(windowHour)}` : formatDeliveryHourLabel(windowHour));
+      const allergies = kitchenPaperAllergies(entry, dateKey);
       return dayMeals.map((meal, index) => {
         const label = getMealLabel(meal);
         return {
@@ -1737,10 +1775,12 @@ const KitchenList = () => {
           'Meals/day': entry.mealsPerDay ?? '',
           'Snacks/day': entry.snacksPerDay ?? '',
           'Breakfast included': yesNo(entry.breakfastIncluded),
-          Exclusions: exclusionsText(entry),
+          Exclusions: kitchenPaperExclusions(entry, dateKey),
+          Allergies: allergies,
           Address: entry.partner ? '' : formatAddress(entry.deliveryAddress),
           Type: label.mealType,
           Meal: label.mealName,
+          'Auto Assigned': kitchenPaperAutoLabel(meal),
           Changes: kitchenMealChanges(meal),
           'P (g)': Number(meal.proteinWeight) || 0,
           'C (g)': Number(meal.carbWeight) || 0,
@@ -1755,7 +1795,7 @@ const KitchenList = () => {
     rows.push(...partnerPaperRows(partnerData));
     const worksheet = XLSX.utils.json_to_sheet(rows);
     // Readable out of the box: sensible column widths and a filter on the header row.
-    const widths = { Section: 24, 'Delivery time': 14, Customer: 28, Plan: 16, 'Meals/day': 9, 'Snacks/day': 10, 'Breakfast included': 11, Exclusions: 34, Address: 48, Type: 10, Meal: 44, 'P (g)': 7, 'C (g)': 7, 'V (g)': 7, 'Total C': 8, 'Total P': 8, 'Total F': 8, Note: 30 };
+    const widths = { Section: 24, 'Delivery time': 14, Customer: 28, Plan: 16, 'Meals/day': 9, 'Snacks/day': 10, 'Breakfast included': 11, Exclusions: 34, Allergies: 29, Address: 48, Type: 10, Meal: 44, 'Auto Assigned': 17, 'P (g)': 7, 'C (g)': 7, 'V (g)': 7, 'Total C': 8, 'Total P': 8, 'Total F': 8, Note: 30 };
     const headers = [...new Set(rows.flatMap(row => Object.keys(row)))];
     worksheet['!cols'] = headers.map((h) => ({ wch: widths[h] || 12 }));
     worksheet['!autofilter'] = { ref: worksheet['!ref'] };
@@ -1793,7 +1833,7 @@ const KitchenList = () => {
       entry = snapshot.entries.find((row) => String(row.email || '').toLowerCase() === customerPaperEmail.toLowerCase());
       if (!entry) throw new Error('No confirmed meals for this customer in the chosen date range.');
       assertKitchenExportReady([entry]);
-      const helpers = { getDateKey, formatDateLabel, getMealLabel, exclusionsText, formatAddress, parseDeliveryHour, formatDeliveryHourLabel, loadJsPDF, loadAutoTable };
+      const helpers = { getDateKey, formatDateLabel, getMealLabel, exclusionsText: kitchenPaperExclusions, formatAddress, parseDeliveryHour, formatDeliveryHourLabel, loadJsPDF, loadAutoTable };
       const result = format === 'word'
         ? downloadCustomerPaperWord({ entry, fromKey, toKey, helpers })
         : await downloadCustomerPaperPdf({ entry, fromKey, toKey, helpers });
@@ -1859,11 +1899,7 @@ const KitchenList = () => {
       const dayNote = (entry.dayNotes || []).find((n) => n.date === dateKey)?.note;
       const rows = dayMeals.map((meal) => {
         const label = getMealLabel(meal);
-        const isLarge = String(meal?.mealType || '').toLowerCase() === 'breakfast' && !!meal?.flags?.isLargeBreakfast;
-        const largeTag = isLarge
-          ? ' <span style="background:#6d28d9;color:#ffffff;font-size:10.5pt;font-weight:bold">&nbsp;LARGE&nbsp;</span>'
-          : '';
-        return `<tr><td>${esc(label.mealType)}</td><td>${esc(label.mealName)}${largeTag}${kitchenMealChanges(meal) ? `<br/><b>${esc(kitchenMealChanges(meal))}</b>` : ''}</td>`
+        return `<tr><td>${esc(label.mealType)}</td><td>${kitchenPaperMealWordHtml(meal, label.mealName, esc, 10.5)}</td>`
           + `<td>${esc(meal.proteinWeight || 0)}g</td><td>${esc(meal.carbWeight || 0)}g</td><td>${esc(meal.vegWeight || 0)}g</td></tr>`;
       }).join('');
       // The whole customer block sits in ONE table row that Word may not split
@@ -1878,7 +1914,8 @@ const KitchenList = () => {
           <p style="margin:0;font-size:10.5pt;page-break-after:avoid">${esc(subLine)}</p>
           ${entry.noDeliveryDate === dateKey ? '<p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>NO MATTER DELIVERY ON THIS DATE - confirm before cooking</b></p>' : ''}
           <p style="margin:0;font-size:10.5pt;page-break-after:avoid"><b>Plan: ${esc(entry.planName || 'N/A')} | Meals/day: ${esc(orDash(entry.mealsPerDay))} | Snacks/day: ${esc(orDash(entry.snacksPerDay))} | Breakfast included: ${breakfastLabel}</b></p>
-          <p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>Exclusions: ${esc(exclusionsText(entry))}</b></p>
+          <p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>Exclusions: ${esc(kitchenPaperExclusions(entry, dateKey))}</b></p>
+          <p style="margin:0;font-size:10.5pt;color:#be123c;page-break-after:avoid"><b>${esc(kitchenPaperAllergyLine(entry, dateKey))}</b></p>
           ${dayNote ? `<p style="margin:0;font-size:10.5pt;color:#b45309;page-break-after:avoid"><b>Note: ${esc(dayNote)}</b></p>` : ''}
           <table border="1" cellspacing="0" cellpadding="4" style="border-collapse:collapse;width:100%;font-size:10.5pt;margin-top:4pt">
             <tr style="background:#1e293b;color:#ffffff"><th>Type</th><th>Meal</th><th>P</th><th>C</th><th>V</th></tr>
@@ -2081,7 +2118,7 @@ ${body}${partnerPaperHtml(partnerData)}
         y += 5.6;
 
         // Food exclusions, in red so the kitchen can't miss them.
-        const exclusionLines = doc.splitTextToSize(`Exclusions: ${exclusionsText(entry)}`, pageWidth - 28);
+        const exclusionLines = doc.splitTextToSize(`Exclusions: ${kitchenPaperExclusions(entry, dateKey)}\n${kitchenPaperAllergyLine(entry, dateKey)}`, pageWidth - 28);
         doc.setFont(undefined, 'bold');
         doc.setTextColor(190, 18, 60);
         doc.text(exclusionLines, 14, y);
@@ -2103,12 +2140,12 @@ ${body}${partnerPaperHtml(partnerData)}
         }
 
         // A breakfast served at the Large portion gets a LARGE tag on its row.
-        const isLargeRow = dayMeals.map((meal) => String(meal?.mealType || '').toLowerCase() === 'breakfast' && !!meal?.flags?.isLargeBreakfast);
-        const tableRows = dayMeals.map((meal, mealIndex) => {
+        const isLargeRow = dayMeals.map(isLargeBreakfast);
+        const tableRows = dayMeals.map((meal) => {
           const label = getMealLabel(meal);
           return [
             label.mealType,
-            `${label.mealName}${isLargeRow[mealIndex] ? '   [LARGE]' : ''}${kitchenMealChanges(meal) ? `\n${kitchenMealChanges(meal)}` : ''}`,
+            kitchenPaperMealPdfText(meal, label.mealName),
             `${meal.proteinWeight || 0}g`,
             `${meal.carbWeight || 0}g`,
             `${meal.vegWeight || 0}g`
@@ -2369,7 +2406,7 @@ ${body}${partnerPaperHtml(partnerData)}
               <button
                 type="button"
                 onClick={() => runKitchenExport(() => downloadDayKitchenPaper(paperDate))}
-                disabled={!paperDate || exportBusy || generatingPdf || (!partnerOnlyDate && (loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
+                disabled={!paperDate || exportBusy || generatingPdf || (!partnerOnlyDate && (exportsAwaitAllergyReview || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
                 <FileText size={16} className={generatingPdf ? 'animate-pulse' : ''} /> {generatingPdf ? 'Generating...' : 'Download Day PDF'}
@@ -2377,7 +2414,7 @@ ${body}${partnerPaperHtml(partnerData)}
               <button
                 type="button"
                 onClick={() => runKitchenExport(() => downloadDayKitchenPaperWord(paperDate))}
-                disabled={!paperDate || exportBusy || (!partnerOnlyDate && (loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
+                disabled={!paperDate || exportBusy || (!partnerOnlyDate && (exportsAwaitAllergyReview || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
                 title="Word version of the Day PDF — same sections, order and per-customer tables"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
@@ -2386,7 +2423,7 @@ ${body}${partnerPaperHtml(partnerData)}
               <button
                 type="button"
                 onClick={() => runKitchenExport(() => exportDayKitchenPaperToExcel(paperDate))}
-                disabled={!paperDate || exportBusy || (!partnerOnlyDate && (loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
+                disabled={!paperDate || exportBusy || (!partnerOnlyDate && (exportsAwaitAllergyReview || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${paperDate}`))}
                 title="Excel version of the Day PDF — one row per meal (emirate, delivery window, customer, plan, P/C/V weights, remark, day note), in the same order as the PDF"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
@@ -2395,7 +2432,7 @@ ${body}${partnerPaperHtml(partnerData)}
               <button
                 type="button"
                 onClick={() => runKitchenExport(() => exportCustomerMacrosToExcel(pdfDate))}
-                disabled={!!partnerOnlyDate || !pdfDate || exportBusy || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
+                disabled={!!partnerOnlyDate || !pdfDate || exportBusy || exportsAwaitAllergyReview || loadingSelections || loadedSelectionScope !== `${selectedMenuId}:${pdfDate}`}
                 title="Export customer ID, name, CPF, meal plan, the customer's total daily C/P/F, meal name, and that meal's C/P/F/calories — one row per meal, in the same customer/meal order as the Day PDF above"
                 className="inline-flex items-center gap-2 rounded-2xl bg-white/10 border border-white/20 px-4 py-2.5 text-sm font-medium hover:bg-white/20 disabled:opacity-50"
               >
@@ -2520,6 +2557,16 @@ ${body}${partnerPaperHtml(partnerData)}
 
         {!missingCheckDate && !loadingMenus && <KitchenEmptyState hasMenu={!!selectedMenuId} />}
         {selectedMenu && missingCheckDate && !selectionWindow.canAutoAssign && <p role="status" className="rounded-xl bg-amber-50 p-4 text-sm text-amber-900">{selectionWindow.message}</p>}
+        {exportsAwaitAllergyReview && <div role="alert" className="rounded-xl bg-rose-50 p-4 text-sm text-rose-900">
+          <p>{allergyCases.length
+            ? `Exports are blocked until all allergy cases are resolved. ${pendingAllergyCases.length} remaining.`
+            : allergyReview}</p>
+          {pendingAllergyCases.length > 0 && <ul className="mt-2 list-disc pl-5">
+            {pendingAllergyCases.map(item => <li key={item.fingerprint}>{item.message}</li>)}
+          </ul>}
+        </div>}
+        {allergyCases.length > 0 && !exportsAwaitAllergyReview &&
+          <p role="status" className="rounded-xl bg-emerald-50 p-4 text-sm text-emerald-950">All saved meal allergy reviews are confirmed.</p>}
 
 
         {menuDateKeys.length > 0 && (
@@ -2722,6 +2769,27 @@ ${body}${partnerPaperHtml(partnerData)}
                   </div>
                 ))}
               </div>
+
+              <section className="mt-4" aria-label="Fallback snacks">
+                <h3 className="text-xs font-semibold text-slate-600">Fallback snacks</h3>
+                <p className="mt-1 text-xs text-slate-500">Used when both daily snack pools conflict with the customer’s exclusions or allergies. For Matter Core, only allergies trigger fallback. Each fallback needs a Meal Library recipe and saved macros.</p>
+                <ul className="mt-2 grid gap-2 lg:grid-cols-3">
+                  {KITCHEN_FALLBACK_SNACKS.map(name => {
+                    const recipe = fallbackSnackRecipes?.recipes.find(option => option.name === name);
+                    const preset = recipe && findKitchenFallbackSnackPreset(recipe.mealName, snackPreset.presetsByName);
+                    return (
+                      <li key={name} className="rounded-xl bg-slate-50 px-3 py-2 text-sm">
+                        <span className="font-medium text-slate-800">{name}</span>
+                        {recipe && recipe.mealName !== name && <p className="text-xs text-slate-500">{recipe.mealName}</p>}
+                        {preset && <p className="text-xs text-slate-500">C {preset.C} · P {preset.P} · F {preset.F}</p>}
+                        {recipe && !preset && renderMissingMacrosForm('snack', recipe.mealName)}
+                        {!recipe && <p className="text-xs text-slate-500">{!fallbackSnackRecipes ? 'Checking Meal Library…'
+                          : fallbackSnackRecipes.failed ? 'Meal Library check unavailable' : 'Needs a verified Meal Library recipe'}</p>}
+                      </li>
+                    );
+                  })}
+                </ul>
+              </section>
 
             </div>
 
@@ -2943,7 +3011,8 @@ ${body}${partnerPaperHtml(partnerData)}
           onShowMore={() => setVisibleCustomers(count => count + 50)}
           renderCustomer={entry => <CustomerCard key={entry.email || entry.customerId} entry={entry} persistMealTypeOverride={persistMealTypeOverride}
             saveMealRemark={saveMealRemark} savingOverrideKey={savingOverrideKey} saveDayNote={saveDayNote} savingDayNoteKey={savingDayNoteKey} snackPreset={snackPreset}
-            menuId={selectedMenuId} date={missingCheckDate} canEdit={!!selectionWindow.deadlineAt && !selectionWindow.canAutoAssign} onMealsChanged={loadSelections} />}
+            menuId={selectedMenuId} date={missingCheckDate} canEdit={!!selectionWindow.deadlineAt && !selectionWindow.canAutoAssign}
+            onMealsChanged={loadSelections} onAllergyConfirmation={confirmAllergyReview} />}
         />
         </div>
 
@@ -2964,7 +3033,52 @@ ${body}${partnerPaperHtml(partnerData)}
 // here (keyed by date only, since email is fixed per card instance) instead
 // of a shared object in the parent, which is what made every card re-render
 // together before.
-const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemark, savingOverrideKey, saveDayNote, savingDayNoteKey, snackPreset, menuId, date, canEdit, onMealsChanged }) => {
+function MealAllergyReview({ item, onConfirm }) {
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const save = async () => {
+    if (saving || !note.trim()) return;
+    setSaving(true);
+    setError('');
+    try {
+      await onConfirm(item, note.trim());
+      setOpen(false);
+    } catch (failure) {
+      setError(failure.response?.data?.message || failure.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  if (item.confirmation) return (
+    <div className="my-2 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-950">
+      <p>Allergy review confirmed by <strong>{item.confirmation.actorName}</strong> on {new Date(item.confirmation.at).toLocaleString('en-GB', { timeZone: 'Asia/Dubai' })} Dubai time.</p>
+      <p>{item.confirmation.note}</p>
+    </div>
+  );
+  return (
+    <div className="my-2 space-y-2 rounded-lg bg-rose-50 p-3 text-sm text-rose-950">
+      <p>{item.message}</p>
+      {item.canConfirm && !open && <button type="button" className="kitchen-button-secondary px-3 py-1"
+        onClick={() => setOpen(true)}>Confirm allergy review</button>}
+      {item.canConfirm && open && <>
+        <label className="block">
+          Verify the Matter allergy and dated ingredients, then record how the kitchen will avoid the allergen.
+          <textarea rows={2} className="mt-1 block w-full rounded border p-2 text-slate-900" maxLength={500}
+            value={note} onChange={event => setNote(event.target.value)} disabled={saving} />
+        </label>
+        <button type="button" className="kitchen-button-primary mr-2 px-3 py-1 disabled:opacity-50"
+          disabled={saving || !note.trim()} onClick={save}>{saving ? 'Saving…' : 'Confirm and log'}</button>
+        <button type="button" disabled={saving} onClick={() => setOpen(false)}>Cancel</button>
+      </>}
+      {!item.canConfirm && <p>Resolve the source data and refresh preparation.</p>}
+      {error && <p role="alert">{error}</p>}
+    </div>
+  );
+}
+
+const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemark, savingOverrideKey, saveDayNote, savingDayNoteKey, snackPreset, menuId, date, canEdit, onMealsChanged, onAllergyConfirmation }) => {
   const [mealIntent, setMealIntent] = useState(null);
   const [localDayNoteDrafts, setLocalDayNoteDrafts] = useState({});
   // Each day's full meal grid starts collapsed — with a realistic customer
@@ -3113,6 +3227,9 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
             {isExpanded && (
             <div className="kitchen-meal-list">
               {dayGroup.meals.map((meal, index) => {
+                const showAllergyCases = meal.kitchenAllergyCases?.length && dayGroup.meals.findIndex(item => item._id === meal._id) === index;
+                const canReplaceForAllergy = meal.kitchenAllergyCases?.some(item => item.canConfirm)
+                  && dayGroup.dateKey === date && date >= kitchenToday();
                 const savedSnackMacros = meal.flags?.invalidInput && String(meal.mealType).toLowerCase() === 'snack'
                   ? resolveSnackPresetForMeal(meal, snackPreset?.presetsByName || {}) : null;
                 return (
@@ -3124,10 +3241,16 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
                     </div>
                     <span className="text-xs font-semibold text-slate-500">#{index + 1}</span>
                     {!entry.partner && meal._id && <div className="flex gap-2 text-xs">
-                      <button type="button" disabled={!canEdit || !/^[1-9]\d*$/.test(String(entry.matterCustomerId || ''))} onClick={() => setMealIntent({ action: 'change', mealId: String(meal._id) })}>Change meal</button>
+                      <button type="button" disabled={(!canEdit && !canReplaceForAllergy) || !/^[1-9]\d*$/.test(String(entry.matterCustomerId || ''))}
+                        onClick={() => setMealIntent({ action: 'change', mealId: String(meal._id) })}>
+                        {canReplaceForAllergy && !canEdit ? 'Change meal for allergy' : 'Change meal'}
+                      </button>
                       <button type="button" disabled={!canEdit || !/^[1-9]\d*$/.test(String(entry.matterCustomerId || ''))} className="text-rose-700" onClick={() => setMealIntent({ action: 'delete', mealId: String(meal._id) })}>Delete meal</button>
                     </div>}
                   </div>
+                  {!!showAllergyCases && meal.kitchenAllergyCases.map(item => (
+                    <MealAllergyReview key={item.fingerprint} item={item} onConfirm={onAllergyConfirmation} />
+                  ))}
                   <div className="mt-2 flex items-center gap-2 text-sm font-medium text-slate-700">
                     <span className="truncate">{getMealLabel(meal).mealName}</span>
                     {meal?.isAutoAssigned && (

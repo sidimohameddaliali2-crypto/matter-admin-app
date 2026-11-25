@@ -113,6 +113,27 @@ test('clearing the date invalidates a request still loading', async () => {
 const selectedDateChip = () => container.querySelector('[aria-label="Delivery dates"] button[aria-pressed="true"]');
 const exportButton = () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Export Excel'));
 
+test('both XLSX exports and the customer drill-down recheck the prepared allergy state', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, config) => {
+    if (!path.endsWith('/kitchen-state')) return originalGet(path, config);
+    if (config.params.verifyAllergies) return { data: { state: 'stale', message: 'Matter allergies changed.' } };
+    return { data: { state: 'ready', data: { preparation: 'completed', snapshotId: 'fixture-job' } } };
+  });
+  await select(1, A);
+  await act(async () => pending[A]({ data: { success: true, data: [{ email: entry.email }] } }));
+  const cooking = [...container.querySelectorAll('button')].find(button => button.textContent.includes('Cooking & EOD Excel'));
+  const customers = container.querySelector('[aria-label="Download customers for Fixture meal"]');
+  for (const button of [exportButton(), cooking, customers]) {
+    expect(button.disabled).toBe(false);
+    await act(async () => button.click());
+    expect(container.textContent).toContain('Matter allergies changed.');
+  }
+  expect(api.get.mock.calls.filter(([path, config]) => path.endsWith('/kitchen-state') && config.params.verifyAllergies)).toHaveLength(3);
+  expect(mockCountingSave).not.toHaveBeenCalled();
+  expect(mockCookingSave).not.toHaveBeenCalled();
+});
+
 const useMixedCoreDates = () => {
   const originalGet = api.get.getMockImplementation();
   api.get.mockImplementation(async (path, config) => {
