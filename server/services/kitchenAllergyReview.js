@@ -22,6 +22,10 @@ export async function loadDatedKitchenAllergyOptions(menuId, date) {
     _id: { $in: (menu.meals || []).flatMap(day => (day.items || []).map(item => item._id || item)) },
     itemDate: new Date(date),
   }).lean();
+  return datedKitchenAllergyOptions(menu, date, items);
+}
+
+export function datedKitchenAllergyOptions(menu, date, items) {
   const mainItems = items.filter(item => item.mealType === 'main');
   const usesLegacyMainRotation = !mainItems.some(item => item.rotationCategory === 'main');
   const legacy = usesLegacyMainRotation
@@ -39,7 +43,7 @@ export async function loadDatedKitchenAllergyOptions(menuId, date) {
   };
 }
 
-function datedFindings(meals, options, nutrition) {
+export function findDatedKitchenAllergyIssues(meals, options, nutrition) {
   const allergies = nutrition.allergyProfile.allergies;
   const core = String(nutrition.plan_name || '').trim().toLowerCase() === 'matter core';
   const findings = [];
@@ -78,7 +82,7 @@ function datedFindings(meals, options, nutrition) {
 }
 
 export function assertSavedKitchenAllergies(meals, options, nutrition, date) {
-  const [finding] = datedFindings(meals, options, nutrition);
+  const [finding] = findDatedKitchenAllergyIssues(meals, options, nutrition);
   if (finding) throw savedMealReviewError(date, nutrition, finding.meal, finding.reason);
 }
 
@@ -106,7 +110,7 @@ function reviewCase(record, nutrition, date, { meal, reason, conflicts = [], evi
     mealName: meal.mealName, message: savedMealReviewError(date, nutrition, meal, reason).message };
 }
 
-export async function collectSavedKitchenAllergies(menuId, date, record, nutrition, optionsByDate, { mealType, fallbackOnly, checkUnavailable = true } = {}) {
+export async function collectSavedKitchenAllergies(menuId, date, record, nutrition, optionsByDate, { mealType, fallbackOnly, checkUnavailable = true, session } = {}) {
   const meals = (record?.selectedMeals || []).filter(meal => {
     if (mealType && meal.mealType !== mealType) return false;
     const time = meal.date && new Date(meal.date);
@@ -115,7 +119,7 @@ export async function collectSavedKitchenAllergies(menuId, date, record, nutriti
   const findings = [];
   const fallback = meals.filter(isFallbackSnack);
   if (fallback.length) {
-    if (!optionsByDate.has(fallbackRecipesKey)) optionsByDate.set(fallbackRecipesKey, loadFallbackSnackRecipes());
+    if (!optionsByDate.has(fallbackRecipesKey)) optionsByDate.set(fallbackRecipesKey, loadFallbackSnackRecipes(session));
     const recipes = await optionsByDate.get(fallbackRecipesKey);
     for (const meal of fallback) {
       const reason = fallbackSnackReview(meal, recipes, nutrition);
@@ -138,7 +142,7 @@ export async function collectSavedKitchenAllergies(menuId, date, record, nutriti
       findings.push(...regular.map(meal => ({ meal, reason: 'has unavailable Matter allergy information' })));
     } else if (nutrition.allergyProfile?.allergies?.length) {
       if (!optionsByDate.has(date)) optionsByDate.set(date, loadDatedKitchenAllergyOptions(menuId, date));
-      findings.push(...datedFindings(regular, await optionsByDate.get(date), nutrition));
+      findings.push(...findDatedKitchenAllergyIssues(regular, await optionsByDate.get(date), nutrition));
     }
   }
   return findings.map(finding => reviewCase(record, nutrition, date, finding));

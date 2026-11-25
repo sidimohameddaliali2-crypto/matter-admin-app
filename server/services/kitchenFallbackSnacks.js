@@ -14,8 +14,10 @@ const hasRestrictionData = meal => meal.components?.length
     && [component.ingredients, component.allergens, component.exclusions].some(hasTerms))
   : hasTerms(meal.ingredients);
 
-export async function loadFallbackSnackRecipes() {
-  const library = await MealCreationState.findById('shared').select('catalogue.meals').lean();
+export async function loadFallbackSnackRecipes(session) {
+  const query = MealCreationState.findById('shared').select('catalogue.meals');
+  if (session) query.session(session);
+  const library = await query.lean();
   return KITCHEN_FALLBACK_SNACKS.flatMap(name => {
     const matches = (library?.catalogue?.meals || []).filter(meal => libraryMealKind(meal) === 'Snack'
       && kitchenFallbackSnackKey(meal.name) === kitchenFallbackSnackKey(name));

@@ -7,7 +7,7 @@ import KitchenCustomerBrowser from '../components/KitchenCustomerBrowser';
 import { snackPresetChanges } from '../lib/kitchenSnackPresetChanges';
 import { KITCHEN_FALLBACK_SNACKS, findKitchenFallbackSnackPreset } from '../constants/kitchenFallbackSnacks';
 import useKitchenCurrentScope from '../lib/useKitchenCurrentScope';
-import { formatKitchenDay, visibleKitchenCustomer, kitchenCustomerDay } from '../lib/kitchenDayScope';
+import { formatKitchenDay, visibleKitchenCustomer, kitchenCustomerDay, kitchenToday } from '../lib/kitchenDayScope';
 import { loadKitchenSnapshot, verifiedKitchenRoster } from '../lib/kitchenSnapshot';
 import { loadPartnerKitchenOrders, partnerPaperRows, partnerPaperHtml, appendPartnerPaperPdf } from '../lib/partnerKitchenData';
 import { prepareKitchenSelections, createKitchenRequestGuard, assertKitchenExportReady, kitchenMealChanges } from '../utils/kitchenIntegrity';
@@ -3228,6 +3228,8 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
             <div className="kitchen-meal-list">
               {dayGroup.meals.map((meal, index) => {
                 const showAllergyCases = meal.kitchenAllergyCases?.length && dayGroup.meals.findIndex(item => item._id === meal._id) === index;
+                const canReplaceForAllergy = meal.kitchenAllergyCases?.some(item => item.canConfirm)
+                  && dayGroup.dateKey === date && date >= kitchenToday();
                 const savedSnackMacros = meal.flags?.invalidInput && String(meal.mealType).toLowerCase() === 'snack'
                   ? resolveSnackPresetForMeal(meal, snackPreset?.presetsByName || {}) : null;
                 return (
@@ -3239,7 +3241,10 @@ const CustomerCard = React.memo(({ entry, persistMealTypeOverride, saveMealRemar
                     </div>
                     <span className="text-xs font-semibold text-slate-500">#{index + 1}</span>
                     {!entry.partner && meal._id && <div className="flex gap-2 text-xs">
-                      <button type="button" disabled={!canEdit || !/^[1-9]\d*$/.test(String(entry.matterCustomerId || ''))} onClick={() => setMealIntent({ action: 'change', mealId: String(meal._id) })}>Change meal</button>
+                      <button type="button" disabled={(!canEdit && !canReplaceForAllergy) || !/^[1-9]\d*$/.test(String(entry.matterCustomerId || ''))}
+                        onClick={() => setMealIntent({ action: 'change', mealId: String(meal._id) })}>
+                        {canReplaceForAllergy && !canEdit ? 'Change meal for allergy' : 'Change meal'}
+                      </button>
                       <button type="button" disabled={!canEdit || !/^[1-9]\d*$/.test(String(entry.matterCustomerId || ''))} className="text-rose-700" onClick={() => setMealIntent({ action: 'delete', mealId: String(meal._id) })}>Delete meal</button>
                     </div>}
                   </div>
