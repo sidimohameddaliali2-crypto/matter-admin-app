@@ -52,6 +52,17 @@ The local `.build/content.mjs`, `build-workbooks.mjs` and `build-deck.mjs` are s
 
 ## Completion checklist
 
+Prepared API-handoff impact check: no Customer Service screen, registry, identity,
+permission, command, reporting definition or canonical storage/provider behavior
+changes. Existing shared presentation and workflow/data definitions remain valid;
+no staff verdict is promoted by the local deployment fixtures. The candidate
+awaits the existing connection-ready promise before cutover and preserves private
+configuration. Activation remains pending. Before any live rollout, update the
+existing readiness record and release gates with the actual web/gateway identities
+and retest authenticated reads, a saved command, history/media and rollback in the
+existing shared files. Keep those live/provider/staff verdicts separate from
+engineering HTTP fixtures; no shared acceptance has been changed by this draft.
+
 - [ ] Affected flows, registry rows and documents reconciled with the tested app version; unchanged material assessed.
 - [ ] New screenshots and instructions match the current UI where required.
 - [ ] Staff answers, audit history, source authority and evidence preserved; affected verdicts marked for retest.

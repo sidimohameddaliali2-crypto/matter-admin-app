@@ -6,7 +6,8 @@
 // loadEnv.js for the full explanation.
 import './loadEnv.js';
 import './observability/installActivity.js';
-import { startActivityHistory } from './observability/activityStore.js';
+import { startActivityHistory, activityJournal } from './observability/activityStore.js';
+import { apiRuntimeSettings, createApiRuntime } from './services/apiRuntime.js';
 import { createRequestTrace } from './observability/requestTrace.js';
 import { resolveTraceRoute } from './observability/routeCatalog.js';
 import traceabilityRoutes from './routes/traceability.js';
@@ -56,6 +57,16 @@ const app = express();
 app.set('activityHistoryEnabled', true);
 startActivityHistory();
 const server = http.createServer(app);
+const managedApi = apiRuntimeSettings();
+let socketBusReady = false, reportReady = process.env.DRIVER_AUDIT_ENABLED !== '1';
+let customerServiceReady = process.env.CUSTOMER_SERVICE_STORAGE !== 'supabase';
+const apiRuntime = managedApi ? createApiRuntime({
+  settings: managedApi,
+  readiness: () => ({ ready: mongoose.connection.readyState === 1 && socketBusReady && reportReady && customerServiceReady,
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected', socketBusReady, reportReady, customerServiceReady }),
+  disconnectSockets: () => io.engine.close(),
+}) : null;
+if (apiRuntime) app.use(apiRuntime.track);
 
 // Origins allowed to call the API with credentials. The SPA is served by this
 // same server, so genuine same-origin requests never need an entry (the browser
@@ -146,6 +157,7 @@ const connectDB = async () => {
     });
     console.log(`✅ MongoDB Connected: ${conn.connection.host}`);
     void driverAuditIntegration.prewarm().then(ready => {
+      reportReady = process.env.DRIVER_AUDIT_ENABLED !== '1' || ready === true;
       if (ready) console.log('Driver Reports ready after database startup');
       if (ready === false) console.warn('Driver Reports startup load will retry on request');
     }).catch(() => console.warn('Driver Reports startup load will retry on request'));
@@ -230,7 +242,10 @@ import { initRedis, getRedisClient } from './config/cache.js';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { setupMongooseSlowQueryMonitoring } from './middleware/slowQueryLogger.js';
 // Routes middleware
-mountCustomerServiceInAdmin({app,onError:()=>console.error('Customer service is unavailable while its Supabase connection is verified. Other app routes remain available.')});
+const customerServiceRuntime = mountCustomerServiceInAdmin({app,onError:()=>console.error('Customer service is unavailable while its Supabase connection is verified. Other app routes remain available.')});
+if (process.env.CUSTOMER_SERVICE_STORAGE === 'supabase') {
+  void customerServiceRuntime?.ready?.then(runtime => { customerServiceReady = Boolean(runtime); });
+}
 app.use('/api/traceability', traceabilityRoutes);
 app.use('/api/mobile', mobileUpdatesRoutes);
 app.use('/api/auth', authRoutes);
@@ -291,7 +306,10 @@ app.get('/api/health', (req, res) => {
     success: true, 
     message: 'Server is healthy',
     timestamp: new Date().toISOString(),
-    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
+    database: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    deployment: apiRuntime ? apiRuntime.status() : { role: 'legacy-jobs', backgroundJobs: !localPreviewMode,
+      socketBusReady, reportEnabled: process.env.DRIVER_AUDIT_ENABLED === '1',
+      ready: mongoose.connection.readyState === 1 && socketBusReady && reportReady && customerServiceReady }
   });
 });
 
@@ -407,6 +425,7 @@ if (redisPubClient) {
     const redisSubClient = redisPubClient.duplicate();
     await redisSubClient.connect();
     io.adapter(createAdapter(redisPubClient, redisSubClient));
+    socketBusReady = true;
     console.log('✅ Socket.io Redis adapter attached');
   } catch (error) {
     console.warn('⚠️  Failed to attach Socket.io Redis adapter:', error.message);
@@ -416,7 +435,22 @@ if (redisPubClient) {
   console.warn('⚠️  Socket.io running without a Redis adapter (Redis unavailable) — cross-instance broadcasts will not reach every dispatcher in PM2 cluster mode.');
 }
 
-server.listen(PORT, () => {
+if (apiRuntime) {
+  if (!process.env.MATTER_API_CONTROL_SOCKET) throw Error('Managed API control socket is required');
+  const stopControl = await apiRuntime.listen(process.env.MATTER_API_CONTROL_SOCKET);
+  let stopping = false;
+  const stop = async () => {
+    if (stopping) return; stopping = true;
+    io.engine.close();
+    await new Promise(resolve => server.close(resolve));
+    await driverAuditIntegration.close?.();
+    await activityJournal.flush().catch(() => {});
+    await stopControl();
+    process.exit(0);
+  };
+  process.once('SIGINT', stop); process.once('SIGTERM', stop);
+}
+server.listen(PORT, managedApi ? '127.0.0.1' : undefined, () => {
   console.log(`
 🚀 Server running in ${process.env.NODE_ENV || 'development'} mode
 📍 Port: ${PORT}
@@ -441,7 +475,7 @@ server.listen(PORT, () => {
 });
 
 // Start background jobs
-if (!localPreviewMode) {
+if (!localPreviewMode && !managedApi) {
 startFlaggedNotifier();
 startMoveUncollectedCollectionsJob();
 startRecalculateDriverKpisJob();
@@ -469,7 +503,7 @@ if (process.env.ENABLE_FLAGGED_ALERTS === '1') {
 }
 
 } else {
-  console.log('Local preview mode: background jobs, cache warm-up, and Redis disabled.');
+  console.log(managedApi ? 'Managed web release: scheduled jobs remain with the existing job owner.' : 'Local preview mode: background jobs, cache warm-up, and Redis disabled.');
 }
 
 // Handle unhandled promise rejections

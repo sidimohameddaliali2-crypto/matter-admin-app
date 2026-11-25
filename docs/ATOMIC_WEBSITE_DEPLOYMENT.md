@@ -1,122 +1,126 @@
 # Keep the website available during deployment
 
-The supplied production Nginx configuration serves `client/build` directly and
-falls back to `/index.html`. CRA clears that directory when building. An absent
-index can cause an Nginx internal-redirection cycle and an HTML 500. An Nginx
-error-log entry from the incident is needed to confirm the exact failure.
+Production Nginx serves `client/build` and falls back to `/index.html`. CRA clears
+its output directory when building. Building there can remove the live index and
+cause an Nginx internal-redirection cycle and an HTML 500. An error-log entry is
+still needed to attribute any individual production incident to that condition.
 
-Atomic website mode builds in GitHub Actions, verifies a complete artifact, and
-switches a Linux symlink only after the existing backend verification succeeds.
-Incomplete uploads and failed builds never replace the visible website. An
-unsuccessful public website/asset check restores its previous pointer.
+## Default deployment: keep the existing Nginx configuration
 
-This fixes static website publication, not the separate API restart gap. The
-existing `pm2 delete`/start sequence and supervised audit-worker pause/resume
-remain unchanged. Do not call this a zero-downtime backend deployment. Overlapping
-API instances need a separately reviewed background-job and worker ownership
-plan, readiness, draining, resource checks and consistent Socket.IO delivery.
-Website rollback does not undo a backend deployment or database changes.
+The candidate workflow is **manual-only**: no push trigger is present. The pause
+change is also proposed separately in PR #230; leaving that PR open does not
+apply a pause to the live workflow. Do not describe production as paused without
+checking its actual Actions configuration. This branch has not been deployed.
 
-## One-time activation after code review
+Every manual application deployment builds and seals the website in GitHub Actions,
+uploads a checksummed artifact, and verifies it before changing application code.
+The Droplet never runs CRA in the live directory. No Nginx edit, bootstrap command
+or feature-variable activation is required for the existing `client/build` root.
 
-The new workflow path is OFF unless the production environment variable
-`ATOMIC_WEBSITE_DEPLOY` is exactly `1`. Keep it unset during preparation. Existing
-audit operations retain their existing behavior and do not upload websites.
+Before merging, mirror the previous client `.env*` build settings into production
+GitHub environment **variables**. The supported `REACT_APP_*` names are listed in
+the website-build step. They are embedded in browser code; use restricted public
+map keys, never server credentials. Compare API/socket origins, 2GIS, timezone,
+next-day rules and meal-selection switches with the current site. Empty variables
+can select defaults. The runner cannot read private `.env` files on the Droplet.
 
-1. Merge the reviewed changes with the new mode still off. The legacy deployment
-   still runs at this stage, with its existing interruptions. Wait for it to finish;
-   do not bootstrap while another deployment is building the old directory.
-2. From the production app directory as its deployment user, snapshot the complete
-   currently working build without changing its source or Nginx:
+With `ATOMIC_WEBSITE_DEPLOY` unset or `0`, the publisher:
 
-   ```bash
-   cd /home/matter/matter-delivery-tracker
-   node .github/scripts/website-release.mjs bootstrap "$PWD"
-   ```
+1. Copies the verified build to `.website/releases/COMMIT-RUN-ATTEMPT` and adds
+   `client/build/website-releases` as a link to that public release directory.
+   Existing files at that path cause a safe failure rather than being overwritten.
+2. Fetches the candidate HTML and main bundle through the public website, comparing
+   exact hashes. A wrong Nginx root, blocked symlink or HTML fallback fails before
+   worker pauses, code changes or visible website publication.
+3. Leaves the current website and all original `/static/` files intact while the
+   API deployment runs. No client dependencies are installed on the Droplet.
+4. Starts the isolated web API, verifies database, Redis and configured feature
+   readiness, then switches the stable local gateway without restarting Nginx
+   or the job owner. See [API handoff and qualification](deployment/API_HANDOFF.md).
+5. Replaces public compatibility files using atomic same-directory renames, with `index.html`
+   last. New HTML refers to immutable `/website-releases/COMMIT-RUN-ATTEMPT/` assets.
+   Old tabs can still retrieve their old assets. A failed public marker, HTML or
+   main-bundle check restores the previous public files and preserves the existing
+   rollback target. An identical retry does not replace that target.
 
-   This creates `.website/current`, `.website/releases/bootstrap-TIMESTAMP` and
-   `.website/legacy-static`. A bootstrap runs only once. Never replace an existing
-   pointer manually with a directory. A failed bootstrap leaves the original
-   `client/build` untouched; inspect its private deployment directories before retry.
-3. Back up the active production Nginx site file identified by `nginx -T`. In the
-   existing HTTPS `server` block, replace only the website root with:
+A build/upload/API-readiness failure does not replace the visible website. A
+public post-publication failure can briefly expose the complete candidate before
+restoring the prior shell. Individual entry-file replacements are atomic; the
+set of manifest/service-worker/index files is not one filesystem transaction.
+Hard-coded public image/icon URLs are updated too; files no longer in a candidate
+are retained so previously loaded clients can still access them.
 
-   ```nginx
-   root /home/matter/matter-delivery-tracker/.website/current;
-   ```
+API releases now have independent code and dependencies. The old web process
+remains until both the gateway and API report no active requests/connections.
+An automatic rollback also drains a candidate that already received traffic.
+Existing WebSockets can reconnect to the selected release during retirement;
+this is not a promise that a socket transport never reconnects. No API change
+restarts scheduled GPS/import work. Worker upgrades are separately qualified.
+The candidate needs the one-time gateway/job-owner setup before it can run;
+fixture tests are not production acceptance. Website-only rollback does not undo
+API code, database writes or private configuration changes.
 
-   Add these two locations alongside the existing `/`, `/api/`, `/uploads/` and
-   `/socket.io/` locations. Keep all existing TLS, security, API, upload and socket
-   settings. The aliases contain only public website assets, never server files.
+## Website rollback
 
-   ```nginx
-   location ^~ /website-releases/ {
-       alias /home/matter/matter-delivery-tracker/.website/releases/;
-   }
+For the default Nginx root, run as the deployment user from the production app
+directory, after ensuring no deployment is in progress:
 
-   location ^~ /static/ {
-       alias /home/matter/matter-delivery-tracker/.website/legacy-static/;
-   }
-   ```
+```bash
+cd /home/matter/matter-delivery-tracker
+node .github/scripts/website-release.mjs rollback-live "$PWD"
+```
 
-   The first route retains versioned bundles for existing tabs; the second retains
-   the pre-migration bundles. Neither falls back to HTML for a missing JS asset.
-4. Run `sudo nginx -t`, and reload Nginx only if it passes. Verify:
+This restores the root files saved at the last successful publication. Confirm
+the website, its referenced main bundle, fresh login, an existing open page and
+the driver offline journey. HTTP fixtures do not certify browser/SW acceptance.
 
-   ```bash
-   node .github/scripts/website-release.mjs check "$PWD/.website/current" https://matterapp.online
-   ```
+## Existing symlink-root installations
 
-   Confirm a fresh browser login, an already-open page, and the driver offline
-   workflow. Node HTTP checks do not run a browser or its service worker. If this
-   check fails, restore the saved Nginx configuration and reload after validating;
-   keep atomic mode off. Both the old build and the bootstrap snapshot remain.
-5. Mirror the previous client `.env*` build settings into production GitHub
-   environment **variables** before moving builds. Supported names are explicitly
-   listed in the website-build step (`REACT_APP_*`). They are embedded in browser
-   code: use public, appropriately restricted map keys, not server secrets.
-   Verify 2GIS, API/socket origins, timezone/next-day settings and meal-selection
-   feature switches against the existing site; empty values can select defaults.
-6. Set production environment variable `ATOMIC_WEBSITE_DEPLOY=1`. Run a manual
-   `deploy` for the reviewed current main commit. Future deploys build on the
-   runner and upload checksummed artifacts before changing server code. A public
-   preflight must confirm Nginx is already serving `.website/current`; otherwise
-   the deploy stops before pausing workers or replacing application code.
+Keep `ATOMIC_WEBSITE_DEPLOY=1` if Nginx already uses `.website/current`. That mode
+continues to use the original symlink publisher and rollback pointer. Its public
+preflight must pass before application changes. Do not disable it while Nginx
+still uses that root: the default publisher targets `client/build`, not that
+symlink. Its candidate asset checks must pass for the unchanged root to be usable.
 
-Do not enable the variable first or point Nginx at an empty directory. No Nginx
-edits, production commands, migrations or deployments are performed by this PR.
-Once bootstrapped, legacy deploys stop before application changes until activation
-is completed. To return to legacy deployment, first restore the original Nginx
-root and remove the two release locations, validate and reload Nginx, then move
-the `.website/current` symlink aside and set the variable to `0`. Merely disabling
-the variable would otherwise leave Nginx serving a frozen snapshot.
+The required existing locations are:
 
-## Rollback and operation
+```nginx
+root /home/matter/matter-delivery-tracker/.website/current;
+location ^~ /website-releases/ {
+    alias /home/matter/matter-delivery-tracker/.website/releases/;
+}
+location ^~ /static/ {
+    alias /home/matter/matter-delivery-tracker/.website/legacy-static/;
+}
+```
 
-For a website-only rollback from the production app directory:
+Keep all TLS, API, upload and Socket.IO settings. A fresh symlink-root installation
+is optional: first run `bootstrap "$PWD"`, validate and reload the reviewed Nginx
+configuration, run `check "$PWD/.website/current" https://matterapp.online`, and
+only then set the variable to `1`. Default installations need none of these steps.
+Its website rollback remains:
 
 ```bash
 node .github/scripts/website-release.mjs rollback "$PWD"
 node .github/scripts/website-release.mjs check "$PWD/.website/current" https://matterapp.online
 ```
 
-Releases are immutable and include source commit, run ID and attempt in their
-URLs. Re-running an old source commit produces a different URL. The publisher
-rejects bad manifests, unexpected files, symlinks, missing assets and checksum
-mismatches. Concurrent publishers fail closed using `.website/publish.lock`.
-If the host dies during publication, inspect the lock/current/previous state
-before an operator removes a stale lock; the workflow never force-unlocks it.
+## Recovery, retention and verification
+
+Publishers fail closed on a concurrent `.website/publish.lock`. A killed host or
+publisher can leave that lock and partially updated entry files. Inspect the
+saved `live-previous.json` or symlink `current`/`previous` state before an operator
+removes a stale lock and restores the last verified release. Automatic rollback
+handles caught publication errors, not host loss or SIGKILL.
 
 Monitor disk space: releases and incoming uploads are retained for diagnosis,
-rollback and older browser sessions. No automated prune deletes them. Review a
-retention policy before removing old assets; never delete `current`, `previous`,
-the bootstrap release used by `legacy-static`, or assets needed by supported
-offline clients. A backend-incompatible website rollback needs application review.
+rollback and existing/offline browser sessions. No automated prune deletes them.
+Review retention before removing assets; never remove a referenced release,
+the default root's original static files or a bootstrap used by `legacy-static`.
 
-Linux publisher checks run in `.github/workflows/website-release-checks.yml`
-without production credentials, external-service calls or database access. They verify complete
-artifacts, original-file preservation, repeated reads across the symlink switch,
-asset retention, failed-public-check rollback and concurrent-publication refusal.
-Windows runs the portable integrity checks; Linux publication checks run on CI.
-The Linux job also starts an isolated Nginx process on a local test port and
-verifies the supplied SPA fallback and alias routes without production access.
+`.github/workflows/website-release-checks.yml` runs Linux integrity, API-readiness
+and real Nginx tests without production credentials or database access. Continuous
+requests exercise the unchanged SPA root through prepare, publish, a failed health
+check and rollback, including old-tab bundles. Local client builds separately
+validate CRA's release-prefixed output. Live activation remains a production
+acceptance step; fixture tests do not establish the serving host's configuration.

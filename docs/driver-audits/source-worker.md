@@ -1,5 +1,13 @@
 # Driver Reports source worker
 
+The proposed [API handoff](../deployment/API_HANDOFF.md) keeps this source/builder
+release separate from the serving web release and the retained GPS/import job
+owner. The web deploy does not pause, replace or restart those workers. Its
+candidate prewarm/readiness check must not be treated as fresh source evidence
+or a live staff acceptance result. Once a managed web release is active, the old
+report-only app-restart operator is refused until it can identify and qualify
+the actual serving web release instead of restarting the retained job owner.
+
 Start with the [maintenance map](maintenance-map.md) for component and source ownership, staff routes, upstream inputs, storage, configuration and tests. Use the in-app reader and separate worker path for the current rollout.
 
 The selected rollout uses Sidi’s existing staff page, the existing Supabase data and reviews, and a separate report worker. Production acceptance remains pending. Check the running processes and private release record for exact deployed identities.

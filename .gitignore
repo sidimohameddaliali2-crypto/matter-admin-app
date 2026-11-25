@@ -35,7 +35,9 @@ tmp/
 .private/
 work/
 .website/
+.api/
 website-build.tar.gz
+api-source.tar.gz
 
 # Private activity journal awaiting database delivery
 server/.activity-journal/

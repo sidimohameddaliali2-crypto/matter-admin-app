@@ -186,6 +186,97 @@ export async function rollbackWebsite(appRoot) {
   });
 }
 
+// Keep the existing Nginx root (client/build) and every old hashed asset intact.
+// Public compatibility files are replaced atomically; CRA never runs here.
+async function replaceFile(file, bytes) {
+  const temporary = path.join(path.dirname(file), `.website-${randomUUID()}`);
+  try {
+    await fs.writeFile(temporary, bytes, { flag: 'wx', mode: 0o644 });
+    await fs.rename(temporary, file);
+  } finally { await fs.unlink(temporary).catch(missing); }
+}
+
+async function liveDirectory(appRoot, root) {
+  const live = path.join(appRoot, 'client/build');
+  if (!(await info(live))?.isDirectory() || (await info(live)).isSymbolicLink()) throw Error('The existing website root must be a real directory.');
+  if (!(await info(path.join(live, 'index.html')))?.isFile()) throw Error('A working website index is required before deployment.');
+  const assets = path.join(live, 'website-releases');
+  if (!(await info(assets))) await fs.symlink(path.relative(live, path.join(root, 'releases')), assets);
+  if (!(await info(assets)).isSymbolicLink() || await fs.realpath(assets) !== path.join(root, 'releases')) throw Error('Website release asset path conflicts with existing files.');
+  return live;
+}
+
+async function checkCandidate(source, releaseId, origin, fetchImpl) {
+  const url = new URL(origin);
+  if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw Error('An HTTPS website origin is required.');
+  const manifest = JSON.parse(await fs.readFile(path.join(source, marker), 'utf8'));
+  // Check the actual immutable HTML and bundle through Nginx before changing
+  // the visible shell. This also catches a wrong root/alias or SPA fallback.
+  const assets = JSON.parse(await fs.readFile(path.join(source, 'asset-manifest.json'), 'utf8')).files;
+  const main = assets['main.js'].slice(`/website-releases/${releaseId}/`.length);
+  for (const name of ['index.html', main]) {
+    const response = await fetchImpl(`${url.origin}/website-releases/${releaseId}/${name}`, { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(10000) });
+    if (!response.ok || hash(Buffer.from(await response.arrayBuffer())) !== manifest.files[name]) throw Error('Public candidate asset verification failed.');
+  }
+}
+
+async function restoreEntries(live, entries) {
+  for (const [name, encoded] of Object.entries(entries)) {
+    if (!safeRelative(name) || name.startsWith('static/') || name.startsWith('website-releases/')) throw Error('Invalid website rollback entry.');
+    if (encoded === null) await fs.unlink(path.join(live, name)).catch(missing);
+    else await replaceFile(path.join(live, name), Buffer.from(encoded, 'base64'));
+  }
+}
+
+export async function publishLiveWebsite(appRoot, source, releaseId, origin, { prepareOnly = false, fetchImpl = fetch } = {}) {
+  return withStore(appRoot, async root => {
+    const destination = await storeBuild(root, source, releaseId);
+    const live = await liveDirectory(await fs.realpath(appRoot), root);
+    await checkCandidate(destination, releaseId, origin, fetchImpl);
+    if (prepareOnly) return { releaseId, prepared: true };
+    const manifest = await verifyWebsite(destination, releaseId);
+    // Retain compatibility with hard-coded /images, /icons, manifest and SW
+    // URLs as well as release-prefixed resources. Never clear old static assets.
+    if (Object.keys(manifest.files).some(name => name.startsWith('website-releases/'))) throw Error('The website-releases asset path is reserved.');
+    const names = Object.keys(manifest.files).filter(name => !name.startsWith('static/') && name !== 'index.html');
+    names.push(marker, 'index.html');
+    const entries = {};
+    for (const name of names) {
+      let parent = live;
+      for (const segment of name.split('/').slice(0, -1)) {
+        parent = path.join(parent, segment);
+        await managedDirectory(parent);
+      }
+      const previous = await fs.readFile(path.join(live, name)).catch(missing);
+      entries[name] = previous === null ? null : previous.toString('base64');
+    }
+    // Re-running a successful release must not destroy its rollback target.
+    if (entries['index.html'] === (await fs.readFile(path.join(destination, 'index.html'))).toString('base64')
+      && entries[marker] === (await fs.readFile(path.join(destination, marker))).toString('base64')) {
+      await checkPublicWebsite(destination, origin, { fetchImpl });
+      return { releaseId, unchanged: true };
+    }
+    try {
+      for (const name of names) await replaceFile(path.join(live, name), await fs.readFile(path.join(destination, name)));
+      await checkPublicWebsite(destination, origin, { fetchImpl });
+      const response = await fetchImpl(`${new URL(origin).origin}/index.html?release=${releaseId}`, { cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(10000) });
+      if (!response.ok || hash(Buffer.from(await response.arrayBuffer())) !== manifest.files['index.html']) throw Error('Public website HTML verification failed.');
+      await replaceFile(path.join(root, 'live-previous.json'), JSON.stringify({ version: 1, entries }));
+    } catch (error) { await restoreEntries(live, entries); throw error; }
+    return { releaseId, published: true };
+  });
+}
+
+export async function rollbackLiveWebsite(appRoot) {
+  return withStore(appRoot, async root => {
+    const receipt = JSON.parse(await fs.readFile(path.join(root, 'live-previous.json'), 'utf8'));
+    if (receipt.version !== 1 || !receipt.entries || typeof receipt.entries['index.html'] !== 'string') throw Error('Invalid website rollback receipt.');
+    const live = await liveDirectory(await fs.realpath(appRoot), root);
+    await restoreEntries(live, receipt.entries);
+    return { rolledBack: true };
+  });
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2);
   try {
@@ -201,7 +292,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       result = { healthy: true };
     }
     else if (command === 'rollback' && args.length === 1) result = await rollbackWebsite(args[0]);
-    else throw Error('Use seal SOURCE ID, bootstrap APP_ROOT, check CURRENT ORIGIN, publish APP_ROOT SOURCE ID ORIGIN, or rollback APP_ROOT.');
+    else if (command === 'prepare-live' && args.length === 4) result = await publishLiveWebsite(...args, { prepareOnly: true });
+    else if (command === 'publish-live' && args.length === 4) result = await publishLiveWebsite(...args);
+    else if (command === 'rollback-live' && args.length === 1) result = await rollbackLiveWebsite(args[0]);
+    else throw Error('Use seal/verify SOURCE ID, bootstrap/rollback/rollback-live APP_ROOT, check CURRENT ORIGIN, or publish/prepare-live/publish-live APP_ROOT SOURCE ID ORIGIN.');
     console.log(JSON.stringify({ ...result, files: undefined }));
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
