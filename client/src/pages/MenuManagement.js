@@ -1,3 +1,4 @@
+import { drawMenuPdf, menuPdfSections, selectionPdfSections, menuPdfDateRange } from '../utils/menuPdf';
 import MenuSelectionBrowser from '../components/MenuSelectionBrowser';
 import MenuNonSelectors from '../components/MenuNonSelectors';
 import SelectionComponentTags from '../components/SelectionComponentTags';
@@ -1017,110 +1018,14 @@ const MenuManagement = () => {
       }
 
       const menuData = response.data.data;
-      const weeklyItems = buildWeeklyItemsFromMenu(menuData);
-      if (!weeklyItems.length) {
-        alert('No menu items found to download.');
+      const sections = menuPdfSections(menuData);
+      if (!sections.length) {
+        alert('No dated menu items found to download.');
         return;
       }
-
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
-      const pageWidth = 210;
-      const pageHeight = 297;
-      const margin = 15;
-      const maxWidth = pageWidth - margin * 2;
-      let currentY = margin;
-
+      drawMenuPdf(pdf, { title: menuData.title || 'Weekly menu', subtitle: menuPdfDateRange(menuData), sections, mergeWeekends: true });
       const safeTitle = String(menuData.title || 'Menu').replace(/[^a-z0-9-_]+/gi, '_');
-      const formatMenuDayLabel = (dateKey) => {
-        if (dateKey === 'ALL_DAYS') return 'All Days';
-        const date = new Date(dateKey);
-        if (Number.isNaN(date.getTime())) return dateKey;
-        return date.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric', year: 'numeric' });
-      };
-
-      const addTextLines = (text, x, y, lineHeight = 6) => {
-        const lines = pdf.splitTextToSize(text, maxWidth);
-        pdf.text(lines, x, y);
-        return lines.length * lineHeight;
-      };
-
-      pdf.setFontSize(18);
-      pdf.setFont('helvetica', 'bold');
-      pdf.text(menuData.title || 'Weekly Menu', margin, currentY);
-      currentY += 10;
-
-      if (menuData.description) {
-        pdf.setFontSize(10);
-        pdf.setFont('helvetica', 'normal');
-        currentY += addTextLines(menuData.description, margin, currentY, 5);
-        currentY += 4;
-      }
-
-      pdf.setFontSize(10);
-      pdf.setFont('helvetica', 'normal');
-      const dateRange = `${menuData.startDate ? new Date(menuData.startDate).toLocaleDateString() : 'N/A'} - ${menuData.endDate ? new Date(menuData.endDate).toLocaleDateString() : 'N/A'}`;
-      pdf.text(`Date range: ${dateRange}`, margin, currentY);
-      currentY += 6;
-
-      if (Array.isArray(menuData.mealPlans) && menuData.mealPlans.length) {
-        pdf.text(`Meal plan: ${menuData.mealPlans.join(', ')}`, margin, currentY);
-        currentY += 8;
-      } else {
-        currentY += 4;
-      }
-
-      weeklyItems.forEach((day) => {
-        if (currentY > pageHeight - margin - 30) {
-          pdf.addPage();
-          currentY = margin;
-        }
-
-        pdf.setFontSize(14);
-        pdf.setFont('helvetica', 'bold');
-        pdf.text(formatMenuDayLabel(day.date), margin, currentY);
-        currentY += 8;
-
-        // Snacks stay in the database for the kitchen list only — they are not
-        // part of the menu the customer/printed menu shows.
-        const menuFacingItems = (day.items || []).filter((item) => item.mealType !== 'snack');
-        if (menuFacingItems.length === 0) {
-          pdf.setFontSize(10);
-          pdf.setFont('helvetica', 'normal');
-          pdf.text('No items listed for this day.', margin + 2, currentY);
-          currentY += 8;
-        } else {
-          menuFacingItems.forEach((item) => {
-            if (currentY > pageHeight - margin - 40) {
-              pdf.addPage();
-              currentY = margin;
-            }
-
-            pdf.setFontSize(11);
-            pdf.setFont('helvetica', 'bold');
-            const titleText = `${item.mealType ? `${item.mealType}` : 'Meal'}${item.mealName ? ` - ${item.mealName}` : ''}`;
-            currentY += addTextLines(titleText, margin, currentY, 6);
-
-            const addLineValue = (label, value) => {
-              if (!value) return;
-              currentY += addTextLines(`${label}: ${value}`, margin + 2, currentY, 5);
-            };
-
-            addLineValue('Category', item.category);
-            addLineValue('Ingredients', item.ingredients);
-            addLineValue('Protein', item.proteinSource);
-            addLineValue('Intolerances', item.intolerances);
-            addLineValue('Allergens', item.allergens);
-            addLineValue('Garnish', item.garnish);
-            addLineValue('CARB', item.carbs);
-            addLineValue('VEG', item.veg);
-            addLineValue('Sauce', item.sauce);
-            currentY += 4;
-          });
-        }
-
-        currentY += 4;
-      });
-
       pdf.save(`${safeTitle}-menu.pdf`);
     } catch (err) {
       console.error('Error generating menu PDF:', err);
@@ -1214,102 +1119,21 @@ const MenuManagement = () => {
   };
 
   const handleDownloadAsPDF = async () => {
-    if (!modalContentRef.current || !selectedCustomerDetail) return;
-    
+    if (!selectedCustomerDetail) return;
     try {
       setIsDownloadingPDF(true);
-      
-      const pdf = new jsPDF({
-        orientation: 'portrait',
-        unit: 'mm',
-        format: 'a4'
-      });
-      
-      const pageWidth = 210;
-      const pageHeight = 297;
-      const margin = 10;
-      const contentWidth = pageWidth - (2 * margin);
-      let currentY = margin;
-      let isFirstPage = true;
-      
-      // Find all date sections (each day container)
-      const dateContainers = modalContentRef.current.querySelectorAll('[class*="border-2 border-matter-neutral-300 rounded-xl"]');
-      
-      if (dateContainers.length === 0) {
-        throw new Error('No content found to export');
-      }
-      
-      // Process each date section
-      for (let i = 0; i < dateContainers.length; i++) {
-        const container = dateContainers[i];
-        
-        // Create a temporary container for this section
-        const tempContainer = document.createElement('div');
-        tempContainer.style.position = 'fixed';
-        tempContainer.style.left = '-99999px';
-        tempContainer.style.width = '1000px';
-        tempContainer.style.backgroundColor = '#ffffff';
-        tempContainer.style.padding = '20px';
-        
-        const clone = container.cloneNode(true);
-        
-        // Remove height constraints
-        const allElements = clone.querySelectorAll('*');
-        allElements.forEach(el => {
-          el.style.maxHeight = 'none';
-          el.style.height = 'auto';
-          el.style.overflow = 'visible';
-        });
-        
-        tempContainer.appendChild(clone);
-        document.body.appendChild(tempContainer);
-        
-        await new Promise(resolve => setTimeout(resolve, 200));
-        
-        // Capture this section
-        const canvas = await html2canvas(clone, {
-          scale: 2,
-          backgroundColor: '#ffffff',
-          logging: false,
-          useCORS: true,
-          allowTaint: true
-        });
-        
-        document.body.removeChild(tempContainer);
-        
-        const imgData = canvas.toDataURL('image/jpeg', 0.95);
-        const imgWidth = contentWidth;
-        const imgHeight = (canvas.height * contentWidth) / canvas.width;
-        
-        // Check if we need a new page
-        if (!isFirstPage && (currentY + imgHeight > pageHeight - margin)) {
-          pdf.addPage();
-          currentY = margin;
-        }
-        
-        // Add the image
-        pdf.addImage(imgData, 'JPEG', margin, currentY, imgWidth, imgHeight);
-        
-        currentY += imgHeight + 5; // Add spacing between sections
-        
-        // If this section would make the next one overflow, start a new page
-        if (currentY > pageHeight - 50) { // Leave room for next section
-          pdf.addPage();
-          currentY = margin;
-        }
-        
-        isFirstPage = false;
-      }
-      
-      // Download PDF
+      const response = await api.get(`/menus/${selectionMenuId}`);
+      if (!response.data?.success) throw new Error(response.data?.message || 'Failed to load menu details');
+      const menu = response.data.data;
       const customerName = `${selectedCustomerDetail.firstName || ''} ${selectedCustomerDetail.lastName || ''}`.trim() || 'Customer';
-      const fileName = `${customerName.replace(/[^a-zA-Z0-9]/g, '_')}_Selections_${new Date().toISOString().split('T')[0]}.pdf`;
-      
-      pdf.save(fileName);
-      
+      const sections = selectionPdfSections(selectedCustomerDetail, menu, selectionDates);
+      if (!sections.length) throw new Error('No dated selections found to export.');
+      const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+      drawMenuPdf(pdf, { title: 'Customer selections', titleBold: true, customerName, subtitle: menuPdfDateRange(menu), sections });
+      pdf.save(`${customerName.replace(/[^a-zA-Z0-9]/g, '_')}_Selections_${new Date().toISOString().split('T')[0]}.pdf`);
     } catch (error) {
       console.error('Error generating PDF:', error);
-      alert('Failed to generate PDF. Please try again.');
+      alert(error.response?.data?.message || error.message || 'Failed to generate PDF. Please try again.');
     } finally {
       setIsDownloadingPDF(false);
     }

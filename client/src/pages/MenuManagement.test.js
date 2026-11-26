@@ -477,3 +477,42 @@ test('first cycle migration asks staff to choose instead of silently copying the
     await click('Create from Cycle Menu');expect(node.querySelector('input[placeholder="Menu Title"]').value).toContain('NOV4');
   }finally{await act(async()=>root.unmount());node.remove();jest.clearAllMocks();}
 });
+
+
+for (const kind of ['menu', 'selection']) test(`the ${kind} PDF download uses the shared sample layout and actual dated meal data`, async () => {
+  const date = '2099-11-02';
+  const item = { _id: 'dish', mealName: 'Fixture Bowl', mealType: 'main', itemDate: date, carbs: 'Wild Rice' };
+  const menu = { _id: 'menu', title: 'Fixture Week', isPublished: true, startDate: date, endDate: date,
+    meals: [{ date, mealType: 'main', items: [item] }] };
+  const customer = { _id: 'person', matterCustomerId: 'person', firstName: 'Fixture', email: 'fixture@example.invalid',
+    selectedMeals: [{ date, mealType: 'main', menuItemId: 'dish', mealName: 'Fixture Bowl', quantity: 2 }] };
+  api.get.mockImplementation(async path => ({ data: { success: true, data: path === '/menus' ? [menu]
+    : path === '/menus/menu' ? menu : path.endsWith('/selections') ? [customer]
+    : { customer_id: 'person', customer_name: 'Fixture Customer', customer_email: customer.email, subscription_id: 'sub',
+      plan_name: 'Custom', meal_frequency: 2, active_delivery_dates: [date], exclusions: [], allergens: [], macros: { carbohydrates: 90, protein: 90, fat: 20 } } } }));
+  const PDF = jest.requireActual('jspdf').jsPDF;
+  const pdf = new PDF(); pdf.save = jest.fn();
+  const text = jest.spyOn(pdf, 'text');
+  jsPDF.mockImplementationOnce(() => pdf);
+  const node = document.createElement('div'); document.body.appendChild(node); const root = createRoot(node);
+  const click = label => act(async () => [...node.querySelectorAll('button')].find(button => button.textContent.trim() === label).click());
+  const screenshot = jest.requireMock('html2canvas'); screenshot.mockClear();
+  try {
+    await act(async () => root.render(<MenuManagement />));
+    if (kind === 'menu') {
+      await act(async () => node.querySelector('button[title="More actions"]').click());
+      await click('Download menu PDF');
+    } else {
+      await click('View selections');
+      await act(async () => node.querySelector('.cursor-pointer.border-2').click());
+      await click('PDF');
+    }
+    const labels = text.mock.calls.flatMap(call => call[0]);
+    expect(labels).toContain('DAY ONE — MONDAY');
+    expect(labels).toContain(kind === 'menu' ? 'Fixture Bowl' : 'Fixture Bowl ×2');
+    expect(labels).toContain('Wild Rice');
+    expect(pdf.save).toHaveBeenCalledWith(expect.stringMatching(kind === 'menu' ? /-menu\.pdf$/ : /_Selections_.*\.pdf$/));
+    expect(screenshot).not.toHaveBeenCalled();
+    expect(customer.selectedMeals[0].quantity).toBe(2);
+  } finally { await act(async () => root.unmount()); node.remove(); jest.clearAllMocks(); }
+});

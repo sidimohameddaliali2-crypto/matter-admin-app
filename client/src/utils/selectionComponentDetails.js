@@ -1,4 +1,4 @@
-import { toTitleCase } from './textFormat';
+import { toTitleCase } from './textFormat.js';
 
 // Kept sides are audit details, never replacement lists used by the kitchen.
 export const selectionComponentDetails = meal => [
