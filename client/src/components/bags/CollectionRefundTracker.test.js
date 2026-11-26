@@ -28,9 +28,9 @@ async function save() { await act(async () => container.querySelector('form').di
 test('completed collection shows pending; management records payment reference and notes', async () => {
   expect(container.querySelector('.collection-status').textContent).toBe('Pending');
   expect([...container.querySelectorAll('[aria-label="Refund status filters"] button')].map(el => el.textContent)).toEqual(['Pending', 'Done']);
-  expect(api.get).toHaveBeenCalledWith('/collections/refunds', { params: { status: 'pending', page: 1 } });
+  expect(api.get).toHaveBeenCalledWith('/collections/refunds', { params: { status: 'pending', page: 1, search: '', dateFrom: '', dateTo: '', owner: '' } });
   await click('Mark as done');
-  expect(container.querySelector('select')).toBeNull();
+  expect(container.querySelector('#collection-refund-status')).toBeNull();
   expect(container.querySelector('#collection-refund-reference').required).toBe(true);
   await change('#collection-refund-reference', 'BANK-123'); await change('#collection-refund-note', 'Payment confirmed');
   await save();
@@ -57,7 +57,7 @@ test('read-only staff and previously refunded customers cannot see update contro
   expect(button('Mark as done')).toBeUndefined();
   canUpdate = true; row = { ...row, refundStatus: 'refunded', recordedForCustomer: true };
   await click('Done');
-  expect(api.get).toHaveBeenLastCalledWith('/collections/refunds', { params: { status: 'refunded', page: 1 } });
+  expect(api.get).toHaveBeenLastCalledWith('/collections/refunds', { params: { status: 'refunded', page: 1, search: '', dateFrom: '', dateTo: '', owner: '' } });
   expect(container.querySelector('.collection-status').textContent).toBe('Done');
   expect(button('Mark as done')).toBeUndefined();
   expect(container.textContent).toContain('Refund already recorded for this customer');
@@ -78,4 +78,28 @@ test('Done requires a nonblank transaction reference and keeps the request pendi
   await change('#collection-refund-reference', 'TXN-789');
   await save();
   expect(api.post).toHaveBeenCalledWith('/collections/collection-1/refund', expect.objectContaining({status: 'refunded', reference: 'TXN-789'}));
+});
+
+test('management assigns follow-up without recording payment and the new version is used for completion', async () => {
+  await act(async () => root.render(<CollectionRefundTracker owners={[{_id:'owner-1',name:'Accounts Manager'}]} />));
+  await click('Assign follow-up');
+  await change('#collection-refund-owner', 'owner-1');
+  await change('#collection-refund-due', '2026-12-01');
+  await save();
+  expect(api.post).toHaveBeenLastCalledWith('/collections/collection-1/refund-assignment', expect.objectContaining({ownerId:'owner-1',dueDate:'2026-12-01',version:0}));
+  expect(api.post.mock.calls[0][1].status).toBeUndefined();
+  expect(container.textContent).toContain('Refund owner and follow-up date saved.');
+});
+test('refund list applies shared customer and collection-date filters', async () => {
+  await act(async () => root.render(<CollectionRefundTracker search="Sara" dateFrom="2026-11-01" dateTo="2026-11-30" />));
+  expect(api.get).toHaveBeenLastCalledWith('/collections/refunds', {params:{status:'pending',page:1,search:'Sara',dateFrom:'2026-11-01',dateTo:'2026-11-30',owner:''}});
+  expect(container.textContent).toContain('does not verify bank payments');
+});
+
+test('clearing filters restores the pending queue and removes the owner restriction', async () => {
+  await change('#collection-refund-owner-filter','unassigned');
+  await click('Done');
+  await act(async () => root.render(<CollectionRefundTracker resetKey={1} />));
+  expect(container.querySelector('#collection-refund-owner-filter').value).toBe('');
+  expect(api.get).toHaveBeenLastCalledWith('/collections/refunds',{params:expect.objectContaining({status:'pending',owner:'',page:1})});
 });

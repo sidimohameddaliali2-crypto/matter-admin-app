@@ -10,7 +10,8 @@ jest.mock('date-fns/locale', () => jest.requireActual('date-fns/locale.cjs'));
 jest.mock('react-day-picker/dist/style.css', () => ({}), { virtual: true });
 let container, root;
 beforeEach(async () => {
-  jest.useFakeTimers({ now: new Date('2026-11-24T08:00:00Z') });
+  jest.useFakeTimers('modern');
+  jest.setSystemTime(new Date('2026-11-24T08:00:00Z'));
   global.IS_REACT_ACT_ENVIRONMENT = true;
   api.get.mockResolvedValue({ data: { data: [], total: 0, pages: 0 } });
   api.post.mockResolvedValue({ data: { success: true } });
@@ -25,9 +26,9 @@ async function click(element) { await act(async () => { element.click(); }); }
 async function change(selector, value) {
   await act(async () => {
     const element = document.querySelector(selector);
-    const prototype = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const prototype = element.tagName === 'SELECT' ? HTMLSelectElement.prototype : element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(prototype, 'value').set.call(element, value);
-    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event(element.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true }));
   });
 }
 async function chooseFriday() {
@@ -112,4 +113,26 @@ test('request list is left of refunds; closing and reopening the modal preserves
   await click(button('Add collection'));
   expect(document.querySelector('[role="dialog"]').getAttribute('aria-labelledby')).toBe('collection-modal-title');
   expect(document.querySelector('#collection-name').value).toBe('Draft customer');
+});
+
+test('open work is the default and shared customer/date filters reach the API', async () => {
+  expect(api.get).toHaveBeenCalledWith('/collections', {params:expect.objectContaining({view:'open',page:1})});
+  await act(async () => { document.querySelector('[aria-label="Close add collection"]').click(); jest.advanceTimersByTime(300); });
+  await change('#collection-list-search', 'Sara');
+  await act(async () => jest.advanceTimersByTime(300));
+  await change('#collection-date-from', '2026-11-01');
+  await click(button('History'));
+  expect(api.get).toHaveBeenCalledWith('/collections', {params:expect.objectContaining({view:'history',search:'Sara',dateFrom:'2026-11-01',page:1})});
+});
+test('past collection dates are disabled and duplicates require an explicit review', async () => {
+  await click(button('Choose a collection date'));
+  expect(document.querySelector('[data-day="2026-11-20"] button').disabled).toBe(true);
+  await click(document.querySelector('[data-day="2026-11-27"] button'));
+  await change('#collection-name','Sara');
+  await change('#collection-address','Al Quoz');
+  api.post.mockRejectedValueOnce({response:{data:{code:'POSSIBLE_DUPLICATE',message:'Review existing request',duplicates:[{_id:'existing',customerName:'Sara',scheduledTime:'2026-11-26T20:00:00Z',status:'pending'}]}}});
+  await act(async () => document.querySelector('form').dispatchEvent(new Event('submit',{bubbles:true,cancelable:true})));
+  expect(document.querySelector('[aria-label="Possible duplicate requests"]').textContent).toContain('Review possible duplicates');
+  expect(document.querySelector('a[href="/deliveries/existing"]')).not.toBeNull();
+  expect(api.post).toHaveBeenCalledTimes(1);
 });

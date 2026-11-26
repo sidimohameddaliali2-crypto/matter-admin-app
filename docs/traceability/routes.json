@@ -128,7 +128,7 @@
     "server/routes/bagOperations.js": "f56198aefbe58fedf23ad4de7a803b2d6d1a751a657fb71c99d19c7acd3d8749",
     "server/routes/bagRefunds.js": "b59d8a5f11c85784e728face2c36cd3bf73f8ef44f08e1c8ce33a9c7e3823191",
     "server/routes/bags.js": "5365c35d13f485789ae19f03793aa8bf6e998f8cee2b8cf052bd377e1e2a4d07",
-    "server/routes/collections.js": "10acd1fd6cc894718a57a5baba028f0580a54f85bd4ed9f88860e08092eb0a9c",
+    "server/routes/collections.js": "74302dc2e580d9957cb1e8ce69f9c212f79d7be7ff2639f982a54414e2fb57d1",
     "server/routes/communications.js": "7d9bc696d81f850efc61dd35ef19207555691ec81fdb7658280620f045a81335",
     "server/routes/customers.js": "46cbcb737f5226edbaac371e64c852bab577c59fe9d45fcee158fc482f5af51f",
     "server/routes/customerService.js": "af8607225feee2254c7b196d0b4ece2b10e32755a45873ede5c7991f51762b28",
@@ -3654,14 +3654,94 @@
       "middlewareDeclarations": []
     },
     {
-      "id": "2d0234c65000a301",
+      "id": "e7e5f7180ed2f8c6",
       "method": "GET",
-      "source": "server/routes/collections.js:21",
+      "source": "server/routes/collections.js:38",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "message",
+        "success"
+      ],
+      "requestKeys": [
+        "query.report"
+      ],
+      "referencedCalls": [
+        "Delivery.find",
+        "collectionCsv",
+        "collectionListFilter",
+        "openCollectionStatuses.includes",
+        "refundError"
+      ],
+      "path": "/api/collections/export",
+      "middlewareDeclarations": [
+        "protect",
+        "authorize(['super_admin', 'admin', 'manager', 'dispatcher'])"
+      ]
+    },
+    {
+      "id": "b3fe4308ea5effd9",
+      "method": "GET",
+      "source": "server/routes/collections.js:50",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
         500
       ],
+      "responseKeys": [
+        "drivers",
+        "message",
+        "owners",
+        "success"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [
+        "User.find",
+        "canRecordCollectionRefund"
+      ],
+      "path": "/api/collections/people",
+      "middlewareDeclarations": [
+        "protect",
+        "authorize(['super_admin', 'admin', 'manager', 'dispatcher'])"
+      ]
+    },
+    {
+      "id": "385b8a924aa44f9e",
+      "method": "GET",
+      "source": "server/routes/collections.js:57",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [
+        500
+      ],
+      "responseKeys": [
+        "asOf",
+        "message",
+        "openCount",
+        "pastDate",
+        "pendingRefunds",
+        "success",
+        "unassigned"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [
+        "Delivery.countDocuments",
+        "collectionRefundQueueFilter"
+      ],
+      "path": "/api/collections/summary",
+      "middlewareDeclarations": [
+        "protect",
+        "authorize(['super_admin', 'admin', 'manager', 'dispatcher'])"
+      ]
+    },
+    {
+      "id": "2d0234c65000a301",
+      "method": "GET",
+      "source": "server/routes/collections.js:69",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
       "responseKeys": [
         "canUpdate",
         "data",
@@ -3676,12 +3756,9 @@
         "query.status"
       ],
       "referencedCalls": [
-        "BagRefundCase.distinct",
         "Delivery.countDocuments",
-        "Delivery.distinct",
         "Delivery.find",
-        "canRecordCollectionRefund",
-        "collectionRefundQueueFilter"
+        "canRecordCollectionRefund"
       ],
       "path": "/api/collections/refunds",
       "middlewareDeclarations": [
@@ -3690,9 +3767,43 @@
       ]
     },
     {
+      "id": "057381129a1c73f8",
+      "method": "POST",
+      "source": "server/routes/collections.js:82",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "duplicate",
+        "message",
+        "success"
+      ],
+      "requestKeys": [
+        "body.dueDate",
+        "body.eventId",
+        "body.ownerId",
+        "body.version",
+        "params.id"
+      ],
+      "referencedCalls": [
+        "Delivery.findOne",
+        "Delivery.findOneAndUpdate",
+        "User.findOne",
+        "buildRefundAssignment",
+        "canRecordCollectionRefund",
+        "collectionRefundFilter",
+        "refundError"
+      ],
+      "path": "/api/collections/:id/refund-assignment",
+      "middlewareDeclarations": [
+        "protect",
+        "authorize(['super_admin', 'admin', 'manager', 'dispatcher'])"
+      ]
+    },
+    {
       "id": "e8b9e030bf9199f9",
       "method": "POST",
-      "source": "server/routes/collections.js:38",
+      "source": "server/routes/collections.js:105",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3726,12 +3837,10 @@
     {
       "id": "ec72c551e9363fe6",
       "method": "GET",
-      "source": "server/routes/collections.js:64",
+      "source": "server/routes/collections.js:131",
       "description": null,
       "handlerGuards": [],
-      "declaredStatuses": [
-        500
-      ],
+      "declaredStatuses": [],
       "responseKeys": [
         "data",
         "message",
@@ -3741,11 +3850,13 @@
         "total"
       ],
       "requestKeys": [
-        "query.page"
+        "query.page",
+        "query.view"
       ],
       "referencedCalls": [
         "Delivery.countDocuments",
-        "Delivery.find"
+        "Delivery.find",
+        "collectionListFilter"
       ],
       "path": "/api/collections",
       "middlewareDeclarations": [
@@ -3756,24 +3867,31 @@
     {
       "id": "6a32925b51bd6a5b",
       "method": "POST",
-      "source": "server/routes/collections.js:79",
+      "source": "server/routes/collections.js:146",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
-        201
+        201,
+        409
       ],
       "responseKeys": [
+        "code",
         "data",
+        "duplicates",
         "message",
         "success"
       ],
       "requestKeys": [
         "body.customerId",
-        "body.customerSource"
+        "body.customerSource",
+        "body.duplicateAcknowledged",
+        "body.duplicateReason"
       ],
       "referencedCalls": [
         "Customer.findOne",
+        "Delivery.find",
         "buildCollectionRequest",
+        "collectionDuplicateFilter",
         "saveReportingDelivery"
       ],
       "path": "/api/collections",

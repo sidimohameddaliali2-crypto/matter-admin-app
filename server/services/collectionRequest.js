@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { toBusinessDateKey } from '../utils/businessDate.js';
 
 export function buildCollectionRequest(input, customer, actorId, now = new Date()) {
   const fail = message => { const error = new Error(message); error.statusCode = 400; throw error; };
@@ -19,6 +20,7 @@ export function buildCollectionRequest(input, customer, actorId, now = new Date(
   const scheduledTime = new Date(`${input.collectionDate}T00:00:00+04:00`);
   const dubaiWeekday = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Dubai', weekday: 'short' }).format(scheduledTime);
   if (!['Tue', 'Fri', 'Sat'].includes(dubaiWeekday)) fail('Collections are available only on Tuesday, Friday and Saturday (Dubai time).');
+  if (input.collectionDate < toBusinessDateKey(now)) fail('New collections must be scheduled for today or later (Dubai time).');
   if (typeof input.refundRequestedAfterCollection !== 'boolean') fail('Confirm whether a bag refund is requested after collection.');
   const latRaw = input.latitude;
   const lngRaw = input.longitude;

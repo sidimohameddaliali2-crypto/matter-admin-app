@@ -203,11 +203,16 @@ const deliverySchema = new mongoose.Schema({
     phone: String,
     depositAlreadyRefunded: Boolean, // Legacy declaration only; never reinterpret as a refund request.
     refundRequestedAfterCollection: Boolean,
+    duplicateReason: String,
     recordedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     recordedAt: Date
   },
   completedAt: Date,
   collectionRefund: {
+    owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    ownerName: String,
+    dueDate: String,
+    assignmentHistory: [{ _id: false, eventId: String, owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, ownerName: String, dueDate: String, actor: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, actorName: String, timestamp: Date }],
     status: { type: String, enum: ['pending', 'not_refunded', 'refunded'] },
     version: Number,
     depositKey: String,

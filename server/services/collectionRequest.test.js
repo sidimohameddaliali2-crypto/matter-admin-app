@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCollectionRequest } from './collectionRequest.js';
+import { buildCollectionRequest as build } from './collectionRequest.js';
+const buildCollectionRequest = (input, customer, actor, now = new Date('2026-11-22T08:00:00Z')) => build(input, customer, actor, now);
 
 const valid = { customerSource: 'manual', customerName: 'Jane Smith', address: 'Al Quoz, Dubai', collectionDate: '2026-11-27', refundRequestedAfterCollection: false };
 test('weekly collection schedule accepts only Tuesday Friday and Saturday in Dubai', () => {
@@ -36,4 +37,9 @@ test('requesting a refund records intent without marking any deposit paid', () =
   assert.equal(request.collectionRequest.refundRequestedAfterCollection, true);
   assert.equal(request.collectionRequest.depositAlreadyRefunded, undefined);
   assert.throws(() => buildCollectionRequest({ ...valid, refundRequestedAfterCollection: undefined, depositAlreadyRefunded: true }, null, 'staff'), error => error.statusCode === 400);
+});
+
+test('new requests cannot be backdated across the Dubai midnight boundary', () => {
+  assert.doesNotThrow(() => buildCollectionRequest(valid, null, 'staff', new Date('2026-11-27T19:59:59Z')));
+  assert.throws(() => buildCollectionRequest(valid, null, 'staff', new Date('2026-11-27T20:00:00Z')), /today or later/);
 });
