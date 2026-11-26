@@ -62,3 +62,21 @@ test('read-only staff and previously refunded customers cannot see update contro
   expect(button('Mark refunded')).toBeUndefined();
   expect(container.textContent).toContain('Refund already recorded for this customer');
 });
+
+test('demo shows one Pending and one Done without saving or mixing real requests', async () => {
+  await click('Mark refunded');
+  const reads = api.get.mock.calls.length;
+  await click('View demo requests');
+  expect(container.querySelector('form')).toBeNull();
+  expect(container.textContent).toContain('Demo only');
+  expect(container.textContent).not.toContain('Sara Ahmed');
+  expect([...container.querySelectorAll('.collection-status')].map(el => el.textContent)).toEqual(['Pending', 'Done']);
+  expect(container.textContent).toContain('DEMO-PAYMENT-002');
+  expect(button('Mark refunded').disabled).toBe(true);
+  await click('Mark refunded');
+  expect(api.post).not.toHaveBeenCalled();
+  expect(api.get).toHaveBeenCalledTimes(reads);
+  await click('Back to real requests');
+  expect(container.textContent).toContain('Sara Ahmed');
+  expect(container.textContent).not.toContain('DEMO-001');
+});
