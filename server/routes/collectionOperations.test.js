@@ -63,3 +63,15 @@ test('possible duplicate creation returns existing cases for review without savi
   assert.equal(res.body.code, 'POSSIBLE_DUPLICATE');
   assert.deepEqual(res.body.duplicates, [existing]);
 });
+test('existing open requests receive a possible-duplicate review link without changing records', async () => {
+  const open = { _id: id, customerName: 'Sara', customerId: 'C001', scheduledTime: new Date('2026-11-26T20:00:00Z'), status: 'pending' };
+  const chain = { select() { return this; }, populate() { return this; }, sort() { return this; }, skip() { return this; }, limit() { return this; }, lean: async () => [open] };
+  mock.method(Delivery, 'find', () => chain);
+  mock.method(Delivery, 'countDocuments', async () => 1);
+  const check = mock.method(Delivery, 'exists', async () => ({ _id: ownerId }));
+  const res = await invoke('/', 'get');
+  assert.equal(res.code, 200);
+  assert.equal(res.body.data[0].possibleDuplicateId, ownerId);
+  assert.deepEqual(check.mock.calls[0].arguments[0]._id, { $ne: id });
+  assert.equal(open.possibleDuplicateId, undefined);
+});

@@ -136,3 +136,11 @@ test('past collection dates are disabled and duplicates require an explicit revi
   expect(document.querySelector('a[href="/deliveries/existing"]')).not.toBeNull();
   expect(api.post).toHaveBeenCalledTimes(1);
 });
+test('older matching requests show a review warning without changing any records', async () => {
+  await act(async () => { document.querySelector('[aria-label="Close add collection"]').click(); jest.advanceTimersByTime(300); });
+  api.get.mockImplementation(url => Promise.resolve({ data: url === '/collections' ? { data: [{ _id: 'one', customerName: 'Sara', address: 'Al Quoz', status: 'pending', scheduledTime: '2026-11-26T20:00:00Z', possibleDuplicateId: 'other' }], total: 1, pages: 1 } : { openCount: 1, pendingRefunds: 0, unassigned: 1, pastDate: 0 } }));
+  await click(button('Refresh'));
+  expect(container.textContent).toContain('Possible duplicate request.');
+  expect(container.querySelector('a[href="/deliveries/other"]').textContent).toBe('Review the other request');
+  expect(api.post).not.toHaveBeenCalled();
+});

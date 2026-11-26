@@ -38,11 +38,11 @@ export function collectionListFilter(query = {}) {
 }
 export function collectionDuplicateFilter(data) {
   const day = toBusinessDateKey(data.scheduledTime);
-  const names = { customerName: { $regex: `^${literalPattern(data.customerName.trim()).replace(/\s+/g, '\\s+')}\\s*$`, $options: 'i' } };
-  const matches = [names];
-  if (data.collectionRequest.customerSource === 'internal') matches.push({ customerId: data.customerId });
+  const name = String(data.customerName || '').trim();
+  const matches = name ? [{ customerName: { $regex: `^${literalPattern(name).replace(/\s+/g, '\\s+')}\\s*$`, $options: 'i' } }] : [];
+  if (data.customerId && data.collectionRequest.customerSource !== 'manual') matches.push({ customerId: data.customerId });
   if (data.collectionRequest.phone) matches.push({ 'collectionRequest.phone': data.collectionRequest.phone });
-  return { type: 'Collection', status: { $in: openCollectionStatuses }, scheduledTime: { $gte: businessDayStart(day), $lt: businessDayStart(addDaysToDateKey(day, 1)) }, $or: matches };
+  return { type: 'Collection', status: { $in: openCollectionStatuses }, scheduledTime: { $gte: businessDayStart(day), $lt: businessDayStart(addDaysToDateKey(day, 1)) }, $or: matches.length ? matches : [{ _id: { $exists: false } }] };
 }
 
 export function buildRefundAssignment(record, input, owner, actor, now = new Date()) {

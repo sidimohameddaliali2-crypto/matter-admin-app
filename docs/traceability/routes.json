@@ -128,7 +128,7 @@
     "server/routes/bagOperations.js": "f56198aefbe58fedf23ad4de7a803b2d6d1a751a657fb71c99d19c7acd3d8749",
     "server/routes/bagRefunds.js": "b59d8a5f11c85784e728face2c36cd3bf73f8ef44f08e1c8ce33a9c7e3823191",
     "server/routes/bags.js": "5365c35d13f485789ae19f03793aa8bf6e998f8cee2b8cf052bd377e1e2a4d07",
-    "server/routes/collections.js": "74302dc2e580d9957cb1e8ce69f9c212f79d7be7ff2639f982a54414e2fb57d1",
+    "server/routes/collections.js": "2f9c3ae8486dc0c2ab1a386c1c98ecc90df505bf8aa07c0baffbb528c1822fef",
     "server/routes/communications.js": "7d9bc696d81f850efc61dd35ef19207555691ec81fdb7658280620f045a81335",
     "server/routes/customers.js": "46cbcb737f5226edbaac371e64c852bab577c59fe9d45fcee158fc482f5af51f",
     "server/routes/customerService.js": "af8607225feee2254c7b196d0b4ece2b10e32755a45873ede5c7991f51762b28",
@@ -3855,8 +3855,11 @@
       ],
       "referencedCalls": [
         "Delivery.countDocuments",
+        "Delivery.exists",
         "Delivery.find",
-        "collectionListFilter"
+        "collectionDuplicateFilter",
+        "collectionListFilter",
+        "openCollectionStatuses.includes"
       ],
       "path": "/api/collections",
       "middlewareDeclarations": [
@@ -3867,7 +3870,7 @@
     {
       "id": "6a32925b51bd6a5b",
       "method": "POST",
-      "source": "server/routes/collections.js:146",
+      "source": "server/routes/collections.js:151",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [

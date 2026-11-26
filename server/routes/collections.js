@@ -137,7 +137,12 @@ router.get('/', async (req, res) => {
         .populate('driver', 'profile.firstName profile.lastName').sort(req.query.view === 'history' ? { scheduledTime: -1, _id: -1 } : { scheduledTime: 1, _id: 1 }).skip((page - 1) * 25).limit(25).lean(),
       Delivery.countDocuments(filter)
     ]);
-    res.json({ success: true, data, page, total, pages: Math.ceil(total / 25) });
+    const reviewed = await Promise.all(data.map(async record => {
+      if (!openCollectionStatuses.includes(record.status) || !record.scheduledTime || !toBusinessDateKey(record.scheduledTime)) return record;
+      const duplicate = await Delivery.exists({ ...collectionDuplicateFilter({ ...record, collectionRequest: record.collectionRequest || {} }), _id: { $ne: record._id } });
+      return { ...record, possibleDuplicateId: duplicate?._id || null };
+    }));
+    res.json({ success: true, data: reviewed, page, total, pages: Math.ceil(total / 25) });
   } catch (error) {
     res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Unable to load collection requests.' });
   }
