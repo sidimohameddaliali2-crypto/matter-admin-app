@@ -29,7 +29,7 @@ test('completed collection shows pending; management records payment reference a
   expect(container.querySelector('.collection-status').textContent).toBe('Pending');
   expect([...container.querySelectorAll('[aria-label="Refund status filters"] button')].map(el => el.textContent)).toEqual(['Pending', 'Done']);
   expect(api.get).toHaveBeenCalledWith('/collections/refunds', { params: { status: 'pending', page: 1 } });
-  await click('Mark refunded');
+  await click('Mark as done');
   expect(container.querySelector('select')).toBeNull();
   expect(container.querySelector('#collection-refund-reference').required).toBe(true);
   await change('#collection-refund-reference', 'BANK-123'); await change('#collection-refund-note', 'Payment confirmed');
@@ -41,7 +41,7 @@ test('earlier unpaid requests remain Pending; failed saves retain the confirmati
   row = { ...row, refundStatus: 'not_refunded', collectionRefund: { version: 2, note: 'Awaiting accounts' } };
   await click('Refresh refunds');
   expect(container.querySelector('.collection-status').textContent).toBe('Pending');
-  await click('Mark refunded'); await change('#collection-refund-note', 'Payment confirmed');
+  await click('Mark as done'); await change('#collection-refund-note', 'Payment confirmed');
   await change('#collection-refund-reference', 'BANK-456');
   api.post.mockRejectedValueOnce({ response: { data: { message: 'This refund changed. Refresh before updating it.' } } });
   await save();
@@ -54,29 +54,28 @@ test('earlier unpaid requests remain Pending; failed saves retain the confirmati
 });
 test('read-only staff and previously refunded customers cannot see update controls', async () => {
   canUpdate = false; await click('Refresh refunds');
-  expect(button('Mark refunded')).toBeUndefined();
+  expect(button('Mark as done')).toBeUndefined();
   canUpdate = true; row = { ...row, refundStatus: 'refunded', recordedForCustomer: true };
   await click('Done');
   expect(api.get).toHaveBeenLastCalledWith('/collections/refunds', { params: { status: 'refunded', page: 1 } });
   expect(container.querySelector('.collection-status').textContent).toBe('Done');
-  expect(button('Mark refunded')).toBeUndefined();
+  expect(button('Mark as done')).toBeUndefined();
   expect(container.textContent).toContain('Refund already recorded for this customer');
 });
 
-test('demo shows one Pending and one Done without saving or mixing real requests', async () => {
-  await click('Mark refunded');
-  const reads = api.get.mock.calls.length;
-  await click('View demo requests');
-  expect(container.querySelector('form')).toBeNull();
-  expect(container.textContent).toContain('Demo only');
-  expect(container.textContent).not.toContain('Sara Ahmed');
-  expect([...container.querySelectorAll('.collection-status')].map(el => el.textContent)).toEqual(['Pending', 'Done']);
-  expect(container.textContent).toContain('DEMO-PAYMENT-002');
-  expect(button('Mark refunded').disabled).toBe(true);
-  await click('Mark refunded');
+test('Done requires a nonblank transaction reference and keeps the request pending until confirmation', async () => {
+  expect(button('View demo requests')).toBeUndefined();
+  expect(container.textContent).not.toContain('DEMO-');
+  await click('Mark as done');
+  expect(container.textContent).toContain('Transaction reference (required)');
+  await change('#collection-refund-note', 'Payment confirmed');
+  await save();
   expect(api.post).not.toHaveBeenCalled();
-  expect(api.get).toHaveBeenCalledTimes(reads);
-  await click('Back to real requests');
-  expect(container.textContent).toContain('Sara Ahmed');
-  expect(container.textContent).not.toContain('DEMO-001');
+  await change('#collection-refund-reference', '   ');
+  await save();
+  expect(api.post).not.toHaveBeenCalled();
+  expect(container.textContent).toContain('Enter the transaction reference');
+  await change('#collection-refund-reference', 'TXN-789');
+  await save();
+  expect(api.post).toHaveBeenCalledWith('/collections/collection-1/refund', expect.objectContaining({status: 'refunded', reference: 'TXN-789'}));
 });
