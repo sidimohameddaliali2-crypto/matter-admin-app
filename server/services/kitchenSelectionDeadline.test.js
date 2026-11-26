@@ -56,8 +56,8 @@ test('unscoped snacks preflight every selected date before assigning any custome
   await assert.rejects(() => runAssignSnacks('menu'), { code: 'KITCHEN_SELECTION_OPEN' });
 });
 
-test('open preview preserves saved choices, adds transient missing rows, and never starts preparation', async t => {
-  const saved = { email: 'chosen@example.invalid', matterCustomerId: '42', selectedMeals: [{ date: '2099-11-02', mealName: 'Chosen beef', quantity: 2 }] };
+test('open preview recovers a legacy choice by upcoming parent ID without saving or duplicating it', async t => {
+  const saved = { email: 'former@example.invalid', matterSubscriptionId: 'parent', selectedMeals: [{ date: '2099-11-02', mealName: 'Chosen beef', quantity: 2 }] };
   const before = JSON.stringify(saved);
   t.mock.method(Menu, 'findById', () => query({}));
   t.mock.method(Record, 'find', () => query([saved]));
@@ -65,7 +65,9 @@ test('open preview preserves saved choices, adds transient missing rows, and nev
   t.mock.method(Breakfast, 'findOne', () => query(null));
   t.mock.method(Snack, 'findOne', () => query(null));
   t.mock.method(matter, 'findSubscriptionsWithDeliveryOnDate', async () => [
-    { customer_id: '42', subscription_id: 'renewed', email: saved.email },
+    { customer_id: '42', subscription_id: 'renewed', email: 'chosen@example.invalid',
+      kitchen_inputs: { customer_id: '42', subscription_id: 'renewed', customer_email: 'chosen@example.invalid',
+        is_upcoming_plan: true, source_parent_subscription_id: 'parent', allergens: [] } },
     { customer_id: '43', subscription_id: 'missing', email: 'missing@example.invalid', name: 'Missing customer' },
   ]);
   t.mock.method(Snapshot, 'create', () => assert.fail('No job on open date'));
@@ -94,6 +96,7 @@ test('open preview keeps the saved choice but marks an allergy conflict for prod
     kitchen_inputs: { customer_id: '42', customer_email: record.email, allergens: ['Peanuts'] } }]);
   const result = await beginKitchenState('menu', date, () => assert.fail('Open preview cannot assign'));
   assert.equal(result.state, 'selection-open');
-  assert.match(result.data.data.kitchenAllergyReview, /House bowl.*Peanuts/);
+  assert.match(result.data.data.kitchenAllergyReview, /^1 saved/);
+  assert.match(result.data.data.kitchenAllergyCases[0].message, /House bowl.*Peanuts/);
   assert.deepEqual(result.data.data.kitchenSelections[0].selectedMeals, [meal]);
 });

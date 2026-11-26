@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { requiresDatedMenuCalendar, menuNutritionForDate, menuMealPlanFields, menuPlanDates } from './menuPlanSchedule.js';
 import Menu from '../models/WeeklyMenu.js';
 import { resolveMenuAllergyProfile } from './menuAllergyProfileService.js';
 import { evaluateComponentSelection, selectionPreferenceFlags } from '../../client/src/constants/componentSelectionRules/index.js';
@@ -117,11 +118,43 @@ export function validateStaffMenuSelections({ menu, selections, existingSelectio
   });
 }
 
-export async function validatedMenuSelections({ menuId, selections, nutrition, staffRecord }) {
+export async function validatedMenuSelections({ menuId, selections, nutrition, staffRecord, enforceCustomerAllowance = true, loadedMenu }) {
   if (!mongoose.isValidObjectId(menuId) || !nutrition) throw failure();
-  const profile = await resolveMenuAllergyProfile(nutrition);
-  if (!profile.allergiesAvailable) throw Object.assign(new Error('Allergy information is unavailable from Matter. Please retry or contact customer service before selecting meals.'), { statusCode: 502, code: 'MATTER_ALLERGENS_UNAVAILABLE' });
-  const menu = await Menu.findById(menuId).populate({ path: 'meals.items', model: 'MenuItem' }).lean();
-  const inputs = { menu, selections, exclusions: nutrition.exclusions || [], allergies: profile.allergies };
-  return staffRecord ? validateStaffMenuSelections({ ...inputs, existingSelections: staffRecord.selectedMeals || [] }) : validateMenuSelections(inputs);
+  const groups = new Map();
+  if (!Array.isArray(selections)) throw failure();
+  for (const selection of selections) {
+    const date = dateKey(selection?.date);
+    const plan = menuNutritionForDate(nutrition, date);
+    if (!groups.has(plan)) groups.set(plan, []);
+    groups.get(plan).push(selection);
+  }
+  // Even an empty submission must not bypass the Matter allergy check.
+  if (!groups.size) groups.set(nutrition, []);
+  const profiles = new Map();
+  for (const plan of groups.keys()) {
+    const profile = await resolveMenuAllergyProfile(plan);
+    if (!profile.allergiesAvailable) throw Object.assign(new Error('Allergy information is unavailable from Matter. Please retry or contact customer service before selecting meals.'), { statusCode: 502, code: 'MATTER_ALLERGENS_UNAVAILABLE' });
+    if (!Array.isArray(plan.exclusions)) throw Object.assign(new Error('Exclusion information is unavailable from Matter. Please retry before selecting meals.'), { statusCode: 502, code: 'MATTER_EXCLUSIONS_UNAVAILABLE' });
+    profiles.set(plan, profile);
+  }
+  const menu = loadedMenu ?? await Menu.findById(menuId).populate({ path: 'meals.items', model: 'MenuItem' }).lean();
+  const checked = new Map();
+  for (const [plan, rows] of groups) {
+    const profile = profiles.get(plan);
+    if (!staffRecord && enforceCustomerAllowance) {
+      const eligible = requiresDatedMenuCalendar(nutrition) ? new Set(menuPlanDates(nutrition)) : null;
+      const totals = new Map();
+      for (const row of rows) {
+        const date = dateKey(row.date);
+        if (eligible && !eligible.has(date)) throw failure();
+        totals.set(date, (totals.get(date) || 0) + (row.quantity === undefined ? 1 : Number(row.quantity)));
+      }
+      if (eligible && (!Number.isInteger(plan.meal_frequency) || plan.meal_frequency < 1)) throw failure();
+      for (const count of totals.values()) if (Number.isInteger(plan.meal_frequency) && count > plan.meal_frequency) throw failure();
+    }
+    const inputs = { menu, selections: rows, exclusions: plan.exclusions, allergies: profile.allergies };
+    const values = staffRecord ? validateStaffMenuSelections({ ...inputs, existingSelections: staffRecord.selectedMeals || [] }) : validateMenuSelections(inputs);
+    values.forEach((meal, index) => checked.set(rows[index], { ...meal, ...(plan.subscription_id && !(staffRecord && meal.isAutoAssigned) ? menuMealPlanFields(plan) : {}) }));
+  }
+  return selections.map(row => checked.get(row));
 }

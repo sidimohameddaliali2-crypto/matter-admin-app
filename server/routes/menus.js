@@ -1,3 +1,4 @@
+import { hasDatedMenuPlans, requiresDatedMenuCalendar, menuNutritionForDate, menuPlanDates, menuPlanOwnsDate, menuMealPlanFields } from '../services/menuPlanSchedule.js';
 import { syncMenuSelectionBreakfastsToPartnerMenu } from '../services/partnerBreakfastMenuSync.js';
 import express from 'express';
 import kitchenMealEditsRouter from './kitchenMealEdits.js';
@@ -17,12 +18,14 @@ import MenuSelectionArchive from '../models/MenuSelectionArchive.js';
 import { excludeRecreatedArchivedAliases } from '../services/archivedMenuAliases.js';
 import { protect } from '../middleware/auth.js';
 import { isMatterCoreDoubleDay } from '../utils/matterCoreDelivery.js';
-import { appendKitchenMeals } from '../services/kitchenSelectionWrite.js';
+import { appendKitchenMeals, matchSavedKitchenInputs } from '../services/kitchenSelectionWrite.js';
 import { kitchenDateUnavailable } from '../services/kitchenDeliveryEligibility.js';
 import { reconcileCoreBreakfast } from '../services/kitchenBreakfastEntitlement.js';
 import { reconcileCoreDoubleAddOns, reconcileCoreMainMeals } from '../services/kitchenCoreEntitlement.js';
 import { toKitchenOption, kitchenAllergyAllows, kitchenConflictList, kitchenConflictFields, mergeKitchenMetadata, buildLegacyKitchenMainRotation, identifyKitchenMenuItem } from '../services/kitchenExclusions.js';
 import { coreSnackPoolForSlot, missingCoreSnackSlots } from '../services/kitchenSnackSlots.js';
+import { canUseFallbackSnacks, eligibleFallbackSnacks, fallbackSnackSelection, kitchenSnackConflicts, loadFallbackSnackOptions, loadFallbackSnackRecipes } from '../services/kitchenFallbackSnacks.js';
+import { kitchenDietaryExclusions } from '../services/kitchenDietaryExclusions.js';
 import { kitchenUpload } from '../services/kitchenUpload.js';
 import { saveManagedMenu } from '../services/managedMenuSave.js';
 import { ensureShortMenuToken, menuShareFilter, invalidateMenuShareCache } from '../services/menuShareLinks.js';
@@ -30,14 +33,14 @@ import { assertAssignmentMacros } from '../services/kitchenMacroValidation.js';
 import { readKitchenState, beginKitchenState } from '../services/kitchenProductionSnapshot.js';
 import { kitchenMenuDates } from '../services/kitchenMenuDates.js';
 import { menuSelectionNames } from '../services/menuSelectionNames.js';
-import { assertKitchenSelectionClosed, readKitchenSelectionWindow } from '../services/kitchenSelectionDeadline.js';
+import { assertKitchenSelectionClosed, kitchenSelectionWindow, readKitchenSelectionWindow } from '../services/kitchenSelectionDeadline.js';
 import { cacheGet, cacheSet, cacheDelete, cacheDeletePattern } from '../config/cache.js';
 import { FIXED_SELECTION_DEADLINES } from '../config/selectionDeadlines.js';
 import athleatService from '../services/athleatService.js';
 import matterApiService, { describeMatterApiError } from '../services/matterApiService.js';
 import supyService from '../services/supyService.js';
 import { withKitchenPreparation, preparationHasFailures, kitchenPreparationFailure } from '../services/kitchenPreparation.js';
-import { matterSelectionIdentity, matterSelectionFilter, normalizeMatterEmail } from '../services/matterKitchenIdentity.js';
+import { matterSelectionIdentity, matterSelectionFilter, matchesMatterSelectionRecord, normalizeMatterEmail } from '../services/matterKitchenIdentity.js';
 import { resolveMenuAllergyProfile, withMenuAllergyProfiles } from '../services/menuAllergyProfileService.js';
 import { reviewSavedKitchenAllergies } from '../services/kitchenAllergyReview.js';
 import { validatedMenuSelections } from '../services/menuSelectionValidation.js';
@@ -449,10 +452,24 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
       });
     }
 
+    if (nutrition.replaces_subscription_id && isValidObjectId(menuId)) {
+      const menu = await WeeklyMenu.findById(menuId).select('startDate').lean();
+      if (menu?.startDate) nutrition = await matterApiService.withPriorKitchenSubscription(nutrition, toDateKey(menu.startDate));
+    }
     const identity = matterSelectionIdentity(nutrition);
     const allergyProfile = await resolveMenuAllergyProfile(nutrition);
     const record = menuId ? await MenuSelectionRecord.findOne(matterSelectionFilter(menuId, nutrition)).lean() : null;
     await reconcileMenuSkippedDays(record, nutrition);
+    const plansByDate = {};
+    const deliveryDates = requiresDatedMenuCalendar(nutrition) ? menuPlanDates(nutrition) : nutrition.active_delivery_dates;
+    for (const date of deliveryDates || []) {
+      const plan = menuNutritionForDate(nutrition, date);
+      const allergies = await resolveMenuAllergyProfile(plan);
+      if (requiresDatedMenuCalendar(nutrition) && (!Number.isInteger(plan.meal_frequency) || plan.meal_frequency < 1)) throw Object.assign(new Error('Matter meal allowance is unavailable for this plan. Please retry.'), { statusCode: 409 });
+      plansByDate[date] = { subscriptionId: String(plan.subscription_id), isUpcomingPlan: plan.is_upcoming_plan === true,
+        mealPerDay: plan.meal_frequency, mealPlan: plan.plan_name,
+        exclusionsAvailable: Array.isArray(plan.exclusions), mealExclusion: Array.isArray(plan.exclusions) ? plan.exclusions.join(', ') : null, ...allergies };
+    }
     const consolidatedMeals = record?.selectedMeals || [];
     const savedSkippedDays = (record?.skippedDays || []).filter(day => !day.resumedAt);
     const foundMenuSelectionRecord = !!record;
@@ -474,9 +491,12 @@ router.get('/customers/:email/subscription-profile', async (req, res) => {
         mealSnack: (nutrition.snacks_per_day ?? 0) > 0,
         snackCount: nutrition.snacks_per_day ?? null,
         mealPlan: nutrition.plan_name ?? null,
-        deliveryDates: nutrition.active_delivery_dates,
+        deliveryDates,
+        plansByDate,
+        upcomingPlanStartDate: nutrition.upcoming_plan?.starting_date || null,
         cycleEndDate: nutrition.cycle_end_date,
-        mealExclusion: (nutrition.exclusions || []).join(', '),
+        exclusionsAvailable: Array.isArray(nutrition.exclusions),
+        mealExclusion: Array.isArray(nutrition.exclusions) ? nutrition.exclusions.join(', ') : null,
         ...allergyProfile,
         partner: null,
         selectedMeals: consolidatedMeals,
@@ -1022,6 +1042,16 @@ router.get('/kitchen-snack-presets', protect, async (req, res) => {
   }
 });
 
+router.get('/kitchen-fallback-snacks', protect, async (_req, res) => {
+  try {
+    const recipes = await loadFallbackSnackRecipes();
+    return res.json({ success: true, data: recipes.map(({ name, mealName }) => ({ name, mealName })) });
+  } catch (error) {
+    console.error('Error reading fallback snack recipes:', error);
+    return res.status(503).json({ success: false, message: 'Fallback snack recipes could not be verified.' });
+  }
+});
+
 /**
  * PUT /api/menus/kitchen-snack-presets
  * Saves individual global snack entries without replacing unrelated presets.
@@ -1164,7 +1194,7 @@ const toDateKey = (value) => {
 // exists used to upsert a SECOND record, so their meals were cooked and counted
 // twice. Before assigning, point such a target at the email the person's
 // existing record is saved under (found through the Matter subscription id).
-const canonicalizeAssignCustomers = async (menuId, customers, matterInputs = [], { onlySnacks = false } = {}) => {
+const canonicalizeAssignCustomers = async (menuId, customers, matterInputs = [], { onlySnacks = false, date } = {}) => {
   if (!Array.isArray(customers) || !customers.length) return customers;
   const records = await MenuSelectionRecord.find({ weeklyMenuId: menuId }).select('email matterEmail matterCustomerId matterSubscriptionId').lean();
   const verified = await mapWithConcurrency(customers, 8, async (target) => {
@@ -1173,22 +1203,24 @@ const canonicalizeAssignCustomers = async (menuId, customers, matterInputs = [],
     const source = matterInputs.find((input) => permanentId
       ? String(input.customer_id) === String(permanentId)
       : normalizeMatterEmail(input.customer_email) === normalizeMatterEmail(record?.matterEmail || target.email));
-    const nutrition = source || await matterApiService.getKitchenNutrition({
+    const nutritionSource = source || await matterApiService.getKitchenNutrition({
       customerId: permanentId, email: record?.matterEmail || target.email,
-      subscriptionId: record?.matterSubscriptionId || target.subscriptionId,
+      subscriptionId: record?.matterSubscriptionId || target.subscriptionId, date,
     });
+    const nutrition = date ? menuNutritionForDate(nutritionSource, date) : nutritionSource;
     const identity = matterSelectionIdentity(nutrition);
+    const exclusions = kitchenDietaryExclusions(nutrition);
     const unresolvedMeals = !onlySnacks && (!Number.isInteger(Number(nutrition.meal_frequency)) || Number(nutrition.meal_frequency) < 1
       || typeof nutrition.breakfast_included !== 'boolean');
     if (unresolvedMeals || nutrition.snacks_per_day == null
       || !Number.isInteger(Number(nutrition.snacks_per_day)) || Number(nutrition.snacks_per_day) < 0
-      || !Array.isArray(nutrition.exclusions)) throw new Error('Matter meal entitlements or exclusions are unresolved. Retry after checking Matter.');
+      || !Array.isArray(exclusions)) throw new Error('Matter meal entitlements or exclusions are unresolved. Retry after checking Matter.');
     const existing = records.find((entry) => String(entry.matterCustomerId || '') === identity.matterCustomerId)
       || record;
     return { ...target, email: existing?.email || identity.matterEmail, ...identity,
       name: nutrition.customer_name, subscriptionId: identity.matterSubscriptionId,
       mealFrequency: nutrition.meal_frequency, breakfastIncluded: nutrition.breakfast_included,
-      exclusions: nutrition.exclusions || [], nutrition,
+      exclusions, nutrition,
     };
   });
   const profiles = withMenuAllergyProfiles(verified.map(customer => customer.nutrition));
@@ -1567,8 +1599,8 @@ const savedCoreMealSlots = (meals, total) => {
  * to the old menu-wide behavior (every customer's selection record, every
  * date they have non-snack meals for).
  */
-async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs = [] } = {}) {
-    if (Array.isArray(customers)) customers = await canonicalizeAssignCustomers(menuId, customers, matterInputs);
+async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs = [], collectAllergyReviews = false } = {}) {
+    if (Array.isArray(customers)) customers = await canonicalizeAssignCustomers(menuId, customers, matterInputs, { date });
     const scopedDateKey = date ? toDateKey(date) : null;
     const scopedEmails = Array.isArray(customers)
       ? new Set(customers.map((c) => String(c.email || '').trim().toLowerCase()).filter(Boolean))
@@ -1596,32 +1628,21 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
     const ingredientReads = new Map();
     const allergyOptionsByDate = new Map();
     const coreSnackBatches = new Map();
+    let fallbackOptions;
     const verifiedInputs = await mapWithConcurrency(records, 8, async (record) => {
       const prepared = scopedNutrition.get(normalizeMatterEmail(record.email));
       const nutrition = prepared || matterInputs.find((input) => record.matterCustomerId
         ? String(input.customer_id) === String(record.matterCustomerId)
-        : normalizeMatterEmail(input.customer_email) === normalizeMatterEmail(record.matterEmail || record.email))
-        || await matterApiService.getKitchenNutrition({ customerId: record.matterCustomerId, email: record.matterEmail || record.email, subscriptionId: record.matterSubscriptionId });
 
-      if (!nutrition || nutrition.snacks_per_day == null || !Number.isFinite(Number(nutrition.snacks_per_day))) {
-        throw new Error('Snack entitlement is unresolved. Retry kitchen preparation.');
-      }
-      return nutrition;
+        : normalizeMatterEmail(input.customer_email) === normalizeMatterEmail(record.matterEmail || record.email))
+        || await matterApiService.getKitchenNutrition({ customerId: record.matterCustomerId, email: record.matterEmail || record.email, subscriptionId: record.matterSubscriptionId, date: scopedDateKey });
+      return scopedDateKey ? menuNutritionForDate(nutrition, scopedDateKey) : nutrition;
     });
     const nutritionByRecord = withMenuAllergyProfiles(verifiedInputs);
     const results = await mapWithConcurrency(records, 8, async (record, index) => {
       const stats = { assigned: 0, skippedNoSnacksNeeded: 0, skippedNoOptions: 0, datesWithNoOptions: [] };
-      const nutrition = nutritionByRecord[index];
-      const snacksPerDay = Number(nutrition.snacks_per_day);
-      await reconcileMenuSkippedDays(record, nutrition);
-      const core = String(nutrition.plan_name || '').trim().toLowerCase() === 'matter core';
-      if (snacksPerDay <= 0) {
-        stats.skippedNoSnacksNeeded = 1;
-        if (!nutrition.allergyProfile.allergies.length
-          && !(record.selectedMeals || []).some(meal => meal.mealType === 'snack' && meal.coreDeliveryFoodDay)) return stats;
-      }
-
-      const exclusions = (nutrition.exclusions || []).map((value) => String(value).trim().toLowerCase()).filter(Boolean);
+      const subscriptionNutrition = nutritionByRecord[index];
+      await reconcileMenuSkippedDays(record, subscriptionNutrition);
 
       // Scoped runs only ever touch the one requested date — even if the
       // customer has meals on other dates already, this call has no business
@@ -1636,6 +1657,14 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
           ));
 
       for (const dateKey of dateKeys) {
+        const [nutrition] = withMenuAllergyProfiles([menuNutritionForDate(subscriptionNutrition, dateKey)]);
+        if (!nutrition || nutrition.snacks_per_day == null || !Number.isFinite(Number(nutrition.snacks_per_day))) throw new Error('Snack entitlement is unresolved. Retry kitchen preparation.');
+        const snacksPerDay = Number(nutrition.snacks_per_day);
+        const core = String(nutrition.plan_name || '').trim().toLowerCase() === 'matter core';
+        if (snacksPerDay <= 0) stats.skippedNoSnacksNeeded = 1;
+        const sourceExclusions = kitchenDietaryExclusions(nutrition);
+        const exclusions = (sourceExclusions || []).map(value => String(value).trim().toLowerCase()).filter(Boolean);
+
         if (await kitchenDateUnavailable(record, dateKey, nutrition)) continue;
         const hasCoreSnack = (record.selectedMeals || []).some(meal => meal.mealType === 'snack'
           && meal.coreDeliveryFoodDay && toDateKey(meal.date) === dateKey);
@@ -1654,7 +1683,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
           if (!dayRecord || await kitchenDateUnavailable(dayRecord, dateKey, nutrition)) continue;
         }
         if (hasCoreSnack) dayRecord = await reconcileCoreDoubleAddOns(dayRecord, dateKey, nutrition, new Date(), { onlySnacks: true });
-        await reviewSavedKitchenAllergies(menuId, dateKey, dayRecord, nutrition, allergyOptionsByDate, 'snack');
+        if (!collectAllergyReviews) await reviewSavedKitchenAllergies(menuId, dateKey, dayRecord, nutrition, allergyOptionsByDate, 'snack');
         if (snacksPerDay <= 0) continue;
         const newSnacks = [];
         const existingSnackCount = (dayRecord.selectedMeals || []).filter(
@@ -1675,12 +1704,21 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
         }).lean().exec());
         const ingredients = await ingredientReads.get(dateKey);
         const eligible = option => kitchenAllergyAllows(option, nutrition.allergyProfile.allergies)
-          && !optionExcludedByCustomer(option, exclusions);
+          && !kitchenSnackConflicts(option, exclusions).length;
         const snackRotation = [...dayPools.first, ...dayPools.second];
-        const eligibleFirst = mergeKitchenMetadata(dayPools.first, ingredients, snackRotation).filter(eligible);
-        const eligibleSecond = mergeKitchenMetadata(dayPools.second, ingredients, snackRotation).filter(eligible);
+        const scheduled = {
+          first: mergeKitchenMetadata(dayPools.first, ingredients, snackRotation),
+          second: mergeKitchenMetadata(dayPools.second, ingredients, snackRotation),
+        };
+        const eligibleFirst = scheduled.first.filter(eligible);
+        const eligibleSecond = scheduled.second.filter(eligible);
+        const allergies = nutrition.allergyProfile.allergies;
+        const fallback = !eligibleFirst.length && !eligibleSecond.length && nutrition.allergyProfile.allergiesAvailable
+          && Array.isArray(sourceExclusions)
+          && canUseFallbackSnacks(scheduled, exclusions, allergies)
+          ? eligibleFallbackSnacks(await (fallbackOptions ||= loadFallbackSnackOptions()), scheduled, exclusions, allergies) : [];
 
-        if (eligibleFirst.length === 0 && eligibleSecond.length === 0) {
+        if (!eligibleFirst.length && !eligibleSecond.length && !fallback.length) {
           stats.skippedNoOptions += 1;
           stats.datesWithNoOptions.push(dateKey);
           continue;
@@ -1691,12 +1729,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
           const preferFirst = overallSlotIndex % 2 === 0;
           let pool = preferFirst ? eligibleFirst : eligibleSecond;
           if (pool.length === 0) pool = preferFirst ? eligibleSecond : eligibleFirst;
-          if (pool.length === 0) {
-            stats.skippedNoOptions += 1;
-            continue;
-          }
-
-          const choice = pool[Math.floor(Math.random() * pool.length)];
+          const choice = fallback.length ? fallback[overallSlotIndex % fallback.length] : pool[Math.floor(Math.random() * pool.length)];
           newSnacks.push({
             date: new Date(dateKey),
             mealType: 'snack',
@@ -1708,6 +1741,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
               P: (Number(choice.P) || 0) / snacksPerDay,
               F: (Number(choice.F) || 0) / snacksPerDay
             },
+            ...(fallback.length && fallbackSnackSelection(choice)),
             isAutoAssigned: true
           });
         }
@@ -1720,6 +1754,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
         // or two staff tabs) — both used to read "0 snacks" and both push,
         // doubling the customer's snacks. The loser of the race now matches
         // nothing and simply skips.
+        newSnacks.forEach(meal => Object.assign(meal, menuMealPlanFields(menuNutritionForDate(nutrition, toDayKey(meal.date)))));
         await assertAssignmentMacros(newSnacks);
         const dayStart = new Date(dateKey);
         const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60 * 1000);
@@ -1762,7 +1797,7 @@ async function runAssignSnacks(menuId, { date, customers } = {}, { matterInputs 
     let skippedNoOptions = results.reduce((sum, r) => sum + r.skippedNoOptions, 0);
     const datesWithNoOptions = new Set(results.flatMap((r) => r.datesWithNoOptions));
     for (const [dateKey, batch] of coreSnackBatches) {
-      const result = await runAssignMatterCoreMeals(menuId, dateKey, batch.customers, { onlySnacks: true, matterInputs: batch.inputs });
+      const result = await runAssignMatterCoreMeals(menuId, dateKey, batch.customers, { onlySnacks: true, matterInputs: batch.inputs, collectAllergyReviews });
       if (result.error) return result;
       assigned += result.data.assignedSnacks;
       skippedNoOptions += result.data.skippedSnackNoOption;
@@ -1843,7 +1878,7 @@ const mapWithConcurrency = async (items, limit, mapper) => {
  * `onlySnacks`: the standalone snack action skips main and breakfast writes
  * and can fall back to the other eligible pool.
  */
-async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly = false, includeBreakfast = false, onlySnacks = false, matterInputs = [] } = {}) {
+async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly = false, includeBreakfast = false, onlySnacks = false, matterInputs = [], collectAllergyReviews = false } = {}) {
 
   const menu = await WeeklyMenu.findById(menuId)
     .select('breakfastOptionsByDate snackOptionsByDate meals selectionDeadlines')
@@ -1852,7 +1887,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     return { error: 'Menu not found', status: 404 };
   }
   assertKitchenSelectionClosed(menu, dateKey);
-  customers = await canonicalizeAssignCustomers(menuId, customers, matterInputs, { onlySnacks });
+  customers = await canonicalizeAssignCustomers(menuId, customers, matterInputs, { onlySnacks, date: dateKey });
 
   // Candidates come from that day's MenuItem records tagged usedForCorePlan
   // (set in the meal editor) rather than the older matterCoreMealOptionsByDate
@@ -1930,6 +1965,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
   let skippedSnackNoOption = 0;
   let doubleDeliveryCustomers = 0;
   const allergyOptionsByDate = new Map();
+  let fallbackOptions;
 
   for (const customer of sortedCustomers) {
     const email = String(customer.email || '').trim();
@@ -1943,7 +1979,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
       existingRecord = await reconcileCoreMainMeals(existingRecord, dateKey, customer.nutrition);
     }
     existingRecord = await reconcileCoreDoubleAddOns(existingRecord, dateKey, customer.nutrition, new Date(), { onlySnacks });
-    await reviewSavedKitchenAllergies(menuId, dateKey, existingRecord, customer.nutrition, allergyOptionsByDate, onlySnacks ? 'snack' : undefined);
+    if (!collectAllergyReviews) await reviewSavedKitchenAllergies(menuId, dateKey, existingRecord, customer.nutrition, allergyOptionsByDate, onlySnacks ? 'snack' : undefined);
     const existingMainMeals = (existingRecord?.selectedMeals || []).filter(
       (m) => toDateKey(m.date) === dateKey && m.mealType === 'main'
     );
@@ -2166,8 +2202,8 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     // customer-eligible candidates used for assignment, with an original
     // pool fallback for saved snacks that have since become ineligible.
     const eligibleSnackPools = {
-      first: snackPools.first.filter(eligible),
-      second: snackPools.second.filter(eligible),
+      first: snackPools.first.filter(option => allergyAllows(option) && !kitchenSnackConflicts(option, exclusions).length),
+      second: snackPools.second.filter(option => allergyAllows(option) && !kitchenSnackConflicts(option, exclusions).length),
     };
     const poolForSlot = slot => {
       const preferred = coreSnackPoolForSlot(slot, snacksPerDay);
@@ -2177,6 +2213,11 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     };
     const requiredSnacks = snacksPerDay * addOnMultiplier;
     let missingSnackSlots = missingCoreSnackSlots(existingSnacks, requiredSnacks, eligibleSnackPools, snackPools, snacksPerDay);
+    const allergyProfile = customer.nutrition.allergyProfile;
+    const fallback = missingSnackSlots.length > 0 && !eligibleSnackPools.first.length && !eligibleSnackPools.second.length
+      && allergyProfile.allergiesAvailable
+      && canUseFallbackSnacks(snackPools, exclusions, allergyProfile.allergies)
+      ? eligibleFallbackSnacks(await (fallbackOptions ||= loadFallbackSnackOptions()), snackPools, exclusions, allergyProfile.allergies) : [];
     if (addOnMultiplier === 2 || existingSnacks.some(meal => meal.coreDeliveryFoodDay)) {
       const savedPortions = existingSnacks.reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
       const stillNeeded = Math.max(0, requiredSnacks - savedPortions);
@@ -2187,7 +2228,8 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
     if (missingSnackSlots.length > 0) {
       for (const overallSlotIndex of missingSnackSlots) {
         const pool = poolForSlot(overallSlotIndex);
-        const choice = onlySnacks ? pool[Math.floor(Math.random() * pool.length)] : pool[0];
+        const choice = fallback.length ? fallback[(overallSlotIndex % snacksPerDay) % fallback.length]
+          : onlySnacks ? pool[Math.floor(Math.random() * pool.length)] : pool[0];
         if (!choice) {
           skippedSnackNoOption += 1;
           continue;
@@ -2208,6 +2250,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
             P: (Number(choice.P) || 0) / snacksPerDay,
             F: (Number(choice.F) || 0) / snacksPerDay
           },
+          ...(fallback.length && fallbackSnackSelection(choice)),
           isAutoAssigned: true
         });
         assignedSnacks += 1;
@@ -2216,6 +2259,7 @@ async function runAssignMatterCoreMeals(menuId, dateKey, customers, { snackOnly 
 
     if (newMeals.length === 0) continue;
 
+    newMeals.forEach(meal => Object.assign(meal, menuMealPlanFields(customer.nutrition)));
     await assertAssignmentMacros(newMeals);
     await appendKitchenMeals(menuId, email, existingRecord,
       {
@@ -2296,7 +2340,7 @@ async function runAutoPopulateMissing(menuId, dateKey, options) {
   return withKitchenPreparation(`menu:${menuId}:${dateKey}`, () => populateMissingKitchenSelections(menuId, dateKey, options));
 }
 
-async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs = false } = {}) {
+async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs = false, collectAllergyReviews = false } = {}) {
   const cacheKey = `menu:${menuId}:autoPopulated:v7:${dateKey}`;
   const cached = freshInputs ? null : await cacheGet(cacheKey);
   if (cached && !freshInputs) return { data: cached, cached: true };
@@ -2325,27 +2369,26 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
   const existingRecords = await MenuSelectionRecord.find({ weeklyMenuId: menuId })
     .select('email legacyStorageEmail matterEmail matterCustomerId matterSubscriptionId selectedMeals skippedDays unpausedDays weeklyMenuId kitchenAutoHolds').lean();
   const matterInputs = withMenuAllergyProfiles(subscriptions.map(sub => sub.kitchen_inputs));
-  const sourceOptions = { matterInputs };
+  const sourceOptions = { matterInputs, collectAllergyReviews };
   const roster = subscriptions.map(({ kitchen_inputs, ...subscription }) => subscription);
   let alreadyCovered = 0;
   const newlyCreatedCustomers = 0; // Compatibility: kitchen never creates Internal customers.
   const needsAssignment = [], needsMatterCoreAssignment = [], needsSnackOnly = [], needsMatterCoreSnackOnly = [];
   const allergyOptionsByDate = new Map();
-  const reviewSaved = (record, nutrition) => reviewSavedKitchenAllergies(menuId, dateKey, record, nutrition, allergyOptionsByDate).catch(error => {
-    if (error.code === 'KITCHEN_ALLERGY_REVIEW') error.kitchenAllergyInputs = { kitchenInputs: matterInputs, kitchenRoster: roster };
-    throw error;
-  });
+  const reviewSaved = (record, nutrition) => collectAllergyReviews
+    ? undefined : reviewSavedKitchenAllergies(menuId, dateKey, record, nutrition, allergyOptionsByDate);
   for (const nutrition of matterInputs) {
     const identity = matterSelectionIdentity(nutrition);
-    const matches = existingRecords.filter((record) => record.matterCustomerId
-      ? String(record.matterCustomerId) === identity.matterCustomerId
-      : normalizeMatterEmail(record.matterEmail || record.email) === identity.matterEmail
-        || String(record.matterSubscriptionId || '') === identity.matterSubscriptionId);
+    const matches = existingRecords.filter(record => matchesMatterSelectionRecord(record, nutrition));
     if (matches.length > 1) throw new Error('Multiple saved selections match the same Matter customer. Resolve the duplicate selection before production.');
     let record = matches[0];
     await reconcileMenuSkippedDays(record, nutrition);
-    if (record && (!record.matterCustomerId || record.matterEmail !== identity.matterEmail || record.matterSubscriptionId !== identity.matterSubscriptionId || normalizeMatterEmail(record.email) !== identity.matterEmail)) {
-      const resolved = { ...identity, email: identity.matterEmail,
+    // The permanent customer owns the weekly record. Dated meals carry the
+    // upcoming subscription ID without repointing the existing current link.
+    const linkedSubscriptionId = nutrition.is_upcoming_plan && record?.matterSubscriptionId
+      ? record.matterSubscriptionId : identity.matterSubscriptionId;
+    if (record && (!record.matterCustomerId || record.matterEmail !== identity.matterEmail || record.matterSubscriptionId !== linkedSubscriptionId || normalizeMatterEmail(record.email) !== identity.matterEmail)) {
+      const resolved = { ...identity, email: identity.matterEmail, matterSubscriptionId: linkedSubscriptionId,
         ...(normalizeMatterEmail(record.email) !== identity.matterEmail ? { legacyStorageEmail: record.legacyStorageEmail || record.email } : {}) };
       await MenuSelectionRecord.updateOne({ _id: record._id }, { $set: resolved });
       Object.assign(record, resolved);
@@ -2440,7 +2483,9 @@ async function populateMissingKitchenSelections(menuId, dateKey, { freshInputs =
   // again soon.
   if (preparationHasFailures(summary)) {
     await cacheDelete(cacheKey);
-    throw kitchenPreparationFailure(summary, dateKey);
+    const failure = kitchenPreparationFailure(summary, dateKey);
+    if (collectAllergyReviews) return { data: summary, failure };
+    throw failure;
   }
   const cachedSummary = { ...summary };
   delete cachedSummary.kitchenInputs;
@@ -2462,7 +2507,8 @@ router.get('/:id/kitchen-state', protect, async (req, res) => {
 router.post('/:id/kitchen-state', protect, async (req, res) => {
   try {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(req.body.date || '') || toDateKey(req.body.date) !== req.body.date) return res.status(400).json({ success: false, message: 'Select a valid date.' });
-    const state = await beginKitchenState(req.params.id, req.body.date, () => runAutoPopulateMissing(req.params.id, req.body.date, { freshInputs: true }), { refresh: req.body.refresh === true });
+    const state = await beginKitchenState(req.params.id, req.body.date,
+      () => runAutoPopulateMissing(req.params.id, req.body.date, { freshInputs: true, collectAllergyReviews: true }), { refresh: req.body.refresh === true });
     return res.status(state.state === 'running' ? 202 : 200).json({ success: true, ...state });
   } catch (error) { return res.status(error.statusCode || 503).json({ success: false, message: error.message, code: error.code, selectionWindow: error.selectionWindow }); }
 });
@@ -2694,7 +2740,7 @@ router.put('/:id/matter-core-meal-options', protect, async (req, res) => {
  * submitted a selection at all). `customers` here is the same shape both
  * callers already use: [{ email, name, customerId, mealFrequency, exclusions }].
  */
-async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [] } = {}) {
+async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [], collectAllergyReviews = false } = {}) {
 
     const menu = await WeeklyMenu.findById(menuId)
       .select('mainMealOptionsByDate breakfastOptionsByDate meals selectionDeadlines')
@@ -2703,7 +2749,7 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
       return { error: 'Menu not found', status: 404 };
     }
     assertKitchenSelectionClosed(menu, dateKey);
-    customers = await canonicalizeAssignCustomers(menuId, customers, matterInputs);
+    customers = await canonicalizeAssignCustomers(menuId, customers, matterInputs, { date: dateKey });
 
     // Rotation candidates come from that day's MenuItem records (tagged
     // portionType + rotationCategory in the meal editor) rather than the
@@ -2771,7 +2817,7 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
       const existingRecord = await MenuSelectionRecord.findOne({ weeklyMenuId: menuId, email }).lean();
       await reconcileMenuSkippedDays(existingRecord, customer.nutrition);
       if (await kitchenDateUnavailable(existingRecord, dateKey, customer.nutrition)) continue;
-      await reviewSavedKitchenAllergies(menuId, dateKey, existingRecord, customer.nutrition, allergyOptionsByDate);
+      if (!collectAllergyReviews) await reviewSavedKitchenAllergies(menuId, dateKey, existingRecord, customer.nutrition, allergyOptionsByDate);
       const existingMainMeals = (existingRecord?.selectedMeals || []).filter(
         (m) => toDateKey(m.date) === dateKey && m.mealType === 'main'
       );
@@ -2927,6 +2973,7 @@ async function runAssignMainMeals(menuId, dateKey, customers, { matterInputs = [
 
       if (newMeals.length === 0) continue;
 
+      newMeals.forEach(meal => Object.assign(meal, menuMealPlanFields(customer.nutrition)));
       await assertAssignmentMacros(newMeals);
       await appendKitchenMeals(menuId, email, existingRecord,
         {
@@ -3557,6 +3604,7 @@ router.post('/customers/:email/skip-pause-preview', async (req, res) => {
       matterCustomerId: matterSub?.customer_id || null,
       skippedDateKeys: dates,
       restoredSkipDates: restoredMenuSkipDates(record, matterSub),
+      existingSkips: (record?.skippedDays || []).filter(day => !day.resumedAt).map(day => toDayKey(day.date)),
       weekendEnabled: matterSub?.weekend_enabled === true
     });
 
@@ -3635,7 +3683,12 @@ router.post('/customers/:email/select-meals', async (req, res) => {
 
     // Require an explicit date for every new pause before saving anything.
     const prior = weeklyMenuId ? await MenuSelectionRecord.findOne(selectionFilter)
-      .select('skippedDays unpausedDays matterSubscriptionId weeklyMenuId').lean() : null;
+      .select('skippedDays unpausedDays matterCustomerId matterSubscriptionId weeklyMenuId selectedMeals').lean() : null;
+    if (matterSub.replaces_subscription_id) {
+      const [earliestDate] = [...selections.map(sel => toDateKey(sel.date)), ...skippedDateKeys,
+        ...pauseDecisionByDate.keys(), ...(prior?.skippedDays || []).map(day => toDayKey(day.date))].filter(Boolean).sort();
+      matterSub = await matterApiService.withPriorKitchenSubscription(matterSub, earliestDate);
+    }
     await reconcileMenuSkippedDays(prior, matterSub);
     const restoredDates = new Set(restoredMenuSkipDates(prior, matterSub));
     // A stale tab still submits its old locked skips. Require a reload rather
@@ -3647,25 +3700,75 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     if (staleSkip) return res.status(409).json({ success: false, message: `Delivery on ${staleSkip} was unpaused in Matter. Reopen the menu to select your meals.` });
     const priorByDate = new Map((prior?.skippedDays || []).filter(day => !day.resumedAt).map((s) => [toDayKey(s.date), s]));
     skippedDateKeys = [...new Set([...priorByDate.keys(), ...skippedDateKeys])].sort();
-    const alreadyPaused = new Set([...priorByDate].filter(([, p]) => ['success', 'already_paused'].includes(p.pauseStatus)).map(([date]) => date));
+    const committedPauses = new Set([...priorByDate].filter(([, p]) => ['success', 'already_paused'].includes(p.pauseStatus)).map(([date]) => date));
+    const alreadyPaused = new Set(committedPauses);
     const claimedExisting = [...pauseDecisionByDate.values()].filter((d) => d.alreadyPaused && !alreadyPaused.has(toDayKey(d.date)));
-    const includesSaturday = skippedDateKeys.some((date) => new Date(`${date}T00:00:00Z`).getUTCDay() === 6);
-    if (claimedExisting.length || includesSaturday) {
+    const newSkipDates = skippedDateKeys.filter(date => !priorByDate.has(date));
+    const includesSaturday = newSkipDates.some(date => new Date(`${date}T00:00:00Z`).getUTCDay() === 6);
+    if (hasDatedMenuPlans(matterSub) && (claimedExisting.length || includesSaturday)) {
+      const verifiedDates = [...new Set([...newSkipDates, ...claimedExisting.map(d => toDayKey(d.date))])].sort();
+      const preview = await previewSkipPauses({ email: cleanEmail, matterSubscriptionId: matterSub.subscription_id,
+        matterCustomerId: matterSub.customer_id, skippedDateKeys: verifiedDates, restoredSkipDates: [...restoredDates], existingSkips: [...priorByDate.keys()] });
+      if (preview.availabilityError) return res.status(502).json({ success: false, message: preview.availabilityError });
+      skippedDateKeys = [...new Set([...skippedDateKeys, ...(preview.pauses || []).map(pause => pause.date)])];
+      for (const pause of preview.pauses || []) {
+        if (pause.alreadyPaused) alreadyPaused.add(pause.date);
+        const decision = pauseDecisionByDate.get(pause.date);
+        if (decision) decision.alreadyPaused = pause.alreadyPaused;
+      }
+    } else if (claimedExisting.length || includesSaturday) {
       const ctx = await resolveSubscriptionContext({ email: cleanEmail, matterSubscriptionId: matterSub?.subscription_id || identity.matterSubscriptionId, matterCustomerId: matterSub?.customer_id || null });
       if (ctx.error) return res.status(502).json({ success: false, message: ctx.error });
-      skippedDateKeys = expandSaturdaySkips(skippedDateKeys, new Set([...ctx.activeDeliveryDates, ...ctx.existingPaused]));
+      skippedDateKeys = [...new Set([...skippedDateKeys, ...expandSaturdaySkips(newSkipDates, new Set([...ctx.activeDeliveryDates, ...ctx.existingPaused]))])].sort();
       skippedDateKeys = skippedDateKeys.filter((date) => !restoredDates.has(date) || pauseDecisionByDate.has(date));
       claimedExisting.forEach((d) => {
         d.alreadyPaused = ctx.existingPaused.has(toDayKey(d.date));
         if (d.alreadyPaused) alreadyPaused.add(toDayKey(d.date));
       });
     }
-    const resumeError = validateRequiredResumeDates({ skippedDateKeys, decisions: [...pauseDecisionByDate.values()], alreadyPaused });
+    const changedSkipDates = [...new Set([
+      ...skippedDateKeys.filter(date => !priorByDate.has(date)),
+      ...pauseDecisionByDate.keys(),
+    ])].filter(date => !committedPauses.has(date));
+    if (requiresDatedMenuCalendar(matterSub)) for (const date of changedSkipDates) {
+      const plan = menuNutritionForDate(matterSub, date);
+      if (!menuPlanOwnsDate(matterSub, plan, date) || (!plan.active_delivery_dates?.includes(date) && !plan.paused_delivery_dates?.includes(date))) {
+        return res.status(409).json({ success: false, message: 'Matter does not confirm a delivery for a skipped day. Reopen the menu.' });
+      }
+    }
+    const resumeError = validateRequiredResumeDates({ skippedDateKeys: changedSkipDates, blockedResumeDates: skippedDateKeys,
+      decisions: [...pauseDecisionByDate.values()], alreadyPaused });
     if (resumeError) return res.status(400).json({ success: false, message: resumeError });
 
+    const menu = await WeeklyMenu.findById(weeklyMenuId).populate({ path: 'meals.items', model: 'MenuItem' }).lean();
+    if (!menu) return res.status(404).json({ success: false, message: 'Menu not found.' });
+    const requestedDates = new Set([
+      ...selections.map(sel => toDateKey(sel.date)).filter(Boolean),
+      ...changedSkipDates,
+    ]);
+    const checkClosedRequest = now => [...requestedDates].find(date => kitchenSelectionWindow(menu, date, now).canAutoAssign);
+    const closedResponse = date => res.status(409).json({ success: false,
+      message: `Selection closed for ${date}. Reopen the menu before changing your other dates.` });
+    const closedRequest = checkClosedRequest(new Date());
+    if (closedRequest) return closedResponse(closedRequest);
+    const decisions = [...pauseDecisionByDate.values()].map(decision => ({
+      date: toDayKey(decision.date),
+      action: decision.action === 'decline' ? 'decline' : 'pause',
+      subscriptionId: String(decision.subscriptionId ?? '').trim(),
+      resumeDate: decision.resumeDate,
+      alreadyPaused: !!decision.alreadyPaused,
+    })).filter(decision => !committedPauses.has(decision.date));
+    if (decisions.some(decision => decision.action === 'pause' && (!decision.subscriptionId
+      || decision.subscriptionId !== String(menuNutritionForDate(matterSub, decision.date).subscription_id)))) {
+      return res.status(409).json({ success: false, message: 'Your Matter plan changed or was not verified. Reopen the pause calendar before confirming.' });
+    }
+
     // Validate before any selection or pause write, using the stored menu and verified profile.
-    const checkedSelections = await validatedMenuSelections({ menuId: weeklyMenuId, nutrition: matterSub, selections: Array.isArray(selections) ? selections.filter(sel => !skippedDateKeys.includes(toDayKey(sel.date))) : selections });
+    const checkedSelections = await validatedMenuSelections({ menuId: weeklyMenuId, loadedMenu: menu, nutrition: matterSub,
+      selections: selections.filter(sel => !skippedDateKeys.includes(toDayKey(sel.date))) });
     const mappedSelections = checkedSelections.map(sel => ({
+      matterSubscriptionId: sel.matterSubscriptionId,
+      isUpcomingPlan: sel.isUpcomingPlan === true,
       date: sel.date,
       mealType: sel.mealType,
       menuItemId: toMenuItemId(sel.menuItemId),
@@ -3709,25 +3812,26 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     // A date a prior submit already resolved to success/already_paused must
     // never be re-applied to Matter.
     if (weeklyMenuId) {
-      // Merge skipped days: keep a prior successful/already-paused outcome for a
-      // date that's still skipped (so a re-submit never double-pauses), mark
-      // everything else pending for the background processor to (re)try.
+      // Keep recorded outcomes unless the customer explicitly requests a
+      // fresh attempt for a still-open date.
       const skippedDays = skippedDateKeys.map((date) => {
-        const p = priorByDate.get(date);
-        if (p && (p.pauseStatus === 'success' || p.pauseStatus === 'already_paused')) {
-          return {
-            date,
-            pauseStatus: p.pauseStatus,
-            resumeDate: p.resumeDate,
-            subscriptionId: p.subscriptionId,
-            processedAt: p.processedAt
-          };
-        }
+        const previous = priorByDate.get(date);
+        if (previous && (committedPauses.has(date) || !pauseDecisionByDate.has(date))) return previous;
         return { date, pauseStatus: 'pending' };
       });
 
-      await MenuSelectionRecord.findOneAndUpdate(
-        selectionFilter,
+      // A later customer submission can edit other days in the menu. Keep
+      // saved portions on closed delivery dates.
+      const now = new Date();
+      const newlyClosedRequest = checkClosedRequest(now);
+      if (newlyClosedRequest) return closedResponse(newlyClosedRequest);
+      const protectedMeals = (prior?.selectedMeals || []).filter(meal => {
+        const date = toDateKey(meal.date);
+        return date && kitchenSelectionWindow(menu, date, now).canAutoAssign;
+      });
+      const saved = await MenuSelectionRecord.findOneAndUpdate(
+        { ...selectionFilter, ...(prior?._id && { _id: prior._id }),
+          ...(prior ? { $expr: matchSavedKitchenInputs(prior) } : { selectedMeals: { $exists: false } }) },
         {
           $set: {
             weeklyMenuId,
@@ -3736,7 +3840,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
             firstName: customer.firstName,
             lastName: customer.lastName,
             mealExclusion: matterExclusion,
-            selectedMeals: mappedSelections,
+            selectedMeals: [...protectedMeals, ...mappedSelections],
             skippedDays,
             submittedAt: new Date(),
             macros: resolvedMacros,
@@ -3747,8 +3851,9 @@ router.post('/customers/:email/select-meals', async (req, res) => {
             } : (cleanSubscriptionId ? { matterSubscriptionId: cleanSubscriptionId } : {}))
           }
         },
-        { upsert: true, new: true }
+        { upsert: !prior, new: true }
       );
+      if (!saved) return res.status(409).json({ success: false, message: 'Meals changed while submitting. Reopen the menu before trying again.' });
       console.log('MenuSelectionRecord upserted for', customer.email, 'menu', weeklyMenuId, '- skipped days:', skippedDateKeys.length);
     }
 
@@ -3767,56 +3872,36 @@ router.post('/customers/:email/select-meals', async (req, res) => {
     // customer to review/retry. Skips any date a prior submit already resolved to
     // success/already_paused, same dedupe as the skippedDays build above, so
     // a re-submit never double-pauses.
-    let pauseResults = [];
-    if (weeklyMenuId && pauseDecisionByDate.size > 0) {
-      const decisions = Array.from(pauseDecisionByDate.values())
-        .map((d) => ({
-          date: toDayKey(d.date),
-          action: d.action === 'decline' ? 'decline' : 'pause',
-          resumeDate: d.resumeDate,
-          alreadyPaused: !!d.alreadyPaused
-        }))
-        .filter((d) => {
-          const p = priorByDate.get(d.date);
-          return !(p && (p.pauseStatus === 'success' || p.pauseStatus === 'already_paused'));
+    const pauseResults = decisions.filter(decision => decision.action === 'decline').map(decision => ({ date: decision.date, pauseStatus: 'declined' }));
+    if (decisions.length > 0) {
+      const groups = new Map();
+      for (const decision of decisions.filter(decision => decision.action === 'pause')) {
+        if (!groups.has(decision.subscriptionId)) groups.set(decision.subscriptionId, []);
+        groups.get(decision.subscriptionId).push(decision);
+      }
+      for (const [subscriptionId, group] of groups) {
+        const ctx = await resolveSubscriptionContext({ email: cleanEmail, matterCustomerId: matterSub.customer_id, date: group[0].date });
+        if (ctx.error || String(ctx.subscriptionId) !== String(subscriptionId)) {
+          pauseResults.push(...group.map(decision => ({ date: decision.date, pauseStatus: 'failed',
+            error: ctx.error || 'Your Matter plan changed. Reopen the menu.' })));
+        } else pauseResults.push(...await applyConfirmedPauses({ subscriptionId, decisions: group, matterCustomerId: matterSub.customer_id }));
+      }
+      const outcomeByDate = new Map(pauseResults.map((r) => [r.date, r]));
+      const freshRecord = await MenuSelectionRecord.findOne(selectionFilter).select('skippedDays').lean();
+      if (freshRecord) {
+        const mergedSkippedDays = (freshRecord.skippedDays || []).map((s) => {
+          const r = outcomeByDate.get(toDayKey(s.date));
+          if (!r) return s;
+          return {
+            date: s.date,
+            pauseStatus: r.pauseStatus,
+            resumeDate: r.resumeDate || s.resumeDate,
+            subscriptionId: r.subscriptionId || s.subscriptionId,
+            error: r.pauseStatus === 'failed' ? r.error : undefined,
+            processedAt: new Date()
+          };
         });
-
-      if (decisions.length > 0) {
-        const needsMatter = decisions.some((d) => d.action === 'pause');
-        let applied;
-        if (!needsMatter) {
-          applied = decisions.map((d) => ({ date: d.date, pauseStatus: 'declined' }));
-        } else {
-          const ctx = await resolveSubscriptionContext({
-            email: cleanEmail,
-            matterSubscriptionId: matterSub?.subscription_id || identity.matterSubscriptionId,
-            matterCustomerId: matterSub?.customer_id || null
-          });
-          applied = ctx.error
-            ? decisions.map((d) => (d.action === 'decline'
-                ? { date: d.date, pauseStatus: 'declined' }
-                : { date: d.date, pauseStatus: 'failed', error: ctx.error }))
-            : await applyConfirmedPauses({ subscriptionId: ctx.subscriptionId, decisions });
-        }
-
-        pauseResults = applied;
-        const outcomeByDate = new Map(applied.map((r) => [r.date, r]));
-        const freshRecord = await MenuSelectionRecord.findOne(selectionFilter).select('skippedDays').lean();
-        if (freshRecord) {
-          const mergedSkippedDays = (freshRecord.skippedDays || []).map((s) => {
-            const r = outcomeByDate.get(toDayKey(s.date));
-            if (!r) return s;
-            return {
-              date: s.date,
-              pauseStatus: r.pauseStatus,
-              resumeDate: r.resumeDate || s.resumeDate,
-              subscriptionId: r.subscriptionId || s.subscriptionId,
-              error: r.pauseStatus === 'failed' ? r.error : undefined,
-              processedAt: new Date()
-            };
-          });
-          await MenuSelectionRecord.updateOne(selectionFilter, { $set: { skippedDays: mergedSkippedDays } });
-        }
+        await MenuSelectionRecord.updateOne(selectionFilter, { $set: { skippedDays: mergedSkippedDays } });
       }
     }
 
@@ -3829,6 +3914,7 @@ router.post('/customers/:email/select-meals', async (req, res) => {
 
   } catch (error) {
     console.error('Error selecting meals:', error);
+    if (error.code === 11000) return res.status(409).json({ success: false, message: 'Meals changed while submitting. Reopen the menu before trying again.' });
     res.status(error.statusCode || 500).json({
       success: false,
       message: error.message
@@ -4024,8 +4110,12 @@ router.put('/:menuId/selections/:email', protect, async (req, res) => {
       : String(nutrition.customer_email || '').trim().toLowerCase() !== String(profileEmail || '').trim().toLowerCase())) {
       return res.status(409).json({ success: false, message: 'Could not save your selections.' });
     }
-    const checkedSelections = await validatedMenuSelections({ menuId, selections, nutrition, staffRecord: existingRecord });
+    const [earliestDate] = selections.map(meal => toDateKey(meal.date)).filter(Boolean).sort();
+    const checkedSelections = await validatedMenuSelections({ menuId, selections,
+      nutrition: await matterApiService.withPriorKitchenSubscription(nutrition, earliestDate), staffRecord: existingRecord });
     const normalizedSelections = checkedSelections.map((sel) => sel.isAutoAssigned ? sel : ({
+      matterSubscriptionId: sel.matterSubscriptionId,
+      isUpcomingPlan: sel.isUpcomingPlan === true,
       date: sel.date,
       mealType: sel.mealType,
       menuItemId: toMenuItemId(sel.menuItemId),

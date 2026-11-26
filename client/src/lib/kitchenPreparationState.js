@@ -7,7 +7,7 @@ const fetchPreparedKitchenState = async (api, menuId, date, isCurrent, { refresh
   if (!response?.data?.state) return null;
   let state = response.data;
   const deadline = Date.now() + 300000;
-  if (state.state === 'missing' || (refresh && state.state === 'ready')) {
+  if (state.state === 'missing' || (refresh && ['ready', 'allergy-review'].includes(state.state))) {
     state = (await api.post(path, { date, ...(refresh ? { refresh: true } : {}) }, { timeout: 30000 })).data;
     // Another request may finish between the initial GET and the POST.
     if (verifyAllergies && state.state === 'ready') {

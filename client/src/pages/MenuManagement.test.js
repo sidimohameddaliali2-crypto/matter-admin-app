@@ -159,6 +159,8 @@ test.each([
   [{carbVegAction:'replace',keptCarbConflict:['DAIRY'],vegConflict:['CORIANDER']},['Replace veg: Coriander','Keep carb: Dairy'],true],
   [{isAutoAssigned:true,exclusionConflict:['Dairy'],conflict:true},[],false],
   [{isAutoAssigned:true,preferenceConflict:['Dairy']},[],false],
+  [{isUpcomingPlan:true},[],false],
+  [{isUpcomingPlan:true,isAutoAssigned:true},[],false],
 ])('saved selection views show source and acknowledgement tags alongside component instructions (%s)', async (flags, labels, acknowledged) => {
   const date='2099-11-02';
   const meal={date,mealName:'Fixture dish',mealType:'main',menuItemId:'dish',quantity:1,...flags};
@@ -169,7 +171,7 @@ test.each([
   const node=document.createElement('div');document.body.appendChild(node);const root=createRoot(node);
   const verify=()=>{
     const badgeTexts=[...node.querySelectorAll('span')].map(span=>span.textContent.trim());
-    expect(badgeTexts).toContain(flags.isAutoAssigned ? 'Auto assigned' : 'Selected');
+    expect(badgeTexts).toContain(flags.isUpcomingPlan ? (flags.isAutoAssigned ? 'Auto assign upcoming plan' : 'Selected upcoming plan') : (flags.isAutoAssigned ? 'Auto assigned' : 'Selected'));
     expect(badgeTexts.includes('Exclusion acknowledged')).toBe(acknowledged);
 
     for(const label of labels)expect(node.textContent).toContain(label);

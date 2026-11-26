@@ -52,6 +52,24 @@ test('subscription identity uses the pause-specific subscription before the reco
   assert.equal(record.skippedDays.length, 2);
 });
 
+test('a predecessor can neither release a pause nor expose restored history on the renewal start date', async t => {
+  const moved = '2026-11-16';
+  const base = { ...nutrition, customer_id: 'person', active_delivery_dates: [moved] };
+  t.mock.method(matter, 'getSubscription', () => assert.fail('A date now owned by the renewal cannot be verified under the predecessor'));
+  t.mock.method(Record, 'updateOne', () => assert.fail('A moved date must keep its saved pause'));
+  for (const calendar of [
+    { ...base, upcoming_plan: { subscription_id: 'next', replaces_subscription_id: 'sub',
+      customer_id: 'person', starting_date: moved, active_delivery_dates: [] } },
+    { ...base, next_subscription_starting_date: moved },
+  ]) {
+    const saved = makeRecord();
+    await reconcileMenuSkippedDays(saved, calendar);
+    assert.equal(saved.skippedDays[0].date, moved);
+    const history = { skippedDays: [], unpausedDays: [{ date: moved, subscriptionId: 'sub' }] };
+    assert.deepEqual(restoredMenuSkipDates(history, calendar), []);
+  }
+});
+
 test('a concurrent new pause cannot be removed using the older saved pause', async (t) => {
   confirmActive(t);
   t.mock.method(Record, 'updateOne', async () => ({ matchedCount: 0 }));

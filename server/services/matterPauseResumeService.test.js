@@ -32,7 +32,7 @@ test('preview exposes availability without generating any resume dates or requir
 
 test('confirmation rechecks Matter and never writes an active or duplicate resume date', async (t) => {
   t.mock.method(matterApiService, 'getSubscription', async () => ({ data: {
-    delivery_schedule: [{ date: '2026-10-26', status: 'active' }],
+    delivery_schedule: ['2026-10-21', '2026-10-22', '2026-10-23', '2026-10-26'].map(date => ({ date, status: 'active' })),
   } }));
   const write = t.mock.method(matterApiService, 'createSubscriptionPause', async () => ({}));
   const result = await applyConfirmedPauses({ subscriptionId: 'sub', decisions: [
@@ -143,7 +143,7 @@ test('Saturday never invents a Sunday delivery when the customer has none', () =
 
 test('a customer-chosen free date before cycle end is applied exactly without automatic replacement', async (t) => {
   t.mock.method(matterApiService, 'getSubscription', async () => ({ data: {
-    cycle_end_date: '2026-12-30', delivery_schedule: [{ date: '2026-10-25', status: 'active' }],
+    cycle_end_date: '2026-12-30', delivery_schedule: ['2026-10-21', '2026-10-25'].map(date => ({ date, status: 'active' })),
   } }));
   const write = t.mock.method(matterApiService, 'createSubscriptionPause', async () => ({}));
   const result = await applyConfirmedPauses({ subscriptionId: 'sub', decisions: [

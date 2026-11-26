@@ -9,7 +9,7 @@ export default function SelectionStatusTags({ meal }) {
     || selectionComponentDetails(meal).some(({ action }) => action === 'kept'));
   return <>
     <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${autoAssigned ? 'bg-matter-neutral-200 text-matter-neutral-800' : 'bg-blue-100 text-blue-700'}`}>
-      {autoAssigned ? 'Auto assigned' : 'Selected'}
+      {meal?.isUpcomingPlan ? (autoAssigned ? 'Auto assign upcoming plan' : 'Selected upcoming plan') : (autoAssigned ? 'Auto assigned' : 'Selected')}
     </span>
     {acknowledged && <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-800">
       Exclusion acknowledged

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import api from '../../utils/publicMenuApi';
 import { evaluateComponentSelection, selectionPreferenceFlags } from '../../constants/componentSelectionRules';
-import { isPastSelectionDeadline } from '../../utils/selectionDeadlines';
+import { FIXED_SELECTION_DEADLINES, isPastSelectionDeadline } from '../../utils/selectionDeadlines';
 import { isWithinRenewalWindow } from '../../utils/subscriptionRenewal';
 import { groupExclusions, exclusionMatchesAny, exclusionMatchesTerm, allergenMatchesAny } from '../../constants/exclusionList';
 import { toTitleCase } from '../../utils/textFormat';
@@ -291,6 +291,7 @@ const MenuSelectionLink = ({ token }) => {
   const [loadError, setLoadError] = useState('');
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [rawMenu, setRawMenu] = useState(null); // real weeklyMenu (for submit)
+  const selectionDeadlines = rawMenu?.selectionDeadlines?.length ? rawMenu.selectionDeadlines : FIXED_SELECTION_DEADLINES;
 
   const [step, setStep] = useState('signin'); // signin | menu | done
   const [email, setEmail] = useState('');
@@ -299,17 +300,20 @@ const MenuSelectionLink = ({ token }) => {
   const [day, setDay] = useState(0);
   const [qty, setQty] = useState({});
   const [manualSkipped, setSkipped] = useState({});
-  const skipped = useMemo(() => {
-    const keys = model?.dayKeys || [];
-    const dates = new Set(expandSaturdaySkips(keys.filter((_, i) => manualSkipped[i]), keys, account?.restoredSkipDates));
-    return Object.fromEntries(keys.map((key, i) => [i, dates.has(key)]));
-  }, [manualSkipped, model, account?.restoredSkipDates]);
   // Snapshot of `skipped` taken at the moment of a successful submit. Once a
   // day has been submitted as skipped, "Change my selections" can no longer
   // un-skip (or re-skip) it — a skip actually pauses that delivery on the
   // backend once submitted, so undoing it here would silently desync from
   // that. Days that had real meal selections stay fully editable.
   const [lockedSkipDays, setLockedSkipDays] = useState({});
+  const skippedDateKeys = useMemo(() => {
+    const keys = model?.dayKeys || [];
+    const saved = keys.filter((_, index) => lockedSkipDays[index]);
+    const draft = keys.filter((_, index) => manualSkipped[index] && !lockedSkipDays[index]);
+    return new Set([...saved, ...expandSaturdaySkips(draft, account?.deliveryDates || keys, account?.restoredSkipDates)]);
+  }, [manualSkipped, lockedSkipDays, model, account?.deliveryDates, account?.restoredSkipDates]);
+  const skipped = useMemo(() => Object.fromEntries((model?.dayKeys || []).map((date, index) => [index, skippedDateKeys.has(date)])),
+    [model, skippedDateKeys]);
   const [acknowledged, setAcknowledged] = useState({});
   // Per-meal-key exclusion flags to carry through to submit: carbVegAction
   // ('kept'/'replace', from the modal below) plus the silent sauce/garnish
@@ -331,7 +335,7 @@ const MenuSelectionLink = ({ token }) => {
     document.addEventListener('visibilitychange', refresh);
     return () => { clearInterval(timer); window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh); };
   }, []);
-  const renewalEligible = isWithinRenewalWindow(account?.cycleEndDate, renewalNow);
+  const renewalEligible = !account?.hasUpcomingPlan && isWithinRenewalWindow(account?.cycleEndDate, renewalNow);
   const [toast, setToast] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const toastTimer = useRef(null);
@@ -441,12 +445,21 @@ const MenuSelectionLink = ({ token }) => {
       const exclusionPhrases = groupExclusions(profile.mealExclusion);
 
       setAccount({
+        exclusionsKnown: (built.dayKeys.length ? built.dayKeys : [null]).every(date => {
+          const plan = profile.plansByDate?.[date] || profile;
+          return plan.exclusionsAvailable === true && typeof plan.mealExclusion === 'string';
+        }),
         name: `${profile.firstName || ''} ${profile.lastName || ''}`.trim() || profile.email || v,
         email: profile.email || v,
         matterCustomerId: profile.matterCustomerId || profile.customerId || null,
-        allergensKnown: profile.allergiesAvailable === true && Array.isArray(profile.allergies),
+        allergensKnown: (built.dayKeys.length ? built.dayKeys : [null]).every(date => {
+          const plan = profile.plansByDate?.[date] || profile;
+          return plan.allergiesAvailable === true && Array.isArray(plan.allergies);
+        }),
         plan: profile.mealPlan || 'Meal plan',
         perDay: Number(profile.mealPerDay) || 1,
+        plansByDate: profile.plansByDate || {},
+        hasUpcomingPlan: !!profile.upcomingPlanStartDate || Object.values(profile.plansByDate || {}).some(plan => plan.isUpcomingPlan),
         weekend: !!profile.weekend,
         deliveryDates: profile.deliveryDates || built.dayKeys,
         restoredSkipDates: profile.restoredSkipDates || [],
@@ -493,7 +506,7 @@ const MenuSelectionLink = ({ token }) => {
       setAcknowledged({});
       // Land on the first day that isn't already closed, instead of always
       // opening on Monday even when Monday (and maybe more) has passed.
-      setDay(firstAvailableDayIndex(built.dayKeys, rawMenu?.selectionDeadlines));
+      setDay(firstAvailableDayIndex(built.dayKeys, selectionDeadlines));
       setStep('menu');
     } catch (err) {
       // Prefer the server's own message (e.g. "We could not find an account
@@ -507,14 +520,21 @@ const MenuSelectionLink = ({ token }) => {
           : 'Could not load your plan. Please try again.')
       );
     }
-  }, [email, preview, rawMenu]);
+  }, [email, preview, rawMenu, selectionDeadlines]);
 
   /* -- selection helpers -- */
-  const dayKeys = model?.dayKeys || [];
+  const dayKeys = useMemo(() => model?.dayKeys || [], [model]);
   const lastDay = Math.max(0, dayKeys.length - 1);
   // Menu-selection Partner members (account.unlimitedMeals) have no daily cap —
   // Infinity means addWithCap below never blocks another meal being added.
-  const target = account?.unlimitedMeals ? Infinity : (account?.perDay || 3);
+  const targetForDay = useCallback(index => account?.unlimitedMeals ? Infinity
+    : (account?.plansByDate?.[dayKeys[index]]?.mealPerDay ?? account?.perDay ?? 3), [account, dayKeys]);
+  const target = targetForDay(day);
+  const restrictionsForMeal = useCallback(meal => {
+    const plan = account?.plansByDate?.[meal.dayKey];
+    return { exclusions: plan ? groupExclusions(plan.mealExclusion) : account?.exclusionPhrases || [],
+      allergies: plan?.allergies ?? account?.allergensLc ?? [] };
+  }, [account]);
 
   // "Last day of your cycle" is the last REAL delivery day (dayKeys is
   // already filtered to the customer's own Matter calendar + the published
@@ -558,8 +578,8 @@ const MenuSelectionLink = ({ token }) => {
   // MenuSelection.jsx / the Menu Management admin tools. Preview/demo mode
   // never locks — there's no real menu (or real deadlines) behind it.
   const isDayDeadlineLocked = useCallback(
-    (dateKey) => (preview ? false : isPastSelectionDeadline(dateKey, rawMenu?.selectionDeadlines)),
-    [preview, rawMenu]
+    (dateKey) => (preview ? false : isPastSelectionDeadline(dateKey, selectionDeadlines)),
+    [preview, selectionDeadlines]
   );
 
   const deadlineLockedToday = isDayDeadlineLocked(dayKeys[day]);
@@ -569,7 +589,8 @@ const MenuSelectionLink = ({ token }) => {
       if (!account) return null;
 
       if (!preview) {
-        const rule = evaluateComponentSelection(m.item, account.exclusionPhrases || [], account.allergensLc || []);
+        const restrictions = restrictionsForMeal(m);
+        const rule = evaluateComponentSelection(m.item, restrictions.exclusions, restrictions.allergies);
         if (rule.allergies.length) return { kind: 'allergen', items: rule.allergies.map(titleCase) };
         if (rule.wholeMeal || rule.publicConflicts.length) return { kind: 'exclusion', items: rule.publicConflicts, matchedCarb: rule.matchedCarb, matchedVeg: rule.matchedVeg, wholeMeal: rule.wholeMeal, hidden: !rule.publicConflicts.length };
         return null;
@@ -602,7 +623,7 @@ const MenuSelectionLink = ({ token }) => {
       }
       return null;
     },
-    [account, preview]
+    [account, preview, restrictionsForMeal]
   );
 
   const bump = useCallback((key, delta) => {
@@ -616,7 +637,8 @@ const MenuSelectionLink = ({ token }) => {
   const computeSauceGarnishFlags = useCallback(
     (m, preference) => {
       if (!preview) {
-        const result = evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []);
+        const restrictions = restrictionsForMeal(m);
+        const result = evaluateComponentSelection(m.item, restrictions.exclusions, restrictions.allergies);
         return selectionPreferenceFlags(result, preference);
       }
       const exclusionPhrases = preview ? [] : (account?.exclusionPhrases || []);
@@ -629,7 +651,7 @@ const MenuSelectionLink = ({ token }) => {
         garnishConflict: matchedGarnish,
       };
     },
-    [account, preview]
+    [account, preview, restrictionsForMeal]
   );
 
   // Adds one meal but never lets a day exceed the customer's meals-per-day.
@@ -638,21 +660,23 @@ const MenuSelectionLink = ({ token }) => {
   // and stashed per meal key so doSubmit can attach them to the selection.
   const addWithCap = useCallback(
     (m, extraFlags = {}) => {
-      if (!preview && account?.allergensKnown !== true) return false;
-      const rule = !preview && evaluateComponentSelection(m.item, account?.exclusionPhrases || [], account?.allergensLc || []);
+      if (!preview && (account?.allergensKnown !== true || account?.exclusionsKnown !== true)) return false;
+      const restrictions = restrictionsForMeal(m);
+      const rule = !preview && evaluateComponentSelection(m.item, restrictions.exclusions, restrictions.allergies);
       if (rule && rule.allergies.length) return false;
       const dayTotal = (model?.meals || [])
         .filter((mm) => mm.dayIndex === m.dayIndex)
         .reduce((a, mm) => a + (qty[mm.key] || 0), 0);
-      if (dayTotal >= target) {
-        flash(`You can pick up to ${target} meal${target === 1 ? '' : 's'} for this day.`);
+      const limit = targetForDay(m.dayIndex);
+      if (dayTotal >= limit) {
+        flash(`You can pick up to ${limit} meal${limit === 1 ? '' : 's'} for this day.`);
         return false;
       }
       bump(m.key, 1);
       setMealFlags((s) => ({ ...s, [m.key]: { ...extraFlags, ...computeSauceGarnishFlags(m, extraFlags.carbVegAction ?? s[m.key]?.carbVegPreference) } }));
       return true;
     },
-    [account, preview, bump, computeSauceGarnishFlags, flash, model, qty, target]
+    [account, preview, bump, computeSauceGarnishFlags, flash, model, qty, targetForDay, restrictionsForMeal]
   );
 
   const openAllergen = useCallback(
@@ -758,13 +782,14 @@ const MenuSelectionLink = ({ token }) => {
   // about pausing is ever recomputed server-side from this; the server
   // applies these decisions verbatim (routes/menus.js select-meals).
   const doSubmit = useCallback(async (pauseDecisions) => {
-    if (!preview && account?.allergensKnown !== true) {
-      flash('Allergy information is unavailable from Matter. Please retry or contact customer service.');
+    if (!preview && (account?.allergensKnown !== true || account?.exclusionsKnown !== true)) {
+      flash(`${account?.allergensKnown !== true ? 'Allergy' : 'Exclusion'} information is unavailable from Matter. Please retry or contact customer service.`);
       return;
     }
     // Recheck restored selections too: a customer's allergy profile may have
     // changed since their previous submission, without going through tryAdd.
-    const blockedMeal = (model?.meals || []).find((m) => qty[m.key] > 0 && !skipped[m.dayIndex] && conflictOf(m)?.kind === 'allergen');
+    const blockedMeal = (model?.meals || []).find((m) => qty[m.key] > 0 && !skipped[m.dayIndex]
+      && !isDayDeadlineLocked(m.dayKey) && conflictOf(m)?.kind === 'allergen');
     if (blockedMeal) {
       flash(`Remove ${blockedMeal.name} before submitting: it conflicts with your allergy profile.`);
       return;
@@ -779,7 +804,7 @@ const MenuSelectionLink = ({ token }) => {
       const selections = [];
       (model?.meals || []).forEach((m) => {
         const n = qty[m.key] || 0;
-        if (!n || skipped[m.dayIndex]) return;
+        if (!n || skipped[m.dayIndex] || isDayDeadlineLocked(m.dayKey)) return;
         selections.push({
           date: m.dayKey,
           mealType: m.type,
@@ -793,7 +818,7 @@ const MenuSelectionLink = ({ token }) => {
         });
       });
       const skippedDates = [...new Set([
-        ...expandSaturdaySkips(dayKeys.filter((_, i) => skipped[i]), account.deliveryDates || dayKeys, account.restoredSkipDates),
+        ...skippedDateKeys,
         ...(pauseDecisions || []).map((d) => d.date),
       ])];
       const res = await api.post(`/menus/customers/${encodeURIComponent(account.email)}/select-meals`, {
@@ -829,7 +854,7 @@ const MenuSelectionLink = ({ token }) => {
     } finally {
       setSubmitting(false);
     }
-  }, [account, computeSauceGarnishFlags, conflictOf, dayKeys, flash, lastCycleDayKey, mealFlags, model, preview, qty, rawMenu, skipped]);
+  }, [account, computeSauceGarnishFlags, conflictOf, flash, isDayDeadlineLocked, mealFlags, model, preview, qty, rawMenu, skipped, skippedDateKeys]);
 
   // Fetches available dates for the currently-skipped days and opens
   // the pause-confirmation calendar. Never calls select-meals itself — the
@@ -884,13 +909,13 @@ const MenuSelectionLink = ({ token }) => {
       setDay((d) => d + 1);
       return;
     }
-    const skippedDateKeys = expandSaturdaySkips(dayKeys.filter((_, i) => skipped[i]), account?.deliveryDates || dayKeys, account?.restoredSkipDates);
-    if (preview || skippedDateKeys.length === 0) {
+    const datesNeedingReview = [...skippedDateKeys].sort().filter(date => !(lockedSkipDays[dayKeys.indexOf(date)] && isDayDeadlineLocked(date)));
+    if (preview || datesNeedingReview.length === 0) {
       doSubmit();
       return;
     }
-    openSkipPauseReview(skippedDateKeys);
-  }, [account, day, dayCount, dayKeys, deadlineLockedToday, doSubmit, flash, lastDay, openSkipPauseReview, preview, skipped, target]);
+    openSkipPauseReview(datesNeedingReview);
+  }, [account, day, dayCount, dayKeys, doSubmit, flash, isDayDeadlineLocked, lastDay, lockedSkipDays, openSkipPauseReview, preview, deadlineLockedToday, skipped, skippedDateKeys, target]);
 
   const resetAll = useCallback(() => {
     setStep('signin');
@@ -917,7 +942,8 @@ const MenuSelectionLink = ({ token }) => {
   const currentDate = dayKeys[day] ? dateFromKey(dayKeys[day]) : null;
   const previousDate = currentDate ? new Date(currentDate) : null;
   previousDate?.setDate(previousDate.getDate() - 1);
-  const sundayIncluded = currentDate?.getDay() === 0 && !!skipped[dayKeys.indexOf(toDateKey(previousDate))]
+  const previousDayIndex = dayKeys.indexOf(toDateKey(previousDate));
+  const sundayIncluded = currentDate?.getDay() === 0 && skippedToday && skipped[previousDayIndex] && !lockedSkipDays[previousDayIndex]
     && !(account?.restoredSkipDates || []).includes(dayKeys[day]);
   const dayHeading = dayKeys[day] ? fmtDayLong(dayKeys[day]) : `Day ${day + 1}`;
   const selectedToday = dayCount(day);
@@ -1008,7 +1034,7 @@ const MenuSelectionLink = ({ token }) => {
         }),
       };
     }).filter((c) => c.meals.length > 0);
-  }, [account, acknowledged, bump, conflictOf, day, dayFull, deadlineLockedToday, model, openAllergen, openExclusion, qty, tryAdd]);
+  }, [account, acknowledged, bump, conflictOf, day, dayFull, model, openAllergen, openExclusion, qty, deadlineLockedToday, tryAdd]);
 
   const dayTabs = useMemo(
     () =>
@@ -1017,7 +1043,8 @@ const MenuSelectionLink = ({ token }) => {
         const on = i === day;
         const isSkip = !!skipped[i];
         const n = dayCount(i);
-        const isComplete = !isSkip && (account?.unlimitedMeals ? n > 0 : target > 0 && n >= target);
+        const dayTarget = targetForDay(i);
+        const isComplete = !isSkip && (account?.unlimitedMeals ? n > 0 : dayTarget > 0 && n >= dayTarget);
         const isPastDeadline = isDayDeadlineLocked(k);
 
         // Status color always shows — skipped days are amber, fully-picked
@@ -1055,7 +1082,7 @@ const MenuSelectionLink = ({ token }) => {
           onClick: () => setDay(i),
         };
       }),
-    [account, day, dayCount, dayKeys, isDayDeadlineLocked, skipped, target]
+    [account, day, dayCount, dayKeys, isDayDeadlineLocked, skipped, targetForDay]
   );
 
   const summary = useMemo(
@@ -1078,17 +1105,17 @@ const MenuSelectionLink = ({ token }) => {
         firstName: (account.name || '').split(' ')[0],
         email: account.email,
         initials: initialsOf(account.name),
-        plan: account.plan,
-        perDay: account.unlimitedMeals ? 'Unlimited' : `${account.perDay} meal${account.perDay === 1 ? '' : 's'}`,
+        plan: account.plansByDate?.[dayKeys[day]]?.mealPlan || account.plan,
+        perDay: account.unlimitedMeals ? 'Unlimited' : `${target} meal${target === 1 ? '' : 's'}`,
         // Split so allergens (hard-block, from the customer's profile) and
         // dietary exclusions (soft-warn, from mealExclusion) each get their
         // own labeled section instead of one merged, ambiguous tag list.
-        allergenFlags: account.allergensDisplay.map((x) => ({
+        allergenFlags: (account.plansByDate?.[dayKeys[day]]?.allergies || account.allergensDisplay).map((x) => ({
           label: x,
           bg: 'var(--color-accent-200)',
           fg: 'var(--color-accent-900)',
         })),
-        exclusionFlags: account.exclusionsDisplay.map((x) => ({
+        exclusionFlags: (account.plansByDate?.[dayKeys[day]] ? groupExclusions(account.plansByDate[dayKeys[day]].mealExclusion) : account.exclusionsDisplay).map((x) => ({
           label: x,
           bg: 'var(--color-accent-2-200)',
           fg: 'var(--color-accent-2-900)',
@@ -1187,11 +1214,11 @@ const MenuSelectionLink = ({ token }) => {
     </div>
   );
 
-  const renderMenu = () => (!preview && account?.allergensKnown !== true ? (
+  const renderMenu = () => (!preview && (account?.allergensKnown !== true || account?.exclusionsKnown !== true) ? (
     <main style={{ padding: '40px 28px', maxWidth: 520, margin: 'auto', textAlign: 'center' }}>
       <MatterLogo height={24} />
-      <h2>Allergy information unavailable</h2>
-      <p>We could not verify your allergy information. Please retry or contact customer service before choosing meals.</p>
+      <h2>{account?.allergensKnown !== true ? 'Allergy' : 'Exclusion'} information unavailable</h2>
+      <p>We could not verify your {account?.allergensKnown !== true ? 'allergy' : 'exclusion'} information. Please retry or contact customer service before choosing meals.</p>
       <button className="btn btn-primary" onClick={signIn}>Try again</button>
       <button className="btn btn-secondary" onClick={() => { setAccount(null); setStep('signin'); }} style={{ marginTop: 12 }}>Sign out</button>
     </main>

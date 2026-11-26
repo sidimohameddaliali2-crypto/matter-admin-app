@@ -62,6 +62,43 @@ const select = async (element, value) => {
 const dateSelect = () => [...container.querySelectorAll('h3')].find((node) => node.textContent === 'Missing Meal Selections').parentElement.querySelector('select');
 const paperSelect = () => [...container.querySelectorAll('label')].find((node) => node.textContent === 'Day kitchen paper').parentElement.querySelector('select');
 
+test('Kitchen List shows the three fallback snacks and the condition for using them', async () => {
+  await select(dateSelect(), friday);
+  const fallback = container.querySelector('[aria-label="Fallback snacks"]');
+  expect([...fallback.querySelectorAll('li > span')].map(label => label.textContent))
+    .toEqual(['CRACKER BLISS BALL', 'CHOCO PEANUT BUTTER TRUFFLE', 'CHEESECAKE BITES']);
+  expect(fallback.textContent).toContain('both daily snack pools conflict');
+  expect(fallback.textContent).toContain('CRACKER BLISS BALL (W/ SOY)');
+  expect(fallback.textContent).toContain('Needs a verified Meal Library recipe');
+});
+
+test('the Upcoming badge follows the verified delivery day while keeping the selected meal visible', async () => {
+  const originalGet = api.get.getMockImplementation();
+  api.get.mockImplementation(async (path, options) => {
+    if (!path.endsWith('/kitchen-state')) return originalGet(path, options);
+    const isUpcoming = options?.params?.date === friday;
+    const subscriptionId = isUpcoming ? 'matter-next' : 'matter-current';
+    return { data: { state: 'selection-open', data: { success: true, preparation: 'selection-open', data: {
+      kitchenSelections: [{ email: 'former@example.invalid', matterSubscriptionId: 'matter-current', selectedMeals: [
+        { date: thursday, mealType: 'main', mealName: 'Current choice', isUpcomingPlan: true },
+        { date: friday, mealType: 'main', mealName: 'Upcoming choice', matterSubscriptionId: 'matter-next', isUpcomingPlan: true },
+      ] }],
+      kitchenInputs: [{ ...input(), subscription_id: subscriptionId, is_upcoming_plan: isUpcoming,
+        source_parent_subscription_id: isUpcoming ? 'matter-current' : null }],
+      rosterComplete: true,
+      kitchenRoster: [{ customer_id: 'permanent', email, subscription_id: subscriptionId, meal_frequency: 1, is_upcoming_plan: isUpcoming }],
+    } } } };
+  });
+  const profile = () => container.querySelector('[aria-label="Selected customer"]');
+  const hasBadge = () => [...profile().querySelectorAll('span')].some(span => span.textContent === 'Upcoming');
+  await select(dateSelect(), friday);
+  expect(profile().textContent).toContain('Upcoming choice');
+  expect(hasBadge()).toBe(true);
+  await select(dateSelect(), thursday);
+  expect(profile().textContent).toContain('Current choice');
+  expect(hasBadge()).toBe(false);
+});
+
 test.each(['selection-open', 'allergy-review'])('%s shows the conflicting saved choice without starting assignment', async state => {
   const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse(state === 'selection-open' ? '2026-10-01T00:00:00Z' : '2026-10-24T00:00:00Z'));
   const originalGet = api.get.getMockImplementation();
@@ -80,6 +117,86 @@ test.each(['selection-open', 'allergy-review'])('%s shows the conflicting saved 
     expect([...container.querySelectorAll('[role="alert"]')].some(alert => alert.textContent === 'Customer chosen beef conflicts with recorded allergies.')).toBe(true);
     expect([...container.querySelectorAll('button')].some(button => button.textContent === 'Auto-Assign')).toBe(false);
     expect(api.post).toHaveBeenCalledTimes(writes);
+  } finally { now.mockRestore(); }
+});
+
+test('meal confirmations require a note and unlock day exports only after all cases are logged', async () => {
+  const originalGet = api.get.getMockImplementation();
+  const cases = ['Peanut chicken', 'Peanut beef'].map((mealName, index) => ({
+    mealName, mealId: `meal-${index}`, fingerprint: `review-${index}`, recordId: 'selection',
+    date: friday, customerId: 'permanent', subscriptionId: 'matter-current',
+    canConfirm: true, message: `${mealName} conflicts with Peanuts`, conflicts: ['Peanuts'], confirmation: null,
+  }));
+  api.get.mockImplementation(async (path, options) => path.endsWith('/kitchen-state') ? { data: {
+    state: 'allergy-review', data: { success: true, preparation: 'allergy-review', data: {
+      kitchenSelections: [{ _id: 'selection', email, matterCustomerId: 'permanent',
+        selectedMeals: cases.map(item => ({ _id: item.mealId, date: friday, mealType: 'main', mealName: item.mealName, kitchenAllergyCases: [item] })) }],
+      kitchenAllergyReview: 'Two meal reviews needed.', kitchenAllergyCases: cases,
+      kitchenInputs: [input()], rosterComplete: true, kitchenRoster: [{ customer_id: 'permanent', email, subscription_id: 'matter-current', meal_frequency: 1 }],
+    } },
+  } } : originalGet(path, options));
+  await select(dateSelect(), friday);
+  await select(paperSelect(), friday);
+  const dayPdf = () => [...container.querySelectorAll('button')].find(button => button.textContent.includes('Download Day PDF'));
+  expect(dayPdf().disabled).toBe(true);
+  expect(container.textContent).toContain('2 remaining');
+
+  for (const item of cases) {
+    const meal = [...container.querySelectorAll('.kitchen-meal')].find(element => element.textContent.includes(item.mealName));
+    await act(async () => [...meal.querySelectorAll('button')].find(button => button.textContent === 'Confirm allergy review').click());
+    const submit = [...meal.querySelectorAll('button')].find(button => button.textContent === 'Confirm and log');
+    expect(submit.disabled).toBe(true);
+    const note = 'Use the verified peanut-free preparation.';
+    await act(async () => {
+      const field = meal.querySelector('textarea');
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(field, note);
+      field.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    api.post.mockResolvedValueOnce({ data: { success: true, data: { actorName: 'Kitchen Lead', at: '2026-10-23T08:00:00Z', note } } });
+    await act(async () => submit.click());
+    expect(api.post).toHaveBeenLastCalledWith('/menus/menu/kitchen-customers/permanent/allergy-confirmations', {
+      recordId: 'selection', mealId: item.mealId, date: friday, subscriptionId: 'matter-current', fingerprint: item.fingerprint, note,
+    });
+    expect(meal.textContent).toContain('confirmed by Kitchen Lead');
+    if (item === cases[0]) {
+      expect(container.textContent).toContain('1 remaining');
+      expect(dayPdf().disabled).toBe(true);
+    }
+  }
+  expect(dayPdf().disabled).toBe(false);
+});
+
+test('after cutoff only an allergy-flagged meal card can open the change editor', async () => {
+  const now = jest.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-10-23T08:00:00Z'));
+  const originalGet = api.get.getMockImplementation();
+  const review = { mealId: 'flagged', mealName: 'Peanut chicken', recordId: 'selection', fingerprint: 'allergy',
+    date: friday, customerId: '42', canConfirm: true, message: 'Peanut chicken conflicts with Peanuts' };
+  const meals = [
+    { _id: 'flagged', date: friday, mealType: 'main', mealName: review.mealName, kitchenAllergyCases: [review] },
+    { _id: 'safe', date: friday, mealType: 'main', mealName: 'Lemon chicken' },
+  ];
+  api.get.mockImplementation(async (path, options) => {
+    if (path.endsWith('/meal-editor')) return { data: { success: true, data: {
+      canEdit: false, meals, choices: [], allergyReplacementMealIds: ['flagged'],
+    } } };
+    if (!path.endsWith('/kitchen-state')) return originalGet(path, options);
+    return { data: { state: 'allergy-review', data: { success: true, preparation: 'allergy-review', data: {
+      kitchenSelections: [{ _id: 'selection', email, matterCustomerId: '42', selectedMeals: meals }],
+      kitchenInputs: [{ ...input(), customer_id: '42' }], rosterComplete: true,
+      kitchenRoster: [{ customer_id: '42', email, subscription_id: 'matter-current', meal_frequency: 1 }],
+      kitchenAllergyCases: [review], kitchenAllergyReview: 'One allergy review pending.',
+    } } } };
+  });
+  try {
+    await select(dateSelect(), friday);
+    const button = label => [...container.querySelectorAll('.kitchen-meal button')].find(item => item.textContent === label);
+    expect(button('Change meal').disabled).toBe(true);
+    expect(button('Delete meal').disabled).toBe(true);
+    const change = button('Change meal for allergy');
+    expect(change.disabled).toBe(false);
+    await act(async () => change.click());
+    expect(api.get).toHaveBeenCalledWith('/menus/menu/kitchen-customers/42/meal-editor', { params: { date: friday }, timeout: 30000 });
+    expect(container.querySelector('[aria-label="Current meal"]').value).toBe('flagged');
   } finally { now.mockRestore(); }
 });
 
@@ -109,6 +226,9 @@ beforeEach(async () => {
   localStorage.clear();
   mockExcelRows.mockImplementation((rows) => rows);
   api.get.mockImplementation(async (path, config) => {
+    if (path === '/menus/kitchen-fallback-snacks') return { data: { success: true, data: [
+      { name: 'CRACKER BLISS BALL', mealName: 'CRACKER BLISS BALL (W/ SOY)' },
+    ] } };
     if (path === '/menus/kitchen-partner-orders') return {data: {success: true, data: {date: config.params.date, orders: [], counts: [], orderCount: 0, totalQuantity: 0}}};
     if (path.startsWith('/menus?')) return { data: { success: true, data: [{ _id: 'menu', title: 'Fixture', isActive: true, isPublished: true, startDate: thursday, endDate: friday }, { _id: 'old-menu', title: 'Old menu', isActive: false, isPublished: true, startDate: thursday, endDate: friday }] } };
     if (path.endsWith('/selections')) return { data: { success: true, data: [{ email, firstName: 'Internal stale name', matterCustomerId: 'permanent', mealPerDay: 9, skippedDays: [{ date: thursday, pauseStatus: 'success' }], selectedMeals: [thursday, friday].map((date) => ({ date, mealType: 'main', mealName: 'Fixture dish' })) }] } };

@@ -85,11 +85,11 @@ const button = (text, scope = node) => [...scope.querySelectorAll('button')].fin
 const click = async element => {expect(element).toBeDefined();await act(async()=>element.click());};
 const card = () => [...node.querySelectorAll('div')].find(element => element.textContent === 'Private Fixture Meal').closest('.card');
 const setText = async (input, value) => act(async()=>{Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,value);input.dispatchEvent(new Event('input',{bubbles:true}));});
-const signIn = async (item, profile = {}) => {
-  const menu={_id:'menu-private',title:'Saved menu',startDate:DELIVERY_DATE,endDate:DELIVERY_DATE,meals:[{date:DELIVERY_DATE,mealType:item.mealType,items:[item]}]};
+const signIn = async (item, profile = {}, menuOverrides = {}) => {
+  const menu={_id:'menu-private',title:'Saved menu',startDate:DELIVERY_DATE,endDate:DELIVERY_DATE,meals:[{date:DELIVERY_DATE,mealType:item.mealType,items:[item]}],...menuOverrides};
   api.get.mockImplementation(async url=>({data:{success:true,data:url.includes('/share/')?menu:{
     firstName:'Test',lastName:'Subscriber',email:'subscriber@example.invalid',matterCustomerId:'customer',subscriptionId:'subscription',mealPerDay:1,
-    allergies:[],allergiesAvailable:true,deliveryDates:[DELIVERY_DATE],mealExclusion:'', ...profile,
+    allergies:[],allergiesAvailable:true,exclusionsAvailable:true,deliveryDates:[DELIVERY_DATE],mealExclusion:'', ...profile,
   }}}));
   api.post.mockResolvedValue({data:{success:true,pauseResults:[]}});
   await act(async()=>root.render(<MenuSelectionLink token="private-real-token"/>));
@@ -107,6 +107,22 @@ test('a portion preference warns and allows keeping the meal without changing sa
   const saved=api.post.mock.calls[0][1].selections[0];
   expect(saved).toMatchObject({mealName:'Private fixture meal',preferenceConflict:['Coriander'],exclusionConflict:[],keptCarbConflict:[],keptVegConflict:[]});
   expect(saved.carbVegAction).toBeUndefined();expect(saved.carbVegPreference).toBeUndefined();
+});
+
+test('a saved Saturday skip leaves a new Sunday delivery selectable', async () => {
+  const item = cycleItem([privateComponent('portion', 'Protein')]);
+  const saturday = '2099-10-24', sunday = '2099-10-25';
+  await signIn(item, {
+    weekend: true, deliveryDates: [sunday], skippedDays: [{ date: saturday, pauseStatus: 'success' }],
+  }, {
+    startDate: saturday, endDate: sunday,
+    meals: [saturday, sunday].map(date => ({ date, mealType: 'main', items: [item] })),
+  });
+  await click(button('Save and go to next day'));
+  expect(node.textContent).not.toContain('You skipped this day');
+  await click(button('+', card()));
+  await click(button('Submit my week'));
+  expect(api.post.mock.calls[0][1].dates).toEqual([saturday]);
 });
 
 test.each(['portion','mixed'])('restored %s preference conflicts can submit with computed warning flags', async scenario => {
@@ -268,7 +284,7 @@ test.each([false, undefined])('unknown Matter allergy availability (%s) blocks m
   expect(button('Submit my week')).toBeUndefined();
   expect(button('+')).toBeUndefined();
   expect(api.post).not.toHaveBeenCalled();
-  api.get.mockResolvedValue({ data: { success: true, data: { firstName: 'Test', email: 'subscriber@example.invalid', allergies: [], allergiesAvailable: true, deliveryDates: [DELIVERY_DATE], mealPerDay: 1 } } });
+  api.get.mockResolvedValue({ data: { success: true, data: { firstName: 'Test', email: 'subscriber@example.invalid', allergies: [], allergiesAvailable: true, exclusionsAvailable: true, mealExclusion: '', deliveryDates: [DELIVERY_DATE], mealPerDay: 1 } } });
   await click(button('Try again'));
   expect(node.textContent).not.toContain('Allergy information unavailable');
   expect(button('+', card())).toBeDefined();
@@ -279,4 +295,83 @@ test('Matter milk allergy blocks butter hidden in recipe ingredients', async () 
   expect(card().textContent).toContain('allergen');
   expect(button('+', card())).toBeUndefined();
   expect(api.post).not.toHaveBeenCalled();
+});
+
+
+test('a week crossing renewal allows two current meals then three upcoming meals', async () => {
+  const nextDate = '2099-10-22';
+  const current = cycleItem([privateComponent('p','Protein')]);
+  const upcoming = { ...current, _id: 'future-item', itemDate: nextDate };
+  const plan = (subscriptionId, mealPerDay) => ({ subscriptionId, mealPerDay, mealPlan: subscriptionId, allergies: [], allergiesAvailable: true, exclusionsAvailable: true, mealExclusion: '' });
+  await signIn(current, { mealPerDay: 2, deliveryDates: [DELIVERY_DATE, nextDate], plansByDate: {
+    [DELIVERY_DATE]: plan('current', 2), [nextDate]: { ...plan('upcoming', 3), isUpcomingPlan: true },
+  } }, { endDate: nextDate, meals: [{ date: DELIVERY_DATE, mealType: 'main', items: [current] }, { date: nextDate, mealType: 'main', items: [upcoming] }] });
+  expect(node.textContent).toContain('2 meals');
+  await click(button('+',card())); await click(button('+',card()));
+  expect(button('+',card()).disabled).toBe(true);
+  await click(button('Save and go to next day'));
+  expect(node.textContent).toContain('3 meals');
+  await click(button('+',card())); await click(button('+',card()));
+  expect(button('+',card()).disabled).toBe(false);
+  await click(button('+',card())); expect(button('+',card()).disabled).toBe(true);
+  await click(button('Submit my week'));
+  expect(api.post.mock.calls[0][1].selections.map(meal=>[meal.date,meal.quantity])).toEqual([[DELIVERY_DATE,2],[nextDate,3]]);
+});
+
+test.each([false, true])('saving an open day leaves the closed day alone (failed pause: %s)', async failedPause => {
+  jest.useFakeTimers();
+  jest.setSystemTime(new Date('2099-10-19T10:00Z'));
+  try {
+    const nextDate = '2099-10-22';
+    const closed = cycleItem([privateComponent('portion', 'Protein')]);
+    const open = { ...closed, _id: 'open-item', itemDate: nextDate };
+    await signIn(closed, {
+      deliveryDates: [DELIVERY_DATE, nextDate], hasSubmittedForRequestedMenu: true,
+      selectedMeals: failedPause ? [] : [{ date: DELIVERY_DATE, mealType: 'main', menuItemId: closed._id, quantity: 1, isAutoAssigned: true }],
+      skippedDays: failedPause ? [{ date: DELIVERY_DATE, pauseStatus: 'failed' }] : [],
+    }, { endDate: nextDate, meals: [{ date: DELIVERY_DATE, mealType: 'main', items: [closed] }, { date: nextDate, mealType: 'main', items: [open] }] });
+    await click(button('+', card()));
+    await click(button('Submit my week'));
+    expect(api.post).toHaveBeenCalledTimes(1);
+    expect(api.post.mock.calls[0][0]).toContain('/select-meals');
+    expect(api.post.mock.calls[0][1].selections.map(meal => meal.date)).toEqual([nextDate]);
+    expect(api.post.mock.calls[0][1].pauseDecisions).toBeUndefined();
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test('the dated upcoming allergy profile blocks a meal even when the current plan has no allergies', async () => {
+  await signIn(cycleItem([privateComponent('p','Protein')], { sauceIngredients: [{ name: 'Butter', visible: false }] }), {
+    plansByDate: { [DELIVERY_DATE]: { mealPerDay: 3, mealPlan: 'Upcoming', allergies: ['Milk'], allergiesAvailable: true, exclusionsAvailable: true, mealExclusion: '' } },
+  });
+  expect(card().textContent).toContain('allergen');
+  expect(button('+',card())).toBeUndefined();
+});
+
+
+test.each([true, undefined])('only the allergy profiles of this menu delivery days gate selection (current flag: %s)', async allergiesAvailable => {
+  await signIn(cycleItem([privateComponent('p','Protein')]), { allergiesAvailable,
+    plansByDate: { [DELIVERY_DATE]: { mealPerDay: 2, allergies: [], allergiesAvailable: true, exclusionsAvailable: true, mealExclusion: '' },
+      '2099-12-01': { mealPerDay: 3, allergies: [], allergiesAvailable: false } },
+  });
+  expect(node.textContent).not.toContain('Allergy information unavailable');
+  expect(button('+',card())).toBeDefined();
+});
+
+
+test.each([false, undefined])('missing exclusion availability (%s) blocks selection instead of treating restrictions as empty', async exclusionsAvailable => {
+  await signIn(cycleItem([privateComponent('p','Protein')]), { exclusionsAvailable });
+  expect(node.textContent).toContain('Exclusion information unavailable');
+  expect(button('+')).toBeUndefined();
+  expect(button('Submit my week')).toBeUndefined();
+  expect(api.post).not.toHaveBeenCalled();
+});
+
+test('unknown upcoming exclusions block that menu even with a known current profile', async () => {
+  await signIn(cycleItem([privateComponent('p','Protein')]), { plansByDate: {
+    [DELIVERY_DATE]: { mealPerDay: 3, allergies: [], allergiesAvailable: true, exclusionsAvailable: false, mealExclusion: null },
+  } });
+  expect(node.textContent).toContain('Exclusion information unavailable');
+  expect(button('+')).toBeUndefined();
 });

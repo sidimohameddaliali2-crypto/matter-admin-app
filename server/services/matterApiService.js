@@ -5,6 +5,8 @@ import crypto from 'crypto';
 import { cacheGet, cacheSet } from '../config/cache.js';
 import { boundedMap } from './boundedMap.js';
 import { normalizeMatterAllergens } from './matterAllergens.js';
+import { menuNutritionForDate } from './menuPlanSchedule.js';
+import { isDateKey } from '../utils/businessDate.js';
 import { readMatterGet } from './matterReadRetry.js';
 import { resolveMatterDeliveryAddress, matterMealContract, matterWeekendEnabled, matterDoubleDeliveryDates } from './matterSubscriptionContract.js';
 
@@ -75,11 +77,58 @@ const activeDeliveryDates = (subscription) => (subscription?.delivery_schedule |
   .filter((entry) => entry?.status === 'active' && entry?.date)
   .map((entry) => String(entry.date).slice(0, 10))
   .sort();
+const deliverySubscriptionStatuses = ['active', 'paused', 'cancelled'];
+const deliverySubscriptionKey = (subscription) => subscription.customer_id == null || subscription.subscription_id == null
+  ? null : JSON.stringify([String(subscription.customer_id), String(subscription.subscription_id)]);
+const activatedDeliverySubscriptions = (subscriptions) => {
+  const byId = new Map(subscriptions
+    .filter(subscription => deliverySubscriptionStatuses.includes(subscription.subscription_status) && deliverySubscriptionKey(subscription))
+    .map(subscription => [deliverySubscriptionKey(subscription), subscription]));
+  const byPredecessor = new Map();
+  for (const sub of byId.values()) {
+    const key = deliverySubscriptionKey({ customer_id: sub.customer_id, subscription_id: sub.replaces_subscription_id });
+    if (!key) continue;
+    if (!byPredecessor.has(key)) byPredecessor.set(key, []);
+    byPredecessor.get(key).push(sub);
+  }
+  return { byId, byPredecessor };
+};
+const activatedSuccessorFor = (root, activated) => {
+  const successors = activated.byPredecessor.get(deliverySubscriptionKey(root)) || [];
+  if (successors.length > 1) throw Object.assign(new Error('Multiple activated Matter renewals match this subscription.'), { statusCode: 409 });
+  return successors[0] || (root.upcoming_plan && activated.byId.get(deliverySubscriptionKey(root.upcoming_plan)));
+};
+const resolveRenewalBoundary = (root, activated) => {
+  const successor = activatedSuccessorFor(root, activated);
+  if (!successor) {
+    if (!root.upcoming_plan) return { effectiveRoot: root, nextStart: null, standalone: false };
+    const embedded = menuNutritionForDate(buildNutritionResult(root), root.upcoming_plan.starting_date);
+    return { effectiveRoot: root, nextStart: embedded.starting_date, standalone: false };
+  }
+  const nextStart = String(successor.starting_date ?? '').slice(0, 10);
+  if (!isDateKey(nextStart) || String(successor.customer_id) !== String(root.customer_id)
+    || String(successor.subscription_id) === String(root.subscription_id)
+    || String(successor.replaces_subscription_id ?? '') !== String(root.subscription_id)) {
+    throw Object.assign(new Error('The activated Matter renewal or its start date could not be verified.'), { statusCode: 409 });
+  }
+  return { effectiveRoot: { ...root, upcoming_plan: null, next_subscription_starting_date: nextStart }, nextStart, standalone: true };
+};
+const canSupplyDelivery = (subscription, date) =>
+  (deliverySubscriptionStatuses.includes(subscription.subscription_status)
+    && (!subscription.cycle_end_date || String(subscription.cycle_end_date).slice(0, 10) >= date))
+  || (subscription.upcoming_plan && (!subscription.upcoming_plan.cycle_end_date
+    || String(subscription.upcoming_plan.cycle_end_date).slice(0, 10) >= date));
 
 // One shape for every nutrition lookup (by email, subscription id, or Matter
 // customer id), so the Kitchen List gets the same fields whichever path found
 // the subscription. customer_id is Matter's permanent id for the customer.
-export const buildNutritionResult = (subscription) => ({
+export const buildNutritionResult = (subscription, upcoming = false, parentSubscriptionId = null) => ({
+  ...(subscription.next_subscription_starting_date && { next_subscription_starting_date: subscription.next_subscription_starting_date }),
+  replaces_subscription_id: subscription.replaces_subscription_id ?? null,
+  starting_date: subscription.starting_date ? String(subscription.starting_date).slice(0, 10) : null,
+  is_upcoming_plan: upcoming,
+  source_parent_subscription_id: parentSubscriptionId,
+  upcoming_plan: !upcoming && subscription.upcoming_plan ? buildNutritionResult(subscription.upcoming_plan, true, subscription.subscription_id) : null,
   delivery_address_resolution: resolveMatterDeliveryAddress(subscription.customer_addresses),
   meal_contract: matterMealContract(subscription),
   double_delivery_dates: matterDoubleDeliveryDates(subscription),
@@ -100,6 +149,10 @@ export const buildNutritionResult = (subscription) => ({
   active_delivery_dates: Array.isArray(subscription.delivery_schedule)
     ? activeDeliveryDates(subscription)
     : null,
+  paused_delivery_dates: Array.isArray(subscription.delivery_schedule)
+    ? [...new Set([...subscription.delivery_schedule.filter(day => day.status === 'paused').map(day => String(day.date).slice(0, 10)),
+      ...(subscription.pauses?.paused_days || []).map(day => String(day).slice(0, 10))])] : null,
+  reserved_resume_dates: Array.isArray(subscription.pauses?.resumed_days) ? subscription.pauses.resumed_days.map(day => String(day).slice(0, 10)) : null,
   weekend_enabled: Array.isArray(subscription.delivery_schedule) ? matterWeekendEnabled(subscription) : null,
   // The subscription's billing-cycle boundary — used by the menu-selection
   // screen's "last day of your cycle" banner/Renew prompt, and by
@@ -170,7 +223,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionByEmail(email) {
     const normalizedEmail = String(email || '').trim().toLowerCase();
-    const cacheKey = `matter:nutrition:v4:email:${normalizedEmail}`;
+    const cacheKey = `matter:nutrition:v5:email:${normalizedEmail}`;
     const cached = normalizedEmail ? await cacheGet(cacheKey) : null;
     if (cached) return cached;
 
@@ -198,7 +251,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionBySubscriptionId(subscriptionId) {
     if (!subscriptionId) return null;
-    const cacheKey = `matter:nutrition:v4:sub:${subscriptionId}`;
+    const cacheKey = `matter:nutrition:v5:sub:${subscriptionId}`;
     const cached = await cacheGet(cacheKey);
     if (cached) return cached;
 
@@ -219,7 +272,7 @@ class MatterApiService {
    */
   async getSubscriptionNutritionByCustomerId(customerId) {
     if (!customerId) return null;
-    const cacheKey = `matter:nutrition:v4:cust:${customerId}`;
+    const cacheKey = `matter:nutrition:v5:cust:${customerId}`;
     const cached = await cacheGet(cacheKey);
     if (cached) return cached;
 
@@ -240,21 +293,43 @@ class MatterApiService {
   // Owner (2026-10-20): permanent Matter customer ID owns kitchen identity.
   // Email discovers that ID at sign-in. Subscription IDs are legacy references.
   // Every read is from Matter; no Internal Customer lookup or relinking occurs.
-  async getKitchenNutrition({ subscriptionId, customerId, email } = {}) {
+  async getKitchenNutrition({ subscriptionId, customerId, email, date } = {}) {
     try {
       const normalize = (value) => String(value || '').trim().toLowerCase();
       const fail = (message) => { const error = new Error(message); error.statusCode = 409; throw error; };
       const one = (list) => {
         const rows = list?.data || [];
         const active = rows.filter((row) => row.subscription_status === 'active');
-        const candidates = active.length === 1 ? active : rows;
-        if (candidates.length !== 1 || Number(list?.meta?.total_pages || 1) > 1) fail('Kitchen subscription lookup is missing or ambiguous; verify the Matter customer ID and website email.');
-        return candidates[0];
+        const current = rows.filter(row => ['active', 'paused'].includes(row.subscription_status));
+        const candidates = active.length === 1 ? active : current.length ? current : rows;
+        if (Number(list?.meta?.total_pages || 1) === 1) {
+          if (current.length === 2) {
+            const [a, b] = current;
+            if (a.customer_id != null && String(a.customer_id) === String(b.customer_id)) {
+              if (String(a.replaces_subscription_id ?? '') === String(b.subscription_id)) return a;
+              if (String(b.replaces_subscription_id ?? '') === String(a.subscription_id)) return b;
+            }
+          }
+          if (candidates.length === 1) return candidates[0];
+        }
+        fail('Kitchen subscription lookup is missing or ambiguous; verify the Matter customer ID and website email.');
       };
       const load = async (id) => {
         const data = (await this.getSubscription(id))?.data;
         if (!data || String(data.subscription_id) !== String(id)) fail('The current Matter subscription could not be verified.');
         return data;
+      };
+      const loadPrimary = async (row, rows) => {
+        const source = await load(row.subscription_id);
+        const successor = activatedSuccessorFor(source, activatedDeliverySubscriptions(rows));
+        if (!successor) return source;
+        const renewal = await load(successor.subscription_id);
+        if (String(renewal.customer_id) !== String(source.customer_id)
+          || String(renewal.subscription_id) === String(source.subscription_id)
+          || String(renewal.replaces_subscription_id) !== String(source.subscription_id)) {
+          fail('The activated Matter renewal could not be verified.');
+        }
+        return renewal;
       };
       const byCustomer = async (id) => {
         if (!String(id ?? '').trim()) fail('Permanent Matter customer ID is missing. Verify this account in Matter.');
@@ -265,8 +340,38 @@ class MatterApiService {
           error.code = 'MATTER_SUBSCRIPTION_UNAVAILABLE';
           throw error;
         }
+        if (date) {
+          if (list?.success === false || !Array.isArray(list?.data) || Number(list.meta?.total_pages || 1) > 1) {
+            fail('Matter subscriptions could not be verified for this delivery date.');
+          }
+          // Ended cycles can still have active make-up deliveries, including
+          // on dates that also appear in a renewal's calendar.
+          const candidates = list.data.filter(row => deliverySubscriptionStatuses.includes(row.subscription_status)
+            || row.upcoming_plan);
+          const roots = await boundedMap(candidates, 5, async row => {
+            const data = await load(row.subscription_id);
+            if (String(data.customer_id ?? '') !== String(id)) fail('Matter customer identity could not be verified.');
+            return { ...data, email: data.email || row.email, subscription_status: data.subscription_status || row.subscription_status };
+          });
+          const activated = activatedDeliverySubscriptions(roots);
+          const scheduled = roots.flatMap(root => {
+            const { effectiveRoot, nextStart, standalone } = resolveRenewalBoundary(root, activated);
+            if (standalone && date >= nextStart) return [];
+            const plan = menuNutritionForDate(buildNutritionResult(effectiveRoot), date);
+            if (plan.starting_date && date < plan.starting_date) return [];
+            if (!Array.isArray(plan.active_delivery_dates)) fail('Matter delivery schedule could not be verified.');
+            return plan.active_delivery_dates.includes(date) ? [{ root: effectiveRoot, plan }] : [];
+          });
+          // Match the preparation roster's in-cycle delivery eligibility.
+          const matches = scheduled.filter(({ plan }) => !plan.cycle_end_date || date <= plan.cycle_end_date);
+          if (!matches.length && scheduled.length) {
+            fail('Matter lists this delivery beyond its plan cycle. Verify the scheduled date and cycle in Matter before editing.');
+          }
+          if (matches.length !== 1) fail('Matter could not verify one active delivery for this customer/date.');
+          return matches[0].root;
+        }
         const row = one(list);
-        const data = await load(row.subscription_id);
+        const data = await loadPrimary(row, list.data);
         if (String(data.customer_id ?? '') !== String(id)) fail('Matter customer identity does not match the requested permanent ID.');
         return data;
       };
@@ -278,7 +383,7 @@ class MatterApiService {
         if ((list?.data || []).length) {
           const row = one(list);
           if (normalize(row.email) !== requestedEmail) fail('Matter subscription email does not match the requested customer.');
-          subscription = await load(row.subscription_id);
+          subscription = await loadPrimary(row, list.data);
           if (normalize(subscription.email) !== requestedEmail) fail('Matter subscription email does not match the requested customer.');
         } else if (subscriptionId) {
           // Recover only a verifiable legacy reference, then follow the stable ID.
@@ -290,7 +395,8 @@ class MatterApiService {
         subscription = await byCustomer(legacy.customer_id);
       } else fail('A Matter customer ID or verified website email is required.');
       if (!String(subscription?.customer_id ?? '').trim()) fail('Permanent Matter customer ID is missing. Verify this account in Matter.');
-      return buildNutritionResult(subscription);
+      const nutrition = buildNutritionResult(subscription);
+      return date ? menuNutritionForDate(nutrition, date) : nutrition;
     } catch (error) {
       if (!error.isAxiosError) throw error;
       const safe = new Error(describeMatterApiError(error) || 'Matter lookup failed. Please retry.');
@@ -298,6 +404,24 @@ class MatterApiService {
       safe.code = error.code;
       throw safe;
     }
+  }
+
+  // The active renewal can share a menu week with its verified predecessor.
+  async withPriorKitchenSubscription(nutrition, earliestDate) {
+    const previousId = nutrition?.replaces_subscription_id;
+    if (!previousId || !isDateKey(earliestDate) || !isDateKey(nutrition.starting_date) || earliestDate >= nutrition.starting_date) return nutrition;
+    const unavailable = () => Object.assign(new Error('Matter could not verify the previous plan for this menu. Please reopen the menu and try again.'), { statusCode: 409 });
+    let previous;
+    try {
+      previous = (await this.getSubscription(previousId))?.data;
+    } catch {
+      throw unavailable();
+    }
+    if (!previous || String(previousId) === String(nutrition.subscription_id)
+      || String(previous.subscription_id) !== String(previousId)
+      || String(previous.customer_id) !== String(nutrition.customer_id)
+      || !Array.isArray(previous.delivery_schedule)) throw unavailable();
+    return { ...nutrition, previous_plan: buildNutritionResult({ ...previous, upcoming_plan: null }) };
   }
 
   /**
@@ -364,87 +488,115 @@ class MatterApiService {
    */
   async findSubscriptionsWithDeliveryInRange(startDateKey, endDateKey, { includeKitchenInputs = false, onProgress } = {}) {
     const all = await this.listAllSubscriptions({ onProgress });
-    const candidates = all.filter((sub) =>
-      ['active', 'paused', 'cancelled'].includes(sub.subscription_status)
-      && String(sub.cycle_end_date || '').slice(0, 10) >= startDateKey
-    );
+    const candidates = all.filter(sub => canSupplyDelivery(sub, startDateKey));
 
     const CONCURRENCY = 20;
-    const matches = [];
     const failures = [];
+    const recordFailure = (error, subscriptionId) => {
+      if (error.code === 'MATTER_IMPORT_INTERRUPTED') throw error;
+      console.error(`delivery-in-range check failed for subscription ${subscriptionId}:`, error.message);
+      failures.push({ subscriptionId: String(subscriptionId), message: 'Unable to verify delivery schedule' });
+    };
     let checked = 0;
     await onProgress?.({ phase: 'checking', completed: 0, total: candidates.length, failed: 0 });
 
-    const results = await boundedMap(candidates, CONCURRENCY, async (sub) => {
+    const details = (await boundedMap(candidates, CONCURRENCY, async (sub) => {
+      try {
+        const detail = (await this.getSubscription(sub.subscription_id))?.data;
+        if (!detail || (includeKitchenInputs && String(detail.subscription_id ?? '') !== String(sub.subscription_id))) {
+          throw new Error('Matter subscription identity could not be verified');
+        }
+        return { ...detail, name: detail.name || sub.name, email: detail.email || sub.email,
+          subscription_status: detail.subscription_status || sub.subscription_status };
+      } catch (error) {
+        recordFailure(error, sub.subscription_id);
+        return null;
+      } finally {
+        await onProgress?.({ phase: 'checking', completed: ++checked, total: candidates.length, failed: failures.length });
+      }
+    })).filter(Boolean);
+    // Resolve precedence after the bounded reads so detail wins over the
+    // list summary. An ended standalone can still suppress a stale copy.
+    const activated = activatedDeliverySubscriptions([...all, ...details]);
+    const matches = details.flatMap((detail) => {
         try {
-          const detail = await this.getSubscription(sub.subscription_id);
-          if (includeKitchenInputs && String(detail?.data?.subscription_id ?? '') !== String(sub.subscription_id)) throw new Error('Matter subscription identity could not be verified');
-          const schedule = detail?.data?.delivery_schedule;
-          if (!Array.isArray(schedule)) throw new Error('Delivery schedule is missing');
-          const deliveryDates = schedule
-            .filter((entry) => {
-              const d = String(entry.date).slice(0, 10);
-              return entry.status === 'active' && d >= startDateKey && d <= endDateKey;
-            })
-            .map((entry) => String(entry.date).slice(0, 10))
-            .sort();
-          if (deliveryDates.length === 0) return [];
-          return deliveryDates.map((deliveryDate) => ({
-            ...(includeKitchenInputs ? { kitchen_inputs: buildNutritionResult({ ...detail.data, email: detail.data.email || sub.email }) } : {}),
-            subscription_id: sub.subscription_id,
-            customer_id: detail.data.customer_id ?? sub.customer_id,
-            // The list/summary endpoint's `name` can be sparser than the
-            // full detail record (same reason `phone`/`address` below are
-            // sourced from `detail.data`, not `sub`) — falling back to the
-            // list row only if detail genuinely has nothing, so bulk name
-            // matching (customerMatchService) doesn't silently miss a real
-            // customer just because the summary row omitted their name.
-            name: detail.data.name || sub.name,
-            // Same reasoning as `name` above — email is the highest-
-            // confidence matcher in customerMatchService, so it shouldn't be
-            // more likely to be missing than the lower-confidence fallbacks.
-            email: detail.data.email || sub.email,
-            phone: detail.data.phone || '',
-            address: formatAddress(resolveMatterDeliveryAddress(detail.data.customer_addresses).address),
-            // Raw best-match address (building/floor/unit/coordinates) and
-            // the delivery time window — detail is already fetched above for
-            // every candidate, so surfacing these costs nothing extra. Added
-            // for the Delivery-import job (matterDeliveryImportService.js),
-            // which needs real coordinates/address parts and a wall-clock
-            // time, not just the flattened display string.
-            address_detail: resolveMatterDeliveryAddress(detail.data.customer_addresses).address,
-            address_resolution: resolveMatterDeliveryAddress(detail.data.customer_addresses),
-            source_fetched_at: new Date().toISOString(),
-            source_updated_at: detail.data.updated_at ?? null,
-            // Raw list too (not just the already-picked best one) — lets a
-            // caller tell "exactly one plausible address, picked with zero
-            // ambiguity" apart from "guessed among several candidates" (see
-            // matterDeliveryImportService.js's unambiguousActiveAddress).
-            customer_addresses: detail.data.customer_addresses || [],
-            delivery_window: detail.data.delivery_window || null,
-            meal_frequency: detail.data.plan?.meal_frequency ?? null,
-            active_delivery_dates: activeDeliveryDates(detail.data),
-            double_delivery_dates: matterDoubleDeliveryDates(detail.data),
-            snacks_per_day: detail.data.snacks_per_day ?? null,
-            breakfast_included: typeof detail.data.breakfast_included === 'boolean' ? detail.data.breakfast_included : null,
-            exclusions: (detail.data.exclusions || []).map((ex) => ex.title).filter(Boolean),
-            subscription_status: sub.subscription_status,
-            plan_name: detail.data.plan?.name ?? null,
-            cycle_end_date: sub.cycle_end_date ?? null,
-            renewal_due_date: sub.renewal_due_date ?? null,
-            renewal_eligible: sub.renewal_eligible ?? null,
-            delivery_date: deliveryDate
-          }));
+          const { effectiveRoot: root, nextStart } = resolveRenewalBoundary(detail, activated);
+          const versions = [root];
+          if (root.upcoming_plan) {
+            if (String(root.upcoming_plan.starting_date).slice(0, 10) <= endDateKey
+              && (!root.upcoming_plan.cycle_end_date || String(root.upcoming_plan.cycle_end_date).slice(0, 10) >= startDateKey)) {
+              versions.push({ ...root.upcoming_plan, is_upcoming_plan: true });
+            }
+          }
+          return versions.flatMap(version => {
+            const detail = { data: version };
+            const sub = version;
+            const schedule = detail?.data?.delivery_schedule;
+            if (!Array.isArray(schedule)) throw new Error('Delivery schedule is missing');
+            const deliveryDates = schedule
+              .filter((entry) => {
+                const d = String(entry.date).slice(0, 10);
+                return entry.status === 'active' && d >= startDateKey && d <= endDateKey
+                  && (!version.starting_date || d >= String(version.starting_date).slice(0, 10))
+                  && (!version.cycle_end_date || d <= String(version.cycle_end_date).slice(0, 10))
+                  && (version.is_upcoming_plan || !nextStart || d < nextStart);
+              })
+              .map((entry) => String(entry.date).slice(0, 10))
+              .sort();
+            if (deliveryDates.length === 0) return [];
+            return deliveryDates.map((deliveryDate) => ({
+              ...(includeKitchenInputs ? { kitchen_inputs: buildNutritionResult({ ...detail.data, email: detail.data.email || sub.email }, version.is_upcoming_plan === true, version.is_upcoming_plan ? root.subscription_id : null) } : {}),
+              subscription_id: sub.subscription_id,
+              customer_id: detail.data.customer_id ?? sub.customer_id,
+              // The list/summary endpoint's `name` can be sparser than the
+              // full detail record (same reason `phone`/`address` below are
+              // sourced from `detail.data`, not `sub`) — falling back to the
+              // list row only if detail genuinely has nothing, so bulk name
+              // matching (customerMatchService) doesn't silently miss a real
+              // customer just because the summary row omitted their name.
+              name: detail.data.name || sub.name,
+              // Same reasoning as `name` above — email is the highest-
+              // confidence matcher in customerMatchService, so it shouldn't be
+              // more likely to be missing than the lower-confidence fallbacks.
+              email: detail.data.email || sub.email,
+              phone: detail.data.phone || '',
+              address: formatAddress(resolveMatterDeliveryAddress(detail.data.customer_addresses).address),
+              // Raw best-match address (building/floor/unit/coordinates) and
+              // the delivery time window — detail is already fetched above for
+              // every candidate, so surfacing these costs nothing extra. Added
+              // for the Delivery-import job (matterDeliveryImportService.js),
+              // which needs real coordinates/address parts and a wall-clock
+              // time, not just the flattened display string.
+              address_detail: resolveMatterDeliveryAddress(detail.data.customer_addresses).address,
+              address_resolution: resolveMatterDeliveryAddress(detail.data.customer_addresses),
+              source_fetched_at: new Date().toISOString(),
+              source_updated_at: detail.data.updated_at ?? null,
+              // Raw list too (not just the already-picked best one) — lets a
+              // caller tell "exactly one plausible address, picked with zero
+              // ambiguity" apart from "guessed among several candidates" (see
+              // matterDeliveryImportService.js's unambiguousActiveAddress).
+              customer_addresses: detail.data.customer_addresses || [],
+              delivery_window: detail.data.delivery_window || null,
+              meal_frequency: detail.data.plan?.meal_frequency ?? null,
+              active_delivery_dates: activeDeliveryDates(detail.data),
+              double_delivery_dates: matterDoubleDeliveryDates(detail.data),
+              snacks_per_day: detail.data.snacks_per_day ?? null,
+              breakfast_included: typeof detail.data.breakfast_included === 'boolean' ? detail.data.breakfast_included : null,
+              exclusions: (detail.data.exclusions || []).map((ex) => ex.title).filter(Boolean),
+              is_upcoming_plan: version.is_upcoming_plan === true,
+              subscription_status: sub.subscription_status,
+              plan_name: detail.data.plan?.name ?? null,
+              cycle_end_date: sub.cycle_end_date ?? null,
+              renewal_due_date: sub.renewal_due_date ?? null,
+              renewal_eligible: sub.renewal_eligible ?? null,
+              delivery_date: deliveryDate
+            }));
+          });
         } catch (error) {
-          if (error.code === 'MATTER_IMPORT_INTERRUPTED') throw error;
-          console.error(`delivery-in-range check failed for subscription ${sub.subscription_id}:`, error.message);
-          failures.push({ subscriptionId: String(sub.subscription_id), message: 'Unable to verify delivery schedule' });
+          recordFailure(error, detail.subscription_id);
           return [];
-        } finally {
-          await onProgress?.({ phase: 'checking', completed: ++checked, total: candidates.length, failed: failures.length });
         }
     });
-    matches.push(...results.flat());
 
     if (failures.length) {
       const error = new Error(`Delivery roster is incomplete: ${failures.length} subscription lookup(s) failed. Retry before preparing kitchen quantities or importing deliveries.`);

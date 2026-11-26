@@ -8,6 +8,7 @@ import Menu from '../models/WeeklyMenu.js';
 
 const handler = router.stack.find((layer) => layer.route?.path === '/customers/:email/select-meals').route.stack.at(-1).handle;
 const response = () => { const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } }; return res; };
+test.beforeEach(t => t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-10-19T00:00Z') }));
 
 test('submission stores a Matter customer selection without using Internal identity matching', async () => {
   const original = { lookup: matter.getKitchenNutrition, find: Customer.findOne, allergyFind: Customer.find, menuRead: Menu.findById, byId: Customer.findById, prior: Record.findOne, save: Record.findOneAndUpdate, count: Record.countDocuments, menu: Menu.findByIdAndUpdate, log: console.log };
@@ -100,6 +101,24 @@ test('admin save uses saved identity profile and recomputes flags', () => withSe
   const res = response(); await adminHandler({ params: { menuId, email: 'storage@example.invalid' }, body: { selections: [submitted({ carbVegAction: 'kept', carbConflict: [] })] } }, res);
   assert.equal(res.statusCode, 200); assert.equal(state.profileEmail, 'website@example.invalid'); assert.equal(state.writes[0].update.$set.selectedMeals[0].carbVegAction, 'kept');
 }));
+test('staff saves in a menu spanning renewal retain the plan that owns each dated choice', t => withSelectionFixtures(async state => {
+  const previousDate = '2026-10-22', nextDate = '2026-10-23';
+  Object.assign(state.nutrition, { replaces_subscription_id: 'previous', starting_date: nextDate, active_delivery_dates: [nextDate] });
+  t.mock.method(matter, 'getSubscription', async id => {
+    assert.equal(id, 'previous');
+    return { data: { subscription_id: id, customer_id: 'permanent', cycle_end_date: previousDate, email: state.nutrition.customer_email,
+      exclusions: [], allergens: [], delivery_schedule: [{ date: previousDate, status: 'active' }] } };
+  });
+  const menu = { meals: [previousDate, nextDate].map(date => ({ date, mealType: 'main', items: [{ ...state.item, itemDate: date }] })) };
+  Menu.findById = () => ({ ...menu, populate() { return this; }, lean: async () => menu });
+  const res = response();
+  await adminHandler({ params: { menuId, email: 'storage@example.invalid' },
+    body: { selections: [submitted({ matterSubscriptionId: 'sub' }), submitted({ date: nextDate })] } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(state.writes[0].update.$set.selectedMeals.map(meal => [meal.date, meal.matterSubscriptionId]),
+    [[previousDate, 'previous'], [nextDate, 'sub']]);
+}));
+
 test('admin cannot save against a mismatched verified Matter identity', () => withSelectionFixtures(async state => {
   state.nutrition.customer_id = 'different'; const res = response(); await adminHandler({ params: { menuId, email: 'storage@example.invalid' }, body: { selections: [submitted()] } }, res);
   assert.equal(res.statusCode, 409); assert.equal(state.writes.length, 0);
@@ -195,4 +214,80 @@ test('missing Matter allergens reject a customer submission without saving', () 
   const res = await post([{ date: '2026-10-22', mealType: 'main', menuItemId: dishId, mealName: 'Fixture' }]);
   assert.equal(res.statusCode, 502);
   assert.equal(state.writes.length, 0);
+}));
+
+
+test('upcoming meals save against the new subscription despite a forged browser subscription', () => withSelectionFixtures(async state => {
+  state.nutrition.upcoming_plan = { ...state.nutrition, subscription_id: 'future-sub', replaces_subscription_id: 'sub', starting_date: '2026-10-22', meal_frequency: 3,
+    is_upcoming_plan: true, active_delivery_dates: ['2026-10-22'] };
+  const res = await post([{ ...submitted(), quantity: 3, matterSubscriptionId: 'forged', isUpcomingPlan: false }]);
+  assert.equal(res.statusCode, 200);
+  assert.equal(state.writes[0].update.$set.selectedMeals[0].matterSubscriptionId, 'future-sub');
+  assert.equal(state.writes[0].update.$set.selectedMeals[0].isUpcomingPlan, true);
+}));
+
+test('resubmission preserves a closed upcoming top-up and only accepts choices on open days', t => withSelectionFixtures(async state => {
+  t.mock.timers.setTime(Date.parse('2026-10-20T00:00Z'));
+  const closed = '2026-10-22', open = '2026-10-23';
+  const saved = { ...submitted(), date: new Date(closed), isAutoAssigned: true, isUpcomingPlan: true, matterSubscriptionId: 'future-sub' };
+  state.savedMeals = [saved];
+  state.nutrition.upcoming_plan = { ...state.nutrition, subscription_id: 'future-sub', replaces_subscription_id: 'sub',
+    starting_date: closed, meal_frequency: 3, is_upcoming_plan: true, active_delivery_dates: [closed, open] };
+  const menu = { meals: [closed, open].map(date => ({ date, mealType: 'main', items: [{ ...state.item, itemDate: date }] })) };
+  Menu.findById = () => ({ populate() { return this; }, lean: async () => menu });
+  const stale = await post([submitted(), submitted({ date: open })]);
+  assert.equal(stale.statusCode, 409);
+  assert.match(stale.body.message, /Selection closed for 2026-10-22/);
+  assert.equal(state.writes.length, 0);
+  const updated = await post([submitted({ date: open })]);
+  assert.equal(updated.statusCode, 200);
+  const choices = state.writes[0].update.$set.selectedMeals;
+  assert.deepEqual(choices[0], saved);
+  assert.equal(choices[1].date, open);
+  assert.equal(choices[1].matterSubscriptionId, 'future-sub');
+}));
+
+test('resubmission cannot retry a failed pause after cutoff and preserves its outcome when saving an open day', t => withSelectionFixtures(async state => {
+  t.mock.timers.setTime(Date.parse('2026-10-20T00:00Z'));
+  const closed = '2026-10-22', open = '2026-10-23';
+  const skipped = { date: closed, pauseStatus: 'failed', error: 'Previous request failed' };
+  Record.findOne = () => ({ select() { return this; }, lean: async () => ({ selectedMeals: [], skippedDays: [skipped] }) });
+  Menu.findById = () => ({ populate() { return this; }, lean: async () => ({
+    meals: [{ date: open, mealType: 'main', items: [{ ...state.item, itemDate: open }] }],
+  }) });
+  t.mock.method(matter, 'createSubscriptionPause', () => assert.fail('No pause write after cutoff'));
+  const request = { params: { email: state.nutrition.customer_email }, body: {
+    weeklyMenuId: menuId, selections: [submitted({ date: open })], skippedDates: [closed],
+  } };
+  const stale = response();
+  await handler({ ...request, body: { ...request.body, pauseDecisions: [{ date: closed, action: 'pause', resumeDate: '2026-10-27' }] } }, stale);
+  assert.equal(stale.statusCode, 409);
+  assert.match(stale.body.message, /Selection closed for 2026-10-22/);
+  assert.equal(state.writes.length, 0);
+  const saved = response();
+  await handler(request, saved);
+  assert.equal(saved.statusCode, 200);
+  assert.deepEqual(state.writes[0].update.$set.skippedDays, [skipped]);
+}));
+
+test('a saved skip no longer on the Matter calendar does not block another day on the upcoming plan', () => withSelectionFixtures(async state => {
+  const keptSkip = { date: '2026-10-23', pauseStatus: 'success', resumeDate: '2026-11-12' };
+  state.nutrition.upcoming_plan = { ...state.nutrition, subscription_id: 'future-sub', replaces_subscription_id: 'sub',
+    starting_date: '2026-10-22', meal_frequency: 3, is_upcoming_plan: true, active_delivery_dates: ['2026-10-22'] };
+  Record.findOne = () => ({ select() { return this; }, lean: async () => ({ selectedMeals: [], skippedDays: [keptSkip] }) });
+  const res = response();
+  await handler({ params: { email: state.nutrition.customer_email }, body: {
+    weeklyMenuId: menuId, selections: [submitted()], skippedDates: [keptSkip.date],
+  } }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(state.writes[0].update.$set.skippedDays, [keptSkip]);
+  assert.equal(state.writes[0].update.$set.selectedMeals[0].matterSubscriptionId, 'future-sub');
+  const conflict = response();
+  await handler({ params: { email: state.nutrition.customer_email }, body: {
+    weeklyMenuId: menuId, selections: [], skippedDates: ['2026-10-22', keptSkip.date],
+    pauseDecisions: [{ date: '2026-10-22', subscriptionId: 'future-sub', action: 'pause', resumeDate: keptSkip.date }],
+  } }, conflict);
+  assert.equal(conflict.statusCode, 400);
+  assert.match(conflict.body.message, /cannot be another paused day/);
+  assert.equal(state.writes.length, 1);
 }));

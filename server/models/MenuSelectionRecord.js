@@ -47,6 +47,9 @@ const menuSelectionRecordSchema = new mongoose.Schema({
   matterSubscriptionId: String,
 
   selectedMeals: [{
+    // Subscription applicable on this food date, including a scheduled renewal.
+    matterSubscriptionId: String,
+    isUpcomingPlan: { type: Boolean, default: false },
     date: Date,
     mealType: {
       type: String,
@@ -92,6 +95,8 @@ const menuSelectionRecordSchema = new mongoose.Schema({
       P: Number,
       F: Number
     },
+    fallbackSnackRecipeId: String,
+    fallbackSnackRecipeVersion: String,
     // True for meals filled in by kitchen staff via "Auto-Assign Main Meals" /
     // "Auto-Assign Snacks" (server/routes/menus.js) rather than picked by the
     // customer. Kept out of the customer-facing menu-selection preview
@@ -170,6 +175,19 @@ const menuSelectionRecordSchema = new mongoose.Schema({
   }],
 
   kitchenAudit: [{ date: String, action: String, at: Date, subscriptionId: String, reason: String }],
+  kitchenAllergyConfirmations: { select: false, type: [{
+    _id: false,
+    fingerprint: String,
+    mealId: String,
+    mealName: String,
+    date: String,
+    subscriptionId: String,
+    conflicts: [String],
+    note: String,
+    actorId: String,
+    actorName: String,
+    at: Date,
+  }] },
   // Historical menu-link pauses explicitly restored to active delivery by Matter.
   // Kept separately so they no longer block selection or kitchen assignment.
   unpausedDays: [{

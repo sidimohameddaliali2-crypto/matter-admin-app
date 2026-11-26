@@ -92,15 +92,22 @@ const collectDatedKitchenSelections = preparations => {
   return [...entries.values()];
 };
 
+export const verifyKitchenSnapshot = async (api, menuId, date, snapshotId) => {
+  const verified = (await api.get(`/menus/${menuId}/kitchen-state`, {
+    params: { date, job: snapshotId, verifyAllergies: true }, timeout: 180000,
+  })).data;
+  if (verified?.state !== 'ready') {
+    throw new Error(verified?.data?.data?.kitchenAllergyReview || verified?.message
+      || 'The prepared kitchen version changed or expired. Reload the selected date before exporting.');
+  }
+};
+
 // Every retained production paper uses the same prepared inputs and formula.
 export const loadKitchenSnapshot = async (api, menuId, dates, isCurrent = () => true, transformSelection = (entry) => entry, prepared = null) => {
   const dayKeys = [...new Set(dates)].sort();
   if (!menuId || !dayKeys.length) throw new Error('Select a menu and delivery date first.');
   if (prepared?.snapshotId && dayKeys.length === 1 && prepared.menuId === menuId && prepared.date === dayKeys[0]) {
-    const verified = (await api.get(`/menus/${menuId}/kitchen-state`, {
-      params: { date: prepared.date, job: prepared.snapshotId, verifyAllergies: true }, timeout: 180000,
-    })).data;
-    if (verified?.state !== 'ready') throw new Error(verified?.message || 'The prepared kitchen version changed or expired. Reload the selected date before exporting.');
+    await verifyKitchenSnapshot(api, menuId, prepared.date, prepared.snapshotId);
   }
   // Export the exact verified load version for up to 60 seconds. This is
   // request-local memory, never a persistent/offline cache. Failed refreshes
@@ -166,12 +173,17 @@ export const calculateKitchenSnapshot = ({ selections, rosters, kitchenInputsByD
   const entries = selections.map(transformSelection).map((entry) => {
     const coreInputsByDate = {};
     const allergyProfilesByDate = {};
+    const dietaryProfilesByDate = {};
     const deliveryDates = dayKeys.filter((date) => {
       const roster = rosters.get(date) || [];
       if (entry.partner) return hasKitchenDeliveryOnDate(entry, roster, date);
       const sub = roster.find(candidate => matchesMatterSubscription(entry, candidate));
       const input = sub && inputsBySubscriptionByDate.get(date)?.get(String(sub.subscription_id));
       if (input?.allergyProfile) allergyProfilesByDate[date] = input.allergyProfile;
+      const planName = sub?.plan_name || input?.plan_name;
+      if (planName) dietaryProfilesByDate[date] = {
+        planName, dietaryRestrictions: input ? input.exclusions : entry.dietaryRestrictions,
+      };
       if (sub && isCorePlan(sub)) {
         const macros = input?.macros;
         const hasWeights = [macros?.carbohydrates, macros?.protein]
@@ -195,7 +207,8 @@ export const calculateKitchenSnapshot = ({ selections, rosters, kitchenInputsByD
       selectedMeals: entry.selectedMeals || [], breakfastPreset, snackPreset });
     const selectedMeals = calculated.selectedMeals.filter((meal) => deliveryDates.includes(getDateKey(meal.date)));
     return {
-      ...calculated, selectedMeals, deliveryDates, allergyProfile: entry.allergyProfile, allergyProfilesByDate, dayNotes: entry.dayNotes || [],
+      ...calculated, selectedMeals, deliveryDates, allergyProfile: entry.allergyProfile, allergyProfilesByDate,
+      dietaryProfilesByDate, dayNotes: entry.dayNotes || [],
       totalWeight: selectedMeals.reduce((sum, meal) => sum + Number(meal.weight || 0), 0),
       totalCalories: selectedMeals.reduce((sum, meal) => sum + Number(meal.macros?.calories || 0), 0),
       hasMatterCoreLookupIssue: selectedMeals.some((meal) => meal.flags?.matterCoreLookupMissing),

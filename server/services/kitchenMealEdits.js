@@ -15,6 +15,8 @@ import { toKitchenOption, kitchenConflictList } from './kitchenExclusions.js';
 import { assertAssignmentMacros, hasKitchenPreset } from './kitchenMacroValidation.js';
 import { isMatterCoreDoubleDay } from '../utils/matterCoreDelivery.js';
 import { validatedMenuSelections } from './menuSelectionValidation.js';
+import { resolveMenuAllergyProfile } from './menuAllergyProfileService.js';
+import { collectSavedKitchenAllergies, datedKitchenAllergyOptions, findDatedKitchenAllergyIssues } from './kitchenAllergyReview.js';
 
 const fail = (message, statusCode = 409) => { throw Object.assign(new Error(message), { statusCode }); };
 const onDate = (meal, date) => new Date(meal.date).toISOString().slice(0, 10) === date;
@@ -34,17 +36,23 @@ const recordFor = async (menuId, nutrition, session) => {
 const validDate = (menu, date) => {
   if (!menu || date < new Date(menu.startDate).toISOString().slice(0, 10) || date > new Date(menu.endDate).toISOString().slice(0, 10)) fail('This date is outside the selected menu.', 400);
 };
+const datedItems = (menu, date) => Item.find({ _id: { $in: (menu.meals || []).flatMap(day => day.items || []) }, itemDate: new Date(date) });
+const allergyReplacementCases = async (menuId, date, record, nutrition, options, session) => {
+  if (!nutrition.allergyProfile.allergies.length || !record) return [];
+  const cases = await collectSavedKitchenAllergies(menuId, date, record, nutrition, new Map([[date, options]]), { session });
+  return cases.filter(item => item.canConfirm);
+};
 export const readMealEditContext = async (menuId, customerId, date) => {
   validateScope(menuId, customerId, date);
   const menu = await Menu.findById(menuId).lean();
   validDate(menu, date);
   const window = kitchenSelectionWindow(menu, date);
-  const nutrition = await matter.getKitchenNutrition({ customerId });
+  const nutrition = await matter.getKitchenNutrition({ customerId, date });
   if (String(nutrition?.customer_id) !== customerId || !nutrition.active_delivery_dates?.includes(date)) fail('Matter does not confirm an active delivery for this customer/date.');
   if (!String(nutrition.plan_name || '').trim()) fail('Matter plan identity is unresolved. Verify the subscription before editing meals.');
   const record = await recordFor(menuId, nutrition);
   if ((record?.skippedDays || []).some(day => day.date === date && !day.resumedAt)) fail('Resolve the saved delivery pause before editing meals.');
-  const items = await Item.find({ _id: { $in: (menu.meals || []).flatMap(day => day.items || []) }, itemDate: new Date(date) }).lean();
+  const items = await datedItems(menu, date).lean();
   const [breakfast, snack] = await Promise.all([
     items.some(item => item.mealType === 'breakfast') ? Breakfast.findOne({ key: 'global' }).lean() : null,
     items.some(item => item.mealType === 'snack') ? Snack.findOne({ key: 'global' }).lean() : null,
@@ -55,7 +63,21 @@ export const readMealEditContext = async (menuId, customerId, date) => {
     conflicts: kitchenConflictList(toKitchenOption(item), nutrition.exclusions || []),
     hasMacros: item.mealType === 'main' || hasKitchenPreset(item.mealName, (item.mealType === 'snack' ? snack : breakfast)?.presetsByName),
   }));
-  return { menu, nutrition, record, items, choices, window };
+  let allergyReplacements = [];
+  if (window.canAutoAssign && date >= toBusinessDateKey(new Date())) {
+    const verified = { ...nutrition, allergyProfile: resolveMenuAllergyProfile(nutrition) };
+    const options = datedKitchenAllergyOptions(menu, date, items);
+    allergyReplacements = await allergyReplacementCases(menuId, date, record, verified, options);
+    if (allergyReplacements.length) {
+      for (const choice of choices) {
+        const [issue] = findDatedKitchenAllergyIssues([{
+          mealType: choice.mealType, mealName: choice.name, menuItemId: choice.id,
+        }], options, verified);
+        if (issue) choice.allergyConflicts = issue.conflicts;
+      }
+    }
+  }
+  return { menu, nutrition, record, items, choices, window, allergyReplacements };
 };
 export const mealEditView = context => ({
   meals: (context.record?.selectedMeals || []).filter(meal => onDate(meal, context.window.date)),
@@ -63,16 +85,19 @@ export const mealEditView = context => ({
   automaticAssignmentPaused: dayHeld(context.record, context.window.date),
   lastEdit: context.record?.kitchenLastMealEdit || null,
   canEdit: !context.window.canAutoAssign, deadlineAt: context.window.deadlineAt,
+  allergyReplacementMealIds: context.allergyReplacements.map(item => item.mealId),
 });
 
 export const editKitchenMeals = async ({ menuId, customerId, date, body, user }) => {
   validateScope(menuId, customerId, date);
   if (!['add', 'change', 'delete', 'restore'].includes(body.action)) fail('Choose a valid action.', 400);
-  // Check the cutoff before contacting Matter, and again immediately before writes.
+  // Only a verified allergy replacement can use the change action after cutoff.
   const header = await Menu.findById(menuId).lean(); validDate(header, date);
-  if (body.action !== 'restore') assertMealEditsOpen(header, date);
+  if (['add', 'delete'].includes(body.action)) assertMealEditsOpen(header, date);
   if (date < toBusinessDateKey(new Date())) fail('Historical meal assignments cannot be edited.');
   const context = await readMealEditContext(menuId, customerId, date);
+  if (body.action === 'change' && context.window.canAutoAssign
+    && !context.allergyReplacements.some(item => item.mealId === body.mealId)) assertMealEditsOpen(context.menu, date);
   const actor = { id: String(user._id), name: [user.profile?.firstName, user.profile?.lastName].filter(Boolean).join(' ').trim() || user.email || String(user._id) };
   const reason = typeof body.reason === 'string' ? body.reason.trim() : '';
   if (reason.length > 500) fail('Keep the reason within 500 characters.', 400);
@@ -88,7 +113,8 @@ export const editKitchenMeals = async ({ menuId, customerId, date, body, user })
     // allergy/profile validation rather than trusting Matter exclusions alone.
     // Validate only the newly added/replaced portions; existing unsafe choices
     // must still be removable, and unrelated saved rows stay untouched.
-    [replacement] = await validatedMenuSelections({ menuId, nutrition: context.nutrition,
+    // The editor enforces its dated entitlement below, including Core double days.
+    [replacement] = await validatedMenuSelections({ menuId, nutrition: context.nutrition, enforceCustomerAllowance: false,
       selections: [{ ...replacement, date, quantity: body.quantity ?? 1 }] });
   }
   let saved;
@@ -102,8 +128,31 @@ export const editKitchenMeals = async ({ menuId, customerId, date, body, user })
       const prior = context.items.find(item => String(item._id) === String(replacement.menuItemId));
       if (!current || JSON.stringify(current) !== JSON.stringify(prior)) fail('The selected dish changed during editing. Reload before saving.');
     }
+    const now = new Date();
+    if (date < toBusinessDateKey(now)) fail('Historical meal assignments cannot be edited.');
+    let allergyReason;
+    let datedReplacement = replacement;
+    if (body.action === 'change' && kitchenSelectionWindow(menu, date, now).canAutoAssign) {
+      const target = record?.selectedMeals.find(meal => String(meal._id) === body.mealId && onDate(meal, date));
+      if (!target) assertMealEditsOpen(menu, date, now);
+      const items = await datedItems(menu, date).session(session).lean();
+      const options = datedKitchenAllergyOptions(menu, date, items);
+      const verified = { ...context.nutrition, allergyProfile: resolveMenuAllergyProfile(context.nutrition) };
+      const cases = await allergyReplacementCases(menuId, date, { ...record, selectedMeals: [target] }, verified, options, session);
+      if (!cases.length) assertMealEditsOpen(menu, date, now);
+      if (replacement.mealType !== target.mealType) fail('After cutoff, choose a replacement of the same meal type.');
+      const [issue] = findDatedKitchenAllergyIssues([replacement], options, verified);
+      if (issue) fail(`This replacement ${issue.reason}.`);
+      const conflicts = [...new Set(cases.flatMap(item => item.conflicts))];
+      allergyReason = `Allergy replacement after cutoff (${conflicts.join(', ')})`;
+      // Preserve the occupied slot range when replacing all or part of a saved serving.
+      if (Number.isInteger(target.slotNumber)) datedReplacement = { ...replacement,
+        slotNumber: target.slotNumber + Math.max(0, (target.quantity || 1) - (body.quantity ?? 1)) };
+    } else if (body.action !== 'restore') {
+      assertMealEditsOpen(menu, date, now);
+    }
     const planned = planMealEdit({ record, action: body.action, mealId: body.mealId, quantity: body.quantity,
-      replacement, date, actor });
+      replacement: datedReplacement, date, actor, now });
     if (String(context.nutrition.plan_name).trim().toLowerCase() === 'matter core' && ['add', 'change'].includes(body.action)) {
       const frequency = Number(context.nutrition.meal_frequency);
       if (!Number.isInteger(frequency) || frequency < 1) fail('Matter Core meal frequency is unresolved.');
@@ -112,8 +161,6 @@ export const editKitchenMeals = async ({ menuId, customerId, date, body, user })
         .reduce((sum, meal) => sum + Math.max(1, Math.floor(Number(meal.quantity) || 1)), 0);
       if (count(planned.selectedMeals) > Math.max(required, count(record?.selectedMeals))) fail(`Matter Core entitlement is ${required} main meal portion(s) for ${date}. Adding excess portions would block production.`);
     }
-    const now = new Date();
-    if (body.action !== 'restore') assertMealEditsOpen(menu, date, now);
     const last = { action: body.action, date, at: now, actorName: actor.name, summary: planned.summary };
     const values = { selectedMeals: planned.selectedMeals, kitchenAutoHolds: planned.kitchenAutoHolds, kitchenLastMealEdit: last,
       matterCustomerId: customerId, matterEmail: context.nutrition.customer_email,
@@ -130,7 +177,7 @@ export const editKitchenMeals = async ({ menuId, customerId, date, body, user })
       await Record.create([{ weeklyMenuId: menuId, ...identity, email: identity.matterEmail, ...values, kitchenEditRevision: 1 }], { session });
     }
     await Log.create([{ menuId, customerId, date, ...last, actorId: actor.id, before: planned.before, after: planned.after,
-      quantity: body.quantity || 1, reason }], { session });
+      quantity: body.quantity || 1, reason: [allergyReason, reason].filter(Boolean).join('. ') }], { session });
     saved = last;
   });
   return { lastEdit: saved, message: body.action === 'restore' ? 'Automatic assignment restored. It can fill missing portions after the menu deadline.' : saved.summary };
