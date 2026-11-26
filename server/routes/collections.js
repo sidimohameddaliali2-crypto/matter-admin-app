@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import Delivery from '../models/Delivery.js';
 import Customer from '../models/Customer.js';
 import BagRefundCase from '../models/BagRefundCase.js';
-import { collectionRefundFilter, canRecordCollectionRefund, buildCollectionRefundUpdate, refundError } from '../services/collectionRefund.js';
+import { collectionRefundFilter, collectionRefundQueueFilter, canRecordCollectionRefund, buildCollectionRefundUpdate, refundError } from '../services/collectionRefund.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { effectivePermissions } from '../models/User.js';
 import { detectAreaFromAddress } from '../config/areas.js';
@@ -26,12 +26,7 @@ router.get('/refunds', async (req, res) => {
       BagRefundCase.distinct('customerId', { status: 'completed' })
     ]);
     const paid = [...new Set([...localPaid, ...bagPaid])];
-    const filter = collectionRefundFilter();
-    if (req.query.status === 'refunded') filter.customerId = { $in: paid };
-    else if (['pending', 'not_refunded'].includes(req.query.status)) {
-      filter.customerId = { $nin: paid };
-      filter['collectionRefund.status'] = req.query.status === 'pending' ? { $nin: ['refunded', 'not_refunded'] } : 'not_refunded';
-    }
+    const filter = collectionRefundQueueFilter(req.query.status, paid);
     const [records, total] = await Promise.all([
       Delivery.find(filter).select('customerId customerName scheduledTime collectionDetails completedAt collectionRefund').sort({ 'collectionDetails.collectedAt': -1, updatedAt: -1, _id: -1 }).skip((page - 1) * 25).limit(25).lean(),
       Delivery.countDocuments(filter)

@@ -1,4 +1,14 @@
 export const collectionRefundFilter = () => ({ type: 'Collection', status: { $in: ['collected', 'completed', 'delivered'] }, 'collectionRequest.refundRequestedAfterCollection': true, 'collectionDetails.noBagsAvailable': { $ne: true } });
+export function collectionRefundQueueFilter(status, paid) {
+  const filter = collectionRefundFilter();
+  if (status === 'refunded') filter.customerId = { $in: paid };
+  else if (['pending', 'not_refunded'].includes(status)) {
+    filter.customerId = { $nin: paid };
+    // Pending includes earlier Not refunded updates so no unpaid request disappears.
+    filter['collectionRefund.status'] = status === 'pending' ? { $ne: 'refunded' } : 'not_refunded';
+  }
+  return filter;
+}
 export const canRecordCollectionRefund = user => ['super_admin', 'admin', 'manager'].includes(user?.role);
 export const refundError = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 export function buildCollectionRefundUpdate(record, input, user, now = new Date()) {
