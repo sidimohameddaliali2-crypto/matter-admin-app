@@ -1,31 +1,17 @@
 import { CUSTOMER_RADIUS_METRES } from '../constants/customerGeofence';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { load } from '@2gis/mapgl';
 import TrackerVisitCard from './deliveries/TrackerVisitCard';
 import { X, Route, MapPin, Clock, AlertTriangle, Loader2, Repeat, Pencil, CheckCircle2, FlaskConical, ArrowLeft, ChevronDown, ChevronUp, Search as SearchIcon, UserPlus, ListOrdered } from 'lucide-react';
 import api from '../utils/api';
 import { activityReference, recordActivityChange } from '../utils/activityCapture';
 import { getDeliveryLatLng, haversineKm, MAX_PLAUSIBLE_DISTANCE_KM } from '../utils/deliveryCoords';
+import { MAPGL_API_KEY as API_KEY, loadMapglOnce, destroyMapSuppressingSdkNoise } from '../utils/mapgl';
 import { formatBusinessTime, formatClockFromSecondsSinceMidnight, toBusinessComponents } from '../utils/businessTime';
 
 // Driver Routes map, rendered with 2GIS MapGL. Shows the day's deliveries grouped
 // by driver, numbered in route order, with a road-following line (2GIS Routing
 // API, live traffic) when a single driver is selected.
 
-// @2gis/mapgl's load() only dedupes *after* its script has finished loading —
-// calling it again while a load is still in flight (exactly what React
-// StrictMode's dev-only mount → cleanup → mount does) injects a second
-// <script> tag, which throws on its own top-level re-execution. That throw
-// surfaces as a content-free "Script error." because the browser treats a
-// cross-origin script's runtime errors as opaque. A module-level singleton
-// promise makes sure load() is only ever actually invoked once per page,
-// regardless of how many times (or how quickly) this effect re-fires.
-let mapglLoadPromise = null;
-function loadMapglOnce() {
-  if (!mapglLoadPromise) mapglLoadPromise = load();
-  return mapglLoadPromise;
-}
-const API_KEY = process.env.REACT_APP_2GIS_API_KEY || '';
 const ROUTING_URL = 'https://routing.api.2gis.com/routing/7.0.0/global';
 const GEOCODE_2GIS_URL = 'https://catalog.api.2gis.com/3.0/items/geocode';
 const MAX_ROUTING_POINTS = 10; // points per routing request; longer routes are chunked
@@ -345,22 +331,6 @@ function makeMarkerDraggable(marker, map, container, onDrop, readStart) {
   };
   markerDragCleanups.set(marker, cleanup);
   return cleanup;
-}
-
-// Destroying a mapgl.Map shortly after creating it (closing the modal before
-// the map's internal async init — key validation / style load — has settled)
-// leaves that internal promise chain rejecting with a bare `undefined` reason
-// somewhere inside the (minified, third-party) SDK. It's cosmetic — the map
-// itself tears down fine — but an unhandled rejection is still worth not
-// leaving lying around. Scope a listener narrowly to the few hundred ms right
-// after this specific destroy call, and only swallow that exact signature
-// (reason === undefined) so a real bug elsewhere is never masked.
-function destroyMapSuppressingSdkNoise(map) {
-  if (!map) return;
-  const onRejection = (e) => { if (e.reason === undefined) e.preventDefault(); };
-  window.addEventListener('unhandledrejection', onRejection);
-  setTimeout(() => window.removeEventListener('unhandledrejection', onRejection), 500);
-  safeDestroy(map);
 }
 
 function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date, onOptimizeRoutes, asPage = false, onDateChange, onAssigned }) {
@@ -1014,8 +984,6 @@ function DriverRouteMap2GIS({ open, onClose, deliveries = [], drivers = [], date
         setMapReady(true);
       })
       .catch((err) => {
-        // A failed load shouldn't be cached forever — let the next open retry.
-        mapglLoadPromise = null;
         if (!cancelled) setMapError(err?.message || 'Failed to load the 2GIS map script.');
       });
     return () => {

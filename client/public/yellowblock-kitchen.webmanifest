@@ -1,0 +1,14 @@
+{
+  "id": "/yellowblock/kitchen",
+  "name": "Yellow Block Kitchen",
+  "short_name": "Kitchen",
+  "start_url": "/yellowblock/kitchen",
+  "scope": "/yellowblock/kitchen",
+  "display": "standalone",
+  "background_color": "#faf9f7",
+  "theme_color": "#fbeae2",
+  "icons": [
+    { "src": "/images/yellowblock-kitchen-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/images/yellowblock-kitchen-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

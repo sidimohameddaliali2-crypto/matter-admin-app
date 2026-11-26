@@ -1,9 +1,8 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
-import { useNavigate } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router-dom';
 import {
   fetchYellowblockConfigStatus,
-  fetchYellowblockOrders,
   fetchYellowblockOrderDetail,
   fetchYellowblockProducts,
   fetchYellowblockAssets,
@@ -15,11 +14,15 @@ import {
   fetchThirdPartyCompanies,
   fetchThirdPartyAssignments,
   createThirdPartyCompany,
-  assignOrdersToThirdParty,
   clearSelectedOrder,
   clearError,
 } from '../store/slices/yellowblockSlice';
 import Events from './Events';
+import { KITCHEN_PATH } from '../utils/yellowblockKitchenPaths';
+import YellowblockOrderWorkflow from '../components/deliveries/YellowblockOrderWorkflow';
+import YellowblockInvoiceGenerator from '../components/YellowblockInvoiceGenerator';
+import ShopifyShippingMap from '../components/deliveries/ShopifyShippingMap';
+import YellowblockDeliveryCalendar from '../components/deliveries/YellowblockDeliveryCalendar';
 import { logout } from '../store/slices/authSlice';
 import {
   ShoppingBag,
@@ -32,7 +35,6 @@ import {
   AlertTriangle,
   X,
   User,
-  ExternalLink,
   Tag,
   Grid,
   MapPin,
@@ -42,20 +44,17 @@ import {
   PackageSearch,
   Building2,
   Calendar,
+  UtensilsCrossed,
   Upload,
   Download,
   MessageCircle,
+  FileText,
+  Menu,
 } from 'lucide-react';
 import XLSX from 'xlsx-js-style';
+import './YellowblockApp.css';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const STATUS_COLORS = {
-  open: 'bg-green-100 text-green-700',
-  closed: 'bg-gray-100 text-gray-600',
-  cancelled: 'bg-red-100 text-red-700',
-  any: 'bg-blue-100 text-blue-700',
-};
 
 const FULFILLMENT_COLORS = {
   fulfilled: 'bg-emerald-100 text-emerald-700',
@@ -146,21 +145,21 @@ SHOPIFY_API_VERSION=2024-01`}
 
 // ─── Order Detail Modal ────────────────────────────────────────────────────────
 
-const OrderDetailModal = ({ order, onClose }) => {
+const OrderDetailModal = ({ order, onClose, allowAssignment }) => {
   const paymentBadge = getPaymentBadge(order?.financial_status);
 
   if (!order) return null;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
+      <div className="yb-panel shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col">
         {/* Header */}
-        <div className="flex items-center justify-between p-5 border-b border-gray-100">
+        <div className="yb-view-toolbar flex items-center justify-between p-5">
           <div>
             <h2 className="text-lg font-bold text-gray-900">Order #{order.order_number}</h2>
             <p className="text-sm text-gray-500">{order.name} · {formatDate(order.created_at)}</p>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg transition">
+          <button onClick={onClose} aria-label="Close order details" className="yb-icon-button">
             <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
@@ -174,6 +173,8 @@ const OrderDetailModal = ({ order, onClose }) => {
               colorClass={FULFILLMENT_COLORS[order.fulfillment_status] || FULFILLMENT_COLORS.unfulfilled}
             />
           </div>
+
+          <YellowblockOrderWorkflow key={order.id} id={String(order.id)} allowAssignment={allowAssignment} />
 
           {/* Customer */}
           {order.customer && (
@@ -222,6 +223,7 @@ const OrderDetailModal = ({ order, onClose }) => {
                   </p>
                 )}
               </div>
+              <ShopifyShippingMap address={order.shipping_address} />
             </div>
           )}
 
@@ -268,294 +270,7 @@ const OrderDetailModal = ({ order, onClose }) => {
   );
 };
 
-// ─── Orders View ──────────────────────────────────────────────────────────────
-
-const OrdersView = ({ onViewDetail }) => {
-  const dispatch = useDispatch();
-  const { orders, ordersPagination, loading, error, thirdPartyCompanies, thirdPartyAssignments, assignmentSaving } = useSelector((s) => s.yellowblock);
-  const [pageStack, setPageStack] = useState([]);
-  const [selectedOrderIds, setSelectedOrderIds] = useState([]);
-  const [selectedCompanyId, setSelectedCompanyId] = useState('');
-  const [assignmentMessage, setAssignmentMessage] = useState('');
-
-  const visibleOrders = orders.filter(
-    (order) => !order.fulfillment_status || order.fulfillment_status === 'unfulfilled'
-  );
-
-  const load = useCallback(
-    (pageInfo = null) => {
-      dispatch(fetchYellowblockOrders({ status: 'any', limit: 50, pageInfo }));
-    },
-    [dispatch]
-  );
-
-  useEffect(() => {
-    setPageStack([]);
-    load(null);
-  }, [load]);
-
-  const handleNext = () => {
-    if (!ordersPagination.nextPageInfo) return;
-    setPageStack((prev) => [...prev, null]); // track history
-    load(ordersPagination.nextPageInfo);
-  };
-
-  const handlePrev = () => {
-    if (!ordersPagination.prevPageInfo) return;
-    const newStack = [...pageStack];
-    newStack.pop();
-    setPageStack(newStack);
-    load(ordersPagination.prevPageInfo);
-  };
-
-  const handleToggleOrderSelection = (orderId) => {
-    setSelectedOrderIds((prev) => (
-      prev.includes(orderId)
-        ? prev.filter((id) => id !== orderId)
-        : [...prev, orderId]
-    ));
-  };
-
-  const handleToggleSelectAllVisible = () => {
-    const visibleIds = visibleOrders.map((order) => order.id);
-    const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedOrderIds.includes(id));
-
-    if (allVisibleSelected) {
-      setSelectedOrderIds((prev) => prev.filter((id) => !visibleIds.includes(id)));
-      return;
-    }
-
-    setSelectedOrderIds((prev) => [...new Set([...prev, ...visibleIds])]);
-  };
-
-  useEffect(() => {
-    const visibleIds = new Set(visibleOrders.map((order) => order.id));
-    setSelectedOrderIds((prev) => prev.filter((id) => visibleIds.has(id)));
-  }, [orders]);
-
-  const allVisibleSelected =
-    visibleOrders.length > 0 && visibleOrders.every((order) => selectedOrderIds.includes(order.id));
-
-  const assignedCompanyByOrderId = useMemo(() => {
-    const map = {};
-    thirdPartyAssignments.forEach((assignment) => {
-      const key = String(assignment.shopifyOrderId || '');
-      if (!key) return;
-      map[key] = assignment.company?.name || 'Assigned';
-    });
-    return map;
-  }, [thirdPartyAssignments]);
-
-  const handleAssignSelectedOrders = async () => {
-    if (!selectedCompanyId || selectedOrderIds.length === 0) return;
-
-    const selectedOrdersPayload = visibleOrders
-      .filter((order) => selectedOrderIds.includes(order.id))
-      .map((order) => ({
-        id: order.id,
-        orderNumber: order.order_number,
-        customerName: order.customer
-          ? `${order.customer.first_name || ''} ${order.customer.last_name || ''}`.trim()
-          : 'Guest',
-        customerPhone: order.phone || order.customer?.phone || order.shipping_address?.phone || order.billing_address?.phone || '',
-        city: order.shipping_address?.city || '',
-        addressLine1: order.shipping_address?.address1 || '',
-        items: (order.line_items || []).map((item) => ({
-          title: item.title || item.name || 'Item',
-          quantity: Number(item.quantity) > 0 ? Number(item.quantity) : 1,
-        })),
-      }));
-
-    const resultAction = await dispatch(assignOrdersToThirdParty({
-      companyId: selectedCompanyId,
-      orders: selectedOrdersPayload,
-    }));
-
-    if (assignOrdersToThirdParty.rejected.match(resultAction)) {
-      setAssignmentMessage(resultAction.payload || 'Failed to assign selected orders.');
-      return;
-    }
-
-    setAssignmentMessage(`Assigned ${selectedOrdersPayload.length} order(s) successfully.`);
-    setSelectedOrderIds([]);
-    setSelectedCompanyId('');
-  };
-
-  return (
-    <div className="flex flex-col h-full">
-      {/* Toolbar */}
-      <div className="flex flex-wrap items-center gap-3 p-4 border-b border-gray-100 bg-white sticky top-0 z-10">
-        <h2 className="text-base font-bold text-gray-900 mr-auto">Shopify Orders</h2>
-        {selectedOrderIds.length > 0 && (
-          <span className="text-sm font-medium text-gray-600 bg-gray-100 px-2.5 py-1 rounded-lg">
-            {selectedOrderIds.length} selected
-          </span>
-        )}
-        <select
-          value={selectedCompanyId}
-          onChange={(e) => setSelectedCompanyId(e.target.value)}
-          className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-yellow-400 min-w-[180px]"
-        >
-          <option value="">Assign to third party...</option>
-          {thirdPartyCompanies.map((company) => (
-            <option key={company._id} value={company._id}>{company.name}</option>
-          ))}
-        </select>
-        <button
-          onClick={handleAssignSelectedOrders}
-          disabled={!selectedCompanyId || selectedOrderIds.length === 0 || assignmentSaving}
-          className="flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg bg-[#ff5937] text-white disabled:opacity-50 hover:opacity-90 transition"
-        >
-          {assignmentSaving ? 'Assigning...' : 'Assign Selected'}
-        </button>
-        <button
-          onClick={() => { setPageStack([]); load(null); }}
-          className="flex items-center gap-1 px-3 py-1.5 text-sm border border-gray-200 rounded-lg hover:bg-gray-50 transition"
-        >
-          <RefreshCw className="w-3.5 h-3.5" /> Refresh
-        </button>
-      </div>
-
-      {assignmentMessage && (
-        <div className="mx-4 mt-3 rounded-lg bg-green-50 border border-green-200 px-3 py-2 text-sm text-green-700">
-          {assignmentMessage}
-        </div>
-      )}
-
-      {/* Error */}
-      {error && (
-        <div className="mx-4 mt-4 flex items-center gap-2 bg-red-50 border border-red-200 text-red-700 rounded-xl p-3 text-sm">
-          <AlertTriangle className="w-4 h-4 shrink-0" />
-          <span className="flex-1">{error}</span>
-          <button onClick={() => dispatch(clearError())}><X className="w-4 h-4" /></button>
-        </div>
-      )}
-
-      {/* Table */}
-      <div className="flex-1 overflow-auto">
-        {loading ? (
-          <div className="flex items-center justify-center h-40"><Spinner /></div>
-        ) : visibleOrders.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-40 text-gray-400">
-            <ShoppingBag className="w-10 h-10 mb-2" />
-            <p className="text-sm">No orders found</p>
-          </div>
-        ) : (
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wide">
-              <tr>
-                <th className="px-4 py-3 text-left">
-                  <input
-                    type="checkbox"
-                    checked={allVisibleSelected}
-                    onChange={handleToggleSelectAllVisible}
-                    className="h-4 w-4 rounded border-gray-300 text-[#ff5937] focus:ring-[#ff5937]"
-                    aria-label="Select all visible orders"
-                  />
-                </th>
-                <th className="px-4 py-3 text-left">Order</th>
-                <th className="px-4 py-3 text-left">Customer</th>
-                <th className="px-4 py-3 text-left">Address</th>
-                <th className="px-4 py-3 text-left">City</th>
-                <th className="px-4 py-3 text-left">Date</th>
-                <th className="px-4 py-3 text-left">Status</th>
-                <th className="px-4 py-3 text-left">Assigned To</th>
-                <th className="px-4 py-3 text-left">Fulfillment</th>
-                <th className="px-4 py-3 text-center">Detail</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-50">
-              {visibleOrders.map((order) => (
-                <tr key={order.id} className="hover:bg-yellow-50 transition">
-                  <td className="px-4 py-3">
-                    <input
-                      type="checkbox"
-                      checked={selectedOrderIds.includes(order.id)}
-                      onChange={() => handleToggleOrderSelection(order.id)}
-                      className="h-4 w-4 rounded border-gray-300 text-[#ff5937] focus:ring-[#ff5937]"
-                      aria-label={`Select order ${order.order_number}`}
-                    />
-                  </td>
-                  <td className="px-4 py-3 font-semibold text-gray-900">#{order.order_number}</td>
-                  <td className="px-4 py-3 text-gray-700">
-                    {order.customer
-                      ? `${order.customer.first_name || ''} ${order.customer.last_name || ''}`.trim() || '—'
-                      : <span className="text-gray-400 italic">Guest</span>}
-                  </td>
-                  <td className="px-4 py-3">
-                    {order.shipping_address ? (
-                      <div className="text-xs">
-                        <p className="text-gray-800 font-medium">{order.shipping_address.address1}</p>
-                        {order.shipping_address.address2 && (
-                          <p className="text-gray-500">{order.shipping_address.address2}</p>
-                        )}
-                      </div>
-                    ) : <span className="text-gray-400 text-xs italic">—</span>}
-                  </td>
-                  <td className="px-4 py-3 text-sm font-medium text-gray-800">
-                    {order.shipping_address?.city || <span className="text-gray-400 italic">—</span>}
-                  </td>
-                  <td className="px-4 py-3 text-gray-500">{formatDate(order.created_at)}</td>
-                  <td className="px-4 py-3">
-                    <Badge text={order.financial_status} colorClass={STATUS_COLORS[order.financial_status] || 'bg-gray-100 text-gray-600'} />
-                  </td>
-                  <td className="px-4 py-3">
-                    {assignedCompanyByOrderId[String(order.id)] ? (
-                      <Badge
-                        text={assignedCompanyByOrderId[String(order.id)]}
-                        colorClass="bg-blue-100 text-blue-700"
-                      />
-                    ) : (
-                      <span className="text-xs text-gray-400 italic">Unassigned</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    {(!order.fulfillment_status || order.fulfillment_status === 'unfulfilled') && (
-                      <Badge
-                        text="unfulfilled"
-                        colorClass={FULFILLMENT_COLORS.unfulfilled}
-                      />
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-center">
-                    <button
-                      onClick={() => onViewDetail(order.id)}
-                      className="inline-flex items-center gap-1 px-2 py-1 text-xs bg-yellow-100 text-yellow-700 rounded-lg hover:bg-yellow-200 transition font-medium"
-                    >
-                      View <ExternalLink className="w-3 h-3" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
-
-      {/* Pagination */}
-      {(ordersPagination.prevPageInfo || ordersPagination.nextPageInfo) && (
-        <div className="flex items-center justify-center gap-3 p-4 border-t border-gray-100">
-          <button
-            onClick={handlePrev}
-            disabled={!ordersPagination.prevPageInfo}
-            className="flex items-center gap-1 px-4 py-2 text-sm border rounded-lg disabled:opacity-40 hover:bg-gray-50 transition"
-          >
-            <ChevronLeft className="w-4 h-4" /> Prev
-          </button>
-          <button
-            onClick={handleNext}
-            disabled={!ordersPagination.nextPageInfo}
-            className="flex items-center gap-1 px-4 py-2 text-sm border rounded-lg disabled:opacity-40 hover:bg-gray-50 transition"
-          >
-            Next <ChevronRight className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-    </div>
-  );
-};
-
-// ─── Products View ────────────────────────────────────────────────────────────
+// ─── Products View ───────────────────────────────────────────────────────────────
 
 const ProductsView = () => {
   const dispatch = useDispatch();
@@ -573,9 +288,9 @@ const ProductsView = () => {
   }, [dispatch, debouncedSearch]);
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="yb-panel flex min-w-0 flex-col">
       {/* Toolbar */}
-      <div className="flex flex-wrap items-center gap-3 p-4 border-b border-gray-100 bg-white sticky top-0 z-10">
+      <div className="yb-view-toolbar flex flex-wrap items-center gap-3 p-4">
         <h2 className="text-base font-bold text-gray-900 mr-auto">Shopify Products</h2>
         <div className="flex items-center gap-2 border border-gray-200 rounded-lg px-3 py-1.5 bg-white">
           <Search className="w-3.5 h-3.5 text-gray-400" />
@@ -945,8 +660,8 @@ const AssetManagementView = () => {
   );
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex flex-wrap items-center gap-3 p-4 border-b border-gray-100 bg-white sticky top-0 z-10">
+    <div className="yb-panel flex min-w-0 flex-col">
+      <div className="yb-view-toolbar flex flex-wrap items-center gap-3 p-4">
         <h2 className="text-base font-bold text-gray-900 mr-auto">Asset Management</h2>
         <div className="flex items-center gap-2 border border-gray-200 rounded-lg px-3 py-1.5 bg-white">
           <Search className="w-3.5 h-3.5 text-gray-400" />
@@ -1350,7 +1065,7 @@ const AssetManagementView = () => {
 
 // ─── Third Party Delivery View ───────────────────────────────────────────────
 
-const ThirdPartyDeliveryView = () => {
+const ThirdPartyDeliveryView = ({ onViewOrder }) => {
   const dispatch = useDispatch();
   const { thirdPartyCompanies, thirdPartyAssignments, thirdPartyLoading, thirdPartySaving } = useSelector((s) => s.yellowblock);
   const [companyName, setCompanyName] = useState('');
@@ -1371,6 +1086,7 @@ const ThirdPartyDeliveryView = () => {
     acc[companyId].push(assignment);
     return acc;
   }, {});
+  const assignmentsWithoutProfile = thirdPartyAssignments.filter(assignment => !assignment.company && assignment.courierName);
 
   const fileToDataUrl = (file) => new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1460,13 +1176,13 @@ const ThirdPartyDeliveryView = () => {
   };
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex flex-wrap items-center gap-3 p-4 border-b border-gray-100 bg-white sticky top-0 z-10">
-        <h2 className="text-base font-bold text-gray-900">Third Party Delivery</h2>
+    <div className="yb-panel flex min-w-0 flex-col">
+      <div className="yb-view-toolbar flex flex-wrap items-center gap-3 p-4">
+        <h2 className="mr-auto text-base font-bold text-gray-900">Third-party delivery</h2>
         <button
           type="button"
           onClick={() => setIsCreateModalOpen(true)}
-          className="ml-auto inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#ff5937] text-white text-sm font-semibold hover:opacity-90 transition"
+          className="yb-button yb-button-primary"
         >
           <Building2 className="w-4 h-4" />
           Create Company Profile
@@ -1503,7 +1219,9 @@ const ThirdPartyDeliveryView = () => {
                         <ul className="space-y-1">
                           {(assignmentsByCompanyId[company._id] || []).map((assignment) => (
                             <li key={assignment._id} className="text-xs text-gray-700 border-b border-gray-100 pb-1">
-                              <p className="font-semibold">Order #{assignment.orderNumber || assignment.shopifyOrderId}</p>
+                              <button type="button" onClick={() => onViewOrder(assignment.shopifyOrderId)} className="font-semibold hover:underline">
+                                Order {String(assignment.orderNumber || assignment.shopifyOrderId).replace(/^#?/, '#')}
+                              </button>
                               <p>{assignment.customerName || 'Guest'}</p>
                               <p className="text-gray-500">{assignment.customerPhone || 'No phone'}</p>
                               <p className="text-gray-500">{assignment.city || '—'} · {assignment.addressLine1 || '—'}</p>
@@ -1525,6 +1243,22 @@ const ThirdPartyDeliveryView = () => {
             </div>
           )}
         </div>
+        {assignmentsWithoutProfile.length > 0 && (
+          <section className="p-1">
+            <h3 className="mb-3 text-sm font-semibold text-gray-800">Other courier assignments</h3>
+            <ul className="divide-y divide-gray-100 rounded-xl border border-gray-200 bg-white">
+              {assignmentsWithoutProfile.map(assignment => (
+                <li key={assignment._id}>
+                  <button type="button" onClick={() => onViewOrder(assignment.shopifyOrderId)}
+                    className="flex w-full items-center justify-between gap-3 p-3 text-left text-sm hover:bg-orange-50">
+                    <span className="font-semibold text-gray-900">Order {String(assignment.orderNumber || assignment.shopifyOrderId).replace(/^#?/, '#')}</span>
+                    <span className="text-gray-600">{assignment.courierName}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </div>
 
       {isCreateModalOpen && (
@@ -1613,10 +1347,12 @@ const ThirdPartyDeliveryView = () => {
 // ─── Main Shell ───────────────────────────────────────────────────────────────
 
 const NAV_ITEMS = [
-  { key: 'orders', label: 'Orders', icon: ShoppingBag },
+  { key: 'orders', label: 'Order', icon: ShoppingBag },
+  { key: 'invoices', label: 'Invoice Generator', icon: FileText },
+  { key: 'kitchen', label: 'Kitchen', icon: UtensilsCrossed },
+  { key: 'third_party_delivery', label: 'Third-party delivery', icon: Building2 },
   { key: 'products', label: 'Products', icon: Grid },
   { key: 'asset_management', label: 'Asset Management', icon: Boxes },
-  { key: 'third_party_delivery', label: 'Third Party Delivery', icon: Building2 },
   { key: 'events', label: 'Events', icon: Calendar },
 ];
 
@@ -1627,16 +1363,16 @@ const YellowblockApp = () => {
   const { configured, selectedOrder, orderDetailLoading } = useSelector((s) => s.yellowblock);
   const [activeView, setActiveView] = useState('orders');
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const kitchenOnly = authUser?.role === 'kitchen';
 
   const userName = authUser
     ? [authUser.profile?.firstName, authUser.profile?.lastName].filter(Boolean).join(' ') || authUser.email
     : '';
+  const pageName = NAV_ITEMS.find(item => item.key === activeView)?.label;
 
   useEffect(() => {
-    dispatch(fetchYellowblockConfigStatus());
-    dispatch(fetchThirdPartyCompanies());
-    dispatch(fetchThirdPartyAssignments());
-  }, [dispatch]);
+    if (authUser && !kitchenOnly) dispatch(fetchYellowblockConfigStatus());
+  }, [authUser, dispatch, kitchenOnly]);
 
   const handleViewDetail = useCallback(
     (orderId) => {
@@ -1650,115 +1386,78 @@ const YellowblockApp = () => {
     navigate('/login');
   };
 
+  if (kitchenOnly) return <Navigate to={KITCHEN_PATH} replace />;
+
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
-      {/* ── Top Nav ── */}
-      <header className="bg-[#fbeae2] text-gray-900 flex items-center h-14 px-4 gap-3 shrink-0">
-        {/* Hamburger (mobile) */}
-        <button
-          className="lg:hidden p-1.5 hover:bg-orange-100 rounded-lg transition"
-          onClick={() => setSidebarOpen((v) => !v)}
-        >
-          <svg viewBox="0 0 24 24" className="w-5 h-5 fill-current">
-            <path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-          </svg>
-        </button>
-
-        {/* Logo */}
-        <div className="flex items-center gap-2 select-none">
-          <img
-            src="/images/yellow-block-logo.png.png"
-            alt="YellowBlock"
-            className="h-11 w-auto rounded-lg object-contain"
-          />
+    <div className="yb-workspace" onKeyDown={event => { if (event.key === 'Escape') setSidebarOpen(false); }}>
+      {sidebarOpen && <button type="button" aria-label="Close navigation" className="yb-nav-overlay" onClick={() => setSidebarOpen(false)} />}
+      <aside id="yellowblock-navigation" className={`yb-sidebar ${sidebarOpen ? 'yb-sidebar-open' : ''}`}>
+        <div className="yb-sidebar-brand">
+          <img src="/images/yellow-block-logo.png.png" alt="Yellow Block" />
+          <button type="button" aria-label="Close menu" className="yb-icon-button yb-mobile-menu" onClick={() => setSidebarOpen(false)}>
+            <X size={20} aria-hidden="true" />
+          </button>
         </div>
-
-        <div className="flex-1" />
-
-        {/* User chip */}
-        <div className="hidden sm:flex items-center gap-2 text-sm text-gray-600">
-          <div className="w-7 h-7 bg-[#e9bbee] rounded-full flex items-center justify-center text-gray-900 font-bold text-xs">
-            {userName.charAt(0).toUpperCase() || 'U'}
-          </div>
-          <span className="max-w-[140px] truncate">{userName}</span>
-        </div>
-
-        <button
-          onClick={handleLogout}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-900 hover:bg-orange-100 rounded-lg transition"
-        >
-          <LogOut className="w-4 h-4" />
-          <span className="hidden sm:inline">Logout</span>
-        </button>
-      </header>
-
-      <div className="flex flex-1 overflow-hidden">
-        {/* ── Sidebar overlay (mobile) ── */}
-        {sidebarOpen && (
-          <div
-            className="fixed inset-0 bg-black bg-opacity-40 z-30 lg:hidden"
-            onClick={() => setSidebarOpen(false)}
-          />
-        )}
-
-        {/* ── Sidebar ── */}
-        <aside
-          className={`
-            fixed lg:static top-14 bottom-0 left-0 w-56 bg-[#fbeae2] text-gray-900 z-40
-            transform transition-transform duration-200
-            ${sidebarOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'}
-          `}
-        >
-          <nav className="p-3 space-y-1 mt-1">
-            {NAV_ITEMS.map(({ key, label, icon: Icon }) => (
+        <nav aria-label="Yellow Block workspace">
+          {NAV_ITEMS.map(({ key, label, icon: Icon }, index) => (
+            <React.Fragment key={key}>
+              {index === 0 && <p className="yb-nav-group">Operations</p>}
+              {key === 'products' && <p className="yb-nav-group">Catalog &amp; events</p>}
               <button
-                key={key}
+                type="button"
+                aria-current={activeView === key ? 'page' : undefined}
                 onClick={() => {
-                  setActiveView(key);
+                  if (key === 'kitchen') navigate(KITCHEN_PATH);
+                  else if (activeView !== key) {
+                    setActiveView(key);
+                    window.scrollTo(0, 0);
+                  }
                   setSidebarOpen(false);
                 }}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition ${
-                  activeView === key
-                    ? 'bg-[#ff5937] text-white'
-                    : 'text-gray-600 hover:text-white hover:bg-[#ff5937]'
-                }`}
+                className="yb-nav-item"
               >
-                <Icon className="w-4 h-4 shrink-0" />
-                {label}
+                <Icon size={17} aria-hidden="true" />
+                <span>{label}</span>
+                {activeView === key && <ChevronRight size={14} aria-hidden="true" className="yb-nav-arrow" />}
               </button>
-            ))}
-          </nav>
+            </React.Fragment>
+          ))}
+        </nav>
+        <div className="yb-sidebar-account">
+          <span className="yb-avatar" aria-hidden="true">{userName.charAt(0).toUpperCase() || 'U'}</span>
+          <span className="truncate text-sm font-semibold">{userName}</span>
+          <button type="button" aria-label="Sign out" title="Sign out" onClick={handleLogout} className="yb-icon-button yb-signout">
+            <LogOut size={17} aria-hidden="true" />
+          </button>
+        </div>
+      </aside>
 
-          {/* Footer */}
-          <div className="absolute bottom-0 left-0 right-0 p-3 border-t border-orange-200">
-            <div className="flex items-center gap-2 px-2 py-1">
-              <div className="w-7 h-7 bg-[#e9bbee] rounded-full flex items-center justify-center text-gray-900 font-bold text-xs shrink-0">
-                {userName.charAt(0).toUpperCase() || 'U'}
-              </div>
-              <div className="min-w-0">
-                <p className="text-xs font-semibold text-gray-900 truncate">{userName}</p>
-                <p className="text-xs text-gray-500 capitalize">
-                  {authUser?.role?.replace('_', ' ') || 'user'}
-                </p>
-              </div>
-            </div>
-          </div>
-        </aside>
+      <div className="yb-workspace-body">
+        <header className="yb-topbar">
+          <button type="button" aria-label="Open navigation" aria-controls="yellowblock-navigation" aria-expanded={sidebarOpen}
+            onClick={() => setSidebarOpen(true)} className="yb-icon-button yb-mobile-menu">
+            <Menu size={22} aria-hidden="true" />
+          </button>
+          <img className="yb-mobile-logo" src="/images/yellow-block-logo.png.png" alt="Yellow Block" />
+          <div className="yb-breadcrumb"><span>Workspace</span><ChevronRight size={13} aria-hidden="true" /><span>{pageName}</span></div>
+        </header>
 
-        {/* ── Main Content ── */}
-        <main className="flex-1 overflow-auto flex flex-col bg-gray-50">
-          {configured === false ? (
+        <main className={`yb-main yb-view-${activeView}`}>
+          {activeView === 'invoices' ? (
+            <YellowblockInvoiceGenerator />
+          ) : configured === false ? (
             <NotConfigured />
           ) : configured === null ? (
             <div className="flex items-center justify-center flex-1"><Spinner /></div>
           ) : (
-            <>
-              {activeView === 'orders' && <OrdersView onViewDetail={handleViewDetail} />}
-              {activeView === 'products' && <ProductsView />}
-              {activeView === 'asset_management' && <AssetManagementView />}
-              {activeView === 'third_party_delivery' && <ThirdPartyDeliveryView />}
-              {activeView === 'events' && <Events />}
-            </>
+            activeView === 'orders' ? <YellowblockDeliveryCalendar onViewOrder={handleViewDetail} allowAssignment /> : (
+              <div className="yb-secondary-view mx-auto w-full max-w-7xl">
+                {activeView === 'products' && <ProductsView />}
+                {activeView === 'asset_management' && <AssetManagementView />}
+                {activeView === 'third_party_delivery' && <ThirdPartyDeliveryView onViewOrder={handleViewDetail} />}
+                {activeView === 'events' && <Events />}
+              </div>
+            )
           )}
         </main>
       </div>
@@ -1774,6 +1473,7 @@ const YellowblockApp = () => {
             <OrderDetailModal
               order={selectedOrder}
               onClose={() => dispatch(clearSelectedOrder())}
+              allowAssignment={activeView === 'orders'}
             />
           )}
         </div>

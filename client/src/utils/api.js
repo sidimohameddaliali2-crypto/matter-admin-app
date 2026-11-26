@@ -1,6 +1,8 @@
 import { attachActivityContext } from './activityCapture';
 import { attachRequestReference } from './requestReference';
 import axios from 'axios';
+import { isKitchenAppPath, KITCHEN_LOGIN_PATH } from './yellowblockKitchenPaths';
+import { isDriverAppPath, DRIVER_LOGIN_PATH } from './yellowblockDriverPaths';
 
 const resolveApiBaseUrl = () => {
   if (process.env.REACT_APP_API_URL) {
@@ -73,7 +75,8 @@ api.interceptors.response.use(
       if (current && error.config?.__matterSessionToken === current && (isAuthEndpoint || isAuthFailureMessage)) {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
-        window.location.href = '/login';
+        const { pathname } = window.location;
+        window.location.href = isKitchenAppPath(pathname) ? KITCHEN_LOGIN_PATH : isDriverAppPath(pathname) ? DRIVER_LOGIN_PATH : '/login';
       }
     }
 

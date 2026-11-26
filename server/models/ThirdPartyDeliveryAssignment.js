@@ -50,9 +50,10 @@ const thirdPartyDeliveryAssignmentSchema = new mongoose.Schema(
     company: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'ThirdPartyDeliveryCompany',
-      required: true,
+      required() { return !this.courierName; },
       index: true,
     },
+    courierName: { type: String, trim: true },
     assignedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

@@ -118,7 +118,7 @@
     }
   ],
   "sourceDigests": {
-    "client/src/App.js": "f7bda780b09b15bc47669cfa926193d36e64ebb0f3e5bea97f92a4b8783d7d75",
+    "client/src/App.js": "2cab5a9544bc4b65a6e4e01e52e537856d8ad8c5cea40e99e21b4242ef31f5f4",
     "server/middleware/socketAuth.js": "19d61a9198b7025048b7ae6688174bf586389f1f06938bf0594191fc8b9c0723",
     "server/routes/adminPartners.js": "6a49ce0e09fa7464a3b16795b628ef314a1ada858f6685917eec003caeef43e1",
     "server/routes/alerts.js": "14af024c0c10fefb3ab5b6a743ef965b662efc08a30f5975701f353efc5b7cc0",
@@ -173,7 +173,10 @@
     "server/routes/vehicles.js": "1416cc87da25539ceeb9bf321d7142882b2d1187b6eadc81047efa62317570d3",
     "server/routes/webhooks.js": "1397b466b9d9d01c02d21a9faa4e764bd6d911023ebd39624f2cbfb2bc5a0ddd",
     "server/routes/xero.js": "6cf8feab5eed7033fe713a54d119772d4af54c0d3931f65d2e76123f86b3b18a",
-    "server/routes/yellowblock.js": "f35f023eddc53257e2088c3463d36361fc83e55e96f12deb7882a671363d2fb3",
+    "server/routes/yellowblock.js": "a3481b106e3b126404ceb01fcf3d7df00bc2b826ef1c07ab1162700d65246e72",
+    "server/routes/yellowblockDriver.js": "edbd0c12eafe22f4049f424fa3bc87c3ab5e64b90a6b916a254d6ff8963f085a",
+    "server/routes/yellowblockInvoice.js": "016149e5ace2f24dfde37e82ff6985b4d39f20c3b49d1e3496135d23f544fd5f",
+    "server/routes/yellowblockKitchen.js": "8bb1176060ad4b532b8d1a1ff896a1f6584cdd14ff7680f1e36233bd005212ce",
     "server/server.js": "a9b5ff14681dbc1b84c872fff9626a52f4aa755832fa3acfd5fa167834733d6b",
     "server/services/customerServiceAdminMount.js": "60edc65da5ae777216df14460320cb5a53c0460f1736af2f3303ccd6aca98282",
     "server/services/driverAuditIntegration.js": "98c3c2fae9b2006e317b03099db8dd68a36d30d0181f4aa84df792524fcd55d2",
@@ -11231,9 +11234,303 @@
       "middlewareDeclarations": []
     },
     {
+      "id": "a8cee0a09523b06f",
+      "method": "GET",
+      "source": "server/routes/yellowblockKitchen.js:113",
+      "description": null,
+      "handlerGuards": [
+        "authorize(staffRoles)"
+      ],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [],
+      "path": "/api/yellowblock/kitchen/couriers",
+      "middlewareDeclarations": [
+        "authorize([...staffRoles, 'kitchen'])"
+      ]
+    },
+    {
+      "id": "f33e3b67f7b01215",
+      "method": "GET",
+      "source": "server/routes/yellowblockKitchen.js:117",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "requestKeys": [
+        "query.cursor"
+      ],
+      "referencedCalls": [
+        "Workflow.find",
+        "kitchenWorkflow"
+      ],
+      "path": "/api/yellowblock/kitchen/orders",
+      "middlewareDeclarations": [
+        "authorize([...staffRoles, 'kitchen'])"
+      ]
+    },
+    {
+      "id": "b08e38e3b5a5e159",
+      "method": "GET",
+      "source": "server/routes/yellowblockKitchen.js:136",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "requestKeys": [
+        "params.orderId"
+      ],
+      "referencedCalls": [
+        "Workflow.findById",
+        "kitchenOrder",
+        "kitchenWorkflow"
+      ],
+      "path": "/api/yellowblock/kitchen/orders/:orderId",
+      "middlewareDeclarations": [
+        "authorize([...staffRoles, 'kitchen'])"
+      ]
+    },
+    {
+      "id": "1d30d5e63fc0f197",
+      "method": "PATCH",
+      "source": "server/routes/yellowblockKitchen.js:200",
+      "description": null,
+      "handlerGuards": [
+        "authorize(staffRoles)"
+      ],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "requestKeys": [
+        "params.orderId"
+      ],
+      "referencedCalls": [],
+      "path": "/api/yellowblock/kitchen/orders/:orderId/courier",
+      "middlewareDeclarations": [
+        "authorize([...staffRoles, 'kitchen'])"
+      ]
+    },
+    {
+      "id": "91f35b53f04a3006",
+      "method": "PATCH",
+      "source": "server/routes/yellowblockKitchen.js:206",
+      "description": null,
+      "handlerGuards": [
+        "authorize(staffRoles)"
+      ],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [],
+      "path": "/api/yellowblock/kitchen/courier-assignments",
+      "middlewareDeclarations": [
+        "authorize([...staffRoles, 'kitchen'])"
+      ]
+    },
+    {
+      "id": "78a5ed4929ebe8e6",
+      "method": "POST",
+      "source": "server/routes/yellowblockKitchen.js:228",
+      "description": null,
+      "handlerGuards": [
+        "receivePhotos"
+      ],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "requestKeys": [
+        "params.orderId",
+        "params.status"
+      ],
+      "referencedCalls": [
+        "Workflow.findById",
+        "Workflow.findOneAndUpdate",
+        "displayName",
+        "kitchenWorkflow"
+      ],
+      "path": "/api/yellowblock/kitchen/orders/:orderId/status/:status",
+      "middlewareDeclarations": [
+        "authorize([...staffRoles, 'kitchen'])"
+      ]
+    },
+    {
+      "id": "fe743c622569bda5",
+      "method": "GET",
+      "source": "server/routes/yellowblockKitchen.js:264",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
+      "responseKeys": [],
+      "requestKeys": [
+        "params.orderId",
+        "params.photo"
+      ],
+      "referencedCalls": [
+        "Workflow.findById"
+      ],
+      "path": "/api/yellowblock/kitchen/orders/:orderId/photos/:photo",
+      "middlewareDeclarations": [
+        "authorize([...staffRoles, 'kitchen'])"
+      ]
+    },
+    {
+      "id": "22141018060e77cb",
+      "method": "GET",
+      "source": "server/routes/yellowblockDriver.js:44",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "requestKeys": [
+        "query.includeDelivered"
+      ],
+      "referencedCalls": [
+        "Workflow.find"
+      ],
+      "path": "/api/yellowblock/driver/orders",
+      "middlewareDeclarations": [
+        "authorize(['driver'])"
+      ]
+    },
+    {
+      "id": "98f65495c8e94a96",
+      "method": "GET",
+      "source": "server/routes/yellowblockDriver.js:54",
+      "description": null,
+      "handlerGuards": [
+        "checkOwner"
+      ],
+      "declaredStatuses": [],
+      "responseKeys": [
+        "data",
+        "success"
+      ],
+      "requestKeys": [
+        "params.orderId"
+      ],
+      "referencedCalls": [
+        "kitchenOrder"
+      ],
+      "path": "/api/yellowblock/driver/orders/:orderId",
+      "middlewareDeclarations": [
+        "authorize(['driver'])"
+      ]
+    },
+    {
+      "id": "90819c4f34402556",
+      "method": "GET",
+      "source": "server/routes/yellowblockDriver.js:76",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
+      "responseKeys": [],
+      "requestKeys": [],
+      "referencedCalls": [
+        "Workflow.findOne"
+      ],
+      "path": "/api/yellowblock/driver/orders/:orderId/packed-photo",
+      "middlewareDeclarations": [
+        "authorize(['driver'])"
+      ]
+    },
+    {
+      "id": "8b8a5ec89bf836ea",
+      "method": "GET",
+      "source": "server/routes/yellowblockDriver.js:82",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [],
+      "responseKeys": [],
+      "requestKeys": [],
+      "referencedCalls": [
+        "Workflow.findOne"
+      ],
+      "path": "/api/yellowblock/driver/orders/:orderId/delivery-photo",
+      "middlewareDeclarations": [
+        "authorize(['driver'])"
+      ]
+    },
+    {
+      "id": "1311675b5e756c0f",
+      "method": "POST",
+      "source": "server/routes/yellowblockDriver.js:112",
+      "description": null,
+      "handlerGuards": [
+        "checkOwner",
+        "transition('prepared', 'collected')"
+      ],
+      "declaredStatuses": [],
+      "responseKeys": [],
+      "requestKeys": [],
+      "referencedCalls": [],
+      "path": "/api/yellowblock/driver/orders/:orderId/collect",
+      "middlewareDeclarations": [
+        "authorize(['driver'])"
+      ]
+    },
+    {
+      "id": "6be1c93043b660ec",
+      "method": "POST",
+      "source": "server/routes/yellowblockDriver.js:113",
+      "description": null,
+      "handlerGuards": [
+        "checkOwner",
+        "transition('collected', 'delivered')"
+      ],
+      "declaredStatuses": [],
+      "responseKeys": [],
+      "requestKeys": [],
+      "referencedCalls": [],
+      "path": "/api/yellowblock/driver/orders/:orderId/deliver",
+      "middlewareDeclarations": [
+        "authorize(['driver'])"
+      ]
+    },
+    {
+      "id": "efc751790cc6ac83",
+      "method": "POST",
+      "source": "server/routes/yellowblockInvoice.js:6",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [
+        400,
+        500
+      ],
+      "responseKeys": [
+        "message",
+        "success"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [
+        "generateYellowblockInvoice"
+      ],
+      "path": "/api/yellowblock/invoices/pdf",
+      "middlewareDeclarations": []
+    },
+    {
       "id": "538b8f3f54e5493a",
       "method": "GET",
-      "source": "server/routes/yellowblock.js:229",
+      "source": "server/routes/yellowblock.js:239",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -11252,7 +11549,7 @@
     {
       "id": "e5965024ca63e96e",
       "method": "GET",
-      "source": "server/routes/yellowblock.js:235",
+      "source": "server/routes/yellowblock.js:245",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11280,7 +11577,7 @@
     {
       "id": "2f37ff66a643300c",
       "method": "POST",
-      "source": "server/routes/yellowblock.js:260",
+      "source": "server/routes/yellowblock.js:270",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11306,7 +11603,7 @@
     {
       "id": "a93d77b309295d95",
       "method": "POST",
-      "source": "server/routes/yellowblock.js:307",
+      "source": "server/routes/yellowblock.js:317",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11332,7 +11629,7 @@
     {
       "id": "b0d21c5d4f38ddab",
       "method": "PATCH",
-      "source": "server/routes/yellowblock.js:367",
+      "source": "server/routes/yellowblock.js:377",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11363,7 +11660,7 @@
     {
       "id": "9f27c7d84b28ff7c",
       "method": "GET",
-      "source": "server/routes/yellowblock.js:406",
+      "source": "server/routes/yellowblock.js:416",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11390,7 +11687,7 @@
     {
       "id": "6f100527968535d7",
       "method": "GET",
-      "source": "server/routes/yellowblock.js:421",
+      "source": "server/routes/yellowblock.js:431",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11414,9 +11711,34 @@
       ]
     },
     {
+      "id": "6fab628cdb7d6aad",
+      "method": "GET",
+      "source": "server/routes/yellowblock.js:448",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [
+        502,
+        503
+      ],
+      "responseKeys": [
+        "data",
+        "message",
+        "success"
+      ],
+      "requestKeys": [],
+      "referencedCalls": [
+        "toScheduledDelivery"
+      ],
+      "path": "/api/yellowblock/delivery-schedule",
+      "middlewareDeclarations": [
+        "protect",
+        "authorize(['super_admin', 'admin', 'yellowblock_user'])"
+      ]
+    },
+    {
       "id": "cccef269ad7a4a09",
       "method": "GET",
-      "source": "server/routes/yellowblock.js:439",
+      "source": "server/routes/yellowblock.js:499",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11444,7 +11766,7 @@
     {
       "id": "42b11155f5d23e81",
       "method": "GET",
-      "source": "server/routes/yellowblock.js:483",
+      "source": "server/routes/yellowblock.js:543",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11469,7 +11791,7 @@
     {
       "id": "5b148f73ce6bb7c7",
       "method": "GET",
-      "source": "server/routes/yellowblock.js:536",
+      "source": "server/routes/yellowblock.js:596",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11497,7 +11819,7 @@
     {
       "id": "8cecd1cda1e7f1a9",
       "method": "GET",
-      "source": "server/routes/yellowblock.js:580",
+      "source": "server/routes/yellowblock.js:640",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11515,13 +11837,14 @@
       "path": "/api/yellowblock/drivers",
       "middlewareDeclarations": [
         "protect",
+        "createYellowblockDriverRouter({ getShopifyConfig, shopifyRequest })",
         "authorize(['super_admin', 'admin', 'yellowblock_user'])"
       ]
     },
     {
       "id": "f2fffd7aeba651ae",
       "method": "GET",
-      "source": "server/routes/yellowblock.js:594",
+      "source": "server/routes/yellowblock.js:654",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11545,7 +11868,7 @@
     {
       "id": "38197d092f74eced",
       "method": "POST",
-      "source": "server/routes/yellowblock.js:608",
+      "source": "server/routes/yellowblock.js:668",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11571,7 +11894,7 @@
     {
       "id": "ea116a6adbc8d1ed",
       "method": "GET",
-      "source": "server/routes/yellowblock.js:641",
+      "source": "server/routes/yellowblock.js:701",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11585,7 +11908,8 @@
       "requestKeys": [],
       "referencedCalls": [
         "ThirdPartyDeliveryAssignment.find",
-        "ThirdPartyDeliveryAssignment.updateOne"
+        "ThirdPartyDeliveryAssignment.updateOne",
+        "Workflow.find"
       ],
       "path": "/api/yellowblock/third-party-assignments",
       "middlewareDeclarations": [
@@ -11596,13 +11920,14 @@
     {
       "id": "067fa6b98dfef739",
       "method": "POST",
-      "source": "server/routes/yellowblock.js:691",
+      "source": "server/routes/yellowblock.js:754",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
         201,
         400,
         404,
+        409,
         500
       ],
       "responseKeys": [
@@ -11615,7 +11940,8 @@
       ],
       "referencedCalls": [
         "ThirdPartyDeliveryAssignment.bulkWrite",
-        "ThirdPartyDeliveryCompany.findById"
+        "ThirdPartyDeliveryCompany.findById",
+        "Workflow.exists"
       ],
       "path": "/api/yellowblock/third-party-assignments",
       "middlewareDeclarations": [
@@ -12027,7 +12353,7 @@
   "browser": [
     {
       "path": "/traceability",
-      "source": "client/src/App.js:257",
+      "source": "client/src/App.js:263",
       "elements": [
         "ProtectedRoute",
         "ActivityHistoryRoute",
@@ -12039,7 +12365,7 @@
     },
     {
       "path": "/login",
-      "source": "client/src/App.js:266",
+      "source": "client/src/App.js:272",
       "elements": [
         "Login"
       ],
@@ -12047,7 +12373,7 @@
     },
     {
       "path": "/privacy-policy",
-      "source": "client/src/App.js:267",
+      "source": "client/src/App.js:275",
       "elements": [
         "PrivacyPolicy"
       ],
@@ -12055,7 +12381,7 @@
     },
     {
       "path": "/partner/login",
-      "source": "client/src/App.js:268",
+      "source": "client/src/App.js:276",
       "elements": [
         "PartnerLogin"
       ],
@@ -12063,7 +12389,7 @@
     },
     {
       "path": "/partner/portal",
-      "source": "client/src/App.js:269",
+      "source": "client/src/App.js:277",
       "elements": [
         "PartnerRoute",
         "PartnerPortal"
@@ -12072,7 +12398,7 @@
     },
     {
       "path": "/join/:token",
-      "source": "client/src/App.js:270",
+      "source": "client/src/App.js:278",
       "elements": [
         "MemberJoin"
       ],
@@ -12080,7 +12406,7 @@
     },
     {
       "path": "/member/portal",
-      "source": "client/src/App.js:271",
+      "source": "client/src/App.js:279",
       "elements": [
         "MemberRoute",
         "MemberPortal"
@@ -12089,7 +12415,7 @@
     },
     {
       "path": "/",
-      "source": "client/src/App.js:273",
+      "source": "client/src/App.js:281",
       "elements": [
         "ProtectedRoute",
         "Navigate"
@@ -12098,7 +12424,7 @@
     },
     {
       "path": "/dashboard",
-      "source": "client/src/App.js:279",
+      "source": "client/src/App.js:287",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12111,7 +12437,7 @@
     },
     {
       "path": "/drivers",
-      "source": "client/src/App.js:289",
+      "source": "client/src/App.js:297",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12124,7 +12450,7 @@
     },
     {
       "path": "/fleet",
-      "source": "client/src/App.js:299",
+      "source": "client/src/App.js:307",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12137,7 +12463,7 @@
     },
     {
       "path": "/live-tracking",
-      "source": "client/src/App.js:309",
+      "source": "client/src/App.js:317",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12150,7 +12476,7 @@
     },
     {
       "path": "/drivers/create",
-      "source": "client/src/App.js:319",
+      "source": "client/src/App.js:327",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12163,7 +12489,7 @@
     },
     {
       "path": "/drivers/:id",
-      "source": "client/src/App.js:329",
+      "source": "client/src/App.js:337",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12176,7 +12502,7 @@
     },
     {
       "path": "/driver-mobile",
-      "source": "client/src/App.js:338",
+      "source": "client/src/App.js:346",
       "elements": [
         "ProtectedRoute",
         "DriverMobile"
@@ -12187,7 +12513,7 @@
     },
     {
       "path": "/dispatcher",
-      "source": "client/src/App.js:343",
+      "source": "client/src/App.js:351",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -12200,7 +12526,7 @@
     },
     {
       "path": "/dispatcher/driver-routes",
-      "source": "client/src/App.js:350",
+      "source": "client/src/App.js:358",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -12213,7 +12539,7 @@
     },
     {
       "path": "/store-keeper",
-      "source": "client/src/App.js:358",
+      "source": "client/src/App.js:366",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -12228,7 +12554,7 @@
     },
     {
       "path": "/users",
-      "source": "client/src/App.js:368",
+      "source": "client/src/App.js:376",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12241,7 +12567,7 @@
     },
     {
       "path": "/employees",
-      "source": "client/src/App.js:377",
+      "source": "client/src/App.js:385",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12254,7 +12580,7 @@
     },
     {
       "path": "/deliveries",
-      "source": "client/src/App.js:386",
+      "source": "client/src/App.js:394",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12267,7 +12593,7 @@
     },
     {
       "path": "/collections",
-      "source": "client/src/App.js:396",
+      "source": "client/src/App.js:404",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -12283,7 +12609,7 @@
     },
     {
       "path": "/customers",
-      "source": "client/src/App.js:405",
+      "source": "client/src/App.js:413",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12296,7 +12622,7 @@
     },
     {
       "path": "/events",
-      "source": "client/src/App.js:415",
+      "source": "client/src/App.js:423",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12311,7 +12637,7 @@
     },
     {
       "path": "/dispatcher/events",
-      "source": "client/src/App.js:425",
+      "source": "client/src/App.js:433",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -12324,7 +12650,7 @@
     },
     {
       "path": "/customer-service/*",
-      "source": "client/src/App.js:433",
+      "source": "client/src/App.js:441",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12342,7 +12668,7 @@
     },
     {
       "path": "/complaints",
-      "source": "client/src/App.js:438",
+      "source": "client/src/App.js:446",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12355,7 +12681,7 @@
     },
     {
       "path": "/batch-auto-assign",
-      "source": "client/src/App.js:448",
+      "source": "client/src/App.js:456",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -12368,7 +12694,7 @@
     },
     {
       "path": "/test-api",
-      "source": "client/src/App.js:458",
+      "source": "client/src/App.js:466",
       "elements": [
         "ProtectedRoute",
         "TestAPI"
@@ -12377,7 +12703,7 @@
     },
     {
       "path": "/deliveries/:id",
-      "source": "client/src/App.js:464",
+      "source": "client/src/App.js:472",
       "elements": [
         "ProtectedRoute",
         "Layout",
@@ -12387,7 +12713,7 @@
     },
     {
       "path": "/add-delivery",
-      "source": "client/src/App.js:472",
+      "source": "client/src/App.js:480",
       "elements": [
         "ProtectedRoute",
         "Layout",
@@ -12397,7 +12723,7 @@
     },
     {
       "path": "/bags",
-      "source": "client/src/App.js:480",
+      "source": "client/src/App.js:488",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12410,7 +12736,7 @@
     },
     {
       "path": "/reports",
-      "source": "client/src/App.js:488",
+      "source": "client/src/App.js:496",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12423,7 +12749,7 @@
     },
     {
       "path": "/driver-audits",
-      "source": "client/src/App.js:497",
+      "source": "client/src/App.js:505",
       "elements": [
         "Navigate"
       ],
@@ -12431,7 +12757,7 @@
     },
     {
       "path": "/driver-reports",
-      "source": "client/src/App.js:498",
+      "source": "client/src/App.js:506",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12444,7 +12770,7 @@
     },
     {
       "path": "/subscription",
-      "source": "client/src/App.js:505",
+      "source": "client/src/App.js:513",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12457,7 +12783,7 @@
     },
     {
       "path": "/website-subscriptions",
-      "source": "client/src/App.js:514",
+      "source": "client/src/App.js:522",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12470,7 +12796,7 @@
     },
     {
       "path": "/website-subscriptions/:id",
-      "source": "client/src/App.js:523",
+      "source": "client/src/App.js:531",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12483,7 +12809,7 @@
     },
     {
       "path": "/customer-analytics",
-      "source": "client/src/App.js:532",
+      "source": "client/src/App.js:540",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12496,7 +12822,7 @@
     },
     {
       "path": "/renewal",
-      "source": "client/src/App.js:541",
+      "source": "client/src/App.js:549",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12509,7 +12835,7 @@
     },
     {
       "path": "/delivery-changes",
-      "source": "client/src/App.js:550",
+      "source": "client/src/App.js:558",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12522,7 +12848,7 @@
     },
     {
       "path": "/delivery-changes/add",
-      "source": "client/src/App.js:560",
+      "source": "client/src/App.js:568",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12535,7 +12861,7 @@
     },
     {
       "path": "/admin/meal-selection-v2/*",
-      "source": "client/src/App.js:570",
+      "source": "client/src/App.js:578",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12550,7 +12876,7 @@
     },
     {
       "path": "/menus",
-      "source": "client/src/App.js:580",
+      "source": "client/src/App.js:588",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12563,7 +12889,7 @@
     },
     {
       "path": "/menu-select/:token",
-      "source": "client/src/App.js:590",
+      "source": "client/src/App.js:598",
       "elements": [
         "MenuSelectPage"
       ],
@@ -12571,7 +12897,7 @@
     },
     {
       "path": "/m/:token",
-      "source": "client/src/App.js:593",
+      "source": "client/src/App.js:601",
       "elements": [
         "MenuSelectPage"
       ],
@@ -12579,7 +12905,7 @@
     },
     {
       "path": "/menu-select-v2",
-      "source": "client/src/App.js:597",
+      "source": "client/src/App.js:605",
       "elements": [
         "MenuSelectionLinkPage"
       ],
@@ -12587,7 +12913,7 @@
     },
     {
       "path": "/matter-core",
-      "source": "client/src/App.js:601",
+      "source": "client/src/App.js:609",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12600,7 +12926,7 @@
     },
     {
       "path": "/matter-core/:token",
-      "source": "client/src/App.js:611",
+      "source": "client/src/App.js:619",
       "elements": [
         "MatterCorePdfPage"
       ],
@@ -12608,7 +12934,7 @@
     },
     {
       "path": "/admin/partners",
-      "source": "client/src/App.js:615",
+      "source": "client/src/App.js:623",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12622,7 +12948,7 @@
     },
     {
       "path": "/kitchen-list",
-      "source": "client/src/App.js:625",
+      "source": "client/src/App.js:633",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12636,7 +12962,7 @@
     },
     {
       "path": "/kitchen-counting",
-      "source": "client/src/App.js:635",
+      "source": "client/src/App.js:643",
       "elements": [
         "ProtectedRoute",
         "PermissionBasedRoute",
@@ -12650,7 +12976,7 @@
     },
     {
       "path": "/yellowblock/*",
-      "source": "client/src/App.js:645",
+      "source": "client/src/App.js:669",
       "elements": [
         "ProtectedRoute",
         "RoleBasedRoute",
@@ -12658,7 +12984,8 @@
       ],
       "guardAttributes": [
         "allowYellowblock",
-        "allowedRoles={['super_admin', 'admin', 'yellowblock_user']}"
+        "allowKitchen",
+        "allowedRoles={['super_admin', 'admin', 'yellowblock_user', 'kitchen']}"
       ]
     }
   ],

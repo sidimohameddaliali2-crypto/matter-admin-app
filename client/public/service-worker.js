@@ -88,6 +88,8 @@ self.addEventListener('fetch', (event) => {
   if (url.pathname === '/api/matter/subscriptions/kitchen-inputs'
     || url.pathname === '/api/matter/subscriptions/delivery-on-date'
     || isKitchenComponentsPath(url.pathname)
+    || url.pathname === '/api/yellowblock/delivery-schedule'
+    || /^\/api\/yellowblock\/(?:kitchen|driver)(?:\/|$)/.test(url.pathname)
     || /^\/api\/bag-refunds(?:\/|$)/.test(url.pathname)
     || /^\/api\/bag-followups(?:\/|$)/.test(url.pathname)
     || /^\/api\/collections(?:\/|$)/.test(url.pathname)

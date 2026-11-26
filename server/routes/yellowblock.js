@@ -6,11 +6,20 @@ import ThirdPartyDeliveryCompany from '../models/ThirdPartyDeliveryCompany.js';
 import ThirdPartyDeliveryAssignment from '../models/ThirdPartyDeliveryAssignment.js';
 import YellowblockAsset from '../models/YellowblockAsset.js';
 import YellowblockAssetUsage from '../models/YellowblockAssetUsage.js';
+import { deliveryOrdersQuery, toScheduledDelivery } from '../services/yellowblockDeliverySchedule.js';
+import { toBusinessDateKey } from '../utils/businessDate.js';
+import createYellowblockKitchenRouter from './yellowblockKitchen.js';
+import createYellowblockDriverRouter from './yellowblockDriver.js';
+import yellowblockInvoiceRouter from './yellowblockInvoice.js';
+import Workflow from '../models/YellowblockOrderWorkflow.js';
 
 const router = express.Router();
 
 router.use(protect);
+router.use('/kitchen', createYellowblockKitchenRouter({ getShopifyConfig, shopifyRequest }));
+router.use('/driver', createYellowblockDriverRouter({ getShopifyConfig, shopifyRequest }));
 router.use(authorize(['super_admin', 'admin', 'yellowblock_user']));
+router.use('/invoices', yellowblockInvoiceRouter);
 
 // ─── Shopify helper ────────────────────────────────────────────────────────────
 
@@ -106,14 +115,14 @@ async function getShopifyAccessToken(shopifyConfig) {
   return shopifyConfig.token;
 }
 
-async function shopifyRequest(path, shopifyConfig) {
+async function shopifyRequest(path, shopifyConfig, payload) {
   const { domain } = shopifyConfig;
   const token = await getShopifyAccessToken(shopifyConfig);
   return new Promise((resolve, reject) => {
     const options = {
       hostname: domain.replace(/^https?:\/\//, ''),
       path,
-      method: 'GET',
+      method: payload ? 'POST' : 'GET',
       headers: {
         'X-Shopify-Access-Token': token,
         'Content-Type': 'application/json',
@@ -131,7 +140,8 @@ async function shopifyRequest(path, shopifyConfig) {
       });
     });
     req.on('error', reject);
-    req.end();
+    if (payload) req.setTimeout(15000, () => req.destroy(new Error('Shopify request timed out')));
+    req.end(payload ? JSON.stringify(payload) : undefined);
   });
 }
 
@@ -434,6 +444,56 @@ router.get('/assets-usage-stats', async (req, res) => {
   }
 });
 
+// GET /api/yellowblock/delivery-schedule
+router.get('/delivery-schedule', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const cfg = getShopifyConfig();
+  if (!cfg.configured) {
+    return res.status(503).json({ success: false, message: 'Shopify is not configured' });
+  }
+
+  try {
+    const today = toBusinessDateKey(new Date());
+    const deliveries = new Map();
+    let after = null;
+
+    do {
+      const { status, body } = await shopifyRequest(`/admin/api/${cfg.version}/graphql.json`, cfg, {
+        query: deliveryOrdersQuery,
+        variables: { after },
+      });
+
+      if (status !== 200) {
+        return handleShopifyUpstreamError(res, status, undefined, 'Could not load deliveries from Shopify');
+      }
+      if (body.errors?.some(error => error.extensions?.code === 'THROTTLED')) {
+        return handleShopifyUpstreamError(res, 429);
+      }
+
+      const page = body.data?.orders;
+      if (body.errors?.length || !page?.pageInfo || !Array.isArray(page.nodes)) {
+        throw new Error('Shopify returned an incomplete delivery schedule');
+      }
+
+      for (const order of page.nodes) {
+        const delivery = toScheduledDelivery(order, today);
+        if (delivery) deliveries.set(delivery.id, delivery);
+      }
+
+      const { hasNextPage, endCursor } = page.pageInfo;
+      if (hasNextPage && (!endCursor || endCursor === after)) {
+        throw new Error('Shopify did not provide the next order page');
+      }
+      after = hasNextPage ? endCursor : null;
+    } while (after);
+
+    res.json({ success: true, data: { today, deliveries: [...deliveries.values()] } });
+  } catch (error) {
+    console.error('[YellowBlock] delivery schedule error:', error.message);
+    res.status(502).json({ success: false, message: 'Could not load deliveries from Shopify' });
+  }
+});
+
 // GET /api/yellowblock/orders
 // Query params: status (open|closed|any), limit (max 250), page_info (cursor)
 router.get('/orders', async (req, res) => {
@@ -647,7 +707,10 @@ router.get('/third-party-assignments', async (req, res) => {
 
     const cfg = getShopifyConfig();
 
-    const enrichedAssignments = await Promise.all(assignments.map(async (assignment) => {
+    const internalOrders = new Set((await Workflow.find({
+      _id: { $in: assignments.map(assignment => assignment.shopifyOrderId) }, driverId: { $exists: true },
+    }).select('_id').lean()).map(order => order._id));
+    const enrichedAssignments = await Promise.all(assignments.filter(assignment => !internalOrders.has(assignment.shopifyOrderId)).map(async (assignment) => {
       const needsEnrichment = !assignment.customerPhone || !Array.isArray(assignment.items) || assignment.items.length === 0;
       if (!needsEnrichment || !cfg.configured) return assignment;
 
@@ -708,6 +771,8 @@ router.post('/third-party-assignments', async (req, res) => {
 
     const cfg = getShopifyConfig();
     const validOrders = orders.filter((order) => order?.id);
+    const internalOrder = await Workflow.exists({ _id: { $in: validOrders.map(order => String(order.id)) }, driverId: { $exists: true } });
+    if (internalOrder) return res.status(409).json({ success: false, message: 'Change in-app driver assignments from the individual order.' });
 
     const operations = await Promise.all(validOrders.map(async (orderInput) => {
       let shopifyOrder = null;
@@ -736,6 +801,7 @@ router.post('/third-party-assignments', async (req, res) => {
               assignedBy: req.user._id,
               assignedAt: new Date(),
             },
+            $unset: { courierName: 1 },
           },
           upsert: true,
         },
