@@ -26,30 +26,39 @@ async function change(id, value) {
 }
 async function save() { await act(async () => container.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))); }
 test('completed collection shows pending; management records payment reference and notes', async () => {
-  expect(container.textContent).toContain('Pending refund');
+  expect(container.querySelector('.collection-status').textContent).toBe('Pending');
+  expect([...container.querySelectorAll('[aria-label="Refund status filters"] button')].map(el => el.textContent)).toEqual(['Pending', 'Done']);
   expect(api.get).toHaveBeenCalledWith('/collections/refunds', { params: { status: 'pending', page: 1 } });
-  await click('Update refund'); await change('#collection-refund-status', 'refunded');
+  await click('Mark refunded');
+  expect(container.querySelector('select')).toBeNull();
   expect(container.querySelector('#collection-refund-reference').required).toBe(true);
   await change('#collection-refund-reference', 'BANK-123'); await change('#collection-refund-note', 'Payment confirmed');
   await save();
   expect(api.post).toHaveBeenCalledWith('/collections/collection-1/refund', expect.objectContaining({ status: 'refunded', reference: 'BANK-123', note: 'Payment confirmed', version: 0, eventId: expect.any(String) }));
-  expect(container.textContent).toContain('Refund recorded as completed.');
+  expect(container.textContent).toContain('Refund marked as Done.');
 });
-test('not refunded records why it remains outstanding; failed saves retain the update', async () => {
-  await click('Update refund'); await change('#collection-refund-note', 'Awaiting accounts');
+test('earlier unpaid requests remain Pending; failed saves retain the confirmation', async () => {
+  row = { ...row, refundStatus: 'not_refunded', collectionRefund: { version: 2, note: 'Awaiting accounts' } };
+  await click('Refresh refunds');
+  expect(container.querySelector('.collection-status').textContent).toBe('Pending');
+  await click('Mark refunded'); await change('#collection-refund-note', 'Payment confirmed');
+  await change('#collection-refund-reference', 'BANK-456');
   api.post.mockRejectedValueOnce({ response: { data: { message: 'This refund changed. Refresh before updating it.' } } });
   await save();
-  expect(container.querySelector('#collection-refund-note').value).toBe('Awaiting accounts');
+  expect(container.querySelector('#collection-refund-note').value).toBe('Payment confirmed');
+  expect(container.querySelector('#collection-refund-reference').value).toBe('BANK-456');
   expect(container.textContent).toContain('This refund changed.');
   await save();
-  expect(api.post).toHaveBeenLastCalledWith('/collections/collection-1/refund', expect.objectContaining({ status: 'not_refunded', note: 'Awaiting accounts' }));
-  expect(container.textContent).toContain('It remains outstanding.');
+  expect(api.post).toHaveBeenLastCalledWith('/collections/collection-1/refund', expect.objectContaining({ status: 'refunded', note: 'Payment confirmed', reference: 'BANK-456', version: 2 }));
+  expect(container.textContent).toContain('Refund marked as Done.');
 });
 test('read-only staff and previously refunded customers cannot see update controls', async () => {
   canUpdate = false; await click('Refresh refunds');
-  expect(button('Update refund')).toBeUndefined();
+  expect(button('Mark refunded')).toBeUndefined();
   canUpdate = true; row = { ...row, refundStatus: 'refunded', recordedForCustomer: true };
-  await click('Refunded');
-  expect(button('Update refund')).toBeUndefined();
+  await click('Done');
+  expect(api.get).toHaveBeenLastCalledWith('/collections/refunds', { params: { status: 'refunded', page: 1 } });
+  expect(container.querySelector('.collection-status').textContent).toBe('Done');
+  expect(button('Mark refunded')).toBeUndefined();
   expect(container.textContent).toContain('Refund already recorded for this customer');
 });

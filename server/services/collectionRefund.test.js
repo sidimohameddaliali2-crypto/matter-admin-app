@@ -1,11 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCollectionRefundUpdate, collectionRefundFilter } from './collectionRefund.js';
+import { buildCollectionRefundUpdate, collectionRefundFilter, collectionRefundQueueFilter } from './collectionRefund.js';
 import { removeClientCollectionRefund } from '../middleware/collectionRefundInput.js';
 import Delivery from '../models/Delivery.js';
 const record = { _id: '507f1f77bcf86cd799439011', customerId: 'C001', type: 'Collection', status: 'collected', collectionRequest: { refundRequestedAfterCollection: true }, collectionDetails: {} };
 const user = { _id: '507f1f77bcf86cd799439012', role: 'manager', profile: { firstName: 'Refund', lastName: 'Owner' } };
 const input = { eventId: 'refund-test-001', version: 0, status: 'refunded', note: 'Transfer confirmed', reference: 'BANK-123' };
+
+test('Pending includes previously not refunded requests and Done includes paid customers only', () => {
+  const pending = collectionRefundQueueFilter('pending', ['C002']);
+  assert.deepEqual(pending.customerId, { $nin: ['C002'] });
+  assert.deepEqual(pending['collectionRefund.status'], { $ne: 'refunded' });
+  const done = collectionRefundQueueFilter('refunded', ['C002']);
+  assert.deepEqual(done.customerId, { $in: ['C002'] });
+  assert.equal(done['collectionRefund.status'], undefined);
+  assert.deepEqual(collectionRefundQueueFilter('not_refunded', []).customerId, { $nin: [] });
+  assert.equal(collectionRefundQueueFilter('not_refunded', [])['collectionRefund.status'], 'not_refunded');
+});
 test('database enforces a single recorded customer deposit refund across collection requests', () => {
   assert.ok(Delivery.schema.indexes().some(([keys, options]) => keys['collectionRefund.depositKey'] === 1 && options.unique && options.sparse));
 });
