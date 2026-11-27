@@ -3,7 +3,7 @@ import api from '../../utils/api';
 import { waitingDays, dubaiDateKey, exportCollectionRows } from '../../utils/collectionOperations';
 
 const labels = { pending: 'Pending', not_refunded: 'Pending', refunded: 'Done' };
-const emailLabels = { not_queued: 'Waiting for automatic email', queued: 'Email queued', sending: 'Sending to Brevo', sent: 'Accepted by Brevo', uncertain: 'Send result uncertain — retrying safely', needs_review: 'Send needs staff review', failed: 'Email failed — check configuration', cancelled: 'Email cancelled' };
+const emailLabels = { not_queued: 'Waiting for today’s daily summary', queued: 'Email queued', sending: 'Sending to Brevo', sent: 'Accepted by Brevo', uncertain: 'Send result uncertain — retrying safely', needs_review: 'Send needs staff review', failed: 'Email failed — check configuration', cancelled: 'Email cancelled' };
 const date = value => value ? new Date(value).toLocaleDateString('en-GB', { timeZone: 'Asia/Dubai' }) : 'Not recorded';
 export default function CollectionRefundTracker({ search = '', dateFrom = '', dateTo = '', owners = [], resetKey = 0, onUpdated } = {}) {
   const [rows, setRows] = useState([]), [filter, setFilter] = useState('pending'), [page, setPage] = useState(1), [pages, setPages] = useState(0), [total, setTotal] = useState(0);
@@ -56,13 +56,6 @@ export default function CollectionRefundTracker({ search = '', dateFrom = '', da
     } catch (err) { setError(err.response?.data?.message || 'Could not save the refund update. Refresh and retry.'); }
     finally { saving.current = false; setBusy(false); }
   }
-  async function emailAccounts(row) {
-    if (saving.current) return;
-    saving.current = true; setBusy(true); setError('');
-    try { await api.post(`/collections/${row._id}/refund-email`, {}); setNotice('Accounts email queued. It will be sent shortly.'); await load(); }
-    catch (err) { setError(err.response?.data?.message || 'Could not queue the Accounts email.'); }
-    finally { saving.current = false; setBusy(false); }
-  }
   async function checkEmailSetup() {
     setCheckingEmail(true); setError(''); setNotice('');
     try {
@@ -112,9 +105,9 @@ export default function CollectionRefundTracker({ search = '', dateFrom = '', da
     <p className="collection-hint">Completed collections with a refund request. AED 155 per customer deposit.</p>
     {canUpdate && <button type="button" className="collection-secondary" disabled={checkingEmail || busy} onClick={checkEmailSetup}>{checkingEmail ? 'Checking email setup…' : 'Check Accounts email setup'}</button>}
     {canUpdate && emailEnabled && <button type="button" className="collection-secondary" disabled={sendingDemo || demoSent || busy} onClick={sendDemo}>{demoSent ? 'Demo accepted by Brevo' : sendingDemo ? 'Sending demo…' : 'Send demo to Accounts'}</button>}
-    {canUpdate && emailEnabled && <button type="button" className="collection-secondary" disabled={sendingPortal || portalSent || busy} onClick={sendPortal}>{portalSent ? 'Portal email accepted by Brevo' : sendingPortal ? 'Sending portal…' : 'Email portal to Accounts'}</button>}
+    {canUpdate && emailEnabled && <button type="button" className="collection-secondary" disabled={sendingPortal || portalSent || busy} onClick={sendPortal}>{portalSent ? 'Portal email accepted by Brevo' : sendingPortal ? 'Sending portal…' : 'Email today’s portal to Accounts'}</button>}
     {canUpdate && <button type="button" className="collection-secondary" disabled={checkingReminders || busy} onClick={checkReminders}>{checkingReminders ? 'Checking reminders…' : 'Check refund reminders'}</button>}
-    <p className="collection-hint">Still pending after collection: 24h → Slack to Adrian Fernandez · 48h → email to Jana. Reminders stop after Done.</p>
+    <p className="collection-hint">One daily email per recipient · Accounts: all pending refunds · Jana: refunds pending 48h or longer · Adrian: one Slack reminder after 24h. Reminders stop after Done.</p>
     <div className="collection-refund-filters" aria-label="Refund status filters">{[['pending', 'Pending'], ['refunded', 'Done']].map(([key, label]) => <button key={key} type="button" className="collection-secondary" aria-pressed={filter === key} disabled={busy} onClick={() => { setFilter(key); setPage(1); setSelected(null); }}>{label}</button>)}</div>
     <label htmlFor="collection-refund-owner-filter">Refund owner</label><select id="collection-refund-owner-filter" value={ownerFilter} disabled={busy} onChange={event => setOwnerFilter(event.target.value)}><option value="">All owners</option><option value="unassigned">Unassigned</option>{owners.map(owner => <option key={owner._id} value={owner._id}>{owner.name}</option>)}</select>
     <button type="button" className="collection-secondary collection-export" onClick={exportRows} disabled={busy || loading || exporting}>{exporting ? 'Exporting…' : 'Export matching refunds'}</button>
@@ -135,7 +128,7 @@ export default function CollectionRefundTracker({ search = '', dateFrom = '', da
       <p>{row.customerId} · AED 155 · Collected: {date(row.collectionDetails?.collectedAt || row.completedAt)}</p>
       <p>Scheduled collection date: {date(row.scheduledTime)}</p>
       {row.refundStatus !== 'refunded' && <><p>Owner: {row.collectionRefund?.ownerName || 'Unassigned'} · Follow-up: {row.collectionRefund?.dueDate || 'Not set'}</p><p className="collection-next-action"><strong>Next:</strong> {row.collectionRefund?.ownerName ? 'Confirm the payment, then record the transaction reference.' : 'Assign a manager to follow up.'} {waitingDays(row.collectionDetails?.collectedAt || row.completedAt) === null ? 'Collection time missing — review the collection record.' : `${waitingDays(row.collectionDetails?.collectedAt || row.completedAt)} calendar days since collection.`}{row.collectionRefund?.dueDate && row.collectionRefund.dueDate < dubaiDateKey() ? ' Staff follow-up date has passed.' : ''}</p></>}
-      {row.refundStatus !== 'refunded' && <p>Accounts email: {emailEnabled ? emailLabels[row.accountsEmail?.state || 'not_queued'] : 'Unavailable — email configuration needs administrator review'}{row.accountsEmail?.sentAt && ` · ${date(row.accountsEmail.sentAt)}`}{row.accountsEmail?.expiresAt && ` · Link expires ${date(row.accountsEmail.expiresAt)}`}</p>}
+      {row.refundStatus !== 'refunded' && <p>Today’s Accounts summary: {emailEnabled ? emailLabels[row.accountsEmail?.state || 'not_queued'] : 'Unavailable — email configuration needs administrator review'}{row.accountsEmail?.sentAt && ` · ${date(row.accountsEmail.sentAt)}`}{row.accountsEmail?.expiresAt && ` · Link expires ${date(row.accountsEmail.expiresAt)}`}</p>}
       {row.refundStatus !== 'refunded' && row.escalations?.map(item => <p key={item.stage}>{item.stage === 'adrian_24h' ? 'Adrian · 24h Slack' : 'Jana · 48h email'}: {item.state === 'sent' ? 'Provider accepted' : item.state === 'needs_review' ? 'Uncertain — staff review required' : item.state}{item.errorCode ? ` · ${item.errorCode}` : ''}</p>)}
       {row.recordedForCustomer ? <p>Refund already recorded for this customer against another collection or in Bag Operations.</p> : <>
         {row.collectionRefund?.updatedByName && <p>Updated by {row.collectionRefund.updatedByName} · {date(row.collectionRefund.updatedAt)}</p>}
@@ -146,7 +139,7 @@ export default function CollectionRefundTracker({ search = '', dateFrom = '', da
       {!!row.collectionRefund?.history?.length && <details><summary>Update history</summary>{row.collectionRefund.history.map(event => <p key={event.eventId}>{labels[event.status]} · {event.actorName}{event.actorType === 'accounts_email_link' ? ' · Accounts email link' : ''}{event.method ? ` · ${event.method === 'card' ? 'Credit/debit card' : 'Bank account'}` : ''} · {date(event.timestamp)}<br />{event.note}{event.reference && ` · ${event.reference}`}</p>)}</details>}
       {!!row.collectionRefund?.assignmentHistory?.length && <details><summary>Follow-up history</summary>{row.collectionRefund.assignmentHistory.map(event => <p key={event.eventId}>{event.ownerName} · Follow-up: {event.dueDate || 'Not set'} · Assigned by {event.actorName} · {date(event.timestamp)}</p>)}</details>}
       {canUpdate && row.refundStatus !== 'refunded' && <div className="collection-refund-filters"><button className="collection-secondary" type="button" disabled={busy || !owners.length} onClick={() => choose(row, 'assignment')}>Assign follow-up</button><button className="collection-secondary" type="button" disabled={busy} onClick={() => choose(row)}>Mark as done</button></div>}
-      {canUpdate && emailEnabled && row.refundStatus !== 'refunded' && <button className="collection-secondary" type="button" disabled={busy || ((!row.accountsEmail?.expiresAt || new Date(row.accountsEmail.expiresAt).getTime() > Date.now()) && ['queued', 'sending', 'uncertain'].includes(row.accountsEmail?.state))} onClick={() => row.accountsEmail?.state && row.accountsEmail.state !== 'not_queued' ? choose(row, 'email') : emailAccounts(row)}>{row.accountsEmail?.state && row.accountsEmail.state !== 'not_queued' ? 'Resend Accounts portal' : 'Email Accounts portal'}</button>}
+
     </li>)}</ul>}
     {!canUpdate && !loading && <p className="collection-hint">An admin or manager can update refund statuses.</p>}
     {pages > 1 && <nav className="collection-pagination" aria-label="Refund pages"><button type="button" disabled={page === 1 || loading || busy} onClick={() => setPage(current => current - 1)}>Previous</button><span>Page {page} of {pages}</span><button type="button" disabled={page >= pages || loading || busy} onClick={() => setPage(current => current + 1)}>Next</button></nav>}

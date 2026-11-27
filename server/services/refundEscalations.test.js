@@ -25,7 +25,7 @@ test('Slack targets only Adrian and Jana email has pending case facts without a 
 });
 const chain = value => ({ select() { return this; }, sort() { return this; }, limit() { return this; }, lean: async () => value });
 function stub(notice, paid = false) {
-  mock.method(Notice, 'init', async () => {}); mock.method(Notice, 'distinct', async () => []);
+  mock.method(Notice, 'init', async () => {}); mock.method(Notice, 'updateMany', async () => ({})); mock.method(Notice, 'distinct', async () => []);
   mock.method(Delivery, 'distinct', async () => []); mock.method(BagRefundCase, 'distinct', async () => []);
   mock.method(Delivery, 'find', () => chain([])); mock.method(Delivery, 'findOne', () => chain(record));
   mock.method(Delivery, 'exists', async () => paid); mock.method(BagRefundCase, 'exists', async () => false);
@@ -43,12 +43,12 @@ test('worker claims with a durable lease and due guard, records acceptance and c
   await runRefundEscalationsOnce({ now, slack: async () => assert.fail('Paid cases must not notify') });
   assert.ok(writes.mock.calls.some(call => call.arguments[1].$set.state === 'cancelled'));
 });
-test('uncertain Slack sends do not repeat, and Brevo retries stop before its dedupe window expires', async () => {
+test('uncertain Slack sends do not repeat and crash recovery requires review', async () => {
   let { writes } = stub({ ...escalationValues(record)[0], _id: 'notice', leaseUntil: now });
   await runRefundEscalationsOnce({ now, slack: async () => { throw new Error('timeout'); } });
   assert.ok(writes.mock.calls.some(call => call.arguments[1].$set.state === 'needs_review'));
-  mock.restoreAll(); ({ writes } = stub({ ...escalationValues(record)[1], _id: 'notice', leaseUntil: now, firstAttemptAt: new Date(now - 21 * 60000) }));
-  await runRefundEscalationsOnce({ now, email: async () => assert.fail('Expired dedupe window') });
+  mock.restoreAll(); ({ writes } = stub({ ...escalationValues(record)[0], _id: 'notice', leaseUntil: now, firstAttemptAt: new Date(now - 21 * 60000) }));
+  await runRefundEscalationsOnce({ now, slack: async () => assert.fail('Uncertain Slack attempt must not repeat') });
   assert.ok(writes.mock.calls.some(call => call.arguments[1].$set.state === 'needs_review'));
 });
 test('unconfigured Slack safely defers without pretending to have sent or blocking Jana', async () => {

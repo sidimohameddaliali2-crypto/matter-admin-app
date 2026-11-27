@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { runRefundDailyDigestsOnce } from '../services/refundDailyDigests.js';
 import Delivery from '../models/Delivery.js';
 import CollectionRefundLink from '../models/CollectionRefundLink.js';
 import { collectionRefundFilter } from '../services/collectionRefund.js';
@@ -41,7 +42,7 @@ export function startCollectionRefundEmailsJob() {
   const run = async () => {
     if (running || mongoose.connection.readyState !== 1) return;
     running = true;
-    try { await runCollectionRefundEmailsOnce(); }
+    try { await runRefundDailyDigestsOnce(); }
     catch { console.error('[refund-email] Notification scan failed; it will retry.'); }
     finally { running = false; }
   };

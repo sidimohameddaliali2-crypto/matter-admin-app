@@ -130,7 +130,7 @@
     "server/routes/bagRefunds.js": "b59d8a5f11c85784e728face2c36cd3bf73f8ef44f08e1c8ce33a9c7e3823191",
     "server/routes/bags.js": "5365c35d13f485789ae19f03793aa8bf6e998f8cee2b8cf052bd377e1e2a4d07",
     "server/routes/collectionRefundLinks.js": "4aae542e3a92faf122101dab61a9e36abe6ed2f45240d14184e3f7f91ef9dd22",
-    "server/routes/collections.js": "9b2ed147b3bf49686da3443a70ffe042d503a1c03b82c7b532aef86ce1514922",
+    "server/routes/collections.js": "537ccf84bfe863be7df5a9220cbb76149ff1e653812acc153e1ab04f4c10efd2",
     "server/routes/communications.js": "7d9bc696d81f850efc61dd35ef19207555691ec81fdb7658280620f045a81335",
     "server/routes/customers.js": "46cbcb737f5226edbaac371e64c852bab577c59fe9d45fcee158fc482f5af51f",
     "server/routes/customerService.js": "af8607225feee2254c7b196d0b4ece2b10e32755a45873ede5c7991f51762b28",
@@ -3659,7 +3659,7 @@
     {
       "id": "94ee5f7c0b48d34e",
       "method": "POST",
-      "source": "server/routes/collections.js:33",
+      "source": "server/routes/collections.js:35",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3687,7 +3687,7 @@
     {
       "id": "62a038164b2d10bc",
       "method": "POST",
-      "source": "server/routes/collections.js:43",
+      "source": "server/routes/collections.js:45",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3700,9 +3700,9 @@
       ],
       "referencedCalls": [
         "canRecordCollectionRefund",
-        "emailAccountsPortal",
         "refundEmailEnabled",
-        "refundError"
+        "refundError",
+        "sendDailyRefundDigest"
       ],
       "path": "/api/collections/refund-portal-email",
       "middlewareDeclarations": [
@@ -3713,7 +3713,7 @@
     {
       "id": "f714f1843ad23eb7",
       "method": "GET",
-      "source": "server/routes/collections.js:52",
+      "source": "server/routes/collections.js:54",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3728,6 +3728,7 @@
       ],
       "requestKeys": [],
       "referencedCalls": [
+        "RefundDailyDigest.countDocuments",
         "RefundEscalation.countDocuments",
         "canRecordCollectionRefund",
         "refundEmailConfiguration",
@@ -3743,7 +3744,7 @@
     {
       "id": "55b707f6640349c2",
       "method": "GET",
-      "source": "server/routes/collections.js:58",
+      "source": "server/routes/collections.js:60",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3770,7 +3771,7 @@
     {
       "id": "e7e5f7180ed2f8c6",
       "method": "GET",
-      "source": "server/routes/collections.js:76",
+      "source": "server/routes/collections.js:78",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3797,7 +3798,7 @@
     {
       "id": "b3fe4308ea5effd9",
       "method": "GET",
-      "source": "server/routes/collections.js:88",
+      "source": "server/routes/collections.js:90",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -3823,7 +3824,7 @@
     {
       "id": "385b8a924aa44f9e",
       "method": "GET",
-      "source": "server/routes/collections.js:95",
+      "source": "server/routes/collections.js:97",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -3852,7 +3853,7 @@
     {
       "id": "2d0234c65000a301",
       "method": "GET",
-      "source": "server/routes/collections.js:107",
+      "source": "server/routes/collections.js:109",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3871,13 +3872,12 @@
         "query.status"
       ],
       "referencedCalls": [
-        "CollectionRefundLink.find",
         "Delivery.countDocuments",
         "Delivery.find",
+        "RefundDailyDigest.findOne",
         "RefundEscalation.find",
         "canRecordCollectionRefund",
-        "refundEmailEnabled",
-        "refundEmailStatus"
+        "refundEmailEnabled"
       ],
       "path": "/api/collections/refunds",
       "middlewareDeclarations": [
@@ -3888,26 +3888,23 @@
     {
       "id": "d6748118ab059057",
       "method": "POST",
-      "source": "server/routes/collections.js:123",
+      "source": "server/routes/collections.js:125",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
       "responseKeys": [
-        "accountsEmail",
         "message",
         "success"
       ],
       "requestKeys": [
-        "body.resend",
         "params.id"
       ],
       "referencedCalls": [
         "Delivery.findOne",
         "canRecordCollectionRefund",
         "collectionRefundFilter",
-        "enqueueRefundLink",
-        "refundEmailStatus",
-        "refundError"
+        "refundError",
+        "sendDailyRefundDigest"
       ],
       "path": "/api/collections/:id/refund-email",
       "middlewareDeclarations": [
@@ -3918,7 +3915,7 @@
     {
       "id": "057381129a1c73f8",
       "method": "POST",
-      "source": "server/routes/collections.js:135",
+      "source": "server/routes/collections.js:136",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3952,7 +3949,7 @@
     {
       "id": "e8b9e030bf9199f9",
       "method": "POST",
-      "source": "server/routes/collections.js:158",
+      "source": "server/routes/collections.js:159",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3986,7 +3983,7 @@
     {
       "id": "ec72c551e9363fe6",
       "method": "GET",
-      "source": "server/routes/collections.js:184",
+      "source": "server/routes/collections.js:185",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -4019,7 +4016,7 @@
     {
       "id": "6a32925b51bd6a5b",
       "method": "POST",
-      "source": "server/routes/collections.js:204",
+      "source": "server/routes/collections.js:205",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [

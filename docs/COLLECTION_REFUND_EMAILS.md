@@ -1,48 +1,44 @@
-# Collection refund email links
+# Accounts bag refund portal and daily reminders
 
-Completed requested bag collections (`collected`, `completed` or `delivered`, with bags available) are scanned once a minute. A durable notification record is inserted once per collection. Refunds already recorded for that customer in Collections or Bag Operations are excluded. Existing pending requests are included when this feature starts.
+## Current flow
 
-Brevo sends to **accounts@matternutrition.xyz** only. The email names the customer, customer ID, recorded collection date and AED 155 deposit, with a private link to `/refund/portal#<capability>`. It never sends a staff login token. This Accounts-only capability grants access to all eligible pending collection refunds, expires after seven days and cannot change an already completed refund. The same active portal capability is reused across notification emails. Legacy single-refund links remain narrowly scoped until they expire; they cannot be used with the portal API. Email scanners can open the page without recording a refund: completion requires an explicit confirmation and a transaction reference.
+Accounts receives at most one operational Brevo email per Dubai calendar day at accounts@matternutrition.xyz. The email summarizes the pending queue and opens /refund/portal#<capability>, with no staff login. The same active portal capability is reused across summaries. The portal lists all unpaid eligible collection requests with search and pagination. Jenniza chooses each refund, selects Credit/debit card or Bank account, enters its transaction reference, and explicitly confirms payment. The receipt and tracker retain Jenniza, the method/reference and the Accounts email-link source. No authenticated staff user ID is asserted by a no-login link, and no money is sent by the portal.
 
-The public entry point loads separately from staff Redux, login bootstrap, sockets and browser activity capture. The capability is in the URL fragment, not a query parameter or server path. API calls send it in a redacted JSON `token` field, without cookies or staff credentials. API responses are not cached; the public page uses no-referrer and cannot be framed. Only the customer name/ID, deposit, collection date, version and completion receipt are exposed.
+Eligible collections are collected/completed/delivered, request refund after collection, and do not record noBagsAvailable. Customers paid in either Collections or Bag Operations are excluded. Completion rechecks eligibility and paid status, then uses the existing expected version and unique customer deposit index. Old refunds remain readable without invented methods. Staff completion retains its signed-in actor.
 
-Notification credentials are derived from a random nonce and the existing JWT secret using a separate HMAC purpose. Only a hash and the derivation nonce are stored, both excluded from ordinary model reads. Staff APIs return only notification status. Do not log capability values, copy them into tickets, or include them in screenshots of real requests.
+## Daily email limit
+
+RefundDailyDigest has a unique kind/dateKey index, one slot each for Accounts and Jana per Dubai day. Atomic leases coordinate manual requests and all PM2 instances. The server owns the stable UUID message key. The staff Email today's portal to Accounts button shares the automatic daily slot: repeated clicks cannot send another operational email that day. A requested portal invitation can be sent even with an empty queue and consumes today's Accounts slot. Explicit demo emails remain separate test actions and never run automatically.
+
+The once-per-minute digest worker can send from 09:00 Dubai onward. Accounts receives one summary if there are pending refunds. If there are none at 09:00, the first eligible pending queue later that day can trigger the daily summary. New requests after that day's accepted summary remain visible immediately in the portal and appear in the next day's email. An empty queue does not trigger automatic emails.
+
+Jana receives at most one daily Brevo email at the owner-confirmed jana@matternutrition.xyz, summarizing all requests still pending 48 hours or longer. The threshold uses collectionDetails.collectedAt, falling back to completedAt; assignment and follow-up notes do not restart the clock. Missing clocks are not invented. The summary includes total request count, up to 50 customer/ID/AED155/collection-time rows, and the staff tracker link for the complete queue. Cases completed before sending are excluded by a fresh unpaid query. A payment can still cross an in-flight provider submission; a notification does not prove the case is still pending when read.
+
+Previously accepted per-refund emails on the same Dubai date consume the recipient's daily slot during migration. The former per-collection sender is no longer started; staff per-collection email endpoints also use the daily gate. Undelivered per-case Jana escalation records are cancelled with daily_digest_mode; accepted history is preserved.
+
+## Adrian's 24-hour Slack reminder
+
+A separate once-per-minute worker enrolls one durable adrian_24h stage per collection and sends once to directory-verified Adrian Fernandez (U047RL01DD1) after 24 elapsed hours while still pending. It rechecks eligibility/payment immediately before sending. There is no default-channel or webhook fallback. Existing SLACK_BOT_TOKEN needs chat:write; ENABLE_SLACK_NOTIFICATIONS=0 preserves a Slack pause. This integration's readiness must be verified on the live server; authorization in a connected chat plugin does not establish server bot permissions.
+
+The message includes customer/ID, AED155, completed collection time and the staff tracker link. Neither Slack nor Jana's email contains an Accounts portal capability. Sent Slack stages do not automatically repeat. Known not-accepted/configuration failures defer 15 minutes. An uncertain Slack outcome or crash after attempting the send requires review rather than blind retries. No Slack deduplication guarantee is assumed.
+
+## Capability and provider safeguards
+
+The portal model and HMAC purpose differ from legacy single-record links. A single-record token cannot list or update the wider portal. Capabilities expire after seven days. Only their hash/derivation nonce are stored, excluded from ordinary reads; do not log them or copy real links into tickets/screenshots. API calls use a redacted token JSON field, no cookies or staff auth. Public entry points bypass staff stores/sockets/activity capture. The capability is in the fragment, not a request path or query. Responses are no-store/private, no-referrer, non-frameable and noindex. The API exposes customer name/ID, AED155, collection clock, version and only the selected completion receipt; it does not expose addresses, phones or staff permission objects.
+
+Brevo calls reuse a stable UUID idempotencyKey. Uncertain retries stay within 20 minutes, below Brevo's documented 30-minute deduplication window, then require review. Daily slots are not replaced to work around uncertainty. Known rejected provider requests defer 15 minutes. Provider acceptance is not inbox-delivery confirmation. Staff can check Brevo/Slack readiness and inspect reminder state/error codes without credentials. Needs-review records are retained for investigation.
 
 ## Configuration
 
-- Existing `BREVO_API_KEY`, verified `BREVO_SENDER_EMAIL` and optional `BREVO_SENDER_NAME` are reused.
-- `JWT_SECRET` must contain at least 16 characters.
-- `PUBLIC_APP_URL` optionally sets the HTTPS origin; default is `https://matterapp.online`. It must not include a path, query, fragment or embedded credentials.
-- `COLLECTION_REFUND_EMAILS_ENABLED=false` pauses automatic dispatch and staff email enqueueing. It does not revoke links already issued.
+- Existing BREVO_API_KEY, verified BREVO_SENDER_EMAIL and optional BREVO_SENDER_NAME are reused.
+- JWT_SECRET must be at least 16 characters. PUBLIC_APP_URL defaults to https://matterapp.online and accepts only a bare HTTPS origin.
+- COLLECTION_REFUND_EMAILS_ENABLED=false pauses Accounts summaries/invitations.
+- COLLECTION_REFUND_ESCALATIONS_ENABLED=false pauses Adrian reminders and Jana summaries.
+- ENABLE_SLACK_NOTIFICATIONS=0 preserves the global Slack pause.
+- Existing business date offset settings define Dubai day boundaries (default UTC+4), independent of server timezone.
 
-No payment provider is called. Completion records that Accounts reported the payment; the mailbox/link source is retained in refund history with the owner-requested display name Jenniza and the Accounts email-link source (no authenticated user identity is asserted). Staff completion and email-link completion use the same collection eligibility, optimistic version and unique customer-deposit safeguards.
+## Demo and acceptance
 
-## Sending, retries and staff controls
+/refund/portal?demo=1 lists two clearly labelled fictional pending refunds. Both can be completed and reset using only component state, with zero API/storage writes or messages. The earlier /refund/complete?demo=1 also opens this portal demo. Existing genuine single-record links remain scoped until expiry; no legacy access is silently broadened.
 
-The worker uses MongoDB leases across application instances and a stable UUID `idempotencyKey` for Brevo retries. Brevo documents a [30-minute deduplication window](https://developers.brevo.com/docs/heterogenous-versions-batch-emails); automatic uncertain retries stop after 20 minutes and require staff review. A timeout is not proof of failure. Do not automatically issue a different message key for an uncertain send.
-
-“Accepted by Brevo” means the API accepted the email; it is not an inbox-delivery confirmation. The Collection page displays queued, sending, accepted, uncertain, failed and needs-review states. Admins/managers can queue an email or explicitly confirm sending a replacement link. Per-collection resend creates a new notification generation and preserves notification events. It emails the current shared portal capability; it does not revoke the shared active portal. The shared capability is replaced when expired (or its signing secret changes). Sending is bounded to ten pending messages per worker pass. No periodic reminder emails are generated after a successful send.
-
-## Acceptance
-
-Local fixtures cover invalid/expired credentials, record scoping, stored-hash lookup, mandatory transaction reference/confirmation, stale writes, existing Bag Operations payments, terminal receipts, missing storage, Brevo acceptance/idempotency, uncertainty cut-off and insert-only automatic enqueueing. Public-page tests use no staff credentials. No real refund should be completed merely to test deployment.
-
-Live verification must distinguish the website/API health and configuration from actual email acceptance and inbox delivery. If no eligible pending refund exists, the first real notification remains to be observed when a genuine collection becomes eligible. Tests and sandbox acceptance do not establish inbox delivery.
-
-## Safe email demo
-
-Management can use Send demo to Accounts to send a clearly labelled Brevo email only to accounts@matternutrition.xyz. The link opens /refund/portal?demo=1 with example data and no capability. The form makes no API calls, writes no storage and updates only component state. Reset/reopen returns to Pending. A real token takes priority if present. The authenticated send endpoint has no customer lookup, collection creation, link creation or ledger write; it accepts only a UUID send ID reused on retry for Brevo deduplication. Demo inbox delivery must be checked separately from API acceptance.
-
-## Refund destination and named confirmation
-
-New Done updates require a credit/debit card or bank account destination and a transaction reference, on both staff and public forms. The destination is stored on the refund and its immutable update-history event and included in staff CSV exports. Old refunds remain readable with Not recorded for an absent destination. The public checkbox explicitly says I, Jenniza, confirm; the server sets this owner-requested display name rather than trusting an incoming name. The receipt shows Confirmed by Jenniza. Actor type remains accounts_email_link, actor email remains the Accounts mailbox, and no staff user ID is asserted by the no-login link. Staff updates retain their actual signed-in actor. The safe demo displays the same checkpoint/name without API or storage writes.
-
-## Accounts portal and overdue escalations
-
-The portal lists all unpaid eligible collection refunds with paginated customer name/ID search, AED 155, collection timestamps, and expected versions. Completing a selected refund uses the same paid-customer check, unique deposit index, optimistic version, destination/reference validation and Jenniza audit as the earlier single-record flow. Pending rows refresh after completion and duplicate collection requests for a paid customer disappear. Portal and single-record credentials use separate HMAC purposes and separate models; an old single-record token never grants broader access. The demo lists two fictional pending records and supports both completions/reset without network, storage or messages. The earlier demo URL also opens the portal demo.
-
-A separate once-per-minute Mongo-leased job enrolls pending requests. It uses collectionDetails.collectedAt, falling back to completedAt, as the original pending clock; owner assignment or follow-up notes do not restart it. Missing timestamps are not fabricated. At 24 elapsed hours it sends one Slack reminder to the directory-verified Adrian Fernandez (U047RL01DD1); at 48 elapsed hours it sends one Brevo email to the owner-confirmed jana@matternutrition.xyz. Each message includes the pending customer/ID, AED 155, collection time and the staff tracker URL. Escalations never include the no-login portal capability. Existing pending cases are included, and both stages may be due after downtime. Paid/ineligible cases are rechecked immediately before attempting delivery and cancelled. A concurrent payment can still cross an in-flight provider request; a notification cannot prove a case is still pending when read.
-
-Unique delivery/stage records retain message IDs, attempts, due clocks, errors and states. Sent stages are never automatically repeated. Known not-accepted/configuration errors retry after 15 minutes. Uncertain Slack outcomes or crash recovery require review rather than automatic repeats. Brevo uncertain retries reuse one UUID within 20 minutes, then require review. No reliable Slack idempotency guarantee is assumed. COLLECTION_REFUND_ESCALATIONS_ENABLED=false pauses both stages; existing ENABLE_SLACK_NOTIFICATIONS=0 pauses Slack. Existing SLACK_BOT_TOKEN requires chat:write for the Adrian DM; no webhook/default-channel fallback is allowed. Accounts notifications and escalations are independent so an unavailable Slack integration does not block Jana email. Staff can inspect reminder readiness/states without exposing keys or portal tokens.
-
-Acceptance: exercise portal scope, expiration, per-customer paid guards, stale writes, destination/reference/Jenniza, multiple demo completions, boundary deadlines, cancellation, leases and uncertain delivery with fixture-only providers. Check server Slack scopes and Brevo sender readiness separately from actual message delivery. Do not mark a real refund paid or invent overdue records to prove deployment.
+Fixtures cover portal scope/expiry, paid-customer and stale-write guards, destination/reference/Jenniza, multiple demo completions, 24h/48h clocks, cancellation, daily quotas under simultaneous/manual sends, Dubai midnight boundaries, migration-day quota, provider uncertainty and management guards. Build and deployment health do not prove inbox delivery or Slack delivery. Check the live server's bot scopes and Brevo sender separately. Do not invent overdue live cases or mark real refunds paid to prove a deployment.
