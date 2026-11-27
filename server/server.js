@@ -183,6 +183,8 @@ import authRoutes from './routes/auth.js';
 import userRoutes from './routes/users.js';
 import deliveryRoutes from './routes/deliveries.js';
 import collectionRoutes from './routes/collections.js';
+import collectionRefundLinkRoutes from './routes/collectionRefundLinks.js';
+import { startCollectionRefundEmailsJob } from './jobs/collectionRefundEmails.js';
 import bagRoutes from './routes/bags.js';
 import bagOperationsRoutes from './routes/bagOperations.js';
 import dispatcherLocationReviewsRoutes from './routes/dispatcherLocationReviews.js';
@@ -241,6 +243,8 @@ const mcpOAuth = createMcpOAuthIntegration();
 app.use(mcpOAuth.router);
 app.use('/api/mcp', createMcpRouter({ oauthProvider: mcpOAuth.provider }));
 app.use('/api/collections', collectionRoutes);
+app.use('/api/collection-refund-links', collectionRefundLinkRoutes);
+app.use('/refund/complete', (_req, res, next) => { res.set({ 'Cache-Control': 'no-store, private', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY', 'X-Robots-Tag': 'noindex, nofollow, noarchive' }); next(); });
 app.use('/api/bags', bagRoutes);
 app.use('/api/bag-operations', bagOperationsRoutes);
 app.use('/api/dispatcher-location-reviews', dispatcherLocationReviewsRoutes);
@@ -444,6 +448,7 @@ server.listen(PORT, () => {
 if (!localPreviewMode) {
 startFlaggedNotifier();
 startMoveUncollectedCollectionsJob();
+startCollectionRefundEmailsJob();
 startRecalculateDriverKpisJob();
 startImportMatterDeliveriesJob();
 startMatterImportWorker();
