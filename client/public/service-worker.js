@@ -11,6 +11,7 @@ const isDriverAuditPath = pathname => pathname === '/driver-audit-view'
   || pathname === '/api/session' || pathname === '/api/session/refresh'
   || pathname.startsWith('/api/reporting/')
   || pathname.startsWith('/report-data/') || pathname.startsWith('/report-assets/');
+const isDispatcherFleetPath = pathname => /^\/api\/dispatcher-fleet(?:\/|$)/i.test(pathname);
 const isKitchenComponentsPath = pathname => /^\/api\/menus\/[^/]+\/kitchen-components\/?$/.test(pathname);
 
 // Assets to cache on install
@@ -59,7 +60,8 @@ self.addEventListener('activate', (event) => {
       const requests = await cache.keys();
       await Promise.all(requests.filter(request => {
         const url = new URL(request.url);
-        return url.origin === location.origin && (isDriverAuditPath(url.pathname) || url.pathname.startsWith('/api/traceability/') || isKitchenComponentsPath(url.pathname));
+        return url.origin === location.origin && (isDriverAuditPath(url.pathname) || isDispatcherFleetPath(url.pathname)
+          || url.pathname.startsWith('/api/traceability/') || isKitchenComponentsPath(url.pathname));
       }).map(request => cache.delete(request)));
       console.log('[Service Worker] Claiming clients');
       return self.clients.claim();
@@ -78,7 +80,7 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (isDriverAuditPath(url.pathname)) return;
-  if (url.pathname.startsWith('/api/traceability/')) {
+  if (isDispatcherFleetPath(url.pathname) || url.pathname.startsWith('/api/traceability/')) {
     event.respondWith(fetch(request, { cache: 'no-store' }));
     return;
   }

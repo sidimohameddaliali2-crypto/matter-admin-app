@@ -48,7 +48,8 @@ function KpiCard({ icon, label, value, sub, subCls }) {
 }
 
 function VehicleFormModal({ initial, drivers, onClose, onSaved }) {
-  const [form, setForm] = useState(initial || EMPTY_FORM);
+  const initialDriver = initial?.assignedDriver?._id ?? initial?.assignedDriver ?? '';
+  const [form, setForm] = useState(() => initial ? { ...initial, assignedDriver: initialDriver } : EMPTY_FORM);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const isEdit = Boolean(initial?._id);
@@ -71,7 +72,7 @@ function VehicleFormModal({ initial, drivers, onClose, onSaved }) {
         vehicleId: form.vehicleId.trim(),
         type: form.type,
         plateNumber: form.plateNumber.trim(),
-        assignedDriver: form.assignedDriver || null,
+        ...((!isEdit || form.assignedDriver !== initialDriver) && { assignedDriver: form.assignedDriver || null }),
         status: form.status,
         fuelLevel: Number(form.fuelLevel) || 0,
         notes: form.notes,

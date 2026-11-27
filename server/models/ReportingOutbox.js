@@ -9,7 +9,7 @@ const reportingCounterSchema = new Schema({
 
 const reportingEventSchema = new Schema({
   sourceVersion: { type: Number, required: true, unique: true },
-  eventType: { type: String, required: true, enum: ['delivery.changed', 'delivery.removed', 'gps.batch-committed'] },
+  eventType: { type: String, required: true, enum: ['delivery.changed', 'delivery.removed', 'gps.batch-committed', 'fleet.assignment-changed'] },
   subjectId: { type: String, required: true },
   occurredAt: { type: Date, required: true },
   attempts: { type: Number, default: 0 },

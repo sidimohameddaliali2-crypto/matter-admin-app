@@ -9,13 +9,36 @@ on:
       - 'server/middleware/reportingVercelIdentity*.js'
       - 'server/routes/externalReportingApi.js'
       - 'server/routes/deliveries.js'
+      - 'server/routes/trackerEvidence.test.js'
       - 'server/models/Delivery.js'
       - 'server/models/ReportingOutbox.js'
+      - 'server/models/FleetAssignmentReceipt.js'
+      - 'server/models/VehicleLocationHistory.js'
       - 'server/services/reportingOutbox*.js'
+      - 'server/services/truckoomApiService.js'
+      - 'server/services/truckoomLiveData*.js'
       - 'server/services/truckoomVisitSync*.js'
-      - 'server/services/vehicleLocationCaptureStore.js'
+      - 'server/services/truckoomVisitRules.js'
+      - 'server/observability/activityScope.js'
+      - 'server/observability/activityTrackerVisit.test.js'
+      - 'server/services/vehicleLocationCapture*.js'
+      - 'server/services/vehicleLocationView.js'
       - 'server/services/matterDeliveryImportService.js'
       - 'server/services/matterDeliveryInsert*.js'
+      - 'server/services/fleetDispatch*.js'
+      - 'server/services/fleetProofReceipt*.js'
+      - 'server/routes/dispatcherFleet*.js'
+      - 'server/routes/drivers.js'
+      - 'server/routes/truckoomApi.js'
+      - 'server/routes/users.js'
+      - 'server/routes/vehicles.js'
+      - 'client/public/service-worker.js'
+      - 'client/src/components/dispatcher/DispatcherFleet.js'
+      - 'client/src/components/drivers/EditDriverModal*.js'
+      - 'client/src/components/deliveries/TrackerVisitCard*'
+      - 'client/src/pages/DispatcherWorkspace.js'
+      - 'client/src/pages/DispatcherWorkspace.test.js'
+      - 'client/src/pages/FleetManagement.js'
       - 'server/package*.json'
 permissions:
   contents: read
@@ -23,6 +46,11 @@ jobs:
   reporting-identity:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      fleet_client_changed: ${{ steps.client_files.outputs.changed }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -35,6 +63,18 @@ jobs:
         run: node --test server/middleware/reportingVercelIdentity.test.js
       - name: Verify protected reporting operator settings and rollback
         run: node --test server/scripts/reporting-source-operator.test.mjs
+      - name: Verify fleet pairing rules, signed reviews and retry admission
+        run: node --test server/services/fleetDispatch.test.js server/services/fleetDispatchWorker.test.js
+      - name: Check whether the dispatcher client changed
+        id: client_files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
+          if grep -qE '^client/(public/service-worker\.js|src/components/(dispatcher/DispatcherFleet|drivers/EditDriverModal(\.test)?)\.js|src/components/deliveries/TrackerVisitCard\.(jsx|test\.js)|src/pages/(DispatcherWorkspace(\.test)?|FleetManagement)\.js)$' <<< "$files"; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
   reporting-mongo:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -66,4 +106,41 @@ jobs:
         working-directory: server
         env:
           REPORTING_TEST_MONGO_URI: mongodb://127.0.0.1:27017/driver_reports_ci?directConnection=true
-        run: node --test services/reportingOutbox.test.js services/reportingOutbox.integration.test.js services/matterDeliveryInsert.test.js services/truckoomVisitSync.test.js
+          TRACKER_AUDIT_TEST_MONGO_URI: mongodb://127.0.0.1:27017/tracker_audit_test_reporting_ci?directConnection=true
+        run: node --test services/reportingOutbox.test.js services/reportingOutbox.integration.test.js services/matterDeliveryInsert.test.js services/truckoomVisitSync.test.js services/truckoomLiveData.test.js services/vehicleLocationCapture.test.js observability/activityTrackerVisit.test.js
+      - name: Verify the Dispatch save, legacy readers and transactional fleet receipts
+        working-directory: server
+        env:
+          REPORTING_TEST_MONGO_URI: mongodb://127.0.0.1:27017/driver_reports_ci?directConnection=true
+        run: node --test --test-concurrency=1 routes/dispatcherFleet.integration.test.js
+      - name: Verify existing dispatch, delivery ordering and completion fixtures
+        working-directory: server
+        run: node --test routes/dispatcherAssignment.test.js routes/dispatcherHandovers.test.js services/deliveryOrder.test.js services/deliveryCompletionFailure.test.js
+      - name: Verify bound fleet proof and preserved capture admission
+        working-directory: server
+        run: node --test services/fleetProofReceipt.test.js routes/trackerEvidence.test.js services/vehicleLocationCaptureStore.test.js
+      - name: Verify the current route inventory
+        working-directory: server
+        run: npm run traceability:check
+  dispatcher-client:
+    needs: reporting-identity
+    if: needs.reporting-identity.outputs.fleet_client_changed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24.22.1'
+      - name: Verify the dispatcher workspace and build with fleet enabled
+        working-directory: client
+        env:
+          CI: 'false'
+          REACT_APP_DISPATCH_FLEET_ENABLED: '1'
+        run: |
+          npm ci --no-audit --no-fund
+          CI=true npm test -- --watchAll=false --runInBand --runTestsByPath src/pages/DispatcherWorkspace.test.js src/components/drivers/EditDriverModal.test.js src/components/deliveries/TrackerVisitCard.test.js
+          npm run build

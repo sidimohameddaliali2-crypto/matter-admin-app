@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import { ArrowRight, CalendarDays, Check, Clock, History, LayoutDashboard, ListOrdered, LogOut, MapPin, Package, Plus, RefreshCw, Search, Truck, Users, X } from 'lucide-react';
@@ -10,14 +10,25 @@ import { formatBusinessTime } from '../utils/businessTime';
 import DispatcherFilters, { DispatcherDialog } from '../components/dispatcher/DispatcherFilters';
 import { DeliveryDetails, DispatcherDeliveryForm, dateLabel, timestamp, Cell } from '../components/dispatcher/DispatcherDelivery';
 import { DispatcherAssignment, DispatcherOrder, DispatcherEvents } from '../components/dispatcher/DispatcherActions';
+import DispatcherFleet, { usePendingFleetOperation } from '../components/dispatcher/DispatcherFleet';
 import DispatcherNewCustomers, { createNewCustomerCache, invalidateNewCustomerCache } from '../components/dispatcher/DispatcherNewCustomers';
 import DispatcherHandover from '../components/dispatcher/DispatcherHandover';
 import '../styles/dispatcherWorkspace.css';
 const navigation = [['dispatch', 'Dispatch', LayoutDashboard], ['drivers', 'Drivers', Users], ['handover', 'Handover', Truck], ['history', 'History', History]];
 const labelStatus = d => !d.driver && d.status === 'pending' ? 'Unassigned' : String(d.status || 'pending').replaceAll('_', ' ');
+function activeCredential() {
+  try { return localStorage.getItem('token'); } catch { return null; }
+}
+function subscribeToCredential(onChange) {
+  const changed = ({ key, storageArea }) => {
+    if ((!storageArea || storageArea === localStorage) && (key === null || key === 'token')) onChange();
+  };
+  window.addEventListener('storage', changed);
+  return () => window.removeEventListener('storage', changed);
+}
 export default function DispatcherWorkspace() {
   const {
-      user
+      user, token: authToken
     } = useSelector(s => s.auth),
     dispatch = useDispatch(),
     navigate = useNavigate(),
@@ -54,6 +65,14 @@ export default function DispatcherWorkspace() {
     [historyStatus, setHistoryStatus] = useState('all'),
     [historyVersion, setHistoryVersion] = useState(0),
     [historyTruncated, setHistoryTruncated] = useState(false);
+  const [fleetRoster, setFleetRoster] = useState(null);
+  const [fleetRosterVersion, setFleetRosterVersion] = useState(0);
+  const credential = useSyncExternalStore(subscribeToCredential, activeCredential);
+  const fleetActor = process.env.REACT_APP_DISPATCH_FLEET_ENABLED === '1'
+    && authToken && credential === authToken && user?._id ? String(user._id) : null;
+  const [pendingFleet, setPendingFleet] = usePendingFleetOperation(fleetActor);
+  const roster = fleetRoster?.actor === fleetActor ? fleetRoster : null;
+  const reloadFleetRoster = () => setFleetRosterVersion(version => version + 1);
   const fetchId = useRef(0),
     detailId = useRef(0),
     writeLock = useRef(false),
@@ -91,7 +110,7 @@ export default function DispatcherWorkspace() {
       const raw = Array.isArray(r.data) ? r.data : r.data.data || r.data.drivers;
       const data = Array.isArray(raw) ? raw : raw?.drivers;
       if (!Array.isArray(data)) throw new Error('Could not read the driver list. Please retry.');
-      setDrivers(data.filter(d => d.isActive !== false).sort((a, b) => staffName(a).localeCompare(staffName(b))));
+      setDrivers(data.filter(driver => driver.isActive !== false).sort((a, b) => staffName(a).localeCompare(staffName(b))));
     } catch (e) {
       setDriverError(errorMessage(e));
     } finally {
@@ -107,6 +126,26 @@ export default function DispatcherWorkspace() {
   useEffect(() => {
     loadDrivers();
   }, [loadDrivers]);
+  useEffect(() => {
+    if (!fleetActor || view !== 'drivers') return;
+    const controller = new AbortController();
+    setFleetRoster({ actor: fleetActor, loading: true });
+    api.get('/dispatcher-fleet/options', {
+      signal: controller.signal, timeout: 6000, headers: { 'x-matter-fleet-actor': fleetActor },
+    })
+      .then(({ data }) => {
+        if (controller.signal.aborted) return;
+        if (!Array.isArray(data?.data) || !Array.isArray(data.drivers)) {
+          throw new Error('Could not read vehicle options. Please retry.');
+        }
+        setFleetRoster({ actor: fleetActor, vehicles: data.data, drivers: data.drivers });
+      })
+      .catch(failure => {
+        if (!controller.signal.aborted) setFleetRoster({ actor: fleetActor,
+          error: failure.response?.status === 404 ? '' : errorMessage(failure) });
+      });
+    return () => controller.abort();
+  }, [view, fleetActor, fleetRosterVersion]);
   useEffect(() => {
     if (!socket) return;
     let timer;
@@ -347,7 +386,17 @@ export default function DispatcherWorkspace() {
             </button>
             <span id="dispatch-select-all-scope" className="sr-only">Selects all matching deliveries across every page</span>
           </div>{chosen.length > 0 && <div className="dp-selection"><strong>{chosen.length} selected</strong><button className="primary" disabled={loading || driverLoading} onClick={() => openAssign(chosen)}>Assign / reassign</button><button disabled={loading || !chosen.some(d => d.driver)} onClick={() => openUnassign(chosen)}>Unassign</button><button onClick={() => setSelected([])}>Clear</button></div>}{error && <p className="dp-error" role="alert">{error} <button onClick={load}>Retry</button></p>}{loading && <p className="dp-empty" role="status">Loading deliveries…</p>}{!loading && <><div className="dp-table-wrap"><table><thead><tr><th><input type="checkbox" aria-label="Select all filtered deliveries" checked={selectable.length > 0 && selectable.every(d => selected.includes(d._id))} onChange={e => setSelected(e.target.checked ? selectable.map(d => d._id) : [])} /></th><th>Customer / delivery</th><th>Area & time</th><th>Driver</th><th>Status</th><th /></tr></thead><tbody>{visible.map(d => <tr key={d._id}><td><input type="checkbox" aria-label={`Select ${d.customerName}`} disabled={isFinished(d)} checked={selected.includes(d._id)} onChange={() => toggle(d._id)} /></td><td><strong>{d.customerName}</strong><small>{d.customerId} · {d.type}</small><small className="dp-table-address">{dispatchAddress(d) || 'Address not recorded'}</small>{d.combinedSunday && <small>Sunday meals included</small>}{d.sundayOnlyCarriedOver && <small>Sunday meal carried to Saturday</small>}</td><td>{d.zone || 'No zone'}<small>{formatBusinessTime(d.scheduledTime)}</small></td><td>{d.driver ? staffName(typeof d.driver === 'object' ? d.driver : drivers.find(x => String(x._id) === driverId(d.driver))) : 'Unassigned'}</td><td>{pill(d)}</td><td><button aria-label={`Open ${d.customerName}`} onClick={() => openDetail(d)}><ArrowRight size={17} /></button></td></tr>)}</tbody></table></div><div className="dp-delivery-cards">{visible.map(deliveryCard)}</div>{!rows.length && !error && <p className="dp-empty">No deliveries match this date and these filters.</p>}</>}<footer className="dp-board-footer"><small>{rows.length} matching deliveries · Dubai time</small>{rows.length > 30 && <div><button disabled={page === 0} onClick={() => setPage(p => p - 1)}>Previous</button><span>{page + 1} / {Math.ceil(rows.length / 30)}</span><button disabled={(page + 1) * 30 >= rows.length} onClick={() => setPage(p => p + 1)}>Next</button></div>}</footer></section></>}
- {view === 'drivers' && <><div className="dp-heading"><div><p className="dp-eyebrow">PREPARE THE TEAM</p><h1>Drivers & their day.</h1><p>{dateLabel(date + 'T12:00:00Z')} · selected dispatch schedule</p></div></div><label className="dp-search"><Search size={18} /><input aria-label="Search drivers" placeholder="Search drivers…" value={driverSearch} onChange={e => setDriverSearch(e.target.value)} /></label><div className="dp-driver-grid">{drivers.filter(d => staffName(d).toLowerCase().includes(driverSearch.toLowerCase())).map(d => <article className="dp-panel" key={d._id}><span className="dp-avatar">{staffName(d).slice(0, 2).toUpperCase()}</span><h3>{staffName(d)}</h3><p className="dp-help">{d.profile?.vehicleType || 'Driver'}</p><div className="dp-summary-row"><span>Assigned deliveries</span><strong>{deliveries.filter(x => driverId(x.driver) === String(d._id)).length}</strong></div>{canBags && <button className="primary dp-full" onClick={() => tab('handover')}>Prepare bag handover</button>}</article>)}</div></>}
+ {view === 'drivers' && <>
+   <div className="dp-heading">
+     <div><p className="dp-eyebrow">PREPARE THE TEAM</p><h1>Drivers & their day.</h1><p>{dateLabel(date + 'T12:00:00Z')} · selected dispatch schedule</p></div>
+     {fleetActor && (pendingFleet || roster?.vehicles) && <button onClick={() => setModal({ type: 'vehicle' })}>
+       {pendingFleet ? 'Resume vehicle save' : 'Vehicle assignment'}
+     </button>}
+   </div>
+   {roster?.error && <p className="dp-error" role="alert">{roster.error} <button onClick={reloadFleetRoster}>Retry vehicle options</button></p>}
+   <label className="dp-search"><Search size={18} /><input aria-label="Search drivers" placeholder="Search drivers…" value={driverSearch} onChange={e => setDriverSearch(e.target.value)} /></label>
+   <div className="dp-driver-grid">{drivers.filter(d => staffName(d).toLowerCase().includes(driverSearch.toLowerCase())).map(d => <article className="dp-panel" key={d._id}><span className="dp-avatar">{staffName(d).slice(0, 2).toUpperCase()}</span><h3>{staffName(d)}</h3><p className="dp-help">{d.profile?.vehicleType || 'Driver'}</p><div className="dp-summary-row"><span>Assigned deliveries</span><strong>{deliveries.filter(x => driverId(x.driver) === String(d._id)).length}</strong></div>{canBags && <button className="primary dp-full" onClick={() => tab('handover')}>Prepare bag handover</button>}</article>)}</div>
+ </>}
  {view === 'handover' && canBags && <DispatcherHandover drivers={drivers} user={user} onHistory={() => tab('history')} onPrepared={() => setHistoryVersion(v => v + 1)} />}
  {view === 'history' && canBags && <><div className="dp-heading"><div><p className="dp-eyebrow">EVERY BAG ACCOUNTED FOR</p><h1>Handover history.</h1><p>Exact bag counts, preparing staff and driver acceptance.</p></div><button onClick={() => setHistoryVersion(v => v + 1)} aria-label="Refresh history"><RefreshCw size={18} /></button></div><section className="dp-panel dp-history"><label className="dp-search"><Search size={18} /><input aria-label="Search handover history" placeholder="Driver, dispatcher, receipt or bag…" value={historySearch} onChange={e => setHistorySearch(e.target.value)} /></label><div className="dp-chips">{[['all', 'All'], ['pending', 'Awaiting acceptance'], ['accepted', 'Accepted'], ['partial', 'Partial / exception'], ['cancelled', 'Cancelled']].map(([key, label]) => <button key={key} aria-pressed={historyStatus === key} onClick={() => setHistoryStatus(key)}>{label}</button>)}</div>{historyLoading && <p role="status">Loading history…</p>}{historyError && <p className="dp-error" role="alert">{historyError}</p>}{historyTruncated && <p className="dp-help">Showing the 100 most recently active handover receipts. Older receipts are not included.</p>}{!historyLoading && !historyError && !receiptRows.length && <p className="dp-empty">No matching handover receipts.</p>}{receiptRows.map(r => <button className="dp-receipt-card" key={r.id} onClick={() => setModal({
             type: 'receipt',
@@ -376,6 +425,9 @@ export default function DispatcherWorkspace() {
         delivery: d
       })} onAssign={openAssign} onUnassign={openUnassign} />} {formError && <p className="dp-error" role="alert">{formError}</p>}</DispatcherDialog>}
  {modal?.type === 'assign' && <DispatcherAssignment targets={modal.targets} deliveries={deliveries} drivers={drivers} date={date} onClose={close} onSaved={assignmentSaved} />}
+ {fleetActor && modal?.type === 'vehicle' && <DispatcherFleet key={fleetActor} actor={fleetActor} roster={roster} reloadRoster={reloadFleetRoster}
+   pending={pendingFleet} setPending={setPendingFleet} onClose={close}
+   onSaved={message => { close(); setNotice(message); reloadFleetRoster(); }} />}
  {modal?.type === 'unassign' && <DispatcherDialog title="Unassign driver?" busy={busy} onClose={close}><p>Remove the driver assignment from {modal.targets.length} {modal.targets.length === 1 ? 'delivery' : 'deliveries'}?</p>{formError && <p className="dp-error" role="alert">{formError}</p>}<div className="dp-actions"><button disabled={busy} onClick={close}>Keep assignment</button><button disabled={busy || !modal.targets.length} onClick={unassign}>{busy ? 'Saving…' : 'Confirm unassign'}</button></div></DispatcherDialog>}
  {modal?.type === 'order' && <DispatcherOrder {...{
       date,

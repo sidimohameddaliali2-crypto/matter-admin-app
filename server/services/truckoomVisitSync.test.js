@@ -4,6 +4,8 @@ import axios from 'axios';
 import truckoom from './truckoomApiService.js';
 import truckoomHistory from './truckoomHistoryService.js';
 import Delivery from '../models/Delivery.js';
+import FleetAssignmentReceipt from '../models/FleetAssignmentReceipt.js';
+import { captureFleetProofReceipt } from './fleetProofReceipt.js';
 import CustomerGeofence from '../models/CustomerGeofence.js';
 import TrackerSyncLease from '../models/TrackerSyncLease.js';
 import TrackerGeofenceEvent from '../models/TrackerGeofenceEvent.js';
@@ -32,7 +34,7 @@ function setup(t, overrides = {}) {
   t.mock.method(TrackerSyncLease, 'findOneAndUpdate', async (_filter, update) => ({ owner: update.$set.owner }));
   t.mock.method(TrackerSyncLease, 'updateOne', async () => ({ matchedCount: 1 }));
   t.mock.method(TrackerSyncLease, 'deleteOne', async () => ({}));
-  t.mock.method(Delivery, 'find', () => ({ populate: () => ({ lean: async () => [row] }) }));
+  t.mock.method(Delivery, 'find', () => ({ select() { return this; }, populate: () => ({ lean: async () => [row] }) }));
   t.mock.method(Delivery, 'updateOne', async (filter, update, options) => { writes.push({ filter, update, options }); return { modifiedCount: 1 }; });
   t.mock.method(CustomerGeofence, 'findOne', () => ({ lean: async () => fence }));
   t.mock.method(CustomerGeofence, 'find', () => ({ sort: () => ({ limit: () => ({ lean: async () => [] }) }) }));
@@ -299,6 +301,147 @@ test('a completed proof with no captured vehicle cannot borrow a later tracker m
   assert.equal(visit.vehicleNo, undefined);
 });
 
+function managedVisit(t, {
+  alias = 'V2', hasBinding = true, crossesHandover = false, captureBound = true,
+  startsBeforeEntry = false, pilotTiming = 'before-capture', stillRostered = true, receivedAfterTick = false,
+} = {}) {
+  const fixture = setup(t);
+  const driverId = 'b'.repeat(24), sourceVehicleId = '1'.repeat(24), receiptId = 'c'.repeat(24);
+  const previousEnv = process.env.MATTER_DISPATCH_FLEET_ROSTER;
+  process.env.MATTER_DISPATCH_FLEET_ROSTER = JSON.stringify({ driverIds: [stillRostered ? driverId : 'a'.repeat(24)], assets: [
+    { sourceVehicleId, vehicleClass: 'bike', trackerAlias: alias },
+  ] });
+  t.after(() => {
+    if (previousEnv === undefined) delete process.env.MATTER_DISPATCH_FLEET_ROSTER;
+    else process.env.MATTER_DISPATCH_FLEET_ROSTER = previousEnv;
+  });
+
+  const { row, now } = fixture;
+  row.driver = { _id: driverId, profile: { truckoomVehicleNo: 'V3' } };
+  row.trackerVisit = { geofenceId: 'G1', geofenceName: fixture.identity.name, businessDate: fixture.identity.businessDate,
+    driverId, vehicleNo: 'V1', lat: 25.1, lng: 55.2, radiusMetres: 60, status: 'awaiting_events' };
+  row.trackerVisitGpsBaseline = { evidence: { status: 'gps_visit_observed' } };
+  row.proof.photoUrl = 'https://example.invalid/proof.jpg';
+  if (receivedAfterTick) row.proof.receivedAt = new Date(+now + 250);
+  if (captureBound) row.fleetProofReceipt = captureFleetProofReceipt(row, row.proof, driverId, {
+    actor: { role: 'driver', _id: driverId },
+  });
+
+  const initial = hasBinding ? {
+    _id: receiptId, effectiveAt: new Date(+row.proof.photoCapturedAt - (startsBeforeEntry ? 6 : 4) * 60_000),
+    // A reciprocal or one-driver move closes one asset and opens the other in one receipt.
+    changes: [{ sourceVehicleId: '2'.repeat(24), previousDriverId: driverId, driverId: null, trackerAlias: 'V1' },
+      { sourceVehicleId, driverId, trackerAlias: alias }],
+  } : null;
+  const next = crossesHandover ? { effectiveAt: new Date(+now - 10 * 60_000) } : null;
+  const pilotStart = {
+    'before-capture': { effectiveAt: new Date(+row.proof.photoCapturedAt - 60 * 60_000) },
+    'after-capture': { effectiveAt: new Date(+row.proof.photoCapturedAt + 60_000) },
+    'after-receipt': { effectiveAt: new Date(+row.proof.receivedAt + 60_000) },
+    'not-enrolled': null,
+  }[pilotTiming];
+  t.mock.method(FleetAssignmentReceipt, 'findOne', filter => {
+    if (filter.effectiveAt) {
+      const boundary = filter.effectiveAt.$lte ?? filter.effectiveAt.$gt;
+      assert.equal(+boundary, +row.proof.photoCapturedAt);
+    }
+    assert.deepEqual(filter.$or, [{ 'changes.driverId': driverId }, { 'changes.previousDriverId': driverId }]);
+    return { sort() { return this; }, select() { return this; }, read() { return this; },
+      readConcern() { return this; }, maxTimeMS() { return this; },
+      async lean() { return !filter.effectiveAt ? pilotStart : filter.effectiveAt.$lte ? initial : next; } };
+  });
+  return fixture;
+}
+
+test('managed camera proof after a swap uses the dated alias and keeps the previous visit evidence', async t => {
+  const fixture = managedVisit(t);
+  await syncCustomerTrackerVisits({ now: fixture.now });
+  const update = fixture.writes[0].update.$set;
+  assert.equal(update.trackerVisit.vehicleNo, 'V2');
+  assert.equal(update.trackerVisit.status, 'awaiting_events');
+  assert.deepEqual(update['trackerVisitGpsBaseline.beforeFleet'].evidence, fixture.row.trackerVisit);
+  assert.equal(update.trackerVisitGpsBaseline, undefined);
+  assert.equal(fixture.row.trackerVisitGpsBaseline.evidence.status, 'gps_visit_observed');
+  assert.equal(+fixture.row.fleetProofReceipt.receivedAt, +fixture.now);
+});
+
+test('the dated tracker receipt still applies after a driver leaves the current pilot roster', async t => {
+  const fixture = managedVisit(t, { stillRostered: false, startsBeforeEntry: true });
+  t.mock.method(truckoom, 'getAlertData', async () => fixture.eventRows.map(row => ({ ...row, vehicle_no: 'V2' })));
+  await syncCustomerTrackerVisits({ now: fixture.now });
+  const { trackerVisit: visit } = fixture.writes[0].update.$set;
+  assert.equal(visit.vehicleNo, 'V2');
+  assert.equal(visit.status, 'inside_window');
+});
+
+test('managed tracker alerts are scoped to the custody interval and require an in-interval entry', async t => {
+  const fixture = managedVisit(t);
+  t.mock.method(truckoom, 'getAlertData', async () => fixture.eventRows.map(row => ({ ...row, vehicle_no: 'V2' })));
+  await syncCustomerTrackerVisits({ now: fixture.now });
+  const visit = fixture.writes[0].update.$set.trackerVisit;
+  assert.equal(visit.vehicleNo, 'V2');
+  assert.equal(visit.status, 'incomplete_events');
+  assert.equal(visit.arrivedAt, null);
+});
+
+test('managed tracker proof verifies an alert pair inside the dated custody', async t => {
+  const fixture = managedVisit(t, { startsBeforeEntry: true });
+  t.mock.method(truckoom, 'getAlertData', async () => [
+    ...fixture.eventRows, ...fixture.eventRows.map(row => ({ ...row, vehicle_no: 'V2' })),
+  ]);
+  await syncCustomerTrackerVisits({ now: fixture.now });
+  const { trackerVisit: visit } = fixture.writes[0].update.$set;
+  assert.equal(visit.vehicleNo, 'V2');
+  assert.equal(visit.status, 'inside_window');
+  assert.ok(visit.arrivedAt);
+});
+
+test('managed proof crossing a handover or lacking one dated binding stays unverified', async t => {
+  for (const overrides of [{ crossesHandover: true }, { hasBinding: false }, { captureBound: false },
+    { hasBinding: false, pilotTiming: 'after-capture' }]) {
+    await t.test(JSON.stringify(overrides), async sub => {
+      const fixture = managedVisit(sub, overrides);
+      await syncCustomerTrackerVisits({ now: fixture.now });
+      const { trackerVisit: visit } = fixture.writes[0].update.$set;
+      assert.equal(visit.status, 'assignment_unverified');
+      assert.equal(visit.vehicleNo, null);
+      assert.equal(visit.arrivedAt, null);
+      assert.equal(visit.needsReview, false);
+      assert.equal(fixture.dates.length, 0);
+    });
+  }
+});
+
+test('legacy saved visits remain on the original path before first custody or without a pilot receipt', async t => {
+  for (const pilotTiming of ['after-receipt', 'not-enrolled']) {
+    await t.test(pilotTiming, async sub => {
+      const fixture = managedVisit(sub, { pilotTiming });
+      await syncCustomerTrackerVisits({ now: fixture.now });
+      const update = fixture.writes[0].update.$set;
+      assert.equal(update.trackerVisit.vehicleNo, 'V1');
+      assert.equal(update.trackerVisit.status, 'inside_window');
+      assert.equal(update['trackerVisitGpsBaseline.beforeFleet'], undefined);
+      assert.equal(FleetAssignmentReceipt.findOne.mock.callCount(), 1);
+    });
+  }
+});
+
+test('proof received after the worker clock waits for the next managed verification cycle', async t => {
+  const fixture = managedVisit(t, { receivedAfterTick: true });
+  await syncCustomerTrackerVisits({ now: fixture.now });
+  assert.equal(fixture.writes.length, 0);
+  assert.equal(fixture.dates.length, 0);
+});
+
+test('confirmed untracked custody cannot borrow a frozen or current alias', async t => {
+  const fixture = managedVisit(t, { alias: null });
+  await syncCustomerTrackerVisits({ now: fixture.now });
+  const { trackerVisit: visit } = fixture.writes[0].update.$set;
+  assert.equal(visit.status, 'no_tracker');
+  assert.equal(visit.vehicleNo, null);
+  assert.equal(fixture.dates.length, 0);
+});
+
 test('vehicle GPS supplies labelled visit evidence when the vendor supplies no customer alerts', async t => {
   const fixture = setup(t);
   const { startOfDay } = getBusinessDayBounds(fixture.now);
@@ -538,11 +681,14 @@ test('GPS method and prior evidence survive model casting without changing real 
   const fixture=setup(t);
   const evidence={evidenceSource:'truckoom_gps_samples',status:'gps_visit_observed'};
   const doc=new Delivery({trackerVisit:{status:'incomplete_events',gpsMethod:'gps-observations-v2',
-    gpsQualityReasons:['observation_gap']},trackerVisitGpsBaseline:{recordedAt:fixture.now,evidence}});
+    gpsQualityReasons:['observation_gap']},trackerVisitGpsBaseline:{recordedAt:fixture.now,evidence,
+      beforeFleet:{recordedAt:fixture.now,evidence:{vehicleNo:'old-alias'}}}});
   const saved=doc.toObject().trackerVisit;
   assert.equal(saved.gpsMethod,'gps-observations-v2');
   assert.deepEqual(saved.gpsQualityReasons,['observation_gap']);
   assert.deepEqual(doc.toObject().trackerVisitGpsBaseline.evidence,evidence);
+  assert.equal(doc.toObject().trackerVisitGpsBaseline.beforeFleet,undefined);
+  assert.equal(doc.toObject({transform:false}).trackerVisitGpsBaseline.beforeFleet.evidence.vehicleNo,'old-alias');
 });
 
 for (const rejection of ['invalid coordinates','missing GPS clock']) {

@@ -11,6 +11,8 @@ import { CAPTURE_MAX_ROWS, captureObservationId, captureTickId } from '../servic
 import { CAPTURE_FIELDS, serializeHistoryPoint } from '../services/vehicleLocationView.js';
 import { inspectReportingMongoTopology, readReportingChanges, readReportingWatermark, reportingCaptureEnabled } from '../services/reportingOutbox.js';
 import { serializeDelivery } from './externalDeliveryApi.js';
+import { fleetProofForReporting } from '../services/fleetProofReceipt.js';
+import { readFleetAssignmentReceipt } from '../services/fleetDispatchStore.js';
 
 const router = express.Router();
 const hasReportingVercelIdentity = createReportingVercelIdentity();
@@ -50,6 +52,7 @@ export function serializeReportingDelivery(delivery) {
   const data = serializeDelivery(delivery, undefined, { includeProofEvidence: true });
   const { customerName, customerId, company, type, status, address, addressId, addressDetails,
     matterSubscriptionId, locationType, deliveredTime, timing, driver, proof, gpsLocation, updatedAt } = data;
+  const fleetProof = fleetProofForReporting(delivery.fleetProofReceipt, proof);
   return {
     ...summary, customerName, customerId, company, type, status, address, addressId,
     matterSubscriptionId, locationType, deliveredTime, timing, updatedAt,
@@ -61,8 +64,10 @@ export function serializeReportingDelivery(delivery) {
       timestamp: proof.timestamp,
       receivedAt: proof.receivedAt,
       photoCapturedAt: proof.photoCapturedAt,
+      ...(proof.photoSource && { photoSource: proof.photoSource }),
       location: proof.location,
     },
+    ...(fleetProof && { fleetProof }),
     gpsLocation: gpsLocation ? { lat: gpsLocation.lat, lng: gpsLocation.lng } : null,
   };
 }
@@ -73,7 +78,7 @@ router.get('/deliveries/:id', async (req, res) => {
   }
   try {
     const delivery = await Delivery.findById(req.params.id).read('primary').readConcern('majority')
-      .select('customerId customerName company otherCompany type status address addressId addressDetails zone matterSubscriptionId scheduledTime deliveredTime completedAt deliveryType lateMinutes earlyMinutes driver proof.photoUrl proof.images proof.timestamp proof.receivedAt proof.photoCapturedAt proof.location gpsLocation updatedAt +reportingVersion')
+      .select('customerId customerName company otherCompany type status address addressId addressDetails zone matterSubscriptionId scheduledTime deliveredTime completedAt deliveryType lateMinutes earlyMinutes driver proof.photoUrl proof.images proof.timestamp proof.receivedAt proof.photoCapturedAt proof.photoSource proof.location gpsLocation updatedAt +reportingVersion +fleetProofReceipt')
       .populate('driver', 'profile.firstName profile.lastName profile.vehicleType').maxTimeMS(5000).lean();
     if (!Number.isSafeInteger(delivery?.reportingVersion) || delivery.reportingVersion < 1) {
       return res.status(404).json({ success: false, message: 'Versioned reporting delivery not found' });
@@ -82,6 +87,22 @@ router.get('/deliveries/:id', async (req, res) => {
   } catch {
     console.error('Reporting delivery snapshot is unavailable');
     return res.status(503).json({ success: false, message: 'Reporting delivery snapshot is unavailable' });
+  }
+});
+
+router.get('/fleet-assignments/:id', async (req, res) => {
+  if (!/^[a-f0-9]{24}$/i.test(req.params.id)) {
+    return res.status(400).json({ success: false, message: 'Invalid vehicle assignment receipt id' });
+  }
+  if (!reportingCaptureEnabled()) {
+    return res.status(503).json({ success: false, message: 'Reporting capture is unavailable' });
+  }
+  try {
+    const data = await readFleetAssignmentReceipt(req.params.id);
+    if (!data) return res.status(404).json({ success: false, message: 'Vehicle assignment receipt not found' });
+    return res.json({ success: true, data });
+  } catch {
+    return res.status(503).json({ success: false, message: 'Vehicle assignment receipt is unavailable' });
   }
 });
 
@@ -169,11 +190,11 @@ router.get('/gps-batches/:id', async (req, res) => {
     const rows = await VehicleLocationHistory.find({ _id: { $in: ids }, captureBatchId: batchId })
       .read('primary').readConcern('majority')
       .sort({ captureRow: 1 }).limit(CAPTURE_MAX_ROWS + 1)
-      .select('vehicleNo driver latitude longitude gpsTime recordedAt ' + CAPTURE_FIELDS).lean();
+      .select('vehicleNo driver latitude longitude gpsTime recordedAt trackerIdentity ' + CAPTURE_FIELDS).lean();
     if (rows.length !== batch.count || rows.some((row, index) => row.captureRow !== index)) {
       throw new Error('Incomplete committed GPS batch');
     }
-    res.json({ success: true, data: rows.map(serializeHistoryPoint), batchId });
+    res.json({ success: true, data: rows.map(row => serializeHistoryPoint(row, { includeTrackerIdentity: true })), batchId });
   } catch {
     console.error('Reporting GPS batch is unavailable');
     res.status(503).json({ success: false, message: 'Reporting GPS batch is unavailable' });

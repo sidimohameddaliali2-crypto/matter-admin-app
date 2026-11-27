@@ -42,6 +42,12 @@ function snapshot(value) {
   return JSON.parse(bytes);
 }
 
+function boundedPayloadBytes(payload) {
+  const bytes = JSON.stringify(payload);
+  return Buffer.byteLength(bytes) <= CAPTURE_MAX_BYTES
+    && mongoose.mongo.BSON.calculateObjectSize({ payload }) <= CAPTURE_MAX_BYTES ? bytes : null;
+}
+
 function preparePayload(batchId, input) {
   if (!input || !Array.isArray(input.rows) || input.rows.length > CAPTURE_MAX_ROWS) throw failure('CAPTURE_BATCH_TOO_LARGE');
   const payload = snapshot({ rows: input.rows, summary: input.summary || {}, sourceReferences: input.sourceReferences || [] });
@@ -50,9 +56,14 @@ function preparePayload(batchId, input) {
     const { _id: ignoredId, ...fields } = row;
     return { ...fields, captureBatchId: batchId, captureRow };
   });
-  const bytes = JSON.stringify(payload);
-  if (Buffer.byteLength(bytes) > CAPTURE_MAX_BYTES
-    || mongoose.mongo.BSON.calculateObjectSize({ payload }) > CAPTURE_MAX_BYTES) throw failure('CAPTURE_BATCH_TOO_LARGE');
+  let bytes = boundedPayloadBytes(payload);
+  if (!bytes && payload.rows.some(row => Object.hasOwn(row, 'trackerIdentity'))) {
+    // Admit the original point and outbox evidence at the existing bound.
+    // A retried input makes the same decision before the payload is saved.
+    for (const row of payload.rows) delete row.trackerIdentity;
+    bytes = boundedPayloadBytes(payload);
+  }
+  if (!bytes) throw failure('CAPTURE_BATCH_TOO_LARGE');
   return { payload, payloadSha256: digest(bytes) };
 }
 

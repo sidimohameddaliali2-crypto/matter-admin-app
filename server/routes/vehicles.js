@@ -2,6 +2,7 @@ import express from 'express';
 import Vehicle from '../models/Vehicle.js';
 import FuelLog from '../models/FuelLog.js';
 import { protect, admin } from '../middleware/auth.js';
+import { driverSourceId, fleetRoster, legacyFleetConflict } from '../services/fleetDispatch.js';
 
 const router = express.Router();
 
@@ -90,6 +91,8 @@ router.post('/', protect, admin, async (req, res) => {
       return res.status(400).json({ success: false, message: 'vehicleId, type, and plateNumber are required' });
     }
 
+    if (assignedDriver && fleetRoster()?.driverIds.has(driverSourceId(assignedDriver))) throw legacyFleetConflict();
+
     const vehicle = await Vehicle.create({
       vehicleId,
       type,
@@ -106,6 +109,7 @@ router.post('/', protect, admin, async (req, res) => {
     if (error.code === 11000) {
       return res.status(400).json({ success: false, message: 'A vehicle with this Vehicle ID already exists' });
     }
+    if ([409, 503].includes(error.status)) return res.status(error.status).json({ success: false, message: error.message });
     console.error('Create vehicle error:', error);
     res.status(500).json({ success: false, message: error.message || 'Failed to create vehicle' });
   }
@@ -124,6 +128,25 @@ router.put('/:id', protect, admin, async (req, res) => {
     if (fuelLevel !== undefined) update.fuelLevel = fuelLevel;
     if (notes !== undefined) update.notes = notes;
 
+    const roster = assignedDriver !== undefined || type !== undefined ? fleetRoster() : null;
+    if (roster) {
+      const current = await Vehicle.findById(req.params.id).select('type assignedDriver').lean();
+      if (!current) return res.status(404).json({ success: false, message: 'Vehicle not found' });
+      const managed = roster.assets.has(String(current._id));
+      const previousDriver = driverSourceId(current.assignedDriver);
+      const requestedDriver = driverSourceId(assignedDriver);
+      if (managed && type !== undefined) {
+        if (type !== current.type) throw legacyFleetConflict();
+        delete update.type;
+      }
+      if (assignedDriver !== undefined && (managed || roster.driverIds.has(previousDriver) || roster.driverIds.has(requestedDriver))) {
+        if (requestedDriver !== previousDriver) throw legacyFleetConflict();
+        // Generic Fleet edits also echo the driver field. Do not write it
+        // back when Dispatch might already have committed a later handover.
+        delete update.assignedDriver;
+      }
+    }
+
     const vehicle = await Vehicle.findByIdAndUpdate(req.params.id, update, { new: true, runValidators: true })
       .populate('assignedDriver', DRIVER_SELECT);
 
@@ -135,6 +158,7 @@ router.put('/:id', protect, admin, async (req, res) => {
     if (error.code === 11000) {
       return res.status(400).json({ success: false, message: 'A vehicle with this Vehicle ID already exists' });
     }
+    if ([409, 503].includes(error.status)) return res.status(error.status).json({ success: false, message: error.message });
     console.error('Update vehicle error:', error);
     res.status(500).json({ success: false, message: error.message || 'Failed to update vehicle' });
   }
@@ -143,6 +167,13 @@ router.put('/:id', protect, admin, async (req, res) => {
 // DELETE /api/vehicles/:id
 router.delete('/:id', protect, admin, async (req, res) => {
   try {
+    const roster = fleetRoster();
+    if (roster) {
+      const current = await Vehicle.findById(req.params.id).select('assignedDriver').lean();
+      if (current && (roster.assets.has(String(current._id)) || roster.driverIds.has(driverSourceId(current.assignedDriver)))) {
+        throw legacyFleetConflict();
+      }
+    }
     const vehicle = await Vehicle.findByIdAndDelete(req.params.id);
     if (!vehicle) {
       return res.status(404).json({ success: false, message: 'Vehicle not found' });
@@ -151,6 +182,7 @@ router.delete('/:id', protect, admin, async (req, res) => {
     await FuelLog.deleteMany({ vehicle: req.params.id });
     res.json({ success: true, message: 'Vehicle removed' });
   } catch (error) {
+    if ([409, 503].includes(error.status)) return res.status(error.status).json({ success: false, message: error.message });
     console.error('Delete vehicle error:', error);
     res.status(500).json({ success: false, message: error.message || 'Failed to delete vehicle' });
   }

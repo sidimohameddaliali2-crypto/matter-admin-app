@@ -1,6 +1,7 @@
 import express from 'express';
 import User, { getDefaultPermissions, effectivePermissions } from '../models/User.js';
 import { protect, authorize, admin, superAdmin } from '../middleware/auth.js';
+import { fleetRoster, legacyFleetConflict } from '../services/fleetDispatch.js';
 
 // Return a plain user object with `permissions` replaced by the effective set
 // the client should enforce (role defaults for unconfigured users, stored
@@ -226,6 +227,7 @@ router.put('/:id', async (req, res) => {
     
     // Only admins can change role, permissions, and active status
     if (req.user.role === 'super_admin' || req.user.role === 'admin') {
+      if (role && role !== user.role && fleetRoster()?.driverIds.has(String(user._id))) throw legacyFleetConflict();
       if (role) user.role = role;
       if (permissions) {
         // Assign after role so the pre-save hook (which only re-seeds when
@@ -245,6 +247,7 @@ router.put('/:id', async (req, res) => {
 
     res.json(withEffectivePermissions(updatedUser));
   } catch (error) {
+    if ([409, 503].includes(error.status)) return res.status(error.status).json({ message: error.message });
     console.error('Update user error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }
@@ -269,10 +272,12 @@ router.delete('/:id', superAdmin, async (req, res) => {
       return res.status(403).json({ message: 'Cannot delete other super admin accounts' });
     }
 
+    if (fleetRoster()?.driverIds.has(String(user._id))) throw legacyFleetConflict();
     await User.findByIdAndDelete(req.params.id);
 
     res.json({ message: 'User deleted successfully' });
   } catch (error) {
+    if ([409, 503].includes(error.status)) return res.status(error.status).json({ message: error.message });
     console.error('Delete user error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });
   }

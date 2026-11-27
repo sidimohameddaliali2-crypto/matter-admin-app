@@ -43,6 +43,7 @@ export function buildVehicleLocationSamples({ fleet, drivers, recordedAt, mappin
       driverCandidates, driverMappingState: driverCandidates.length === 1 ? 'current_mapping_snapshot' : driverCandidates.length ? 'ambiguous_current_mapping' : mappingAvailable ? 'unmapped' : 'unavailable',
       latitude, longitude, recordedAt: receipt, gpsTime,
       sourceReceipt: vehicle.sourceReceipt || null, sourceRow: vehicle.sourceRow ?? null,
+      ...(vehicle.trackerIdentity && { trackerIdentity: vehicle.trackerIdentity }),
       trackerServerTime, rawGpsTime: text(vehicle.rawGpsTime), rawTrackerServerTime: text(vehicle.rawTrackerServerTime),
       speedKph: Number.isFinite(vehicle.speedKph) ? vehicle.speedKph : null,
       ignition: text(vehicle.ignition), trackerStatus: text(vehicle.trackerStatus), locationSource: text(vehicle.locationSource),

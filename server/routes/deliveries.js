@@ -29,6 +29,7 @@ import { protectMatterRevenueInput } from '../middleware/matterRevenueInput.js';
 import { protectCollectionRefundInput } from '../middleware/collectionRefundInput.js';
 import { fillProofAddressInBackground, resolveProofAddressWithin } from '../services/proofLocationAddress.js';
 import { recordProofReceipt } from '../services/truckoomVisitRules.js';
+import { primaryProofPhoto } from '../services/fleetProofReceipt.js';
 import {
   optimizeRoutes,
   applyRoutePlan,
@@ -373,14 +374,21 @@ router.use(protect);
 router.use(protectMatterRevenueInput);
 router.use(protectMatterImportIdentityInput);
 router.use(protectCollectionRefundInput);
-// Tracker verdicts, their baseline evidence, and receipt timestamps are server-owned.
+// Tracker verdicts, their baseline evidence and proof receipts are server-owned.
 router.use(function protectTrackerEvidence(req, res, next) {
   const clean = value => {
     if (!value || typeof value !== 'object') return;
     if (Array.isArray(value)) { value.forEach(clean); return; }
     for (const key of Object.keys(value)) {
       if (key === 'trackerVisit' || key.startsWith('trackerVisit.')
-        || key === 'trackerVisitGpsBaseline' || key.startsWith('trackerVisitGpsBaseline.') || key === 'receivedAt' || key === 'proof.receivedAt') delete value[key];
+        || key === 'trackerVisitGpsBaseline' || key.startsWith('trackerVisitGpsBaseline.')
+        || key === 'fleetProofReceipt' || key.startsWith('fleetProofReceipt.') || key === 'receivedAt' || key === 'proof.receivedAt') delete value[key];
+      else if (key === '$rename' && value[key] && typeof value[key] === 'object') {
+        for (const [path, target] of Object.entries(value[key])) {
+          if (typeof target === 'string' && (target === 'fleetProofReceipt' || target.startsWith('fleetProofReceipt.'))) delete value[key][path];
+        }
+        clean(value[key]);
+      }
       else clean(value[key]);
     }
   };
@@ -2461,7 +2469,7 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
     const normalizedLocation = normalizeLocationPayload(location);
 
     // Find delivery
-    const delivery = await Delivery.findById(deliveryId);
+    const delivery = await Delivery.findById(deliveryId).select('+fleetProofReceipt');
     if (!delivery) {
       return res.status(404).json({
         success: false,
@@ -2499,6 +2507,8 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
 
     // Build proof: body proof takes precedence; fall back to uploaded files
     const proofLocation = normalizedLocation || undefined;
+    const previousPhoto = primaryProofPhoto(delivery.proof);
+    const previousReceipt = delivery.fleetProofReceipt?.toObject();
     const mergedImages = bodyProof.images?.length
       ? bodyProof.images
       : proofImages.length
@@ -2514,7 +2524,9 @@ router.post('/:id/complete', upload.array('proofImages', 5), handleUploadError, 
       timestamp: new Date(),
       location: proofLocation
     };
-    recordProofReceipt(delivery, { ...bodyProof, photoUrl: delivery.proof.photoUrl });
+    recordProofReceipt(delivery, { ...bodyProof, photoUrl: delivery.proof.photoUrl }, new Date(), {
+      actor: req.user, previousPhoto, previousReceipt, handsetLocation: proofLocation, replacedProof: true,
+    });
 
     await recordDeliveryBagMovements(delivery,{status:'delivered',proof:delivery.proof,bagId:req.body.bagId||bodyProof.bagId||delivery.bagAssignment?.bagId||delivery.bag?.bagId},req.user);
 
@@ -2656,7 +2668,7 @@ router.patch('/:id/bag-assignment', async (req, res) => {
   try {
     const { bagId, proof } = req.body;
     
-    const delivery = await Delivery.findById(req.params.id);
+    const delivery = await Delivery.findById(req.params.id).select('+fleetProofReceipt');
     
     if (!delivery) {
       return res.status(404).json({ message: 'Delivery not found' });
@@ -2693,8 +2705,11 @@ router.patch('/:id/bag-assignment', async (req, res) => {
     await recordDeliveryBagMovements(delivery,{...req.body,status:delivery.status},req.user);
 
     if (proof) {
+      const previousPhoto = primaryProofPhoto(delivery.proof);
+      const previousReceipt = delivery.fleetProofReceipt?.toObject();
       delivery.proof = { ...delivery.proof, ...proof };
-      recordProofReceipt(delivery, proof);
+      recordProofReceipt(delivery, proof, new Date(), { actor: req.user, previousPhoto, previousReceipt,
+        handsetLocation: normalizeLocationPayload(proof.location) });
     }
 
     // Add to timeline
@@ -2723,7 +2738,7 @@ router.patch('/:id/status', async (req, res) => {
   try {
     const { status, proof, bagId } = req.body;
     
-    const delivery = await Delivery.findById(req.params.id);
+    const delivery = await Delivery.findById(req.params.id).select('+fleetProofReceipt');
     
     if (!delivery) {
       return res.status(404).json({ message: 'Delivery not found' });
@@ -2771,10 +2786,13 @@ router.patch('/:id/status', async (req, res) => {
       delivery.lateMinutes = 0;
       delivery.earlyMinutes = 0;
       delivery.completedAt = undefined;
+      if (delivery.fleetProofReceipt) delivery.fleetProofReceipt = null;
     }
 
     // Handle proof data safely
     if (proof) {
+      const previousPhoto = primaryProofPhoto(delivery.proof);
+      const previousReceipt = delivery.fleetProofReceipt?.toObject();
       // Initialize proof object if it doesn't exist
       if (!delivery.proof) {
         delivery.proof = {};
@@ -2798,7 +2816,9 @@ router.patch('/:id/status', async (req, res) => {
       if (!delivery.proof.timestamp) {
         delivery.proof.timestamp = new Date();
       }
-      recordProofReceipt(delivery, proof);
+      const completionActor = ['delivered', 'completed'].includes(status) ? req.user : null;
+      recordProofReceipt(delivery, proof, new Date(), { actor: completionActor, previousPhoto, previousReceipt,
+        handsetLocation: normalizeLocationPayload(proof.location) });
 
       // Owner (2026-10-10): "make two pins, the actual location and the
       // driver location, do not overwrite" — this used to copy the driver's

@@ -31,6 +31,12 @@ dotenv.config();
 const FLEET_CACHE_TTL_SECONDS = 60;
 const FLEET_CACHE_KEY = 'truckoom:fleet:vehicles:v3';
 
+function trackerDeviceId(value) {
+  const id = Number.isSafeInteger(value) && value > 0 ? String(value)
+    : typeof value === 'string' ? value.trim() : '';
+  return /^[A-Za-z0-9._:-]{1,128}$/.test(id) ? id : null;
+}
+
 class TruckoomApiService {
   constructor() {
     this.baseURL = process.env.TRUCKOOM_BASE_URL || 'https://trace.truckoom.com/webservice';
@@ -226,6 +232,15 @@ class TruckoomApiService {
     const fleet = vehicles.map((v) => {
       const candidates = locationsByVehicle.get(v.vehicleNo) || [];
       const loc = candidates.length === 1 ? candidates[0] : null;
+      const namespace = candidates[0]?.sourceNamespace;
+      const sourceReceipt = loc?.sourceReceipt || candidates[0]?.sourceReceipt || locations.sourceReceipt || null;
+      const devices = candidates.length > 1 ? candidates.map(candidate => trackerDeviceId(candidate.imei)) : [];
+      const candidateDeviceIds = devices.length && devices.every(Boolean) ? [...new Set(devices)].sort() : [];
+      const trackerIdentity = namespace && sourceReceipt?.kind === 'live'
+        && candidates.every(candidate => candidate.sourceNamespace === namespace)
+        ? { namespace, deviceId: trackerDeviceId(loc?.imei), directoryDeviceId: trackerDeviceId(v.imei),
+          ...(candidateDeviceIds.length && candidateDeviceIds.length <= 8 && { candidateDeviceIds }) }
+        : null;
       return {
         vehicleNo: v.vehicleNo,
         imei: v.imei,
@@ -244,8 +259,9 @@ class TruckoomApiService {
         locationSource: loc?.locationSource || null,
         rawCoordinates: loc?.rawCoordinates || null,
         sourceRow: loc?.sourceRow ?? null,
-        sourceReceipt: loc?.sourceReceipt || candidates[0]?.sourceReceipt || locations.sourceReceipt || null,
+        sourceReceipt,
         sourceQualityFlags: candidates.length > 1 ? ['conflicting_live_vehicle_rows'] : [],
+        ...(trackerIdentity && { trackerIdentity }),
       };
     });
 

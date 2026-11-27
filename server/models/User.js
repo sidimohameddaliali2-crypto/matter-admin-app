@@ -39,9 +39,8 @@ const userSchema = new mongoose.Schema({
     shiftTiming: String,
     vehicleId: String,
     // Which Truckoom-tracked vehicle (their vehicle_no, e.g. "71591") this
-    // driver's real GPS comes from — set manually on the driver's profile
-    // (Drivers page), since Truckoom has no reliable field of its own
-    // linking a vehicle to a driver (see services/truckoomApiService.js).
+    // driver's real GPS comes from. Dispatch maintains the managed fleet's
+    // link from confirmed custody; other driver links remain manually set.
     // Null for drivers with no tracked vehicle.
     truckoomVehicleNo: {
       type: String,
