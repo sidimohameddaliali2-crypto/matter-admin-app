@@ -143,7 +143,7 @@
     "server/routes/deliveryOrder.js": "9878c87a45a8e972e43bb4bba611aeec39dcfa4f7ae8822f2c3b01b442d145ba",
     "server/routes/dispatcherHandovers.js": "6432b395ad15a2e5c40bd1da2ce8fa9da04cc7b7f3fdf580d039232c3fd97bd9",
     "server/routes/dispatcherLocationReviews.js": "329e3b7278254e6549694e88d30fd0a0c49976aff97fe10b807ffd834a292a8a",
-    "server/routes/drivers.js": "147fb9519b6be77f42f3402fefd843891c8e163444b83c9dbd3241a2e335a78d",
+    "server/routes/drivers.js": "6cc2115272efb6d446fd33759fbaad8b0507b04f6cebc579dc8752fb0b1de408",
     "server/routes/employees.js": "ec4db79bcee3ad0581c5869d0aa2e548eb097fae6cabf10d5d36b9aeed988b6b",
     "server/routes/events.js": "32e740ac024915317cd2960dcef817e9aa8c973c49fd2a69c677e0d78de62005",
     "server/routes/externalDeliveryApi.js": "ae7351681d5febf5fbf38acd72bbe6f6aab51008d89ae9f9401a4993cac86631",
@@ -1639,7 +1639,7 @@
     {
       "id": "7d812daa5ea2fb8d",
       "method": "GET",
-      "source": "server/routes/drivers.js:12",
+      "source": "server/routes/drivers.js:13",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1654,7 +1654,8 @@
       "requestKeys": [],
       "referencedCalls": [
         "Delivery.aggregate",
-        "User.find"
+        "User.find",
+        "Vehicle.find"
       ],
       "path": "/api/users/drivers",
       "middlewareDeclarations": []
@@ -1662,7 +1663,7 @@
     {
       "id": "e8b183f2dae59a4a",
       "method": "GET",
-      "source": "server/routes/drivers.js:91",
+      "source": "server/routes/drivers.js:102",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1687,7 +1688,7 @@
     {
       "id": "05ad2d21f5a426d4",
       "method": "GET",
-      "source": "server/routes/drivers.js:143",
+      "source": "server/routes/drivers.js:154",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1715,7 +1716,7 @@
     {
       "id": "332db6cc2047b5d9",
       "method": "PUT",
-      "source": "server/routes/drivers.js:177",
+      "source": "server/routes/drivers.js:188",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1746,7 +1747,7 @@
     {
       "id": "7755238150732264",
       "method": "POST",
-      "source": "server/routes/drivers.js:233",
+      "source": "server/routes/drivers.js:244",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1774,7 +1775,7 @@
     {
       "id": "79761254c0a52cc5",
       "method": "GET",
-      "source": "server/routes/drivers.js:264",
+      "source": "server/routes/drivers.js:275",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1800,7 +1801,7 @@
     {
       "id": "c30b27702d13657e",
       "method": "GET",
-      "source": "server/routes/drivers.js:327",
+      "source": "server/routes/drivers.js:338",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1829,7 +1830,7 @@
     {
       "id": "ffd5804c66a1b13e",
       "method": "GET",
-      "source": "server/routes/drivers.js:397",
+      "source": "server/routes/drivers.js:408",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1858,7 +1859,7 @@
     {
       "id": "0c6ae4703ef502ae",
       "method": "GET",
-      "source": "server/routes/drivers.js:469",
+      "source": "server/routes/drivers.js:480",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1891,7 +1892,7 @@
     {
       "id": "cf3bb61a7cc83150",
       "method": "POST",
-      "source": "server/routes/drivers.js:525",
+      "source": "server/routes/drivers.js:536",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -1938,7 +1939,7 @@
     {
       "id": "3999212282c50172",
       "method": "PUT",
-      "source": "server/routes/drivers.js:578",
+      "source": "server/routes/drivers.js:589",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -1971,7 +1972,7 @@
     {
       "id": "76086434102d7542",
       "method": "PATCH",
-      "source": "server/routes/drivers.js:620",
+      "source": "server/routes/drivers.js:631",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -1998,7 +1999,7 @@
     {
       "id": "56e65cc3b38246c5",
       "method": "POST",
-      "source": "server/routes/drivers.js:640",
+      "source": "server/routes/drivers.js:651",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -2027,7 +2028,7 @@
     {
       "id": "e1ce7bbbe0a469cd",
       "method": "GET",
-      "source": "server/routes/drivers.js:676",
+      "source": "server/routes/drivers.js:687",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -4627,7 +4628,7 @@
     {
       "id": "39432d8bf6ba1a41",
       "method": "GET",
-      "source": "server/routes/drivers.js:12",
+      "source": "server/routes/drivers.js:13",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -4642,7 +4643,8 @@
       "requestKeys": [],
       "referencedCalls": [
         "Delivery.aggregate",
-        "User.find"
+        "User.find",
+        "Vehicle.find"
       ],
       "path": "/api/drivers",
       "middlewareDeclarations": []
@@ -4650,7 +4652,7 @@
     {
       "id": "7f287ce5b9577148",
       "method": "GET",
-      "source": "server/routes/drivers.js:91",
+      "source": "server/routes/drivers.js:102",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -4675,7 +4677,7 @@
     {
       "id": "6bdfefc699d46db1",
       "method": "GET",
-      "source": "server/routes/drivers.js:143",
+      "source": "server/routes/drivers.js:154",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -4703,7 +4705,7 @@
     {
       "id": "5a064c973d17ccfa",
       "method": "PUT",
-      "source": "server/routes/drivers.js:177",
+      "source": "server/routes/drivers.js:188",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -4734,7 +4736,7 @@
     {
       "id": "01743a724b2f9b78",
       "method": "POST",
-      "source": "server/routes/drivers.js:233",
+      "source": "server/routes/drivers.js:244",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -4762,7 +4764,7 @@
     {
       "id": "0a5ef22ce90c7a9d",
       "method": "GET",
-      "source": "server/routes/drivers.js:264",
+      "source": "server/routes/drivers.js:275",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -4788,7 +4790,7 @@
     {
       "id": "181eb4c2b4bfafba",
       "method": "GET",
-      "source": "server/routes/drivers.js:327",
+      "source": "server/routes/drivers.js:338",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -4817,7 +4819,7 @@
     {
       "id": "46156c139ea4a882",
       "method": "GET",
-      "source": "server/routes/drivers.js:397",
+      "source": "server/routes/drivers.js:408",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -4846,7 +4848,7 @@
     {
       "id": "f43872fb528aef9c",
       "method": "GET",
-      "source": "server/routes/drivers.js:469",
+      "source": "server/routes/drivers.js:480",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -4879,7 +4881,7 @@
     {
       "id": "e74ab70b4545adc6",
       "method": "POST",
-      "source": "server/routes/drivers.js:525",
+      "source": "server/routes/drivers.js:536",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -4926,7 +4928,7 @@
     {
       "id": "697b7259f769dd8a",
       "method": "PUT",
-      "source": "server/routes/drivers.js:578",
+      "source": "server/routes/drivers.js:589",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -4959,7 +4961,7 @@
     {
       "id": "d410a5956ba770f3",
       "method": "PATCH",
-      "source": "server/routes/drivers.js:620",
+      "source": "server/routes/drivers.js:631",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -4986,7 +4988,7 @@
     {
       "id": "cd19b71fd64ccc16",
       "method": "POST",
-      "source": "server/routes/drivers.js:640",
+      "source": "server/routes/drivers.js:651",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -5015,7 +5017,7 @@
     {
       "id": "9965aef4e5137078",
       "method": "GET",
-      "source": "server/routes/drivers.js:676",
+      "source": "server/routes/drivers.js:687",
       "description": null,
       "handlerGuards": [
         "protect",

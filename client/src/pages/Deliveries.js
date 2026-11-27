@@ -10,6 +10,7 @@ import DeliveryDetailModal from '../components/deliveries/DeliveryDetailModal';
 import { toBusinessComponents, businessComponentsToUtcDate, formatBusinessDateInput } from '../utils/businessTime';
 import { useSocket } from '../contexts/SocketContext';
 import { recordActivityChange } from '../utils/activityCapture';
+import { driverVehicleLabel } from '../utils/driverVehicle';
 
 const COMPLETED_STATUSES = ['delivered', 'completed', 'collected'];
 const PENDING_STATUSES = ['pending', 'assigned', 'on_route', 'picked_up'];
@@ -105,6 +106,13 @@ const getDriverDisplayName = (driver) => {
   return [firstName, lastName].filter(Boolean).join(' ').trim() || fallback || 'Unnamed driver';
 };
 
+const DriverVehicle = ({ driver, lookupState }) => {
+  const label = driverVehicleLabel(driver);
+  return <span className="block text-xs text-gray-500 truncate" title="Current assigned vehicle; not a historical vehicle record">
+    {label ? `Assigned now: ${label}` : lookupState === 'loading' ? 'Loading vehicle…' : lookupState === 'unavailable' ? 'Vehicle unavailable' : 'Vehicle not set'}
+  </span>;
+};
+
 const Deliveries = () => {
   const role = useSelector((state) => state.auth.user?.role);
   const [searchParams] = useSearchParams();
@@ -131,6 +139,7 @@ const Deliveries = () => {
   const selectionRef = React.useRef(selectedDeliveries);
   useEffect(() => { selectionRef.current = selectedDeliveries; }, [selectedDeliveries]);
   const [allDrivers, setAllDrivers] = useState([]);
+  const [driverLookupState, setDriverLookupState] = useState('loading');
   const [isPrintConfigOpen, setIsPrintConfigOpen] = useState(false);
   // Keep receipts above the loading/error branches that can unmount the control.
   const handledMatterImportJobs = React.useRef(new Set());
@@ -277,14 +286,23 @@ const Deliveries = () => {
   }, [completionToast]);
 
   useEffect(() => {
+    let cancelled = false;
+    setDriverLookupState('loading');
     api.get('/users/drivers')
       .then((res) => {
+        if (cancelled) return;
         const payload = res?.data;
         const list = payload?.data?.users || payload?.data?.drivers || payload?.data || payload?.users || payload?.drivers || payload || [];
         setAllDrivers(Array.isArray(list) ? list : []);
+        setDriverLookupState('ready');
       })
-      .catch(() => setAllDrivers([]));
-  }, []);
+      .catch(() => { if (!cancelled) { setAllDrivers([]); setDriverLookupState('unavailable'); } });
+    return () => { cancelled = true; };
+  }, [refreshVersion]);
+
+  const driversById = useMemo(() => new Map(allDrivers.map(driver => [String(driver._id), driver])), [allDrivers]);
+  const resolveDeliveryDriver = useCallback(driver => driver
+    ? driversById.get(String(driver._id || driver)) || driver : null, [driversById]);
 
   const areaOptions = useMemo(() => {
     const zones = new Set();
@@ -314,10 +332,17 @@ const Deliveries = () => {
 
   const driverOptions = useMemo(() => {
     const map = new Map();
-    deliveries.forEach((d) => { if (d.driver?._id) map.set(d.driver._id, getDriverDisplayName(d.driver)); });
-    allDrivers.forEach((d) => { if (d._id && !map.has(d._id)) map.set(d._id, getDriverDisplayName(d)); });
+    const add = driver => {
+      const resolved = resolveDeliveryDriver(driver);
+      const id = resolved?._id || (typeof driver === 'string' ? driver : null);
+      if (!id) return;
+      const vehicle = driverVehicleLabel(resolved);
+      map.set(String(id), `${getDriverDisplayName(resolved)}${vehicle ? ` · ${vehicle}` : ''}`);
+    };
+    deliveries.forEach(delivery => add(delivery.driver));
+    allDrivers.forEach(add);
     return Array.from(map.entries()).sort((a, b) => a[1].localeCompare(b[1]));
-  }, [deliveries, allDrivers]);
+  }, [deliveries, allDrivers, resolveDeliveryDriver]);
 
   useEffect(() => {
     let filtered = deliveries;
@@ -327,8 +352,8 @@ const Deliveries = () => {
       filtered = filtered.filter((d) =>
         d.customerName?.toLowerCase().includes(term) ||
         d.customerId?.toLowerCase().includes(term) ||
-        d.driver?.profile?.firstName?.toLowerCase().includes(term) ||
-        d.driver?.profile?.lastName?.toLowerCase().includes(term) ||
+        (d.driver && getDriverDisplayName(resolveDeliveryDriver(d.driver)).toLowerCase().includes(term)) ||
+        driverVehicleLabel(resolveDeliveryDriver(d.driver)).toLowerCase().includes(term) ||
         d.zone?.toLowerCase().includes(term)
       );
     }
@@ -336,7 +361,7 @@ const Deliveries = () => {
     if (typeFilter !== 'all') filtered = filtered.filter((d) => d.type === typeFilter);
     if (areaFilter !== 'all') filtered = filtered.filter((d) => d.zone?.trim() === areaFilter);
     if (emirateFilter !== 'all') filtered = filtered.filter((d) => normalizeEmirateLabel(d.addressDetails?.city) === emirateFilter);
-    if (driverFilter !== 'all') filtered = filtered.filter((d) => d.driver?._id === driverFilter);
+    if (driverFilter !== 'all') filtered = filtered.filter((d) => String(d.driver?._id || d.driver || '') === driverFilter);
     if (timingFilter === 'late') filtered = filtered.filter((d) => d.lateMinutes > 0);
     else if (timingFilter === 'early') filtered = filtered.filter((d) => d.earlyMinutes > 0);
 
@@ -355,7 +380,7 @@ const Deliveries = () => {
     });
 
     setFilteredDeliveries(filtered);
-  }, [deliveries, searchTerm, statusFilter, typeFilter, areaFilter, emirateFilter, driverFilter, timingFilter]);
+  }, [deliveries, searchTerm, statusFilter, typeFilter, areaFilter, emirateFilter, driverFilter, timingFilter, resolveDeliveryDriver]);
 
   const stats = useMemo(() => ({
     total: deliveries.length,
@@ -607,7 +632,7 @@ const Deliveries = () => {
         <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-[20px]">search</span>
         <input
           type="text"
-          placeholder="Search customer, driver, zone…"
+          placeholder="Search customer, driver, vehicle, zone…"
           data-activity-label="Delivery search"
           value={searchTerm}
           onChange={(e) => setSearchTerm(e.target.value)}
@@ -681,7 +706,8 @@ const Deliveries = () => {
           const timing = getTimingInfo(delivery);
           const scheduled = formatDate(delivery.scheduledTime);
           const statusStyle = STATUS_STYLES[delivery.status] || { label: delivery.status || 'Unknown', dot: 'bg-gray-400', cls: 'bg-gray-100 text-gray-700' };
-          const driverName = delivery.driver ? getDriverDisplayName(delivery.driver) : null;
+          const driver = resolveDeliveryDriver(delivery.driver);
+          const driverName = driver ? getDriverDisplayName(driver) : null;
           return (
             <button
               type="button"
@@ -749,7 +775,7 @@ const Deliveries = () => {
                       <span className="w-6 h-6 rounded-full bg-blue-100 text-blue-700 flex items-center justify-center text-[10px] font-semibold flex-shrink-0">
                         {driverName.charAt(0).toUpperCase()}
                       </span>
-                      <span className="text-sm text-gray-900 truncate">{driverName}</span>
+                      <span className="min-w-0"><span className="block text-sm text-gray-900 truncate">{driverName}</span><DriverVehicle driver={driver} lookupState={driverLookupState} /></span>
                     </>
                   ) : (
                     <>
@@ -809,7 +835,7 @@ const Deliveries = () => {
                 <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Area</th>
                 <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Time</th>
                 <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Status</th>
-                <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Driver</th>
+                <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Driver / vehicle</th>
                 <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center">Late/Early</th>
                 <th className="p-3 text-xs font-semibold text-gray-500 uppercase tracking-wider text-center">Proof</th>
               </tr>
@@ -880,7 +906,7 @@ const Deliveries = () => {
                       </span>
                     </td>
                     <td className="p-3 text-sm text-gray-700">
-                      {delivery.driver ? getDriverDisplayName(delivery.driver) : <span className="italic text-gray-400">Unassigned</span>}
+                      {delivery.driver ? <><span>{getDriverDisplayName(resolveDeliveryDriver(delivery.driver))}</span><DriverVehicle driver={resolveDeliveryDriver(delivery.driver)} lookupState={driverLookupState} /></> : <span className="italic text-gray-400">Unassigned</span>}
                     </td>
                     <td className="p-3 text-center font-mono text-sm">
                       {timing.isIcon
