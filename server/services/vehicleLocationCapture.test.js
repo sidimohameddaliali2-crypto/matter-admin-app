@@ -54,3 +54,24 @@ test('cached fleet sampled after a future fix retains the original receipt-time 
   assert.equal(evaluation.status, 'incomplete_events');
   assert.ok(evaluation.gpsQualityReasons.includes('future_fix_time'));
 });
+
+test('captured tracker provenance survives immutable row casting and stays on the versioned feed', async () => {
+  const { default: History } = await import('../models/VehicleLocationHistory.js');
+  const { serializeHistoryPoint } = await import('./vehicleLocationView.js');
+  const sourceReceipt = { receiptId: 'synthetic-receipt', kind: 'live', sha256: 'a'.repeat(64), responseReceivedAt: at };
+  const trackerIdentity = { namespace: 'b'.repeat(64), deviceId: null, directoryDeviceId: 'directory-device',
+    candidateDeviceIds: ['device-a', 'device-b'] };
+  const { rows } = buildVehicleLocationSamples({ fleet: [{ ...vehicle, gpsTime: null, latitude: null, longitude: null,
+    sourceReceipt, trackerIdentity, sourceQualityFlags: ['conflicting_live_vehicle_rows'] }], drivers, recordedAt: at });
+  const model = new History({ ...rows[0], captureBatchId: 'fixture-batch', captureRow: 0 });
+  await model.validate();
+  const point = model.toObject();
+  const versioned = serializeHistoryPoint(point, { includeTrackerIdentity: true });
+  assert.deepEqual(versioned.capture.trackerIdentity, trackerIdentity);
+  assert.equal(versioned.capture.sourceReceipt.responseReceivedAt, at);
+  assert.ok(versioned.capture.qualityFlags.includes('conflicting_live_vehicle_rows'));
+  assert.equal(versioned.gpsTime, null);
+  assert.equal(versioned.latitude, null);
+  const { trackerIdentity: _omitted, ...legacyCapture } = versioned.capture;
+  assert.deepEqual(serializeHistoryPoint(point), { ...versioned, capture: legacyCapture });
+});

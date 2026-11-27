@@ -19,11 +19,18 @@ router.use(protect, dispatcher, (req, res, next) => {
 router.get('/options', async (req, res) => {
   try {
     const { vehicles, currentDriverIds } = await req.sendFleetDispatch({ phase: 'options', actorId: String(req.user._id) });
-    const active = await Vehicle.find({ _id: { $in: vehicles.map(vehicle => vehicle.sourceVehicleId) }, status: activeVehicle })
-      .select('_id vehicleId plateNumber type').sort('vehicleId').lean();
+    const [active, eligibleDrivers] = await Promise.all([
+      Vehicle.find({ _id: { $in: vehicles.map(vehicle => vehicle.sourceVehicleId) }, status: activeVehicle })
+        .select('_id vehicleId plateNumber type').sort('vehicleId').maxTimeMS(3000).lean(),
+      User.find({ role: 'driver', $or: [{ isActive: true }, { _id: { $in: currentDriverIds } }] })
+        .select('_id isActive profile.firstName profile.lastName').maxTimeMS(3000).lean(),
+    ]);
     const data = confirmedFleetVehicles(active, vehicles)
       .map(({ _id, vehicleId, plateNumber, type }) => ({ id: String(_id), label: vehicleId, plate: plateNumber, type }));
-    return res.json({ data, currentDriverIds });
+    const drivers = eligibleDrivers.map(({ _id, isActive, profile }) => ({
+      _id: String(_id), isActive, name: [profile?.firstName, profile?.lastName].filter(Boolean).join(' ') || 'Driver',
+    })).sort((a, b) => a.name.localeCompare(b.name));
+    return res.json({ data, drivers });
   } catch {
     return res.status(503).json({ message: 'Vehicle assignments are temporarily unavailable.' });
   }

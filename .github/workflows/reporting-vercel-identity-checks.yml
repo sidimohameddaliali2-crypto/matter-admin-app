@@ -11,15 +11,21 @@ on:
       - 'server/routes/deliveries.js'
       - 'server/models/Delivery.js'
       - 'server/models/ReportingOutbox.js'
+      - 'server/models/VehicleLocationHistory.js'
       - 'server/services/reportingOutbox*.js'
+      - 'server/services/truckoomApiService.js'
+      - 'server/services/truckoomLiveData*.js'
       - 'server/services/truckoomVisitSync*.js'
-      - 'server/services/vehicleLocationCaptureStore.js'
+      - 'server/services/vehicleLocationCapture*.js'
+      - 'server/services/vehicleLocationView.js'
       - 'server/services/matterDeliveryImportService.js'
       - 'server/services/matterDeliveryInsert*.js'
       - 'server/services/fleetDispatch*.js'
       - 'server/routes/dispatcherFleet*.js'
+      - 'client/public/service-worker.js'
       - 'client/src/components/dispatcher/DispatcherFleet.js'
       - 'client/src/pages/DispatcherWorkspace.js'
+      - 'client/src/pages/DispatcherWorkspace.test.js'
       - 'server/package*.json'
 permissions:
   contents: read
@@ -45,7 +51,7 @@ jobs:
       - name: Verify protected reporting operator settings and rollback
         run: node --test server/scripts/reporting-source-operator.test.mjs
       - name: Verify signed fleet saves, review receipts and retries
-        run: node --test server/services/fleetDispatch.test.js
+        run: node --test server/services/fleetDispatch.test.js server/services/fleetDispatchWorker.test.js
       - name: Check whether the dispatcher client changed
         id: client_files
         env:
@@ -53,7 +59,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" --jq '.[].filename')
-          if grep -qE '^client/(src/components/dispatcher/DispatcherFleet\.js|src/pages/DispatcherWorkspace\.js)$' <<< "$files"; then
+          if grep -qE '^client/(public/service-worker\.js|src/components/dispatcher/DispatcherFleet\.js|src/pages/DispatcherWorkspace(\.test)?\.js)$' <<< "$files"; then
             echo 'changed=true' >> "$GITHUB_OUTPUT"
           fi
   reporting-mongo:
@@ -87,7 +93,7 @@ jobs:
         working-directory: server
         env:
           REPORTING_TEST_MONGO_URI: mongodb://127.0.0.1:27017/driver_reports_ci?directConnection=true
-        run: node --test services/reportingOutbox.test.js services/reportingOutbox.integration.test.js services/matterDeliveryInsert.test.js services/truckoomVisitSync.test.js
+        run: node --test services/reportingOutbox.test.js services/reportingOutbox.integration.test.js services/matterDeliveryInsert.test.js services/truckoomVisitSync.test.js services/truckoomLiveData.test.js services/vehicleLocationCapture.test.js
       - name: Verify existing dispatch, delivery ordering and completion fixtures
         working-directory: server
         run: node --test routes/dispatcherAssignment.test.js routes/dispatcherHandovers.test.js services/deliveryOrder.test.js services/deliveryCompletionFailure.test.js
@@ -107,11 +113,12 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: '24.22.1'
-      - name: Build the dispatcher client with fleet enabled
+      - name: Verify the dispatcher workspace and build with fleet enabled
         working-directory: client
         env:
           CI: 'false'
           REACT_APP_DISPATCH_FLEET_ENABLED: '1'
         run: |
           npm ci --no-audit --no-fund
+          CI=true npm test -- --watchAll=false --runInBand --runTestsByPath src/pages/DispatcherWorkspace.test.js
           npm run build

@@ -61,6 +61,7 @@ export function serializeReportingDelivery(delivery) {
       timestamp: proof.timestamp,
       receivedAt: proof.receivedAt,
       photoCapturedAt: proof.photoCapturedAt,
+      ...(proof.photoSource && { photoSource: proof.photoSource }),
       location: proof.location,
     },
     gpsLocation: gpsLocation ? { lat: gpsLocation.lat, lng: gpsLocation.lng } : null,
@@ -73,7 +74,7 @@ router.get('/deliveries/:id', async (req, res) => {
   }
   try {
     const delivery = await Delivery.findById(req.params.id).read('primary').readConcern('majority')
-      .select('customerId customerName company otherCompany type status address addressId addressDetails zone matterSubscriptionId scheduledTime deliveredTime completedAt deliveryType lateMinutes earlyMinutes driver proof.photoUrl proof.images proof.timestamp proof.receivedAt proof.photoCapturedAt proof.location gpsLocation updatedAt +reportingVersion')
+      .select('customerId customerName company otherCompany type status address addressId addressDetails zone matterSubscriptionId scheduledTime deliveredTime completedAt deliveryType lateMinutes earlyMinutes driver proof.photoUrl proof.images proof.timestamp proof.receivedAt proof.photoCapturedAt proof.photoSource proof.location gpsLocation updatedAt +reportingVersion')
       .populate('driver', 'profile.firstName profile.lastName profile.vehicleType').maxTimeMS(5000).lean();
     if (!Number.isSafeInteger(delivery?.reportingVersion) || delivery.reportingVersion < 1) {
       return res.status(404).json({ success: false, message: 'Versioned reporting delivery not found' });
@@ -169,11 +170,11 @@ router.get('/gps-batches/:id', async (req, res) => {
     const rows = await VehicleLocationHistory.find({ _id: { $in: ids }, captureBatchId: batchId })
       .read('primary').readConcern('majority')
       .sort({ captureRow: 1 }).limit(CAPTURE_MAX_ROWS + 1)
-      .select('vehicleNo driver latitude longitude gpsTime recordedAt ' + CAPTURE_FIELDS).lean();
+      .select('vehicleNo driver latitude longitude gpsTime recordedAt trackerIdentity ' + CAPTURE_FIELDS).lean();
     if (rows.length !== batch.count || rows.some((row, index) => row.captureRow !== index)) {
       throw new Error('Incomplete committed GPS batch');
     }
-    res.json({ success: true, data: rows.map(serializeHistoryPoint), batchId });
+    res.json({ success: true, data: rows.map(row => serializeHistoryPoint(row, { includeTrackerIdentity: true })), batchId });
   } catch {
     console.error('Reporting GPS batch is unavailable');
     res.status(503).json({ success: false, message: 'Reporting GPS batch is unavailable' });

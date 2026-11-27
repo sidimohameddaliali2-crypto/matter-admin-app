@@ -58,6 +58,9 @@ function checkFirstSaveTime(command, now, expiresAt = Infinity) {
   if (command.kind !== 'correct' && Date.parse(command.from) < now - pastWindow) {
     throw failure(422, 'Use an effective time within the last 15 minutes or a future time.');
   }
+  if (command.kind !== 'correct' && command.to !== null && Date.parse(command.to) <= now) {
+    throw failure(422, 'Use a future shift end for a normal pairing.');
+  }
 }
 
 export async function dispatchFleet({ phase, operationId, command, reviewProof }, {
@@ -97,7 +100,7 @@ export async function dispatchFleet({ phase, operationId, command, reviewProof }
     if (receipt.state === 'saved') return receipt;
     throw error;
   }
-  return send({ phase, ...request });
+  return send({ phase, ...request, expiresAt });
 }
 
 export function confirmedFleetVehicles(rows, registry) {

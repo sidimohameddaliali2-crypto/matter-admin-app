@@ -1,5 +1,5 @@
 import mongoose from 'mongoose';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import TruckoomLiveSnapshot from '../models/TruckoomLiveSnapshot.js';
 import { parseTruckoomAlertTime } from './truckoomVisitRules.js';
 
@@ -23,6 +23,11 @@ function number(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+export function truckoomCompanyNamespace(company) {
+  if (typeof company !== 'string' || !company.trim()) return null;
+  return createHash('sha256').update('truckoom:project-49:company:v1\0').update(company).digest('hex');
+}
+
 export function normalizeTruckoomLiveData(payload, companyName) {
   const rows = payload?.root?.VehicleData;
   if (!Array.isArray(rows)) throw new Error('Truckoom live data unavailable or rate limited');
@@ -33,6 +38,7 @@ export function normalizeTruckoomLiveData(payload, companyName) {
       && !(latitude === 0 && longitude === 0);
     return {
       vehicleNo: String(row.Vehicle_No || '').trim(), imei: row.Imeino || null,
+      sourceNamespace: truckoomCompanyNamespace(row.Company),
       deviceName: row.Vehicle_Name || null, vehicleType: row.Vehicletype || null,
       latitude: fix ? latitude : null, longitude: fix ? longitude : null,
       rawCoordinates: { latitude, longitude }, sourceRow,

@@ -39,6 +39,10 @@ const vehicleLocationHistorySchema = new mongoose.Schema({
   captureRow: Number,
   sourceReceipt: mongoose.Schema.Types.Mixed,
   sourceRow: Number,
+  trackerIdentity: {
+    type: new mongoose.Schema({ namespace: String, deviceId: String, directoryDeviceId: String,
+      candidateDeviceIds: { type: [String], default: undefined } }, { _id: false }),
+  },
   trackerServerTime: Date,
   rawGpsTime: String,
   rawTrackerServerTime: String,

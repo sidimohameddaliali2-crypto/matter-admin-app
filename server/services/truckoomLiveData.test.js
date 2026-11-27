@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import axios from 'axios';
-import { createTruckoomLiveCache, normalizeTruckoomLiveData, parseTruckoomGpsTime } from './truckoomLiveData.js';
+import { createTruckoomLiveCache, normalizeTruckoomLiveData, parseTruckoomGpsTime, truckoomCompanyNamespace } from './truckoomLiveData.js';
 import truckoom from './truckoomApiService.js';
 
 const row = { Company: 'OURS', Vehicle_No: ' V1 ', Vehicle_Name: 'Vehicle', Imeino: '123',
@@ -20,6 +20,8 @@ test('parses real live-data envelope, filters company, preserves zero speed and 
   assert.equal(rows[0].speedKph, 0);
   assert.equal(rows[0].ignition, 'OFF');
   assert.equal(rows[0].address, 'Saved tracker address');
+  assert.equal(rows[0].sourceNamespace, 'de274e097ece5dba67ca650e0578fbf0059855241da7644b0f20a5620ba470c4');
+  assert.notEqual(rows[0].sourceNamespace, truckoomCompanyNamespace('OTHER'));
   assert.equal(parseTruckoomGpsTime('bad'), null);
 });
 
@@ -162,4 +164,24 @@ test('duplicate live vehicle rows stay ambiguous instead of choosing the last po
   t.mock.method(service, 'getVehicleLocations', async () => [{ vehicleNo: 'V1', latitude: 25, longitude: 55 }, { vehicleNo: 'V1', latitude: 26, longitude: 55 }]);
   const [result] = await service.getFleetStatus();
   assert.equal(result.latitude, null); assert.deepEqual(result.sourceQualityFlags, ['conflicting_live_vehicle_rows']);
+});
+
+test('fleet capture keeps the retained live IMEI separate from the directory IMEI', async t => {
+  const service = new truckoom.constructor();
+  const normalized = normalizeTruckoomLiveData(payload, 'OURS');
+  const sourceReceipt = { kind: 'live', receiptId: 'synthetic-receipt', sha256: 'a'.repeat(64), responseReceivedAt: '2026-10-23T06:59:00Z' };
+  t.mock.method(service, 'getCompanyVehicles', async () => [{ vehicleNo: 'V1', imei: 'directory-device' }]);
+  const live = t.mock.method(service, 'getVehicleLocations', async () => [{ ...normalized[0], sourceReceipt }]);
+  const [observed] = await service.getFleetStatus();
+  assert.equal(observed.imei, 'directory-device');
+  assert.deepEqual(observed.trackerIdentity, { namespace: normalized[0].sourceNamespace, deviceId: '123', directoryDeviceId: 'directory-device' });
+  live.mock.mockImplementation(async () => [{ ...normalized[0], sourceReceipt },
+    { ...normalized[0], sourceReceipt, imei: '456' }]);
+  const [conflict] = await service.getFleetStatus();
+  assert.equal(conflict.gpsTime, null);
+  assert.deepEqual(conflict.trackerIdentity, { namespace: normalized[0].sourceNamespace, deviceId: null,
+    directoryDeviceId: 'directory-device', candidateDeviceIds: ['123', '456'] });
+  live.mock.mockImplementation(async () => []);
+  const [directoryOnly] = await service.getFleetStatus();
+  assert.equal(directoryOnly.trackerIdentity, undefined);
 });

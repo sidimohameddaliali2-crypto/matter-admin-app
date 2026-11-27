@@ -39,8 +39,7 @@ export function usePendingFleetOperation(actor) {
   return [pending, setPending];
 }
 
-export default function DispatcherFleet({ drivers, inactiveDrivers, roster, driverLoading, driverError,
-  reloadDrivers, reloadRoster, pending, setPending, onClose, onSaved }) {
+export default function DispatcherFleet({ roster, reloadRoster, pending, setPending, onClose, onSaved }) {
   const [fields, setFields] = useState(initial);
   const [review, setReview] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -50,11 +49,11 @@ export default function DispatcherFleet({ drivers, inactiveDrivers, roster, driv
   const end = kind === 'end';
   const swap = kind === 'swap';
   const vehicles = roster?.vehicles ?? [];
-  const endDrivers = inactiveDrivers.filter(driver => roster?.currentDriverIds?.includes(String(driver._id)));
-  const choices = end ? [...drivers, ...endDrivers] : drivers;
+  const choices = roster?.drivers ?? [];
+  const drivers = choices.filter(driver => driver.isActive === true);
   const name = id => staffName(choices.find(driver => String(driver._id) === id));
   const vehicleName = id => vehicles.find(vehicle => vehicle.id === id)?.label || 'Vehicle';
-  const canStart = roster?.vehicles && !driverLoading && !driverError && (end || vehicles.length > 0);
+  const canStart = roster?.vehicles && (end || vehicles.length > 0);
 
   function update(event) {
     if (lock.current) return;
@@ -62,7 +61,7 @@ export default function DispatcherFleet({ drivers, inactiveDrivers, roster, driv
     setFields(previous => ({
       ...previous,
       [name]: type === 'checkbox' ? checked : value,
-      ...(name === 'kind' && value !== 'end' && endDrivers.some(driver => String(driver._id) === previous.driverId)
+      ...(name === 'kind' && value !== 'end' && !drivers.some(driver => String(driver._id) === previous.driverId)
         && { driverId: '' }),
     }));
     setReview(null);
@@ -117,8 +116,6 @@ export default function DispatcherFleet({ drivers, inactiveDrivers, roster, driv
   return <DispatcherDialog title="Vehicle assignment" busy={busy} onClose={onClose}>
     <form onSubmit={submit}>
       {pending ? <p role="status">This save is unconfirmed. Retry to check or finish the original save.</p> : <>
-        {driverLoading && <p role="status">Loading drivers…</p>}
-        {driverError && <p className="dp-error" role="alert">{driverError} <button type="button" onClick={reloadDrivers}>Retry drivers</button></p>}
         {roster?.error && <p className="dp-error" role="alert">{roster.error} <button type="button" onClick={reloadRoster}>Retry vehicle options</button></p>}
         {roster?.loading && <p role="status">Loading vehicle options…</p>}
         {!end && roster?.vehicles?.length === 0 && <p role="status">No confirmed vehicles are available.</p>}
@@ -128,7 +125,7 @@ export default function DispatcherFleet({ drivers, inactiveDrivers, roster, driv
         </select></label>
         <label className="dp-field">Driver<select name="driverId" value={fields.driverId} onChange={update} required disabled={busy}>
           <option value="">Choose a driver</option>
-          {choices.map(driver => <option key={driver._id} value={driver._id}>
+          {(end ? choices : drivers).map(driver => <option key={driver._id} value={driver._id}>
             {staffName(driver)}{driver.isActive === false ? ' · Inactive' : ''}
           </option>)}
         </select></label>

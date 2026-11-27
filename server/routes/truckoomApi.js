@@ -72,7 +72,7 @@ router.get('/vehicles', async (req, res) => {
     const vehicles = await mapWithLimit(fleet, 5, async (v) => {
       const mapping = mappingByVehicleNo.get(v.vehicleNo);
       const driver = mapping?.driver;
-      const { rawCoordinates, sourceReceipt, sourceRow, sourceQualityFlags, ...publicVehicle } = v;
+      const { rawCoordinates, sourceReceipt, sourceRow, sourceQualityFlags, trackerIdentity, ...publicVehicle } = v;
       const hasFix = Number.isFinite(v.latitude) && Number.isFinite(v.longitude);
       return {
         ...publicVehicle,

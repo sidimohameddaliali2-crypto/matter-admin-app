@@ -254,7 +254,8 @@ test('a pending fleet save stays reachable during a roster outage and retries it
 
 test('review locks the form during the request and save uses the submitted command', async () => {
   fleetOptions(async () => ({ data: { data: [{ id: 'van', label: 'Van 1', type: 'van' },
-    { id: 'bike', label: 'Bike 1', type: 'bike' }], currentDriverIds: [] } }));
+    { id: 'bike', label: 'Bike 1', type: 'bike' }],
+    drivers: [{ _id: 'driver-1', name: 'Fleet driver', isActive: true }] } }));
   let finishReview;
   const review = { operationId: 'reviewed', reviewProof: 'proof', current: [], expected: [], expectedAssets: [] };
   api.post.mockImplementationOnce(() => new Promise(resolve => { finishReview = resolve; })).mockResolvedValueOnce({
@@ -284,9 +285,10 @@ test('review locks the form during the request and save uses the submitted comma
 test('inactive drivers with current ledger custody can be selected only for End assignment', async () => {
   drivers.push({ _id: 'former', name: 'Former driver', isActive: false },
     { _id: 'other', name: 'Other inactive driver', isActive: false });
-  // Reload workspace driver state with the fixture inactive drivers.
+  // The fleet form receives only the minimal authorized roster.
   await act(async () => root.render(null));
-  fleetOptions(async () => ({ data: { data: [], currentDriverIds: ['former'] } }));
+  fleetOptions(async () => ({ data: { data: [],
+    drivers: [{ _id: 'former', name: 'Former driver', isActive: false }] } }));
   await act(async () => root.render(<DispatcherWorkspace />));
   await click('Drivers');
   await click('Vehicle assignment');

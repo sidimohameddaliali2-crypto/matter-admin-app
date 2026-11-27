@@ -44,6 +44,8 @@ The external history endpoint filters by `recordedAt`, sorts by `recordedAt` and
 
 The staff `/api/truckoom/history` route is a separate consumer with its own cap and response projection. Review it explicitly when adding capture fields or changing history semantics. No in-repository frontend caller of that route was identified during the base trace; that does not prove there are no external callers. Preserve legacy fields and document any additive completeness information.
 
+The protected versioned reporting feed may include the observed Truckoom Company namespace, original live `Imeino`, separately observed directory IMEI, conflicting device candidates and retained response receipt. The namespace is the SHA-256 of `truckoom:project-49:company:v1`, a NUL byte, and the exact `Company` returned in the archived live row. This is the observed company label. The captured response does not provide an independent stable tenant ID, so qualify the actual reporting account and physical live IMEI with the fleet custodian. Alias-only and conflicting device evidence remain unresolved. Cached or historical rows without provenance retain that absence.
+
 ### Assignments
 
 Driver assignments can be edited through both:

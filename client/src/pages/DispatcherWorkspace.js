@@ -29,7 +29,7 @@ export default function DispatcherWorkspace() {
     [date, setDate] = useState(() => dispatchDateWindow().defaultDate),
     [today, setToday] = useState(businessToday),
     [deliveries, setDeliveries] = useState([]),
-    [driverRoster, setDriverRoster] = useState([]),
+    [drivers, setDrivers] = useState([]),
     [loading, setLoading] = useState(true),
     [driverLoading, setDriverLoading] = useState(true),
     [error, setError] = useState(''),
@@ -61,7 +61,6 @@ export default function DispatcherWorkspace() {
   const [pendingFleet, setPendingFleet] = usePendingFleetOperation(fleetActor);
   const roster = fleetRoster?.actor === fleetActor ? fleetRoster : null;
   const reloadFleetRoster = () => setFleetRosterVersion(version => version + 1);
-  const drivers = useMemo(() => driverRoster.filter(driver => driver.isActive !== false), [driverRoster]);
   const fetchId = useRef(0),
     detailId = useRef(0),
     writeLock = useRef(false),
@@ -99,7 +98,7 @@ export default function DispatcherWorkspace() {
       const raw = Array.isArray(r.data) ? r.data : r.data.data || r.data.drivers;
       const data = Array.isArray(raw) ? raw : raw?.drivers;
       if (!Array.isArray(data)) throw new Error('Could not read the driver list. Please retry.');
-      setDriverRoster([...data].sort((a, b) => staffName(a).localeCompare(staffName(b))));
+      setDrivers(data.filter(driver => driver.isActive !== false).sort((a, b) => staffName(a).localeCompare(staffName(b))));
     } catch (e) {
       setDriverError(errorMessage(e));
     } finally {
@@ -122,10 +121,10 @@ export default function DispatcherWorkspace() {
     api.get('/dispatcher-fleet/options', { signal: controller.signal, timeout: 6000 })
       .then(({ data }) => {
         if (controller.signal.aborted) return;
-        if (!Array.isArray(data?.data) || !Array.isArray(data.currentDriverIds)) {
+        if (!Array.isArray(data?.data) || !Array.isArray(data.drivers)) {
           throw new Error('Could not read vehicle options. Please retry.');
         }
-        setFleetRoster({ actor: fleetActor, vehicles: data.data, currentDriverIds: data.currentDriverIds });
+        setFleetRoster({ actor: fleetActor, vehicles: data.data, drivers: data.drivers });
       })
       .catch(failure => {
         if (!controller.signal.aborted) setFleetRoster({ actor: fleetActor,
@@ -412,9 +411,7 @@ export default function DispatcherWorkspace() {
         delivery: d
       })} onAssign={openAssign} onUnassign={openUnassign} />} {formError && <p className="dp-error" role="alert">{formError}</p>}</DispatcherDialog>}
  {modal?.type === 'assign' && <DispatcherAssignment targets={modal.targets} deliveries={deliveries} drivers={drivers} date={date} onClose={close} onSaved={assignmentSaved} />}
- {fleetActor && modal?.type === 'vehicle' && <DispatcherFleet key={fleetActor} drivers={drivers}
-   inactiveDrivers={driverRoster.filter(driver => driver.isActive === false)} roster={roster}
-   driverLoading={driverLoading} driverError={driverError} reloadDrivers={loadDrivers} reloadRoster={reloadFleetRoster}
+ {fleetActor && modal?.type === 'vehicle' && <DispatcherFleet key={fleetActor} roster={roster} reloadRoster={reloadFleetRoster}
    pending={pendingFleet} setPending={setPendingFleet} onClose={close}
    onSaved={message => { close(); setNotice(message); reloadFleetRoster(); }} />}
  {modal?.type === 'unassign' && <DispatcherDialog title="Unassign driver?" busy={busy} onClose={close}><p>Remove the driver assignment from {modal.targets.length} {modal.targets.length === 1 ? 'delivery' : 'deliveries'}?</p>{formError && <p className="dp-error" role="alert">{formError}</p>}<div className="dp-actions"><button disabled={busy} onClick={close}>Keep assignment</button><button disabled={busy || !modal.targets.length} onClick={unassign}>{busy ? 'Saving…' : 'Confirm unassign'}</button></div></DispatcherDialog>}

@@ -106,8 +106,13 @@ test('the first save uses a 15-minute epoch window across midnight and accepts f
     for (const allowed of [cutoff, future]) {
       assert.deepEqual(await dispatchFleet(withProof(build(allowed)), deps), receipt);
       assert.equal(phases.at(-1).phase, 'commit');
+      assert.equal(phases.at(-1).expiresAt, now + 600_000);
     }
   }
+  const closed = { ...cutoff, to: '2026-11-26T23:55:00+04:00' };
+  await assert.rejects(dispatchFleet(withProof(closed), deps), { status: 422 });
+  assert.equal(phases.at(-1).phase, 'receipt');
+  assert.equal('expiresAt' in phases.at(-1), false);
   const historical = { ...stale, kind: 'correct' };
   await assert.rejects(dispatchFleet(withProof(historical), deps), { status: 403 });
   assert.deepEqual(await dispatchFleet(withProof(historical), { ...deps, allowCorrection: true }), receipt);
@@ -134,7 +139,7 @@ test('a stale or newly ineligible retry looks up the exact prior receipt and can
   assert.deepEqual(await dispatchFleet(request, deps), receipt);
   const saving = { phase: 'commit', actorId, operationId: operation.operationId, command: current };
   const lookup = { ...saving, phase: 'receipt' };
-  assert.deepEqual(sent, [saving, lookup, lookup]);
+  assert.deepEqual(sent, [{ ...saving, expiresAt: now + 600_000 }, lookup, lookup]);
 });
 
 test('an expired review without a receipt cannot save and an uncertain lookup preserves retry', async () => {
