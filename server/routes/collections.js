@@ -5,7 +5,7 @@ import Customer from '../models/Customer.js';
 import User from '../models/User.js';
 import BagRefundCase from '../models/BagRefundCase.js';
 import CollectionRefundLink from '../models/CollectionRefundLink.js';
-import { enqueueRefundLink, refundEmailStatus, refundEmailEnabled } from '../services/collectionRefundLinks.js';
+import { enqueueRefundLink, refundEmailStatus, refundEmailEnabled, refundLinkOrigin } from '../services/collectionRefundLinks.js';
 import { refundEmailConfiguration } from '../services/collectionRefundEmail.js';
 import { collectionRefundFilter, collectionRefundQueueFilter, canRecordCollectionRefund, buildCollectionRefundUpdate, refundError } from '../services/collectionRefund.js';
 import { protect, authorize } from '../middleware/auth.js';
@@ -32,6 +32,7 @@ router.get('/refund-email-config', async (req, res) => {
   try {
     if (!canRecordCollectionRefund(req.user)) throw refundError('Management access is required.', 403);
     if (!refundEmailEnabled()) return res.json({ success: true, ready: false, code: 'missing_or_paused_configuration' });
+    refundLinkOrigin();
     res.json({ success: true, ...await refundEmailConfiguration() });
   } catch (error) { res.status(error.statusCode || 503).json({ success: false, message: error.statusCode ? error.message : 'Could not check Brevo. Please retry.' }); }
 });

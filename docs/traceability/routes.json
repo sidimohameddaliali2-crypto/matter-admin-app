@@ -129,7 +129,7 @@
     "server/routes/bagRefunds.js": "b59d8a5f11c85784e728face2c36cd3bf73f8ef44f08e1c8ce33a9c7e3823191",
     "server/routes/bags.js": "5365c35d13f485789ae19f03793aa8bf6e998f8cee2b8cf052bd377e1e2a4d07",
     "server/routes/collectionRefundLinks.js": "727125c023842c107d48d6f514e0cca419f73b7523e6a648b3cef4b9ee7d80db",
-    "server/routes/collections.js": "1e255323f089270ba5774c537c650a54e73ea7e9b773b040f143f2ca29020ad5",
+    "server/routes/collections.js": "20561ec9f20f334472ac72776bf83c09aea06b778369afa496408db0d5b2e712",
     "server/routes/communications.js": "7d9bc696d81f850efc61dd35ef19207555691ec81fdb7658280620f045a81335",
     "server/routes/customers.js": "46cbcb737f5226edbaac371e64c852bab577c59fe9d45fcee158fc482f5af51f",
     "server/routes/customerService.js": "af8607225feee2254c7b196d0b4ece2b10e32755a45873ede5c7991f51762b28",
@@ -3673,7 +3673,8 @@
         "canRecordCollectionRefund",
         "refundEmailConfiguration",
         "refundEmailEnabled",
-        "refundError"
+        "refundError",
+        "refundLinkOrigin"
       ],
       "path": "/api/collections/refund-email-config",
       "middlewareDeclarations": [
@@ -3684,7 +3685,7 @@
     {
       "id": "e7e5f7180ed2f8c6",
       "method": "GET",
-      "source": "server/routes/collections.js:48",
+      "source": "server/routes/collections.js:49",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3711,7 +3712,7 @@
     {
       "id": "b3fe4308ea5effd9",
       "method": "GET",
-      "source": "server/routes/collections.js:60",
+      "source": "server/routes/collections.js:61",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -3737,7 +3738,7 @@
     {
       "id": "385b8a924aa44f9e",
       "method": "GET",
-      "source": "server/routes/collections.js:67",
+      "source": "server/routes/collections.js:68",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -3766,7 +3767,7 @@
     {
       "id": "2d0234c65000a301",
       "method": "GET",
-      "source": "server/routes/collections.js:79",
+      "source": "server/routes/collections.js:80",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3801,7 +3802,7 @@
     {
       "id": "d6748118ab059057",
       "method": "POST",
-      "source": "server/routes/collections.js:94",
+      "source": "server/routes/collections.js:95",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3831,7 +3832,7 @@
     {
       "id": "057381129a1c73f8",
       "method": "POST",
-      "source": "server/routes/collections.js:106",
+      "source": "server/routes/collections.js:107",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3865,7 +3866,7 @@
     {
       "id": "e8b9e030bf9199f9",
       "method": "POST",
-      "source": "server/routes/collections.js:129",
+      "source": "server/routes/collections.js:130",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3899,7 +3900,7 @@
     {
       "id": "ec72c551e9363fe6",
       "method": "GET",
-      "source": "server/routes/collections.js:155",
+      "source": "server/routes/collections.js:156",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3932,7 +3933,7 @@
     {
       "id": "6a32925b51bd6a5b",
       "method": "POST",
-      "source": "server/routes/collections.js:175",
+      "source": "server/routes/collections.js:176",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [

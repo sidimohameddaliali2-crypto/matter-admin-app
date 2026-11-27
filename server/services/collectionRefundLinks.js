@@ -13,7 +13,9 @@ export function deriveRefundToken(nonce, secret = process.env.JWT_SECRET) {
   return createHmac('sha256', secret).update(`matter:collection-refund:v1:${nonce}`).digest('base64url');
 }
 export function refundLinkOrigin() {
-  const url = new URL(process.env.PUBLIC_APP_URL || 'https://matterapp.online');
+  let url;
+  try { url = new URL(process.env.PUBLIC_APP_URL || 'https://matterapp.online'); }
+  catch { throw refundError('Configure a valid HTTPS PUBLIC_APP_URL.', 503); }
   if (url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw refundError('Configure a valid HTTPS PUBLIC_APP_URL.', 503);
   return url.origin;
 }
