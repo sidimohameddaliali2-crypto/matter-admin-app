@@ -1,6 +1,7 @@
 import express from 'express';
 import User from '../models/User.js';
 import Delivery from '../models/Delivery.js';
+import Vehicle from '../models/Vehicle.js';
 import { protect, admin } from '../middleware/auth.js';
 import { getDirections } from '../services/googleDirectionsService.js';
 import { addressForDriver } from '../services/reverseGeocode.js';
@@ -28,7 +29,7 @@ router.get('/', protect, async (req, res) => {
     // the all-time query matches ~75k of this collection's 80k+ documents,
     // which made fetching the raw documents take 10+ seconds even once the
     // query itself had an index to use.
-    const [todayStats, allTimeStats] = await Promise.all([
+    const [todayStats, allTimeStats, assignedVehicles] = await Promise.all([
       Delivery.aggregate([
         { $match: { driver: { $in: driverIds }, scheduledTime: { $gte: today, $lt: tomorrow } } },
         {
@@ -53,11 +54,20 @@ router.get('/', protect, async (req, res) => {
             complaintsCount: { $sum: { $cond: [{ $eq: ['$complaint.hasComplaint', true] }, 1, 0] } }
           }
         }
-      ])
+      ]),
+      driverIds.length ? Vehicle.find({ assignedDriver: { $in: driverIds } })
+        .select('_id vehicleId plateNumber type assignedDriver').lean() : Promise.resolve([])
     ]);
 
     const todayByDriver = new Map(todayStats.map((s) => [s._id.toString(), s]));
     const allTimeByDriver = new Map(allTimeStats.map((s) => [s._id.toString(), s]));
+    const vehiclesByDriver = new Map();
+    for (const vehicle of assignedVehicles) {
+      const key = String(vehicle.assignedDriver);
+      if (!vehiclesByDriver.has(key)) vehiclesByDriver.set(key, []);
+      vehiclesByDriver.get(key).push({ _id: String(vehicle._id), vehicleId: vehicle.vehicleId,
+        plateNumber: vehicle.plateNumber, type: vehicle.type });
+    }
 
     const driversWithStats = drivers.map((driver) => {
       const driverKey = driver._id.toString();
@@ -66,6 +76,7 @@ router.get('/', protect, async (req, res) => {
 
       return {
         ...driver,
+        assignedVehicles: vehiclesByDriver.get(driverKey) || [],
         todayDeliveries: today.deliveriesCount,
         deliveriesCount: today.deliveriesCount,
         tasksCount: today.tasksCount,
