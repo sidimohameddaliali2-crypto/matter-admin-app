@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import Delivery from '../models/Delivery.js';
 import Customer from '../models/Customer.js';
 import { apiKeyAuth, isReportingApiClient } from '../middleware/apiKeyAuth.js';
+import { reportingPhotoInstructions } from '../services/reportingPhotoInstructions.js';
 import { isDateKey, businessDayStart } from '../utils/businessDate.js';
 
 // Read-only delivery API for external/third-party consumers (logistics
@@ -230,8 +231,11 @@ router.get('/', async (req, res) => {
     const safePage = Number.isNaN(parsedPage) || parsedPage < 1 ? 1 : parsedPage;
     const safeLimit = Number.isNaN(parsedLimit) || parsedLimit < 1 ? 50 : Math.min(parsedLimit, MAX_LIMIT);
 
+    const auditEvidence = req.query.photoAudit === '1' && isReportingApiClient(req);
+    const deliveryQuery = Delivery.find(query);
+    if (auditEvidence) deliveryQuery.select('+reportingVersion').read('primary').readConcern('majority');
     const [deliveries, total] = await Promise.all([
-      Delivery.find(query)
+      deliveryQuery
         .populate('driver', 'profile.firstName profile.lastName profile.phone profile.vehicleType email')
         .sort({ scheduledTime: -1 })
         .skip((safePage - 1) * safeLimit)
@@ -244,7 +248,14 @@ router.get('/', async (req, res) => {
 
     res.json({
       success: true,
-      data: deliveries.map((d) => serializeDelivery(d, customersById)),
+      data: deliveries.map(d => {
+        const data = serializeDelivery(d, customersById);
+        if (auditEvidence && data.type === 'Delivery' && Number.isSafeInteger(d.reportingVersion) && d.reportingVersion > 0) {
+          data.photoAuditVersion = d.reportingVersion;
+          data.photoInstructions = reportingPhotoInstructions(d.addressDetails, d.address);
+        }
+        return data;
+      }),
       pagination: {
         page: safePage,
         limit: safeLimit,
