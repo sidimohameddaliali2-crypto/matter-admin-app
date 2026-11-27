@@ -221,7 +221,7 @@ const deliverySchema = new mongoose.Schema({
     updatedAt: Date,
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     updatedByName: String,
-    history: [{ _id: false, eventId: String, status: String, reference: String, note: String, actor: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, actorName: String, timestamp: Date }]
+    history: [{ _id: false, eventId: String, status: String, reference: String, note: String, actor: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, actorName: String, actorType: String, actorEmail: String, timestamp: Date }]
   },
   lateMinutes: {
     type: Number,

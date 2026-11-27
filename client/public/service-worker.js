@@ -91,6 +91,7 @@ self.addEventListener('fetch', (event) => {
     || /^\/api\/bag-refunds(?:\/|$)/.test(url.pathname)
     || /^\/api\/bag-followups(?:\/|$)/.test(url.pathname)
     || /^\/api\/collections(?:\/|$)/.test(url.pathname)
+      || /^\/api\/collection-refund-links(?:\/|$)/.test(url.pathname)
     || /^\/api\/bag-operations(?:\/|$)/.test(url.pathname)
     || /^\/api\/matter\/subscriptions\/[^/]+\/delivery-comparison$/.test(url.pathname)) {
     event.respondWith(fetch(request, { cache: 'no-store' }));

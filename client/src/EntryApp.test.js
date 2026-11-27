@@ -25,6 +25,15 @@ test.each(['/menu-select/long-token','/m/short-code'])('public menu %s renders w
 });
 test.each(['/menus','/menu-select-v2','/m','/m/code/extra'])('%s stays in the staff/normal router',path=>expect(isPublicMenuPath(path)).toBe(false));
 
+test('Accounts links render without staff stores or browser storage',async()=>{
+ window.history.replaceState({},'','/refund/complete#'+'a'.repeat(43));
+ Object.defineProperty(window,'localStorage',{configurable:true,get(){throw new DOMException('Blocked','SecurityError');}});
+ global.fetch=jest.fn().mockResolvedValue({ok:true,json:async()=>({success:true,data:{customerName:'Accounts fixture',customerId:'C001',amount:155,status:'pending',version:0}})});
+ await act(async()=>root.render(<EntryApp/>));
+ expect(mockStaffLoaded).not.toHaveBeenCalled();
+ expect(host.textContent).toContain('Accounts fixture');
+ expect(host.textContent).toContain('No staff login is required');
+});
 test('normal staff pages still load their existing application',async()=>{
  window.history.replaceState({},'','/menus');
  await act(async()=>root.render(<EntryApp/>));

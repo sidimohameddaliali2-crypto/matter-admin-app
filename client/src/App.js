@@ -15,6 +15,7 @@ import LiveTracking from './pages/LiveTracking';
 import DriverDetail from './pages/DriverDetail';
 import Deliveries from './pages/Deliveries';
 import Collections from './pages/Collections';
+import CollectionRefundComplete from './pages/CollectionRefundComplete';
 import DeliveryDetail from './pages/DeliveryDetail';
 import AddDelivery from './pages/AddDelivery';
 import BagTracking from './pages/BagOperations';
@@ -264,6 +265,7 @@ function App() {
               </ProtectedRoute>
             } />
             <Route path="/login" element={<Login />} />
+            <Route path="/refund/complete" element={<CollectionRefundComplete />} />
             <Route path="/privacy-policy" element={<PrivacyPolicy />} />
             <Route path="/partner/login" element={<PartnerLogin />} />
             <Route path="/partner/portal" element={<PartnerRoute><PartnerPortal /></PartnerRoute>} />

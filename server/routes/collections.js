@@ -4,6 +4,9 @@ import Delivery from '../models/Delivery.js';
 import Customer from '../models/Customer.js';
 import User from '../models/User.js';
 import BagRefundCase from '../models/BagRefundCase.js';
+import CollectionRefundLink from '../models/CollectionRefundLink.js';
+import { enqueueRefundLink, refundEmailStatus, refundEmailEnabled } from '../services/collectionRefundLinks.js';
+import { refundEmailConfiguration } from '../services/collectionRefundEmail.js';
 import { collectionRefundFilter, collectionRefundQueueFilter, canRecordCollectionRefund, buildCollectionRefundUpdate, refundError } from '../services/collectionRefund.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { effectivePermissions } from '../models/User.js';
@@ -25,6 +28,13 @@ async function paidCustomerIds() {
   const [local, bags] = await Promise.all([Delivery.distinct('customerId', { 'collectionRefund.status': 'refunded' }), BagRefundCase.distinct('customerId', { status: 'completed' })]);
   return [...new Set([...local, ...bags])];
 }
+router.get('/refund-email-config', async (req, res) => {
+  try {
+    if (!canRecordCollectionRefund(req.user)) throw refundError('Management access is required.', 403);
+    if (!refundEmailEnabled()) return res.json({ success: true, ready: false, code: 'missing_or_paused_configuration' });
+    res.json({ success: true, ...await refundEmailConfiguration() });
+  } catch (error) { res.status(error.statusCode || 503).json({ success: false, message: error.statusCode ? error.message : 'Could not check Brevo. Please retry.' }); }
+});
 async function refundListFilter(query) {
   const paid = await paidCustomerIds();
   const filter = { ...collectionRefundQueueFilter(query.status, paid), ...collectionSearchFilter(query) };
@@ -75,8 +85,22 @@ router.get('/refunds', async (req, res) => {
       Delivery.find(filter).select('customerId customerName scheduledTime collectionDetails completedAt collectionRefund').sort(sort).skip((page - 1) * 25).limit(25).lean(),
       Delivery.countDocuments(filter)
     ]);
-    res.json({ success: true, data: records.map(record => ({ ...record, refundStatus: paid.includes(record.customerId) ? 'refunded' : record.collectionRefund?.status || 'pending', recordedForCustomer: paid.includes(record.customerId) && record.collectionRefund?.status !== 'refunded' })), total, page, pages: Math.ceil(total / 25), canUpdate: canRecordCollectionRefund(req.user) });
+    const links = await CollectionRefundLink.find({ delivery: { $in: records.map(record => record._id) } }).select('delivery state sentAt expiresAt usedAt errorCode').lean();
+    const byDelivery = new Map(links.map(link => [String(link.delivery), link]));
+    res.json({ success: true, data: records.map(record => ({ ...record, accountsEmail: refundEmailStatus(byDelivery.get(String(record._id))), refundStatus: paid.includes(record.customerId) ? 'refunded' : record.collectionRefund?.status || 'pending', recordedForCustomer: paid.includes(record.customerId) && record.collectionRefund?.status !== 'refunded' })), total, page, pages: Math.ceil(total / 25), canUpdate: canRecordCollectionRefund(req.user), emailEnabled: refundEmailEnabled() });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Unable to load refund tracking.' }); }
+});
+
+router.post('/:id/refund-email', async (req, res) => {
+  try {
+    if (!canRecordCollectionRefund(req.user)) throw refundError('Management access is required to email Accounts.', 403);
+    if (!mongoose.isValidObjectId(req.params.id)) throw refundError('Invalid collection ID.');
+    const record = await Delivery.findOne({ ...collectionRefundFilter(), _id: req.params.id, 'collectionRefund.status': { $ne: 'refunded' } }).select('_id customerId').lean();
+    if (!record) throw refundError('A pending refund after a completed collection is required.', 409);
+    const actorName = [req.user.profile?.firstName, req.user.profile?.lastName].filter(Boolean).join(' ') || req.user.email;
+    const link = await enqueueRefundLink(record, { resend: req.body.resend === true, actorName });
+    res.json({ success: true, accountsEmail: refundEmailStatus(link), message: 'Accounts email queued. It will be sent shortly.' });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Could not queue the Accounts email.' }); }
 });
 
 router.post('/:id/refund-assignment', async (req, res) => {
