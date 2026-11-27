@@ -15,7 +15,7 @@ Notification credentials are derived from a random nonce and the existing JWT se
 - `PUBLIC_APP_URL` optionally sets the HTTPS origin; default is `https://matterapp.online`. It must not include a path, query, fragment or embedded credentials.
 - `COLLECTION_REFUND_EMAILS_ENABLED=false` pauses automatic dispatch and staff email enqueueing. It does not revoke links already issued.
 
-No payment provider is called. Completion records that Accounts reported the payment; the mailbox/link source is retained in refund history without inventing a named staff identity. Staff completion and email-link completion use the same collection eligibility, optimistic version and unique customer-deposit safeguards.
+No payment provider is called. Completion records that Accounts reported the payment; the mailbox/link source is retained in refund history with the owner-requested display name Jenniza and the Accounts email-link source (no authenticated user identity is asserted). Staff completion and email-link completion use the same collection eligibility, optimistic version and unique customer-deposit safeguards.
 
 ## Sending, retries and staff controls
 
@@ -32,3 +32,7 @@ Live verification must distinguish the website/API health and configuration from
 ## Safe email demo
 
 Management can use Send demo to Accounts to send a clearly labelled Brevo email only to accounts@matternutrition.xyz. The link opens /refund/complete?demo=1 with example data and no capability. The form makes no API calls, writes no storage and updates only component state. Reset/reopen returns to Pending. A real token takes priority if present. The authenticated send endpoint has no customer lookup, collection creation, link creation or ledger write; it accepts only a UUID send ID reused on retry for Brevo deduplication. Demo inbox delivery must be checked separately from API acceptance.
+
+## Refund destination and named confirmation
+
+New Done updates require a credit/debit card or bank account destination and a transaction reference, on both staff and public forms. The destination is stored on the refund and its immutable update-history event and included in staff CSV exports. Old refunds remain readable with Not recorded for an absent destination. The public checkbox explicitly says I, Jenniza, confirm; the server sets this owner-requested display name rather than trusting an incoming name. The receipt shows Confirmed by Jenniza. Actor type remains accounts_email_link, actor email remains the Accounts mailbox, and no staff user ID is asserted by the no-login link. Staff updates retain their actual signed-in actor. The safe demo displays the same checkpoint/name without API or storage writes.

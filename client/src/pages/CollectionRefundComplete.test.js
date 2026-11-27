@@ -13,7 +13,7 @@ beforeEach(async () => {
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); jest.clearAllMocks(); window.history.replaceState({}, '', '/'); });
 async function change(selector, value) {
-  await act(async () => { const input = container.querySelector(selector); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })); });
+  await act(async () => { const input = container.querySelector(selector); Object.getOwnPropertyDescriptor(input.tagName === 'SELECT' ? HTMLSelectElement.prototype : HTMLInputElement.prototype, 'value').set.call(input, value); input.dispatchEvent(new Event(input.tagName === 'SELECT' ? 'change' : 'input', { bubbles: true })); });
 }
 async function submit() { await act(async () => container.querySelector('form').dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))); }
 test('the private link loads only its refund without login cookies or an authorization header', () => {
@@ -25,13 +25,13 @@ test('the private link loads only its refund without login cookies or an authori
 });
 test('Done requires a transaction reference and explicit confirmation, then renders the recorded reference', async () => {
   await submit(); expect(fetch).toHaveBeenCalledTimes(1);
-  await change('#accounts-refund-reference', 'TXN-123');
+  await change('#accounts-refund-method', 'bank_account'); await change('#accounts-refund-reference', 'TXN-123');
   await submit(); expect(fetch).toHaveBeenCalledTimes(1);
   await act(async () => container.querySelector('[type="checkbox"]').click());
-  record = { ...record, status: 'done', reference: 'TXN-123' };
+  record = { ...record, status: 'done', reference: 'TXN-123', method: 'bank_account', confirmedByName: 'Jenniza' };
   await submit();
   const write = fetch.mock.calls.find(([url]) => url.endsWith('/complete'));
-  expect(JSON.parse(write[1].body)).toEqual(expect.objectContaining({ token, reference: 'TXN-123', confirmed: true, version: 2 }));
+  expect(JSON.parse(write[1].body)).toEqual(expect.objectContaining({ token, method: 'bank_account', reference: 'TXN-123', confirmed: true, version: 2 }));
   expect(container.querySelector('form')).toBeNull(); expect(container.textContent).toContain('Refund recorded as Done'); expect(container.textContent).toContain('TXN-123');
 });
 test('expired links show the server message without presenting an editable refund', async () => {
@@ -39,8 +39,16 @@ test('expired links show the server message without presenting an editable refun
   await act(async () => [...container.querySelectorAll('button')].find(el => el.textContent === 'Reload refund details').click());
   expect(container.querySelector('[role="alert"]').textContent).toContain('expired'); expect(container.querySelector('form')).toBeNull();
 });
+test('a reference and confirmation cannot complete a refund without the destination checkpoint', async () => {
+  await change('#accounts-refund-reference', 'TXN-MISSING-METHOD');
+  await act(async () => container.querySelector('[type="checkbox"]').click());
+  await submit();
+  expect(container.textContent).toContain('Choose credit/debit card or bank account.');
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(container.querySelector('#accounts-refund-method').required).toBe(true);
+});
 test('a failed save keeps the reference and confirmation for a safe retry', async () => {
-  await change('#accounts-refund-reference', 'TXN-RETRY'); await act(async () => container.querySelector('[type="checkbox"]').click());
+  await change('#accounts-refund-method', 'bank_account'); await change('#accounts-refund-reference', 'TXN-RETRY'); await act(async () => container.querySelector('[type="checkbox"]').click());
   fetch.mockResolvedValueOnce({ ok: false, json: async () => ({ message: 'This refund changed. Reload before updating.' }) });
   await submit(); expect(container.querySelector('#accounts-refund-reference').value).toBe('TXN-RETRY'); expect(container.querySelector('[type="checkbox"]').checked).toBe(true); expect(container.textContent).toContain('This refund changed');
 });
@@ -49,10 +57,10 @@ test('demo completion and reset never call a refund API or persist a real refund
   window.history.replaceState({}, '', '/refund/complete?demo=1');
   await act(async () => root.render(<CollectionRefundComplete />));
   expect(container.textContent).toContain('DEMO ONLY'); expect(fetch).not.toHaveBeenCalled();
-  await change('#accounts-refund-reference', 'DEMO-REF-001');
+  await change('#accounts-refund-method', 'bank_account'); await change('#accounts-refund-reference', 'DEMO-REF-001');
   await act(async () => container.querySelector('[type="checkbox"]').click()); await submit();
   expect(container.textContent).toContain('Demo complete. Nothing was saved');
-  expect(container.textContent).toContain('DEMO-REF-001'); expect(fetch).not.toHaveBeenCalled();
+  expect(container.textContent).toContain('DEMO-REF-001'); expect(container.textContent).toContain('Jenniza'); expect(container.textContent).toContain('Bank account'); expect(fetch).not.toHaveBeenCalled();
   await act(async () => [...container.querySelectorAll('button')].find(el => el.textContent === 'Reset demo').click());
   expect(container.querySelector('form')).not.toBeNull(); expect(container.querySelector('#accounts-refund-reference').value).toBe(''); expect(fetch).not.toHaveBeenCalled();
 });

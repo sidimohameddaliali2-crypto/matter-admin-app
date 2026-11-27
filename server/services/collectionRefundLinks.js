@@ -56,7 +56,7 @@ export async function resolveRefundLink(token, now = new Date()) {
 }
 export function accountsRefundUpdate(record, input) {
   if (input.confirmed !== true) throw refundError('Confirm that the AED 155 deposit has been refunded.');
-  const update = buildCollectionRefundUpdate(record, { ...input, status: 'refunded', note: typeof input.note === 'string' && input.note.trim() ? input.note : 'Refund recorded through the Accounts email link.' }, { role: 'admin', email: ACCOUNTS_EMAIL, profile: { firstName: 'Accounts via email link' } });
+  const update = buildCollectionRefundUpdate(record, { ...input, status: 'refunded', note: typeof input.note === 'string' && input.note.trim() ? input.note : 'Jenniza confirmed the refund through the Accounts email link.' }, { role: 'admin', email: ACCOUNTS_EMAIL, profile: { firstName: 'Jenniza' } });
   delete update.$set['collectionRefund.updatedBy'];
   update.$unset = { 'collectionRefund.updatedBy': 1 };
   update.$push['collectionRefund.history'].actorType = 'accounts_email_link';

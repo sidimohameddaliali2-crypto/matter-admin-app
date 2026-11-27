@@ -8,6 +8,7 @@ const date = value => value ? new Date(value).toLocaleDateString('en-GB', { time
 export default function CollectionRefundTracker({ search = '', dateFrom = '', dateTo = '', owners = [], resetKey = 0, onUpdated } = {}) {
   const [rows, setRows] = useState([]), [filter, setFilter] = useState('pending'), [page, setPage] = useState(1), [pages, setPages] = useState(0), [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true), [canUpdate, setCanUpdate] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState('');
+  const [method, setMethod] = useState('');
   const [selected, setSelected] = useState(null), [note, setNote] = useState(''), [reference, setReference] = useState(''), [busy, setBusy] = useState(false);
   const eventId = useRef(''), request = useRef(0), saving = useRef(false);
   const [ownerFilter, setOwnerFilter] = useState(''), [mode, setMode] = useState('refund'), [ownerId, setOwnerId] = useState(''), [dueDate, setDueDate] = useState(''), [exporting, setExporting] = useState(false);
@@ -32,13 +33,14 @@ export default function CollectionRefundTracker({ search = '', dateFrom = '', da
   function choose(row, action = 'refund') {
     setEmailConfirmed(false);
     setMode(action); setOwnerId(row.collectionRefund?.owner || ''); setDueDate(row.collectionRefund?.dueDate || '');
-    setSelected(row); setNote(''); setReference(''); setError(''); setNotice('');
+    setSelected(row); setMethod(''); setNote(''); setReference(''); setError(''); setNotice('');
     eventId.current = window.crypto?.randomUUID?.() || `refund-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   }
   async function save(event) {
     event.preventDefault(); if (saving.current) return;
     const followUpDate = event.currentTarget.elements.namedItem('followUpDate')?.value ?? dueDate;
     if (mode === 'refund' && !reference.trim()) { setError('Enter the transaction reference before marking this refund as Done.'); return; }
+    if (mode === 'refund' && !['card', 'bank_account'].includes(method)) { setError('Choose credit/debit card or bank account.'); return; }
     if (mode === 'assignment' && !ownerId) { setError('Choose a refund owner.'); return; }
     if (mode === 'email' && !emailConfirmed) { setError('Confirm sending a replacement Accounts link.'); return; }
     saving.current = true; setBusy(true); setError('');
@@ -47,7 +49,7 @@ export default function CollectionRefundTracker({ search = '', dateFrom = '', da
         await api.post(`/collections/${selected._id}/refund-email`, { resend: true });
         setSelected(null); setNotice('Replacement Accounts email queued. The previous link will no longer work.'); await load(); return;
       }
-      await api.post(`/collections/${selected._id}/${mode === 'assignment' ? 'refund-assignment' : 'refund'}`, { ...(mode === 'assignment' ? { ownerId, dueDate: followUpDate } : { status: 'refunded', note, reference: reference.trim() }), version: selected.collectionRefund?.version || 0, eventId: eventId.current });
+      await api.post(`/collections/${selected._id}/${mode === 'assignment' ? 'refund-assignment' : 'refund'}`, { ...(mode === 'assignment' ? { ownerId, dueDate: followUpDate } : { status: 'refunded', method, note, reference: reference.trim() }), version: selected.collectionRefund?.version || 0, eventId: eventId.current });
       setSelected(null); setNotice(mode === 'assignment' ? 'Refund owner and follow-up date saved.' : 'Refund marked as Done.'); await load(); onUpdated?.();
     } catch (err) { setError(err.response?.data?.message || 'Could not save the refund update. Refresh and retry.'); }
     finally { saving.current = false; setBusy(false); }
@@ -98,7 +100,7 @@ export default function CollectionRefundTracker({ search = '', dateFrom = '', da
     {selected && <form className="collection-refund-editor" onSubmit={save} aria-label="Update refund status">
       <h3>{mode === 'email' ? 'Resend Accounts link' : mode === 'assignment' ? 'Assign refund follow-up' : 'Mark as done'} · {selected.customerName}</h3>
       <fieldset disabled={busy}><legend className="sr-only">Refund update</legend>
-        {mode === 'email' ? <><p>Send a private replacement link to <strong>accounts@matternutrition.xyz</strong>. The old link will stop working. Check Accounts before resending if the previous send result is uncertain.</p><label className="collection-checkbox"><input type="checkbox" required checked={emailConfirmed} onChange={event => setEmailConfirmed(event.target.checked)} />Send the replacement link to Accounts</label></> : mode === 'assignment' ? <><label htmlFor="collection-refund-owner">Refund owner</label><select id="collection-refund-owner" value={ownerId} required autoFocus onChange={event => setOwnerId(event.target.value)}><option value="">Choose a manager</option>{owners.map(owner => <option key={owner._id} value={owner._id}>{owner.name}</option>)}</select><label htmlFor="collection-refund-due">Follow-up date · Dubai (optional)</label><input id="collection-refund-due" name="followUpDate" type="date" value={dueDate} onInput={event => setDueDate(event.currentTarget.value)} onChange={event => setDueDate(event.target.value)} /><p className="collection-hint">Choose a staff follow-up date. This is not a promised payment deadline.</p></> : <><label htmlFor="collection-refund-reference">Transaction reference (required)</label><input id="collection-refund-reference" value={reference} autoFocus required maxLength={200} onChange={event => setReference(event.target.value)} />
+        {mode === 'email' ? <><p>Send a private replacement link to <strong>accounts@matternutrition.xyz</strong>. The old link will stop working. Check Accounts before resending if the previous send result is uncertain.</p><label className="collection-checkbox"><input type="checkbox" required checked={emailConfirmed} onChange={event => setEmailConfirmed(event.target.checked)} />Send the replacement link to Accounts</label></> : mode === 'assignment' ? <><label htmlFor="collection-refund-owner">Refund owner</label><select id="collection-refund-owner" value={ownerId} required autoFocus onChange={event => setOwnerId(event.target.value)}><option value="">Choose a manager</option>{owners.map(owner => <option key={owner._id} value={owner._id}>{owner.name}</option>)}</select><label htmlFor="collection-refund-due">Follow-up date · Dubai (optional)</label><input id="collection-refund-due" name="followUpDate" type="date" value={dueDate} onInput={event => setDueDate(event.currentTarget.value)} onChange={event => setDueDate(event.target.value)} /><p className="collection-hint">Choose a staff follow-up date. This is not a promised payment deadline.</p></> : <><label htmlFor="collection-refund-method">Refund destination (required)</label><select id="collection-refund-method" required value={method} onChange={event => setMethod(event.target.value)}><option value="">Choose refund destination</option><option value="card">Credit/debit card</option><option value="bank_account">Bank account</option></select><label htmlFor="collection-refund-reference">Transaction reference (required)</label><input id="collection-refund-reference" value={reference} autoFocus required maxLength={200} onChange={event => setReference(event.target.value)} />
         <label htmlFor="collection-refund-note">Confirmation notes</label><textarea id="collection-refund-note" required maxLength={2000} value={note} onChange={event => setNote(event.target.value)} placeholder="Payment confirmation" />
         <p className="collection-hint">Saving records the status only. It does not send money.</p>
         </>}
@@ -113,10 +115,11 @@ export default function CollectionRefundTracker({ search = '', dateFrom = '', da
       {row.refundStatus !== 'refunded' && <p>Accounts email: {emailEnabled ? emailLabels[row.accountsEmail?.state || 'not_queued'] : 'Unavailable — email configuration needs administrator review'}{row.accountsEmail?.sentAt && ` · ${date(row.accountsEmail.sentAt)}`}{row.accountsEmail?.expiresAt && ` · Link expires ${date(row.accountsEmail.expiresAt)}`}</p>}
       {row.recordedForCustomer ? <p>Refund already recorded for this customer against another collection or in Bag Operations.</p> : <>
         {row.collectionRefund?.updatedByName && <p>Updated by {row.collectionRefund.updatedByName} · {date(row.collectionRefund.updatedAt)}</p>}
+        {row.collectionRefund?.method && <p>Refund destination: {row.collectionRefund.method === 'card' ? 'Credit/debit card' : 'Bank account'}</p>}
         {row.collectionRefund?.reference && <p>Transaction reference: {row.collectionRefund.reference}</p>}
         {row.collectionRefund?.note && <p>{row.collectionRefund.note}</p>}
       </>}
-      {!!row.collectionRefund?.history?.length && <details><summary>Update history</summary>{row.collectionRefund.history.map(event => <p key={event.eventId}>{labels[event.status]} · {event.actorName} · {date(event.timestamp)}<br />{event.note}{event.reference && ` · ${event.reference}`}</p>)}</details>}
+      {!!row.collectionRefund?.history?.length && <details><summary>Update history</summary>{row.collectionRefund.history.map(event => <p key={event.eventId}>{labels[event.status]} · {event.actorName}{event.actorType === 'accounts_email_link' ? ' · Accounts email link' : ''}{event.method ? ` · ${event.method === 'card' ? 'Credit/debit card' : 'Bank account'}` : ''} · {date(event.timestamp)}<br />{event.note}{event.reference && ` · ${event.reference}`}</p>)}</details>}
       {!!row.collectionRefund?.assignmentHistory?.length && <details><summary>Follow-up history</summary>{row.collectionRefund.assignmentHistory.map(event => <p key={event.eventId}>{event.ownerName} · Follow-up: {event.dueDate || 'Not set'} · Assigned by {event.actorName} · {date(event.timestamp)}</p>)}</details>}
       {canUpdate && row.refundStatus !== 'refunded' && <div className="collection-refund-filters"><button className="collection-secondary" type="button" disabled={busy || !owners.length} onClick={() => choose(row, 'assignment')}>Assign follow-up</button><button className="collection-secondary" type="button" disabled={busy} onClick={() => choose(row)}>Mark as done</button></div>}
       {canUpdate && emailEnabled && row.refundStatus !== 'refunded' && <button className="collection-secondary" type="button" disabled={busy || ((!row.accountsEmail?.expiresAt || new Date(row.accountsEmail.expiresAt).getTime() > Date.now()) && ['queued', 'sending', 'uncertain'].includes(row.accountsEmail?.state))} onClick={() => row.accountsEmail?.state && row.accountsEmail.state !== 'not_queued' ? choose(row, 'email') : emailAccounts(row)}>{row.accountsEmail?.state && row.accountsEmail.state !== 'not_queued' ? 'Resend Accounts link' : 'Email Accounts'}</button>}

@@ -21,7 +21,7 @@ router.post('/view', async (req, res) => {
     const { link, record } = await resolveRefundLink(req.body.token);
     const ownPaid = record.collectionRefund?.status === 'refunded';
     const paid = ownPaid || await refundAlreadyPaid(record.customerId);
-    res.json({ success: true, data: { customerName: record.customerName, customerId: record.customerId, amount: 155, collectedAt: record.collectionDetails?.collectedAt || record.completedAt || null, status: paid ? 'done' : 'pending', recordedElsewhere: paid && !ownPaid, reference: ownPaid ? record.collectionRefund.reference : undefined, completedAt: ownPaid ? record.collectionRefund.updatedAt : undefined, version: record.collectionRefund?.version || 0, expiresAt: link.expiresAt } });
+    res.json({ success: true, data: { customerName: record.customerName, customerId: record.customerId, amount: 155, collectedAt: record.collectionDetails?.collectedAt || record.completedAt || null, status: paid ? 'done' : 'pending', recordedElsewhere: paid && !ownPaid, reference: ownPaid ? record.collectionRefund.reference : undefined, method: ownPaid ? record.collectionRefund.method : undefined, confirmedByName: ownPaid ? record.collectionRefund.updatedByName : undefined, completedAt: ownPaid ? record.collectionRefund.updatedAt : undefined, version: record.collectionRefund?.version || 0, expiresAt: link.expiresAt } });
   } catch (error) { failure(res, error); }
 });
 router.post('/complete', async (req, res) => {
