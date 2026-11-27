@@ -217,11 +217,12 @@ const deliverySchema = new mongoose.Schema({
     version: Number,
     depositKey: String,
     reference: String,
+    method: { type: String, enum: ['card', 'bank_account'] },
     note: String,
     updatedAt: Date,
     updatedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     updatedByName: String,
-    history: [{ _id: false, eventId: String, status: String, reference: String, note: String, actor: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, actorName: String, actorType: String, actorEmail: String, timestamp: Date }]
+    history: [{ _id: false, eventId: String, status: String, reference: String, method: { type: String, enum: ['card', 'bank_account'] }, note: String, actor: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, actorName: String, actorType: String, actorEmail: String, timestamp: Date }]
   },
   lateMinutes: {
     type: Number,

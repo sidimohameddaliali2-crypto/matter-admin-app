@@ -7,7 +7,7 @@ const saved = { findById: Delivery.findById, exists: Delivery.exists, update: De
 afterEach(() => { Delivery.findById = saved.findById; Delivery.exists = saved.exists; Delivery.findOneAndUpdate = saved.update; BagRefundCase.exists = saved.bagExists; });
 const handler = router.stack.find(layer => layer.route?.path === '/:id/refund').route.stack[0].handle;
 const record = { _id: '507f1f77bcf86cd799439011', customerId: 'C001', type: 'Collection', status: 'collected', collectionRequest: { refundRequestedAfterCollection: true } };
-const req = () => ({ params: { id: record._id }, user: { _id: '507f1f77bcf86cd799439012', role: 'admin' }, body: { eventId: 'refund-test-001', version: 0, status: 'refunded', note: 'Payment checked', reference: 'BANK-123' }, app: { get: () => null } });
+const req = () => ({ params: { id: record._id }, user: { _id: '507f1f77bcf86cd799439012', role: 'admin' }, body: { eventId: 'refund-test-001', version: 0, status: 'refunded', note: 'Payment checked', method: 'bank_account', reference: 'BANK-123' }, app: { get: () => null } });
 const res = () => ({ statusCode: 200, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } });
 function stub(value = record) { Delivery.findById = () => ({ lean: async () => value }); Delivery.exists = async () => false; BagRefundCase.exists = async () => false; }
 test('refund write atomically checks collection eligibility and the expected version', async () => {

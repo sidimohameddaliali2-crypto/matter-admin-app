@@ -32,7 +32,7 @@ test('completed collection shows pending; management records payment reference a
   await click('Mark as done');
   expect(container.querySelector('#collection-refund-status')).toBeNull();
   expect(container.querySelector('#collection-refund-reference').required).toBe(true);
-  await change('#collection-refund-reference', 'BANK-123'); await change('#collection-refund-note', 'Payment confirmed');
+  await change('#collection-refund-method', 'card'); await change('#collection-refund-reference', 'BANK-123'); await change('#collection-refund-note', 'Payment confirmed');
   await save();
   expect(api.post).toHaveBeenCalledWith('/collections/collection-1/refund', expect.objectContaining({ status: 'refunded', reference: 'BANK-123', note: 'Payment confirmed', version: 0, eventId: expect.any(String) }));
   expect(container.textContent).toContain('Refund marked as Done.');
@@ -42,7 +42,7 @@ test('earlier unpaid requests remain Pending; failed saves retain the confirmati
   await click('Refresh refunds');
   expect(container.querySelector('.collection-status').textContent).toBe('Pending');
   await click('Mark as done'); await change('#collection-refund-note', 'Payment confirmed');
-  await change('#collection-refund-reference', 'BANK-456');
+  await change('#collection-refund-method', 'card'); await change('#collection-refund-reference', 'BANK-456');
   api.post.mockRejectedValueOnce({ response: { data: { message: 'This refund changed. Refresh before updating it.' } } });
   await save();
   expect(container.querySelector('#collection-refund-note').value).toBe('Payment confirmed');
@@ -71,11 +71,11 @@ test('Done requires a nonblank transaction reference and keeps the request pendi
   await change('#collection-refund-note', 'Payment confirmed');
   await save();
   expect(api.post).not.toHaveBeenCalled();
-  await change('#collection-refund-reference', '   ');
+  await change('#collection-refund-method', 'card'); await change('#collection-refund-reference', '   ');
   await save();
   expect(api.post).not.toHaveBeenCalled();
   expect(container.textContent).toContain('Enter the transaction reference');
-  await change('#collection-refund-reference', 'TXN-789');
+  await change('#collection-refund-method', 'card'); await change('#collection-refund-reference', 'TXN-789');
   await save();
   expect(api.post).toHaveBeenCalledWith('/collections/collection-1/refund', expect.objectContaining({status: 'refunded', reference: 'TXN-789'}));
 });

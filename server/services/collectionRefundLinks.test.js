@@ -72,30 +72,35 @@ test('public view is restricted to the token record and returns no contact detai
   assert.equal(res.body.data.address,undefined);assert.equal(res.body.data.collectionRefund,undefined);assert.equal(res.body.data.token,undefined);
 });
 test('Accounts completion requires payment confirmation and a transaction reference and audits the mailbox honestly',()=>{
-  const input={confirmed:true,reference:'BANK-123',version:0,eventId:'accounts-fixture-001'};
+  const input={confirmed:true,method:'bank_account',reference:'BANK-123',version:0,eventId:'accounts-fixture-001'};
   assert.throws(()=>accountsRefundUpdate(record,{...input,confirmed:false}),/Confirm/);
   assert.throws(()=>accountsRefundUpdate(record,{...input,reference:'  '}),/reference/);
   const update=accountsRefundUpdate(record,input);
   assert.equal(update.$set['collectionRefund.status'],'refunded');assert.equal(update.$unset['collectionRefund.updatedBy'],1);
   assert.equal(update.$push['collectionRefund.history'].actorEmail,'accounts@matternutrition.xyz');assert.equal(update.$push['collectionRefund.history'].actorType,'accounts_email_link');
   assert.equal(update.$push['collectionRefund.history'].actor,undefined);
+  assert.equal(update.$set['collectionRefund.updatedByName'],'Jenniza');
+  assert.equal(update.$push['collectionRefund.history'].actorName,'Jenniza');
+  assert.equal(update.$push['collectionRefund.history'].method,'bank_account');
+  assert.throws(()=>accountsRefundUpdate(record,{...input,method:'cash'}),/credit\/debit card or bank account/);
+  assert.equal(accountsRefundUpdate(record,{...input,confirmedByName:'Forged name'}).$set['collectionRefund.updatedByName'],'Jenniza');
 });
 test('public completion uses the token collection, optimistic version and existing one-deposit guard',async()=>{
   const token=stubToken();let captured;
   mock.method(Delivery,'findOneAndUpdate',async(filter,update)=>{captured={filter,update};return record;});mock.method(Link,'updateOne',async()=>({}));
-  const res=await invoke('/complete',{token,deliveryId:'forged',confirmed:true,reference:'BANK-123',version:0,eventId:'accounts-fixture-001'});
+  const res=await invoke('/complete',{token,deliveryId:'forged',confirmed:true,method:'bank_account',reference:'BANK-123',version:0,eventId:'accounts-fixture-001'});
   assert.equal(res.code,200);assert.equal(captured.filter._id,record._id);assert.deepEqual(captured.filter['collectionRefund.status'],{$ne:'refunded'});
   assert.deepEqual(captured.filter['collectionRefund.version'],{$in:[null,0]});assert.equal(captured.update.$set['collectionRefund.depositKey'],'C001');
 });
 test('a refund recorded in Bag Operations blocks public completion without a write',async()=>{
   const token=stubToken();mock.restoreAll();stubToken();mock.method(BagRefundCase,'exists',async()=>({_id:'paid'}));
   const write=mock.method(Delivery,'findOneAndUpdate',()=>assert.fail('must not write'));
-  const res=await invoke('/complete',{token,confirmed:true,reference:'BANK-123',version:0,eventId:'accounts-fixture-001'});
+  const res=await invoke('/complete',{token,confirmed:true,method:'bank_account',reference:'BANK-123',version:0,eventId:'accounts-fixture-001'});
   assert.equal(res.code,409);assert.equal(write.mock.callCount(),0);
 });
 test('a stale version cannot overwrite a concurrent update',async()=>{
   const token=stubToken();const write=mock.method(Delivery,'findOneAndUpdate',async()=>null);
-  const res=await invoke('/complete',{token,confirmed:true,reference:'BANK-123',version:0,eventId:'accounts-fixture-001'});
+  const res=await invoke('/complete',{token,confirmed:true,method:'bank_account',reference:'BANK-123',version:0,eventId:'accounts-fixture-001'});
   assert.equal(res.code,409);assert.equal(write.mock.callCount(),1);
 });
 test('already-completed links are read-only on retry',async()=>{
