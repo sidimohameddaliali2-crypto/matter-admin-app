@@ -11,6 +11,7 @@ import { CAPTURE_MAX_ROWS, captureObservationId, captureTickId } from '../servic
 import { CAPTURE_FIELDS, serializeHistoryPoint } from '../services/vehicleLocationView.js';
 import { inspectReportingMongoTopology, readReportingChanges, readReportingWatermark, reportingCaptureEnabled } from '../services/reportingOutbox.js';
 import { serializeDelivery } from './externalDeliveryApi.js';
+import { fleetProofForReporting } from '../services/fleetProofReceipt.js';
 
 const router = express.Router();
 const hasReportingVercelIdentity = createReportingVercelIdentity();
@@ -50,6 +51,7 @@ export function serializeReportingDelivery(delivery) {
   const data = serializeDelivery(delivery, undefined, { includeProofEvidence: true });
   const { customerName, customerId, company, type, status, address, addressId, addressDetails,
     matterSubscriptionId, locationType, deliveredTime, timing, driver, proof, gpsLocation, updatedAt } = data;
+  const fleetProof = fleetProofForReporting(delivery.fleetProofReceipt, proof);
   return {
     ...summary, customerName, customerId, company, type, status, address, addressId,
     matterSubscriptionId, locationType, deliveredTime, timing, updatedAt,
@@ -64,6 +66,7 @@ export function serializeReportingDelivery(delivery) {
       ...(proof.photoSource && { photoSource: proof.photoSource }),
       location: proof.location,
     },
+    ...(fleetProof && { fleetProof }),
     gpsLocation: gpsLocation ? { lat: gpsLocation.lat, lng: gpsLocation.lng } : null,
   };
 }
@@ -74,7 +77,7 @@ router.get('/deliveries/:id', async (req, res) => {
   }
   try {
     const delivery = await Delivery.findById(req.params.id).read('primary').readConcern('majority')
-      .select('customerId customerName company otherCompany type status address addressId addressDetails zone matterSubscriptionId scheduledTime deliveredTime completedAt deliveryType lateMinutes earlyMinutes driver proof.photoUrl proof.images proof.timestamp proof.receivedAt proof.photoCapturedAt proof.photoSource proof.location gpsLocation updatedAt +reportingVersion')
+      .select('customerId customerName company otherCompany type status address addressId addressDetails zone matterSubscriptionId scheduledTime deliveredTime completedAt deliveryType lateMinutes earlyMinutes driver proof.photoUrl proof.images proof.timestamp proof.receivedAt proof.photoCapturedAt proof.photoSource proof.location gpsLocation updatedAt +reportingVersion +fleetProofReceipt')
       .populate('driver', 'profile.firstName profile.lastName profile.vehicleType').maxTimeMS(5000).lean();
     if (!Number.isSafeInteger(delivery?.reportingVersion) || delivery.reportingVersion < 1) {
       return res.status(404).json({ success: false, message: 'Versioned reporting delivery not found' });

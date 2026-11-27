@@ -59,6 +59,8 @@ The base implementation does not establish an immutable effective-dated assignme
 
 The driver app sends camera capture time/source separately from upload/receipt time. Delivery routes strip client attempts to set server-owned tracker evidence and call `recordProofReceipt`. The visit synchronization service freezes destination and assignment context once proof is received and writes tracker evidence with a conditional update against the delivery version.
 
+For fleet attribution, an authenticated assigned driver completing a delivery can bind their account ID to the submitted camera proof and server receipt. Handset coordinates qualify only when the completion request supplied the same coordinates that are saved with that proof. A replacement photo without coordinates can keep the old point for the ordinary viewer, but its private receipt has no bound handset. Reassigning a completed delivery keeps the original proof actor in the versioned feed. The fleet report leaves the class unresolved if that actor differs from the accepted delivery driver.
+
 Preserve these boundaries:
 
 - GPS repair must not modify delivered/completed times, delivery status, bag scans or driver KPI inputs.

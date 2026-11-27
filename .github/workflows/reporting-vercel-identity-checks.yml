@@ -9,6 +9,7 @@ on:
       - 'server/middleware/reportingVercelIdentity*.js'
       - 'server/routes/externalReportingApi.js'
       - 'server/routes/deliveries.js'
+      - 'server/routes/trackerEvidence.test.js'
       - 'server/models/Delivery.js'
       - 'server/models/ReportingOutbox.js'
       - 'server/models/VehicleLocationHistory.js'
@@ -16,11 +17,13 @@ on:
       - 'server/services/truckoomApiService.js'
       - 'server/services/truckoomLiveData*.js'
       - 'server/services/truckoomVisitSync*.js'
+      - 'server/services/truckoomVisitRules.js'
       - 'server/services/vehicleLocationCapture*.js'
       - 'server/services/vehicleLocationView.js'
       - 'server/services/matterDeliveryImportService.js'
       - 'server/services/matterDeliveryInsert*.js'
       - 'server/services/fleetDispatch*.js'
+      - 'server/services/fleetProofReceipt*.js'
       - 'server/routes/dispatcherFleet*.js'
       - 'client/public/service-worker.js'
       - 'client/src/components/dispatcher/DispatcherFleet.js'
@@ -97,6 +100,9 @@ jobs:
       - name: Verify existing dispatch, delivery ordering and completion fixtures
         working-directory: server
         run: node --test routes/dispatcherAssignment.test.js routes/dispatcherHandovers.test.js services/deliveryOrder.test.js services/deliveryCompletionFailure.test.js
+      - name: Verify bound fleet proof and preserved capture admission
+        working-directory: server
+        run: node --test services/fleetProofReceipt.test.js routes/trackerEvidence.test.js services/vehicleLocationCaptureStore.test.js
       - name: Verify the current route inventory
         working-directory: server
         run: npm run traceability:check

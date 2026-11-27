@@ -1,3 +1,5 @@
+import { captureFleetProofReceipt } from './fleetProofReceipt.js';
+
 // Owner (2026-10-23): compare the photo shutter time with the tracker visit,
 // using a 60 m circle around the customer's saved pin. Never use upload time.
 export const CUSTOMER_RADIUS_METRES = 60;
@@ -76,7 +78,9 @@ export function evaluateTrackerVisit({ events, photoCapturedAt, photoSource, sta
   return { ...result, status: 'outside_window', needsReview: true };
 }
 
-export function recordProofReceipt(delivery, incoming, now = new Date()) {
+export function recordProofReceipt(delivery, incoming, now = new Date(), completion) {
+  if (completion?.replacedProof || (incoming && ['photoUrl', 'images', 'photoCapturedAt', 'photoSource', 'timestamp']
+    .some(field => Object.hasOwn(incoming, field)))) delivery.fleetProofReceipt = null;
   if (!incoming || !(delivery.proof?.photoUrl || delivery.proof?.images?.length)) return;
   if (!(incoming.photoUrl || incoming.images?.length || incoming.photoCapturedAt !== undefined || incoming.photoSource !== undefined)) return;
   const firstReceipt = !delivery.proof.receivedAt;
@@ -90,6 +94,7 @@ export function recordProofReceipt(delivery, incoming, now = new Date()) {
   delivery.proof.photoSource = ['camera', 'upload'].includes(incoming.photoSource) ? incoming.photoSource : 'unknown';
   const snapshot = delivery.trackerVisit;
   const driverId = String(delivery.driver?._id || delivery.driver || '');
+  delivery.fleetProofReceipt = captureFleetProofReceipt(delivery, incoming, driverId, completion);
   if (firstReceipt && snapshot?.geofenceId && (
     (String(snapshot.driverId || '') !== driverId) ||
     (Number.isFinite(delivery.gpsLocation?.lat) && Number.isFinite(delivery.gpsLocation?.lng) &&

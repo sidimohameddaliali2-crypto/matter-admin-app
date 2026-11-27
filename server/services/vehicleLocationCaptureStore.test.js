@@ -169,6 +169,24 @@ test('bounded payloads fail before saving and empty successful outcomes remain e
   const result = await f.store.persistBatch(lease);assert.equal(result.storedRows, 0);assert.equal(result.missingVehicles, 2);
 });
 
+test('fleet identity overflow leaves the same admissible and replayable capture payload', async () => {
+  const f = fixture(), lease = await f.store.claimTick(tick);
+  const large = { rows: [row('V1')], summary: { detail: 'x'.repeat(CAPTURE_MAX_BYTES - 1024) } };
+  const decorated = { ...large, rows: [{ ...large.rows[0], trackerIdentity: { namespace: 'a'.repeat(64),
+    deviceId: null, directoryDeviceId: 'fixture-directory', candidateDeviceIds: Array.from({ length: 8 }, (_, i) =>
+      String(i).repeat(128)) } }] };
+  const saved = await f.store.saveBatch(lease, decorated);
+  assert.equal(Object.hasOwn(saved.payload.rows[0], 'trackerIdentity'), false);
+  assert.deepEqual(saved.payload, (await f.store.saveBatch(lease, large)).payload);
+  assert.equal((await f.store.persistBatch(saved)).storedRows, 1);
+  assert.equal(Object.hasOwn([...f.points.values()][0], 'trackerIdentity'), false);
+
+  const over = fixture(), overLease = await over.store.claimTick(tick);
+  await assert.rejects(over.store.saveBatch(overLease, { ...decorated, summary: { detail: 'x'.repeat(CAPTURE_MAX_BYTES) } }),
+    { code: 'CAPTURE_BATCH_TOO_LARGE' });
+  assert.equal(over.documents.get(overLease.batchId).payload, undefined);
+});
+
 test('failed acknowledgement verification leaves the batch pending', async () => {
   const f = fixture(), lease = await f.store.saveBatch(await f.store.claimTick(tick), input);
   f.history.countDocuments = async () => 0;

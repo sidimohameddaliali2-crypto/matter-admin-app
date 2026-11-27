@@ -4,6 +4,11 @@ import { sanitizeDeliveryAddressEdit } from '../services/deliveryAddressEdit.js'
 import { saveReportingDelivery } from '../services/reportingOutbox.js';
 import { applyZoneRules, isAbuDhabiEmirate, ABU_DHABI_ZONE } from '../config/zoneRules.js';
 
+function hideFleetProofReceipt(_delivery, output) {
+  delete output.fleetProofReceipt;
+  return output;
+}
+
 const deliverySchema = new mongoose.Schema({
   reportingVersion: { type: Number, immutable: true, select: false },
   bagReturnReceipts: [{bagId:String,eventId:String,receivedAt:Date}],
@@ -262,6 +267,11 @@ deliveryType: {
     verified: Boolean,
     deliveryMethod: String
   },
+
+  // Set by an authenticated completion and read only by the versioned feed.
+  fleetProofReceipt: { select: false, type: new mongoose.Schema({
+    actorId: String, photoCaptureSha256: String, receivedAt: Date, handsetSha256: String,
+  }, { _id: false }) },
     
   // Failed driver completion: retain only the bag references needed to trace
   // a rejected scan, without treating it as a completed delivery or proof.
@@ -322,7 +332,9 @@ deliveryType: {
   },
   
 }, {
-  timestamps: true
+  timestamps: true,
+  toJSON: { transform: hideFleetProofReceipt },
+  toObject: { transform: hideFleetProofReceipt },
 });
 
 // One recorded AED 155 deposit refund per customer in the collection tracker.
@@ -374,6 +386,21 @@ deliverySchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], async functi
   const original = this.op === 'updateMany' ? null : await this.model.findOne(this.getQuery())
     .select('address addressId addressDetails gpsLocation').session(this.getOptions().session ?? null).lean();
   sanitizeDeliveryAddressEdit(original, set);
+});
+
+// Ordinary administrative proof replacements cannot inherit a driver receipt.
+// A background address-label edit leaves the photographed coordinates intact.
+deliverySchema.pre(['findOneAndUpdate', 'updateOne', 'updateMany'], function clearReplacedFleetProof() {
+  const update = this.getUpdate();
+  if (!update || Array.isArray(update)) return;
+  const evidencePath = path => typeof path === 'string' && (path === 'proof'
+    || /^proof\.(?:photoUrl|images|photoCapturedAt|photoSource|receivedAt|timestamp)(?:\.|$)/.test(path));
+  const replacesProof = Object.entries(update).some(([operator, values]) => operator.startsWith('$') && values
+    && Object.entries(values).some(([path, target]) => evidencePath(path) || (operator === '$rename' && evidencePath(target))));
+  if (replacesProof) {
+    update.$unset ??= {};
+    update.$unset.fleetProofReceipt = '';
+  }
 });
 
 // Automatic zone rules (config/zoneRules.js): emirate Abu Dhabi, or zone
