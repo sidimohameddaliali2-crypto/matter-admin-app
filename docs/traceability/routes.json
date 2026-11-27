@@ -143,15 +143,15 @@
     "server/routes/deliveryChanges.js": "1484012ff6ff30cdefd9e70f6f665f7970bc8586b434cb2067dd88b258a91c89",
     "server/routes/deliveryIssues.js": "0de921f1e6e027c8ed5d2cb75910267d025bce3c0605ecdd09c5e67fa8fd166b",
     "server/routes/deliveryOrder.js": "8ac06833fbcaa1cbc086af60731ed7f78f9b9af0fd88811ec9209738cb8bfb2f",
-    "server/routes/dispatcherFleet.js": "05964f72e3a2419793cf945d062678fc0ad370206364a16fe23ab427f9da7cf0",
+    "server/routes/dispatcherFleet.js": "fc95131f42d626889e8ea6b54e0d0cb9f3fc66e66fee5229eda3b87e9ee9dbf4",
     "server/routes/dispatcherHandovers.js": "6a713a25e9e44833af23aedd6a910fc0e8fd1c545739aee2ca9df249f92115b9",
     "server/routes/dispatcherLocationReviews.js": "0e47705116b69fe9ddf165aa77e923467d32df6907e0927d0c9369d6c3ad485e",
-    "server/routes/drivers.js": "5a2656b0406ec346bd88c8181a9ceece5d6aa8a5deb762a1a865361b9e359644",
+    "server/routes/drivers.js": "4f1fb4185e6a7fb15cd3caf846b548316fcb8b5bf5bb69c52d14b11b19be8bac",
     "server/routes/employees.js": "90eea44c77457e47125a6c63f09e95efa3e37a5081440c1d4a6f0d8d5cfe9f5c",
     "server/routes/events.js": "2cf1b2fadd6b12b8d9927c3edfcff7c19ae0481d012b817fa35a4242079108cf",
     "server/routes/externalDeliveryApi.js": "46f9a078ea23e8a42e9259a75d4b4016e983eb8730ae45212f63d54a930fcab0",
     "server/routes/externalDriverLocationApi.js": "4e0e3a740bbfbd56aee46fea293a20601a8bc0ce05d4d1f1c8595ce4d02d5f28",
-    "server/routes/externalReportingApi.js": "d68816733a3426448ac170cdc7cf85607696bd19cfa104fcf4ddd102dff9e38f",
+    "server/routes/externalReportingApi.js": "b8a70cef843c1526554d4a9e662ef0eee2995e621bbddb8bca4dfd6159dc734d",
     "server/routes/handoffs.js": "93d78d2adf199e0681f35f0620b1674d2c09a458612282043a0e112eaf085927",
     "server/routes/incidents.js": "23a9d4cd19c8ca5290471a02ba4e5d80d49ca6c504554a25819aab76ca458ddf",
     "server/routes/index.js": "b958488aa38e5b94ca235ad490446fba34b63cdb9d15cfc31c020950e08331d5",
@@ -170,10 +170,10 @@
     "server/routes/reports.js": "2f47a5ca54b28ee3dfe8eed0c896590e3411cb2bd85263abcec8e5f1b4254b64",
     "server/routes/storeKeeperScans.js": "53ccdc75bc154610453ecf5890598e70c1a972351e580e1c496ff3fe2c9f0e31",
     "server/routes/traceability.js": "5104dc2dc874d7de167fdb1e7b9f4fc13064a8bd7be417223712296c07c22d0e",
-    "server/routes/truckoomApi.js": "b3b6b87af85219a33a693d5405e4cb327218ef9dfcd55ff46cdcdba0c83de401",
+    "server/routes/truckoomApi.js": "691aa544c22a99f25bbfae1b868d97efb17e76e7e86ee1c0ed3e38fb62ed1fc6",
     "server/routes/upload.js": "70d735777f602df261219898f34093b53092ca3cc3e51db8a02795226b960e18",
-    "server/routes/users.js": "9d62189cb347a57b6292fccb2c4b80d2da195f7924397aac7bb59af90b145317",
-    "server/routes/vehicles.js": "858c897340bc7d20a8424073c0d1f7ea2f24cbcee49c634ec6dc5d7c0ee0f85b",
+    "server/routes/users.js": "6ff6e6693751351b7b8c11135021a1db0a3cefc631f6dfc0c54164fbae50db07",
+    "server/routes/vehicles.js": "61b5835d782802dc67d7af3d7d0e110514043262fd396497f22e1ca75d623d06",
     "server/routes/webhooks.js": "191a71d5d7831f089fa05421449614342048f1c9e5728ce2869b002a9003a3a1",
     "server/routes/xero.js": "72264b338337eab6945a892300c7424e77f4b4539a0264794471b48fd0d7e5cc",
     "server/routes/yellowblock.js": "7369950e2f9b35759a4bd71678566c3e6b9bb9c2c2109020f2bf8967d03259e4",
@@ -1642,7 +1642,7 @@
     {
       "id": "7d812daa5ea2fb8d",
       "method": "GET",
-      "source": "server/routes/drivers.js:13",
+      "source": "server/routes/drivers.js:14",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1666,7 +1666,7 @@
     {
       "id": "e8b183f2dae59a4a",
       "method": "GET",
-      "source": "server/routes/drivers.js:102",
+      "source": "server/routes/drivers.js:103",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1691,7 +1691,7 @@
     {
       "id": "05ad2d21f5a426d4",
       "method": "GET",
-      "source": "server/routes/drivers.js:154",
+      "source": "server/routes/drivers.js:155",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1719,7 +1719,7 @@
     {
       "id": "332db6cc2047b5d9",
       "method": "PUT",
-      "source": "server/routes/drivers.js:188",
+      "source": "server/routes/drivers.js:189",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1750,7 +1750,7 @@
     {
       "id": "7755238150732264",
       "method": "POST",
-      "source": "server/routes/drivers.js:244",
+      "source": "server/routes/drivers.js:245",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1778,7 +1778,7 @@
     {
       "id": "79761254c0a52cc5",
       "method": "GET",
-      "source": "server/routes/drivers.js:275",
+      "source": "server/routes/drivers.js:276",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1804,7 +1804,7 @@
     {
       "id": "c30b27702d13657e",
       "method": "GET",
-      "source": "server/routes/drivers.js:338",
+      "source": "server/routes/drivers.js:339",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1833,7 +1833,7 @@
     {
       "id": "ffd5804c66a1b13e",
       "method": "GET",
-      "source": "server/routes/drivers.js:408",
+      "source": "server/routes/drivers.js:409",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1862,7 +1862,7 @@
     {
       "id": "0c6ae4703ef502ae",
       "method": "GET",
-      "source": "server/routes/drivers.js:480",
+      "source": "server/routes/drivers.js:481",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -1895,7 +1895,7 @@
     {
       "id": "cf3bb61a7cc83150",
       "method": "POST",
-      "source": "server/routes/drivers.js:536",
+      "source": "server/routes/drivers.js:537",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -1942,7 +1942,7 @@
     {
       "id": "3999212282c50172",
       "method": "PUT",
-      "source": "server/routes/drivers.js:589",
+      "source": "server/routes/drivers.js:590",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -1967,7 +1967,10 @@
         "params.id"
       ],
       "referencedCalls": [
-        "User.findById"
+        "User.findById",
+        "fleetRoster",
+        "legacyFleetConflict",
+        "trackerAlias"
       ],
       "path": "/api/users/drivers/:id",
       "middlewareDeclarations": []
@@ -1975,7 +1978,7 @@
     {
       "id": "76086434102d7542",
       "method": "PATCH",
-      "source": "server/routes/drivers.js:631",
+      "source": "server/routes/drivers.js:643",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -2002,7 +2005,7 @@
     {
       "id": "56e65cc3b38246c5",
       "method": "POST",
-      "source": "server/routes/drivers.js:651",
+      "source": "server/routes/drivers.js:663",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -2031,7 +2034,7 @@
     {
       "id": "e1ce7bbbe0a469cd",
       "method": "GET",
-      "source": "server/routes/drivers.js:687",
+      "source": "server/routes/drivers.js:699",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -2054,7 +2057,7 @@
     {
       "id": "d603c450426eb62e",
       "method": "GET",
-      "source": "server/routes/users.js:21",
+      "source": "server/routes/users.js:22",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -2078,7 +2081,7 @@
     {
       "id": "9c55a5c3ba06b72f",
       "method": "PUT",
-      "source": "server/routes/users.js:38",
+      "source": "server/routes/users.js:39",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -2104,7 +2107,7 @@
     {
       "id": "8cd8efa92ec9f0c1",
       "method": "GET",
-      "source": "server/routes/users.js:61",
+      "source": "server/routes/users.js:62",
       "description": null,
       "handlerGuards": [
         "authorize(['super_admin', 'admin'])"
@@ -2138,7 +2141,7 @@
     {
       "id": "2197f589cc2aa58b",
       "method": "GET",
-      "source": "server/routes/users.js:105",
+      "source": "server/routes/users.js:106",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -2164,7 +2167,7 @@
     {
       "id": "449c1b040015eeab",
       "method": "POST",
-      "source": "server/routes/users.js:127",
+      "source": "server/routes/users.js:128",
       "description": null,
       "handlerGuards": [
         "authorize(['super_admin', 'admin'])"
@@ -2203,7 +2206,7 @@
     {
       "id": "219b11a365a183d6",
       "method": "PUT",
-      "source": "server/routes/users.js:186",
+      "source": "server/routes/users.js:187",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -2227,7 +2230,9 @@
         "params.id"
       ],
       "referencedCalls": [
-        "User.findById"
+        "User.findById",
+        "fleetRoster",
+        "legacyFleetConflict"
       ],
       "path": "/api/users/:id",
       "middlewareDeclarations": [
@@ -2237,7 +2242,7 @@
     {
       "id": "5977ad758e46bbdd",
       "method": "DELETE",
-      "source": "server/routes/users.js:254",
+      "source": "server/routes/users.js:257",
       "description": null,
       "handlerGuards": [
         "superAdmin"
@@ -2257,7 +2262,9 @@
       ],
       "referencedCalls": [
         "User.findById",
-        "User.findByIdAndDelete"
+        "User.findByIdAndDelete",
+        "fleetRoster",
+        "legacyFleetConflict"
       ],
       "path": "/api/users/:id",
       "middlewareDeclarations": [
@@ -2267,7 +2274,7 @@
     {
       "id": "74cd6966d05bc888",
       "method": "GET",
-      "source": "server/routes/users.js:282",
+      "source": "server/routes/users.js:287",
       "description": null,
       "handlerGuards": [
         "authorize(['super_admin', 'admin'])"
@@ -4579,22 +4586,19 @@
     {
       "id": "d1607b4d5a21c178",
       "method": "GET",
-      "source": "server/routes/dispatcherFleet.js:22",
+      "source": "server/routes/dispatcherFleet.js:26",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
         503
       ],
       "responseKeys": [
-        "data",
-        "drivers",
         "message"
       ],
       "requestKeys": [],
       "referencedCalls": [
-        "User.find",
-        "Vehicle.find",
-        "confirmedFleetVehicles"
+        "fleetUnavailable",
+        "readDispatchOptions"
       ],
       "path": "/api/dispatcher-fleet/options",
       "middlewareDeclarations": [
@@ -4605,7 +4609,7 @@
     {
       "id": "788e497e911705b4",
       "method": "POST",
-      "source": "server/routes/dispatcherFleet.js:59",
+      "source": "server/routes/dispatcherFleet.js:34",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -4933,7 +4937,7 @@
     {
       "id": "39432d8bf6ba1a41",
       "method": "GET",
-      "source": "server/routes/drivers.js:13",
+      "source": "server/routes/drivers.js:14",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -4957,7 +4961,7 @@
     {
       "id": "7f287ce5b9577148",
       "method": "GET",
-      "source": "server/routes/drivers.js:102",
+      "source": "server/routes/drivers.js:103",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -4982,7 +4986,7 @@
     {
       "id": "6bdfefc699d46db1",
       "method": "GET",
-      "source": "server/routes/drivers.js:154",
+      "source": "server/routes/drivers.js:155",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5010,7 +5014,7 @@
     {
       "id": "5a064c973d17ccfa",
       "method": "PUT",
-      "source": "server/routes/drivers.js:188",
+      "source": "server/routes/drivers.js:189",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5041,7 +5045,7 @@
     {
       "id": "01743a724b2f9b78",
       "method": "POST",
-      "source": "server/routes/drivers.js:244",
+      "source": "server/routes/drivers.js:245",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5069,7 +5073,7 @@
     {
       "id": "0a5ef22ce90c7a9d",
       "method": "GET",
-      "source": "server/routes/drivers.js:275",
+      "source": "server/routes/drivers.js:276",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5095,7 +5099,7 @@
     {
       "id": "181eb4c2b4bfafba",
       "method": "GET",
-      "source": "server/routes/drivers.js:338",
+      "source": "server/routes/drivers.js:339",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5124,7 +5128,7 @@
     {
       "id": "46156c139ea4a882",
       "method": "GET",
-      "source": "server/routes/drivers.js:408",
+      "source": "server/routes/drivers.js:409",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5153,7 +5157,7 @@
     {
       "id": "f43872fb528aef9c",
       "method": "GET",
-      "source": "server/routes/drivers.js:480",
+      "source": "server/routes/drivers.js:481",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -5186,7 +5190,7 @@
     {
       "id": "e74ab70b4545adc6",
       "method": "POST",
-      "source": "server/routes/drivers.js:536",
+      "source": "server/routes/drivers.js:537",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -5233,7 +5237,7 @@
     {
       "id": "697b7259f769dd8a",
       "method": "PUT",
-      "source": "server/routes/drivers.js:589",
+      "source": "server/routes/drivers.js:590",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -5258,7 +5262,10 @@
         "params.id"
       ],
       "referencedCalls": [
-        "User.findById"
+        "User.findById",
+        "fleetRoster",
+        "legacyFleetConflict",
+        "trackerAlias"
       ],
       "path": "/api/drivers/:id",
       "middlewareDeclarations": []
@@ -5266,7 +5273,7 @@
     {
       "id": "d410a5956ba770f3",
       "method": "PATCH",
-      "source": "server/routes/drivers.js:631",
+      "source": "server/routes/drivers.js:643",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -5293,7 +5300,7 @@
     {
       "id": "cd19b71fd64ccc16",
       "method": "POST",
-      "source": "server/routes/drivers.js:651",
+      "source": "server/routes/drivers.js:663",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -5322,7 +5329,7 @@
     {
       "id": "9965aef4e5137078",
       "method": "GET",
-      "source": "server/routes/drivers.js:687",
+      "source": "server/routes/drivers.js:699",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -11238,7 +11245,7 @@
     {
       "id": "ef71a5a47dcf8b1a",
       "method": "GET",
-      "source": "server/routes/truckoomApi.js:51",
+      "source": "server/routes/truckoomApi.js:52",
       "description": "Every tracked vehicle, its live GPS location and street address, and the driver it's mapped to (if any) with that driver's own phone position + address — so Live Tracking can show two pins per driver (tracker and app). `appOnlyDrivers` are active drivers with a phone position but no tracker on the map: one pin (the app's). Used by Live Tracking and the Driver Routes \"vehicle GPS\" overlay.",
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11268,7 +11275,7 @@
     {
       "id": "ba14aa9586319d17",
       "method": "PUT",
-      "source": "server/routes/truckoomApi.js:117",
+      "source": "server/routes/truckoomApi.js:118",
       "description": "Assign (or clear) which driver a tracked vehicle belongs to — lets a dispatcher reassign a tracker directly from Live Tracking instead of going through the driver's own profile edit form. Clears the mapping from whichever driver currently holds this vehicleNo first, so a vehicle never ends up pointing at two drivers at once.",
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11285,8 +11292,14 @@
         "params.vehicleNo"
       ],
       "referencedCalls": [
+        "User.exists",
+        "User.findOne",
         "User.findOneAndUpdate",
-        "User.updateMany"
+        "User.updateMany",
+        "driverSourceId",
+        "fleetRoster",
+        "legacyFleetConflict",
+        "trackerAlias"
       ],
       "path": "/api/truckoom/vehicles/:vehicleNo/driver",
       "middlewareDeclarations": [
@@ -11297,7 +11310,7 @@
     {
       "id": "ef2ee55e5708a6d9",
       "method": "GET",
-      "source": "server/routes/truckoomApi.js:158",
+      "source": "server/routes/truckoomApi.js:173",
       "description": "Recorded GPS trail for a vehicle or driver over a time range — the history jobs/recordVehicleLocations.js builds every minute, separate from vendor history; times remain observation vs fix clocks.",
       "handlerGuards": [],
       "declaredStatuses": [
@@ -11329,7 +11342,7 @@
     {
       "id": "c7f9708589265ccc",
       "method": "GET",
-      "source": "server/routes/vehicles.js:17",
+      "source": "server/routes/vehicles.js:18",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -11362,7 +11375,7 @@
     {
       "id": "364d47daadfa83d9",
       "method": "GET",
-      "source": "server/routes/vehicles.js:71",
+      "source": "server/routes/vehicles.js:72",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -11388,7 +11401,7 @@
     {
       "id": "33b1bb711ba90330",
       "method": "POST",
-      "source": "server/routes/vehicles.js:85",
+      "source": "server/routes/vehicles.js:86",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -11414,7 +11427,10 @@
         "body.vehicleId"
       ],
       "referencedCalls": [
-        "Vehicle.create"
+        "Vehicle.create",
+        "driverSourceId",
+        "fleetRoster",
+        "legacyFleetConflict"
       ],
       "path": "/api/vehicles",
       "middlewareDeclarations": []
@@ -11422,7 +11438,7 @@
     {
       "id": "9d335bc3dd2ac333",
       "method": "PUT",
-      "source": "server/routes/vehicles.js:115",
+      "source": "server/routes/vehicles.js:119",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -11449,7 +11465,11 @@
         "params.id"
       ],
       "referencedCalls": [
-        "Vehicle.findByIdAndUpdate"
+        "Vehicle.findById",
+        "Vehicle.findByIdAndUpdate",
+        "driverSourceId",
+        "fleetRoster",
+        "legacyFleetConflict"
       ],
       "path": "/api/vehicles/:id",
       "middlewareDeclarations": []
@@ -11457,7 +11477,7 @@
     {
       "id": "3eead96d6dd25390",
       "method": "DELETE",
-      "source": "server/routes/vehicles.js:144",
+      "source": "server/routes/vehicles.js:168",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -11476,7 +11496,11 @@
       ],
       "referencedCalls": [
         "FuelLog.deleteMany",
-        "Vehicle.findByIdAndDelete"
+        "Vehicle.findById",
+        "Vehicle.findByIdAndDelete",
+        "driverSourceId",
+        "fleetRoster",
+        "legacyFleetConflict"
       ],
       "path": "/api/vehicles/:id",
       "middlewareDeclarations": []
@@ -11484,7 +11508,7 @@
     {
       "id": "d70dc68fd5938129",
       "method": "GET",
-      "source": "server/routes/vehicles.js:163",
+      "source": "server/routes/vehicles.js:195",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -11512,7 +11536,7 @@
     {
       "id": "cbfff527ac1ff259",
       "method": "POST",
-      "source": "server/routes/vehicles.js:203",
+      "source": "server/routes/vehicles.js:235",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -11548,7 +11572,7 @@
     {
       "id": "b3395682dd300a02",
       "method": "DELETE",
-      "source": "server/routes/vehicles.js:239",
+      "source": "server/routes/vehicles.js:271",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -12117,7 +12141,7 @@
     {
       "id": "d4ab8afcf8dd8875",
       "method": "GET",
-      "source": "server/routes/externalReportingApi.js:74",
+      "source": "server/routes/externalReportingApi.js:75",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -12140,9 +12164,35 @@
       "middlewareDeclarations": []
     },
     {
+      "id": "14512468a814e23a",
+      "method": "GET",
+      "source": "server/routes/externalReportingApi.js:93",
+      "description": null,
+      "handlerGuards": [],
+      "declaredStatuses": [
+        400,
+        404,
+        503
+      ],
+      "responseKeys": [
+        "data",
+        "message",
+        "success"
+      ],
+      "requestKeys": [
+        "params.id"
+      ],
+      "referencedCalls": [
+        "readFleetAssignmentReceipt",
+        "reportingCaptureEnabled"
+      ],
+      "path": "/api/external/reporting/fleet-assignments/:id",
+      "middlewareDeclarations": []
+    },
+    {
       "id": "d530d2215b5fecb5",
       "method": "GET",
-      "source": "server/routes/externalReportingApi.js:92",
+      "source": "server/routes/externalReportingApi.js:109",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -12160,7 +12210,7 @@
     {
       "id": "e7e38512dab62a1e",
       "method": "GET",
-      "source": "server/routes/externalReportingApi.js:105",
+      "source": "server/routes/externalReportingApi.js:122",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -12184,7 +12234,7 @@
     {
       "id": "a21c7979fcb6b128",
       "method": "GET",
-      "source": "server/routes/externalReportingApi.js:119",
+      "source": "server/routes/externalReportingApi.js:136",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -12210,7 +12260,7 @@
     {
       "id": "da616ff6e9c84fb4",
       "method": "GET",
-      "source": "server/routes/externalReportingApi.js:156",
+      "source": "server/routes/externalReportingApi.js:173",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [

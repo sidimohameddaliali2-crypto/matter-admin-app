@@ -232,7 +232,7 @@ function fleetOptions(load) {
 
 test('a pending fleet save stays reachable during a roster outage and retries its original request', async () => {
   const request = { phase: 'commit', operationId: 'original', reviewProof: 'original-proof',
-    command: { kind: 'assign', from: '2026-11-27T08:00:00.000Z', to: null, pairs: [] } };
+    command: { kind: 'assign', pairs: [{ driverId: 'driver-1', sourceVehicleId: 'van' }] } };
   sessionStorage.setItem(fleetSessionKey, JSON.stringify(request));
   const roster = jest.fn().mockRejectedValue(new Error('Roster unavailable'));
   fleetOptions(roster);
@@ -256,11 +256,11 @@ test('a pending fleet save stays reachable during a roster outage and retries it
 });
 
 test('review locks the form during the request and save uses the submitted command', async () => {
-  fleetOptions(async () => ({ data: { data: [{ id: 'van', label: 'Van 1', type: 'van' },
-    { id: 'bike', label: 'Bike 1', type: 'bike' }],
+  fleetOptions(async () => ({ data: { data: [{ id: 'van', label: 'Van 1', type: 'van', available: true },
+    { id: 'bike', label: 'Bike 1', type: 'bike', available: true }],
     drivers: [{ _id: 'driver-1', name: 'Fleet driver', isActive: true }] } }));
   let finishReview;
-  const review = { operationId: 'reviewed', reviewProof: 'proof', current: [], expected: [], expectedAssets: [] };
+  const review = { operationId: 'reviewed', reviewProof: 'proof', changes: [{ sourceVehicleId: 'van', driverId: 'driver-1' }] };
   api.post.mockImplementationOnce(() => new Promise(resolve => { finishReview = resolve; })).mockResolvedValueOnce({
     data: { data: { state: 'saved', operationId: review.operationId } },
   });
@@ -271,7 +271,7 @@ test('review locks the form during the request and save uses the submitted comma
   await fill(dialog.querySelector('select[name="driverId"]'), 'driver-1');
   const vehicle = dialog.querySelector('select[name="vehicleId"]');
   await fill(vehicle, 'van');
-  await act(async () => dialog.querySelector('input[name="ongoing"]').click());
+  expect(dialog.querySelector('input[type="datetime-local"]')).toBeNull();
   await click('Review pairing');
   const submitted = api.post.mock.calls[0][1].command;
   expect(vehicle.disabled).toBe(true);
@@ -280,10 +280,42 @@ test('review locks the form during the request and save uses the submitted comma
   await click('Save pairing');
   expect(api.post.mock.calls[1][1]).toEqual({
     phase: 'commit', operationId: review.operationId, reviewProof: review.reviewProof,
-    command: { ...submitted, expected: review.expected, expectedAssets: review.expectedAssets },
+    command: submitted,
   });
   expect(api.post.mock.calls[1][2].headers['x-matter-fleet-actor']).toBe('staff');
-  expect(submitted.pairs[0].sourceVehicleId).toBe('van');
+  expect(submitted).toEqual({ kind: 'assign', pairs: [{ driverId: 'driver-1', sourceVehicleId: 'van' }] });
+});
+
+test('Dispatch derives both sides of a swap from one driver and vehicle selection and retries the original save', async () => {
+  fleetOptions(async () => ({ data: {
+    data: [{ id: 'van', label: 'Van 1', type: 'van', available: true, driverId: 'driver-1' },
+      { id: 'bike', label: 'Bike 1', type: 'bike', available: true, driverId: 'driver-2' }],
+    drivers: [{ _id: 'driver-1', name: 'First driver', isActive: true }, { _id: 'driver-2', name: 'Second driver', isActive: true }],
+  } }));
+  const changes = [{ sourceVehicleId: 'van', driverId: 'driver-2' }, { sourceVehicleId: 'bike', driverId: 'driver-1' }];
+  api.post.mockResolvedValueOnce({ data: { data: { operationId: 'swap-op', reviewProof: 'swap-review', changes } } })
+    .mockRejectedValueOnce(new Error('Connection ended'))
+    .mockResolvedValueOnce({ data: { data: { state: 'saved', operationId: 'swap-op' } } });
+  await click('Drivers');
+  await click('Vehicle assignment');
+  const dialog = container.querySelector('[role="dialog"]');
+  await fill(dialog.querySelector('select[name="kind"]'), 'swap');
+  await fill(dialog.querySelector('select[name="driverId"]'), 'driver-1');
+  await fill(dialog.querySelector('select[name="vehicleId"]'), 'bike');
+  expect(dialog.querySelectorAll('select')).toHaveLength(3);
+  expect(dialog.textContent).toContain('Van 1 goes to Second driver.');
+  await click('Review pairing');
+  expect(dialog.textContent).toContain('This change takes effect when saved.');
+  await click('Save pairing');
+  await click('Retry save');
+  const command = { kind: 'swap', pairs: [{ driverId: 'driver-1', sourceVehicleId: 'bike' },
+    { driverId: 'driver-2', sourceVehicleId: 'van' }] };
+  const commit = { phase: 'commit', operationId: 'swap-op', reviewProof: 'swap-review', command };
+  expect(api.post.mock.calls.map(([path, request]) => [path, request])).toEqual([
+    ['/dispatcher-fleet', { phase: 'review', command }], ['/dispatcher-fleet', commit], ['/dispatcher-fleet', commit],
+  ]);
+  expect(sessionStorage.getItem(fleetSessionKey)).toBeNull();
+  expect(container.textContent).toContain('Vehicle pairing saved.');
 });
 
 test('a credential change in another tab hides fleet data and retains the original pending receipt', async () => {
@@ -309,7 +341,8 @@ test('inactive drivers with current ledger custody can be selected only for End 
     { _id: 'other', name: 'Other inactive driver', isActive: false });
   // The fleet form receives only the minimal authorized roster.
   await act(async () => root.render(null));
-  fleetOptions(async () => ({ data: { data: [],
+  fleetOptions(async () => ({ data: { data: [
+    { id: 'maintenance-bike', label: 'Maintenance bike', type: 'bike', available: false, driverId: 'former' }],
     drivers: [{ _id: 'former', name: 'Former driver', isActive: false }] } }));
   await act(async () => root.render(<DispatcherWorkspace />));
   await click('Drivers');

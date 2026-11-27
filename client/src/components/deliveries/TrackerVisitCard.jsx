@@ -13,6 +13,7 @@ const labels = {
   uploaded_photo: 'Review: uploaded photo capture time unknown',
   missing_pin: 'Unverified: customer pin missing',
   no_tracker: 'Unverified: driver has no assigned tracker',
+  assignment_unverified: 'Unverified: vehicle assignment at camera capture could not be confirmed',
   tracker_error: 'Unverified: Truckoom unavailable',
   verification_error: 'Unverified: tracker check failed',
   gps_visit_observed: 'Photo time matches sampled GPS visit (estimated)',

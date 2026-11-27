@@ -14,7 +14,7 @@ const maxTokenLifetimeSeconds = 2 * 60 * 60;
 const clockSkewSeconds = 30;
 const keyIdPattern = /^[A-Za-z0-9_-]{1,128}$/;
 const base64UrlPattern = /^[A-Za-z0-9_-]+$/;
-const reportingReadPath = /^\/(?:changes|readiness|deliveries\/[a-f0-9]{24}|days\/\d{4}-\d{2}-\d{2}\/ids|gps-batches\/[^/]+)\/?$/i;
+const reportingReadPath = /^\/(?:changes|readiness|deliveries\/[a-f0-9]{24}|fleet-assignments\/[a-f0-9]{24}|days\/\d{4}-\d{2}-\d{2}\/ids|gps-batches\/[^/]+)\/?$/i;
 
 function jwtJson(segment) {
   const data = Buffer.from(segment, 'base64url');

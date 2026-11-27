@@ -69,3 +69,12 @@ test('a new visit without a saved radius displays the 60 m default',async()=>{
  await act(async()=>root.render(<TrackerVisitCard delivery={{_id:'new-radius',status:'assigned',trackerVisit:{status:'awaiting_events'}}}/>));
  expect(container.textContent).toContain('Customer radius: 60 m');
 });
+
+test('an unresolved dated vehicle assignment leaves tracker arrival unverified', async () => {
+  await act(async () => root.render(<TrackerVisitCard delivery={{ _id: 'fixture-unbound-assignment', status: 'delivered',
+    proof: { photoUrl: 'https://example.invalid/proof.jpg' },
+    trackerVisit: { status: 'assignment_unverified' },
+  }} />));
+  expect(container.textContent).toContain('Unverified: vehicle assignment at camera capture could not be confirmed');
+  expect(container.textContent).toContain('Tracker arrival: Not recorded');
+});

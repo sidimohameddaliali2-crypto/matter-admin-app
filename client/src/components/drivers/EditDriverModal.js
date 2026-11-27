@@ -43,6 +43,7 @@ const EditDriverModal = ({ driver, onClose }) => {
   }, [driversArray]);
 
   const [formData, setFormData] = useState(() => buildFormFromDriver(driver));
+  const initialTruckoomVehicleNo = useRef(formData.truckoomVehicleNo);
   const [errors, setErrors] = useState({});
   const [error, setError] = useState('');
 
@@ -63,7 +64,9 @@ const EditDriverModal = ({ driver, onClose }) => {
   }, []);
 
   useEffect(() => {
-    setFormData(buildFormFromDriver(driver));
+    const nextForm = buildFormFromDriver(driver);
+    initialTruckoomVehicleNo.current = nextForm.truckoomVehicleNo;
+    setFormData(nextForm);
     setVehiclePaperPreview(driver?.profile?.vehiclePaper || null);
     setVehiclePaperFile(null);
   }, [driver]);
@@ -145,7 +148,8 @@ const EditDriverModal = ({ driver, onClose }) => {
             shiftTiming: formData.shiftTiming || undefined,
             vehicleType: formData.vehicleType || undefined,
             vehicleId: formData.vehicleId || undefined,
-            truckoomVehicleNo: formData.truckoomVehicleNo || null,
+            ...(formData.truckoomVehicleNo !== initialTruckoomVehicleNo.current
+              && { truckoomVehicleNo: formData.truckoomVehicleNo || null }),
             stopCapacity: formData.stopCapacity !== '' ? Number(formData.stopCapacity) : undefined,
             vehiclePaper: vehiclePaperUrl || undefined,
             baseSalary: formData.baseSalary !== '' ? Number(formData.baseSalary) : undefined,

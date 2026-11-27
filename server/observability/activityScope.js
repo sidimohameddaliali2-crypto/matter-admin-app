@@ -15,7 +15,7 @@ export function isAutomaticTrackerVisit(context, model, operation, update = {}, 
     || model !== 'Delivery' || operation !== 'updateOne' || options.upsert) return false;
   if (!update.$set?.trackerVisit || typeof update.$set.trackerVisit !== 'object' || Array.isArray(update.$set.trackerVisit)) return false;
   return Object.keys(update).every(key => ['$set', '$setOnInsert'].includes(key))
-    && Object.keys(update.$set).every(key => ['trackerVisit', 'trackerVisitGpsBaseline', 'updatedAt'].includes(key))
+    && Object.keys(update.$set).every(key => ['trackerVisit', 'trackerVisitGpsBaseline', 'trackerVisitGpsBaseline.beforeFleet', 'updatedAt'].includes(key))
     && Object.keys(update.$setOnInsert || {}).every(key => key === 'createdAt');
 }
 

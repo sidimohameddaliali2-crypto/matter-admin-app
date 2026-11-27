@@ -1,170 +1,166 @@
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 const roles = new Set(['super_admin', 'admin', 'manager', 'dispatcher']);
-const objectId = /^[a-f0-9]{24}$/;
-const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
-const kinds = new Set(['assign', 'swap', 'end', 'correct']);
-const classes = new Set(['bike', 'van', 'car', 'truck', 'other']);
-const clockText = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+const classes = new Set(['bike', 'van', 'car', 'truck']);
+const kinds = new Set(['assign', 'swap', 'end']);
 const reviewLifetime = 10 * 60_000;
-const pastWindow = 15 * 60_000;
-const fleetPath = '/api/reporting/fleet-dispatch';
-const failure = (status, message) => Object.assign(new Error(message), { status });
-const unknown = () => failure(503, 'Vehicle save could not be confirmed. Retry this same request.');
-const isSourceId = value => typeof value === 'string' && objectId.test(value);
-const isClock = value => typeof value === 'string' && clockText.test(value) && Number.isFinite(Date.parse(value));
+
+export const activeFleetStatuses = ['active', 'idle'];
+export const isFleetSourceId = value => typeof value === 'string' && /^[a-f0-9]{24}$/.test(value);
+export const isFleetOperationId = value => typeof value === 'string' && /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value);
+export const fleetError = (status, message) => Object.assign(new Error(message), { status });
+export const fleetUnavailable = () => fleetError(503, 'Vehicle assignments are temporarily unavailable.');
+export const fleetChanged = () => fleetError(409, 'The pairing changed. Review it before saving again.');
+export const legacyFleetConflict = () => fleetError(409, 'Use Dispatch vehicle assignment to change this pairing.');
+export function driverSourceId(value) {
+  const id = value?._id ?? value;
+  return id ? String(id).toLowerCase() : null;
+}
+export const trackerAlias = value => typeof value === 'string' || typeof value === 'number' ? String(value).trim() || null : null;
 
 export function operatorAllowed(user, env) {
   const actor = String(user?._id ?? '');
   return env.MATTER_DISPATCH_FLEET_ENABLED === '1' && roles.has(user?.role)
-    && objectId.test(actor) && Boolean(env.MATTER_DISPATCH_FLEET_OPERATORS?.split(',').some(id => id.trim() === actor));
+    && isFleetSourceId(actor) && Boolean(env.MATTER_DISPATCH_FLEET_OPERATORS?.split(',').some(id => id.trim() === actor));
 }
 
-function reviewSignature(secret, actorId, operationId, { kind, from, to, pairs, expected, expectedAssets }, expiresAt) {
-  const fields = [actorId, operationId, kind, from, to,
-    pairs.map(({ driverId, sourceVehicleId }) => [driverId, sourceVehicleId]), expected, expectedAssets];
-  if (expiresAt !== null) fields.push(expiresAt);
-  const version = expiresAt === null ? 'v1' : 'v2';
-  return createHmac('sha256', secret).update(`matter-sidi-fleet-review-${version}\n`).update(JSON.stringify(fields)).digest('hex');
+export function fleetRoster(env = process.env) {
+  const config = env.MATTER_DISPATCH_FLEET_ROSTER;
+  // Keeping the roster configured during a writer pause preserves the legacy fences.
+  if (!config && env.MATTER_DISPATCH_FLEET_ENABLED !== '1') return null;
+  let roster;
+  try { roster = JSON.parse(config); }
+  catch { throw fleetUnavailable(); }
+  const { driverIds, assets } = roster ?? {};
+  if (!Array.isArray(driverIds) || driverIds.length === 0 || driverIds.length > 100 || !driverIds.every(isFleetSourceId)
+      || !Array.isArray(assets) || assets.length === 0 || assets.length > 100) throw fleetUnavailable();
+
+  const byId = new Map();
+  const aliases = new Set();
+  for (const asset of assets) {
+    const { sourceVehicleId, vehicleClass, trackerAlias: alias } = asset ?? {};
+    if (!isFleetSourceId(sourceVehicleId) || !classes.has(vehicleClass) || byId.has(sourceVehicleId)
+        || (alias !== null && (typeof alias !== 'string' || alias !== trackerAlias(alias)
+          || alias.length > 80 || /[\x00-\x1f\x7f]/.test(alias) || aliases.has(alias)))) throw fleetUnavailable();
+    byId.set(sourceVehicleId, { vehicleClass, trackerAlias: alias });
+    if (alias !== null) aliases.add(alias);
+  }
+  const drivers = new Set(driverIds);
+  if (drivers.size !== driverIds.length) throw fleetUnavailable();
+  return { assets: byId, driverIds: drivers, trackerAliases: aliases };
 }
 
-export function fleetReviewProof(secret, actorId, operationId, command, now = Date.now()) {
+export function readFleetCommand(command) {
+  const { kind, pairs, ...fields } = command ?? {};
+  const swap = kind === 'swap';
+  if (!kinds.has(kind) || Object.keys(fields).length > 0 || !Array.isArray(pairs)
+      || pairs.length !== (swap ? 2 : 1)) throw fleetError(400, 'Choose a driver and confirmed vehicle for this handover.');
+  const valid = pairs.every(pair => pair && typeof pair === 'object' && Object.keys(pair).length === 2
+    && isFleetSourceId(pair.driverId) && (kind === 'end' ? pair.sourceVehicleId === null : isFleetSourceId(pair.sourceVehicleId)));
+  if (!valid || (swap && (pairs[0].driverId === pairs[1].driverId || pairs[0].sourceVehicleId === pairs[1].sourceVehicleId))) {
+    throw fleetError(400, 'Choose distinct drivers and vehicles for this handover.');
+  }
+  return { kind, pairs: pairs.map(({ driverId, sourceVehicleId }) => ({ driverId, sourceVehicleId })) };
+}
+
+const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+function reviewSignature(secret, actorId, operationId, command, fingerprint, expiresAt) {
+  return createHmac('sha256', secret).update('matter-sidi-live-fleet-review-v1\n')
+    .update(JSON.stringify([actorId, operationId, command, fingerprint, expiresAt])).digest('hex');
+}
+
+export function fleetReviewProof(secret, actorId, operationId, command, fingerprint, now) {
   const expiresAt = now + reviewLifetime;
-  return `${expiresAt}.${reviewSignature(secret, actorId, operationId, command, expiresAt)}`;
+  return `${expiresAt}.${fingerprint}.${reviewSignature(secret, actorId, operationId, command, fingerprint, expiresAt)}`;
 }
 
-export function fleetReviewExpiry(secret, actorId, operationId, command, proof) {
-  const match = typeof proof === 'string' && /^(?:(\d{13})\.)?([a-f0-9]{64})$/.exec(proof);
-  if (!match) return null;
-  const expiresAt = match[1] === undefined ? null : Number(match[1]);
-  const signed = reviewSignature(secret, actorId, operationId, command, expiresAt);
-  if (!timingSafeEqual(Buffer.from(match[2], 'hex'), Buffer.from(signed, 'hex'))) return null;
-  // Previously issued proofs have no expiry and can only recover a receipt.
-  return expiresAt ?? 0;
+export function readFleetReview(secret, actorId, operationId, command, proof) {
+  const parts = typeof proof === 'string' && /^(\d{13})\.([a-f0-9]{64})\.([a-f0-9]{64})$/.exec(proof);
+  if (!parts) return null;
+  const [, time, fingerprint, signature] = parts;
+  const expiresAt = Number(time);
+  const expected = reviewSignature(secret, actorId, operationId, command, fingerprint, expiresAt);
+  return timingSafeEqual(Buffer.from(signature, 'hex'), Buffer.from(expected, 'hex')) ? { fingerprint, expiresAt } : null;
 }
 
-function validCommand(command) {
-  const { kind, from, to, pairs } = command ?? {};
-  if (!kinds.has(kind) || !isClock(from) || (kind === 'end' && to !== null)
-      || (to !== null && (!isClock(to) || Date.parse(to) <= Date.parse(from)))
-      || !Array.isArray(pairs) || pairs.length !== (kind === 'swap' ? 2 : 1)) return false;
-  return pairs.every(pair => isSourceId(pair?.driverId)
-    && (kind === 'end' ? pair.sourceVehicleId === null : isSourceId(pair.sourceVehicleId)))
-    && (kind !== 'swap' || (pairs[0].driverId !== pairs[1].driverId && pairs[0].sourceVehicleId !== pairs[1].sourceVehicleId));
-}
+export const fleetRequestHash = (command, reviewProof) => digest([command, reviewProof]);
 
-function checkFirstSaveTime(command, now, expiresAt = Infinity) {
-  if (now >= expiresAt) throw failure(422, 'This pairing review expired. Review the pairing again.');
-  if (command.kind !== 'correct' && Date.parse(command.from) < now - pastWindow) {
-    throw failure(422, 'Use an effective time within the last 15 minutes or a future time.');
+function confirmedAsset(vehicle, roster) {
+  const asset = roster.assets.get(String(vehicle._id));
+  if (!asset || asset.vehicleClass !== vehicle.type) {
+    throw fleetError(409, 'Current custody or vehicle class conflicts with the confirmed fleet roster.');
   }
-  if (command.kind !== 'correct' && command.to !== null && Date.parse(command.to) <= now) {
-    throw failure(422, 'Use a future shift end for a normal pairing.');
-  }
+  return asset;
 }
 
-export async function dispatchFleet({ phase, operationId, command, reviewProof }, {
-  actorId, secret, allowCorrection, checkRoster, send, clock = Date.now,
-}) {
-  if (!['review', 'commit'].includes(phase) || !validCommand(command)) {
-    throw failure(400, 'Choose a driver, confirmed vehicle and effective time.');
-  }
-  if (command.kind === 'correct' && !allowCorrection) {
-    throw failure(403, 'Historical corrections require an authorized administrator.');
-  }
-  const confirmRoster = async () => {
-    if (!await checkRoster(command)) throw failure(422, command.kind === 'end'
-      ? 'Choose a driver with a vehicle assignment to end.'
-      : 'Choose an active driver and an available vehicle with a confirmed class.');
-  };
-  if (phase === 'review') {
-    checkFirstSaveTime(command, clock());
-    await confirmRoster();
-    const data = await send({ phase, command, actorId });
-    const id = randomUUID();
-    return { ...data, operationId: id, reviewProof: fleetReviewProof(secret, actorId, id,
-      { ...command, expected: data.expected, expectedAssets: data.expectedAssets }, clock()) };
-  }
-
-  if (typeof operationId !== 'string' || !uuid.test(operationId)) throw failure(400, 'Invalid pairing operation.');
-  const expiresAt = fleetReviewExpiry(secret, actorId, operationId, command, reviewProof);
-  if (expiresAt === null) throw failure(422, 'Review this pairing before saving it.');
-  const request = { operationId, command, actorId };
-  try {
-    checkFirstSaveTime(command, clock(), expiresAt);
-    await confirmRoster();
-    checkFirstSaveTime(command, clock(), expiresAt);
-  } catch (error) {
-    // The original write may have succeeded before eligibility changed.
-    const receipt = await send({ phase: 'receipt', ...request });
-    if (receipt.state === 'saved') return receipt;
-    throw error;
-  }
-  return send({ phase, ...request, expiresAt });
-}
-
-export function confirmedFleetVehicles(rows, registry) {
-  const verifiedClass = new Map(registry.map(vehicle => [vehicle.sourceVehicleId, vehicle.vehicleClass]));
-  return rows.filter(row => verifiedClass.has(String(row._id)) && row.type === verifiedClass.get(String(row._id)));
-}
-
-function validRoster(data) {
-  const { vehicles, currentDriverIds } = data ?? {};
-  return Array.isArray(vehicles) && vehicles.length <= 100
-    && vehicles.every(vehicle => isSourceId(vehicle?.sourceVehicleId) && classes.has(vehicle.vehicleClass))
-    && new Set(vehicles.map(vehicle => vehicle.sourceVehicleId)).size === vehicles.length
-    && Array.isArray(currentDriverIds) && currentDriverIds.length <= 100 && currentDriverIds.every(isSourceId);
-}
-
-function targetOrigin(value) {
-  try {
-    const url = new URL(value);
-    if (url.protocol === 'https:' && url.origin === value && !url.port && url.hostname.includes('.')) return value;
-  } catch { /* Invalid configuration leaves the optional action unavailable. */ }
-  return null;
-}
-
-export function fleetDispatchClient(env, { fetchImpl = fetch, clock = Date.now } = {}) {
-  const origin = targetOrigin(env.MATTER_DISPATCH_FLEET_REPORTS_ORIGIN);
-  const secret = env.MATTER_FLEET_LINK_SECRET;
-  if (env.MATTER_DISPATCH_FLEET_ENABLED !== '1' || !origin
-      || !/^[\x21-\x7e]{32,256}$/.test(secret ?? '')) return null;
-  return async function send(request) {
-    const body = JSON.stringify(request);
-    const timestamp = String(Math.floor(clock() / 1000));
-    const signature = createHmac('sha256', secret).update('matter-fleet-v1\n' + timestamp + '\n').update(body).digest('hex');
-    let result;
-    try {
-      result = await fetchImpl(origin + fleetPath, {
-        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(3500),
-        headers: { 'content-type': 'application/json', 'x-matter-fleet-time': timestamp,
-          'x-matter-fleet-signature': signature,
-          ...(env.MATTER_DISPATCH_FLEET_VERCEL_BYPASS && {
-            'x-vercel-protection-bypass': env.MATTER_DISPATCH_FLEET_VERCEL_BYPASS,
-          }),
-        },
-        body,
-      });
-    } catch { throw unknown(); }
-    if (!result.ok) {
-      await result.body?.cancel().catch(() => {});
-      if (result.status === 409) throw failure(409, 'The pairing changed. Review it before saving again.');
-      if (request.phase !== 'receipt' && (result.status === 400 || result.status === 422)) {
-        throw failure(422, request.command?.kind === 'end'
-          ? 'No unique vehicle assignment covers this driver at the effective time.'
-          : 'Choose a valid driver, confirmed vehicle and time.');
-      }
-      throw unknown();
+export function buildFleetPlan({ kind, pairs }, { drivers, vehicles, heads }, roster) {
+  const participants = new Map(pairs.map(pair => [pair.driverId, drivers.find(driver => String(driver._id) === pair.driverId)]));
+  for (const [id, driver] of participants) {
+    if (!roster.driverIds.has(id) || driver?.role !== 'driver' || (kind !== 'end' && !driver.isActive)) {
+      throw fleetError(422, 'Choose an eligible driver from the Dispatch fleet roster.');
     }
-    try {
-      const data = await result.json();
-      if (request.phase === 'receipt' && data?.state === 'not-found') return data;
-      if (['commit', 'receipt'].includes(request.phase)
-          && (data?.state !== 'saved' || data.operationId !== request.operationId)) throw unknown();
-      if (request.phase === 'review' && (!Array.isArray(data.expected) || !Array.isArray(data.expectedAssets)
-          || !Array.isArray(data.current))) throw unknown();
-      if (request.phase === 'options' && !validRoster(data)) throw unknown();
-      return data;
-    } catch { throw unknown(); }
-  };
+  }
+
+  const current = new Map();
+  for (const id of participants.keys()) {
+    const owned = vehicles.filter(vehicle => driverSourceId(vehicle.assignedDriver) === id);
+    if (owned.length > 1) throw fleetError(409, 'A driver already has more than one vehicle in Fleet.');
+    if (owned[0]) {
+      confirmedAsset(owned[0], roster);
+      current.set(id, owned[0]);
+    }
+  }
+
+  const desired = new Map([...current.values()].map(vehicle => [String(vehicle._id), { vehicle, driverId: null }]));
+  if (kind === 'end' && desired.size === 0) throw fleetError(409, 'This driver has no current Dispatch vehicle to end.');
+  for (const { driverId, sourceVehicleId } of pairs) {
+    if (kind === 'end') break;
+    const target = vehicles.find(vehicle => String(vehicle._id) === sourceVehicleId);
+    if (!target || !activeFleetStatuses.includes(target.status)) throw fleetError(422, 'Choose an available vehicle.');
+    confirmedAsset(target, roster);
+    const ownerId = driverSourceId(target.assignedDriver);
+    if (kind === 'swap' && (!ownerId || ownerId === driverId || !participants.has(ownerId))) {
+      throw fleetError(409, 'Choose the two vehicles these drivers currently hold to make a reciprocal swap.');
+    }
+    if (kind === 'assign' && ownerId && ownerId !== driverId) {
+      throw fleetError(409, 'This vehicle is already assigned. Review a swap or end its current assignment first.');
+    }
+    desired.set(sourceVehicleId, { vehicle: target, driverId });
+  }
+
+  const aliases = new Set([...desired.keys()].map(id => roster.assets.get(id).trackerAlias).filter(Boolean));
+  for (const alias of aliases) {
+    const holders = drivers.filter(driver => driver.role === 'driver' && trackerAlias(driver.profile?.truckoomVehicleNo) === alias);
+    if (holders.length > 1 || holders.some(driver => !participants.has(String(driver._id)))) {
+      throw fleetError(409, 'A confirmed tracker has a conflicting driver mapping.');
+    }
+  }
+
+  const driverStates = [...participants].sort(([a], [b]) => a.localeCompare(b)).map(([id, driver]) => {
+    const alias = trackerAlias(driver.profile?.truckoomVehicleNo);
+    if (alias && !aliases.has(alias)) throw fleetError(409, 'A driver still has a tracker outside this handover.');
+    return [id, driver.isActive, alias];
+  });
+  const changes = [];
+  const vehicleStates = [...desired].sort(([a], [b]) => a.localeCompare(b)).map(([id, { vehicle, driverId }]) => {
+    const { vehicleClass, trackerAlias: alias } = roster.assets.get(id);
+    const previousDriverId = driverSourceId(vehicle.assignedDriver);
+    const head = heads.get(id);
+    if (head && (head.change.driverId !== previousDriverId || head.change.vehicleClass !== vehicleClass
+        || (previousDriverId && (head.change.trackerAlias !== alias
+          || trackerAlias(participants.get(previousDriverId)?.profile?.truckoomVehicleNo) !== alias)))) {
+      throw fleetError(409, 'The current Fleet or tracker mapping differs from the last saved pairing.');
+    }
+    if (!head || previousDriverId !== driverId) {
+      changes.push({ sourceVehicleId: id, vehicleClass, trackerAlias: alias, previousDriverId, driverId });
+    }
+    return [id, vehicleClass, vehicle.status, previousDriverId, alias, head?.id ?? null];
+  });
+  if (!changes.length) throw fleetError(409, 'This pairing is already saved.');
+
+  // The review commits the actual custody and tracker state, including each
+  // asset's last receipt. A swap away and back still invalidates the old review.
+  const fingerprint = digest([driverStates, vehicleStates]);
+  return { changes, fingerprint };
 }

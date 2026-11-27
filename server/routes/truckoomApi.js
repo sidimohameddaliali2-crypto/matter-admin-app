@@ -7,6 +7,7 @@ import { protect, checkPermission } from '../middleware/auth.js';
 import { addressForDriver } from '../services/reverseGeocode.js';
 import { mapWithLimit } from '../utils/concurrency.js';
 import { isPlausibleCoordinate } from '../services/geocoding.js';
+import { driverSourceId, fleetRoster, legacyFleetConflict, trackerAlias } from '../services/fleetDispatch.js';
 
 // Live vehicle GPS (owner, 2026-09-24) — gated by the existing "live_map"
 // permission (already on for admin/manager/dispatcher by default, see
@@ -119,8 +120,21 @@ router.put('/vehicles/:vehicleNo/driver', async (req, res) => {
     const { vehicleNo } = req.params;
     const { driverId } = req.body || {};
 
-    if (driverId && !driverId.match(/^[a-f\d]{24}$/i)) {
+    if (driverId && (typeof driverId !== 'string' || !/^[a-f\d]{24}$/i.test(driverId))) {
       return res.status(400).json({ success: false, message: 'Invalid driverId' });
+    }
+
+    const roster = fleetRoster();
+    if (roster) {
+      if (roster.trackerAliases.has(trackerAlias(vehicleNo)) || roster.driverIds.has(driverSourceId(driverId))) {
+        throw legacyFleetConflict();
+      }
+      const destination = driverId && await User.findOne({ _id: driverId, role: 'driver' })
+        .select('profile.truckoomVehicleNo').lean();
+      if (roster.trackerAliases.has(trackerAlias(destination?.profile?.truckoomVehicleNo))
+          || await User.exists({
+            _id: { $in: [...roster.driverIds] }, role: 'driver', 'profile.truckoomVehicleNo': vehicleNo,
+          })) throw legacyFleetConflict();
     }
 
     await User.updateMany(
@@ -146,6 +160,7 @@ router.put('/vehicles/:vehicleNo/driver', async (req, res) => {
 
     res.json({ success: true, data: { driver: null } });
   } catch (error) {
+    if ([409, 503].includes(error.status)) return res.status(error.status).json({ success: false, message: error.message });
     console.error('Truckoom vehicle driver assignment error:', error.message);
     res.status(500).json({ success: false, message: 'Failed to update vehicle driver assignment' });
   }

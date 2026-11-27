@@ -70,7 +70,7 @@ export async function withReportingEvents(write) {
   if (!reportingCaptureEnabled()) return write(undefined, async () => {});
   await initializeOutbox();
   return mongoose.connection.transaction(async session => {
-    async function enqueue(eventType, subjectIds) {
+    async function enqueue(eventType, subjectIds, occurredAt) {
       const ids = [...new Set(subjectIds.map(String))];
       if (ids.length === 0) return;
       const result = await ReportingCounter.findOneAndUpdate({ _id: counterId },
@@ -79,8 +79,8 @@ export async function withReportingEvents(write) {
         throw new Error('Reporting event sequence is unavailable');
       }
       const first = result.lastVersion - ids.length + 1;
-      const occurredAt = new Date();
-      const events = ids.map((subjectId, index) => ({ eventType, subjectId, occurredAt, sourceVersion: first + index }));
+      const eventClock = occurredAt ?? new Date();
+      const events = ids.map((subjectId, index) => ({ eventType, subjectId, occurredAt: eventClock, sourceVersion: first + index }));
       await ReportingOutbox.insertMany(events, { session });
       return events;
     }

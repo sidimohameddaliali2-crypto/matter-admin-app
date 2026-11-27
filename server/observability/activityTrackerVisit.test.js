@@ -12,6 +12,9 @@ test('only the automatic tracker-only update shape is eligible to defer its dupl
   assert.equal(isAutomaticTrackerVisit(context, 'Delivery', 'updateOne', update()), true);
   const baseline = update(); baseline.$set.trackerVisitGpsBaseline = { evidence: { status: 'inside_window' } };
   assert.equal(isAutomaticTrackerVisit(context, 'Delivery', 'updateOne', baseline), true);
+  const beforeFleet = update();
+  beforeFleet.$set['trackerVisitGpsBaseline.beforeFleet'] = { evidence: { vehicleNo: 'old-alias' } };
+  assert.equal(isAutomaticTrackerVisit(context, 'Delivery', 'updateOne', beforeFleet), true);
   for (const field of ['status', 'proof', 'driver', 'address', 'gpsLocation', 'bagAssignment']) {
     const mixed = update(); mixed.$set[field] = 'business-change';
     assert.equal(isAutomaticTrackerVisit(context, 'Delivery', 'updateOne', mixed), false);
@@ -97,7 +100,7 @@ test('real Mongoose preserves tracker/GPS writes and saved, unchanged and failed
   const events = [];
   try {
     const schema = new mongoose.Schema({ trackerVisit: mongoose.Schema.Types.Mixed, status: String,
-      gpsLocation: mongoose.Schema.Types.Mixed, proof: mongoose.Schema.Types.Mixed }, { timestamps: true });
+      trackerVisitGpsBaseline: mongoose.Schema.Types.Mixed, gpsLocation: mongoose.Schema.Types.Mixed, proof: mongoose.Schema.Types.Mixed }, { timestamps: true });
     schema.plugin(createActivityPlugin({ write: async event => { events.push(event); } }));
     const Delivery = connection.model('Delivery', schema);
     const id = new mongoose.Types.ObjectId();
@@ -106,10 +109,14 @@ test('real Mongoose preserves tracker/GPS writes and saved, unchanged and failed
     await connection.db.command({ collMod: Delivery.collection.name, validator: {
       $jsonSchema: { properties: { trackerVisit: { properties: { status: { enum: ['awaiting_events', 'inside_window'] } } } } }
     } });
-    const changed = await inTraceContext(context, async () => await Delivery.updateOne({ _id: id }, { $set: { trackerVisit: { status: 'inside_window' } } }));
+    const priorVisit = { evidence: { vehicleNo: 'old-alias', status: 'awaiting_events' } };
+    const changed = await inTraceContext(context, async () => await Delivery.updateOne({ _id: id }, { $set: {
+      trackerVisit: { status: 'inside_window' }, 'trackerVisitGpsBaseline.beforeFleet': priorVisit,
+    } }));
     assert.equal(changed.modifiedCount, 1);
     assert.deepEqual(events.map(e => e.stage), ['record_saved']);
     const saved = await Delivery.findById(id).lean();
+    assert.deepEqual(saved.trackerVisitGpsBaseline.beforeFleet, priorVisit);
     assert.deepEqual(saved.gpsLocation, evidence.gpsLocation);
     assert.deepEqual(saved.proof, evidence.proof);
     assert.equal(saved.status, 'delivered');

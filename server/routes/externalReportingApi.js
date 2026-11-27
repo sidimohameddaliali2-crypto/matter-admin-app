@@ -12,6 +12,7 @@ import { CAPTURE_FIELDS, serializeHistoryPoint } from '../services/vehicleLocati
 import { inspectReportingMongoTopology, readReportingChanges, readReportingWatermark, reportingCaptureEnabled } from '../services/reportingOutbox.js';
 import { serializeDelivery } from './externalDeliveryApi.js';
 import { fleetProofForReporting } from '../services/fleetProofReceipt.js';
+import { readFleetAssignmentReceipt } from '../services/fleetDispatchStore.js';
 
 const router = express.Router();
 const hasReportingVercelIdentity = createReportingVercelIdentity();
@@ -86,6 +87,22 @@ router.get('/deliveries/:id', async (req, res) => {
   } catch {
     console.error('Reporting delivery snapshot is unavailable');
     return res.status(503).json({ success: false, message: 'Reporting delivery snapshot is unavailable' });
+  }
+});
+
+router.get('/fleet-assignments/:id', async (req, res) => {
+  if (!/^[a-f0-9]{24}$/i.test(req.params.id)) {
+    return res.status(400).json({ success: false, message: 'Invalid vehicle assignment receipt id' });
+  }
+  if (!reportingCaptureEnabled()) {
+    return res.status(503).json({ success: false, message: 'Reporting capture is unavailable' });
+  }
+  try {
+    const data = await readFleetAssignmentReceipt(req.params.id);
+    if (!data) return res.status(404).json({ success: false, message: 'Vehicle assignment receipt not found' });
+    return res.json({ success: true, data });
+  } catch {
+    return res.status(503).json({ success: false, message: 'Vehicle assignment receipt is unavailable' });
   }
 });
 

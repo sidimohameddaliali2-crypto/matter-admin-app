@@ -1,183 +1,140 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { confirmedFleetVehicles, dispatchFleet, fleetDispatchClient, fleetReviewExpiry, fleetReviewProof, operatorAllowed } from './fleetDispatch.js';
+import {
+  fleetRoster, operatorAllowed, readFleetCommand, buildFleetPlan,
+  fleetReviewProof, readFleetReview,
+} from './fleetDispatch.js';
 
-const actorId = 'a'.repeat(24);
-const command = {
-  kind: 'assign', from: '2026-11-26T08:00:00+04:00', to: '2026-11-26T12:00:00+04:00',
-  pairs: [{ driverId: 'b'.repeat(24), sourceVehicleId: 'c'.repeat(24) }], expected: [],
-  expectedAssets: [{ id: '00000000-0000-4000-8000-000000000001', confirmedAt: '2026-11-26T07:20:00.123456+04:00' }],
-};
-const operation = {
-  phase: 'commit', operationId: 'aaaa1234-2222-4333-8333-bbbbbbbbbbbb', actorId, command,
-};
+const actor = 'a'.repeat(24);
+const first = 'b'.repeat(24);
+const second = 'c'.repeat(24);
+const outside = 'd'.repeat(24);
+const van = '1'.repeat(24);
+const bike = '2'.repeat(24);
+const outsideVehicle = '3'.repeat(24);
+const op = 'aaaa1234-2222-4333-8333-bbbbbbbbbbbb';
+const secret = 'fixture-fleet-review-secret-'.repeat(2);
+const now = Date.parse('2026-11-27T08:01:00.000Z');
+const rosterData = { driverIds: [first, second], assets: [
+  { sourceVehicleId: van, vehicleClass: 'van', trackerAlias: 'fixture-van' },
+  { sourceVehicleId: bike, vehicleClass: 'bike', trackerAlias: null },
+] };
 const env = {
-  MATTER_DISPATCH_FLEET_ENABLED: '1', MATTER_DISPATCH_FLEET_OPERATORS: actorId,
-  MATTER_DISPATCH_FLEET_REPORTS_ORIGIN: 'https://reports-staging.example.com',
-  MATTER_FLEET_LINK_SECRET: 'qa-only-'.repeat(5),
+  MATTER_DISPATCH_FLEET_ENABLED: '1',
+  MATTER_DISPATCH_FLEET_OPERATORS: actor,
+  MATTER_DISPATCH_FLEET_ROSTER: JSON.stringify(rosterData),
 };
-const now = Date.parse('2026-11-27T00:05:00+04:00');
-const current = { ...command, from: '2026-11-26T23:55:00+04:00', to: null };
-const receipt = { state: 'saved', operationId: operation.operationId };
-const result = { expected: current.expected, expectedAssets: current.expectedAssets, current: [] };
-const stale = { ...current, from: '2026-11-26T23:49:59.999+04:00' };
+const command = (kind, ...pairs) => ({ kind, pairs: pairs.map(([driverId, sourceVehicleId]) => ({ driverId, sourceVehicleId })) });
 
-function fixture(options = {}) {
-  const phases = [];
-  const secret = env.MATTER_FLEET_LINK_SECRET;
-  const deps = {
-    actorId, secret, allowCorrection: false, clock: () => now,
-    checkRoster: async () => true,
-    send: async request => {
-      phases.push(request);
-      if (request.phase === 'review') return result;
-      if (request.phase === 'receipt') return { state: 'not-found' };
-      return receipt;
-    },
-    ...options,
+function state({ vanDriver = first, bikeDriver = second, firstAlias = 'fixture-van', heads = [] } = {}) {
+  return {
+    vehicles: [
+      { _id: van, type: 'van', assignedDriver: vanDriver, status: 'active' },
+      { _id: bike, type: 'bike', assignedDriver: bikeDriver, status: 'idle' },
+    ],
+    drivers: [
+      { _id: first, role: 'driver', isActive: true, profile: { truckoomVehicleNo: firstAlias } },
+      { _id: second, role: 'driver', isActive: true, profile: {} },
+    ],
+    heads: new Map(heads),
   };
-  const withProof = (request, issuedAt = now) => ({
-    ...operation,
-    command: request,
-    reviewProof: fleetReviewProof(secret, actorId, operation.operationId, request, issuedAt),
-  });
-  return { phases, deps, withProof };
 }
 
-test('uses an explicit allowlist for dispatch roles without granting any new existing role', () => {
-  assert.equal(operatorAllowed({ _id: actorId, role: 'dispatcher' }, env), true);
-  assert.equal(operatorAllowed({ _id: actorId, role: 'viewer' }, env), false);
-  assert.equal(operatorAllowed({ _id: 'd'.repeat(24), role: 'admin' }, env), false);
-  assert.equal(operatorAllowed({ _id: actorId, role: 'dispatcher' }, {}), false);
-});
-
-test('sends one signed request per action and preserves the same operation ID for a lost response', async () => {
-  const requests = [];
-  const client = fleetDispatchClient(env, {
-    clock: () => 1795750000000,
-    fetchImpl: async (url, options) => {
-      requests.push({ url, options });
-      if (requests.length === 1) throw Error('connection ended after commit');
-      return Response.json({ state: 'saved', operationId: operation.operationId });
-    },
-  });
-  await assert.rejects(client(operation), { status: 503 });
-  assert.equal(requests.length, 1);
-  assert.equal((await client(operation)).operationId, operation.operationId);
-  assert.deepEqual(requests.map(r => JSON.parse(r.options.body)), [operation, operation]);
-  assert.equal(requests[0].url, env.MATTER_DISPATCH_FLEET_REPORTS_ORIGIN + '/api/reporting/fleet-dispatch');
-  assert.match(requests[0].options.headers['x-matter-fleet-signature'], /^[a-f0-9]{64}$/);
-  assert.equal(requests[0].options.redirect, 'error');
-});
-
-test('the review permits one operation for that actor and that exact pairing', () => {
-  const secret = env.MATTER_FLEET_LINK_SECRET;
-  const proof = fleetReviewProof(secret, actorId, operation.operationId, command, now);
-  const expiry = (request, operator = actorId, id = operation.operationId, token = proof) =>
-    fleetReviewExpiry(secret, operator, id, request, token);
-  assert.equal(expiry(command), now + 600_000);
-  assert.equal(expiry(command, actorId, 'different-operation'), null);
-  assert.equal(expiry(command, 'other-user'), null);
-  assert.equal(expiry({ ...command, from: current.from }), null);
-  assert.equal(expiry({ ...command, to: null }), null);
-  assert.equal(expiry({ ...command, pairs: [{ ...command.pairs[0], sourceVehicleId: 'd'.repeat(24) }] }), null);
-  assert.equal(expiry({ ...command, expected: [operation.operationId] }), null);
-  assert.equal(expiry({ ...command, expectedAssets: [] }), null);
-  assert.equal(expiry(command, actorId, operation.operationId, proof.replace(String(now + 600_000), String(now + 700_000))), null);
-});
-
-test('the first save uses a 15-minute epoch window across midnight and accepts future times', async () => {
-  const cutoff = { ...current, from: '2026-11-26T23:50:00+04:00' };
-  const future = { ...current, from: '2026-11-30T08:00:00+04:00' };
-  const { phases, deps, withProof } = fixture();
-  for (const kind of ['assign', 'swap', 'end']) {
-    const pairs = kind === 'swap' ? [...current.pairs, { driverId: 'd'.repeat(24), sourceVehicleId: 'e'.repeat(24) }]
-      : kind === 'end' ? [{ driverId: current.pairs[0].driverId, sourceVehicleId: null }] : current.pairs;
-    const build = input => ({
-      ...input, kind, pairs,
-      expected: kind === 'end' ? [operation.operationId] : [],
-      expectedAssets: kind === 'end' ? [] : kind === 'swap'
-        ? [...input.expectedAssets, { ...input.expectedAssets[0], id: '00000000-0000-4000-8000-000000000002' }]
-        : input.expectedAssets,
-    });
-    await assert.rejects(dispatchFleet({ phase: 'review', command: build(stale) }, deps), { status: 422 });
-    await assert.rejects(dispatchFleet(withProof(build(stale)), deps), { status: 422 });
-    assert.equal(phases.at(-1).phase, 'receipt');
-    for (const allowed of [cutoff, future]) {
-      assert.deepEqual(await dispatchFleet(withProof(build(allowed)), deps), receipt);
-      assert.equal(phases.at(-1).phase, 'commit');
-      assert.equal(phases.at(-1).expiresAt, now + 600_000);
-    }
+test('limits entry to explicitly approved Dispatch actors and requires independently confirmed tracker coverage', () => {
+  assert.equal(operatorAllowed({ _id: actor, role: 'dispatcher' }, env), true);
+  assert.equal(operatorAllowed({ _id: actor, role: 'viewer' }, env), false);
+  assert.equal(operatorAllowed({ _id: outside, role: 'admin' }, env), false);
+  assert.equal(operatorAllowed({ _id: actor, role: 'dispatcher' }, {}), false);
+  assert.equal(fleetRoster({}), null);
+  const roster = fleetRoster(env);
+  assert.equal(roster.assets.get(van).trackerAlias, 'fixture-van');
+  assert.equal(roster.assets.get(bike).trackerAlias, null);
+  for (const assets of [
+    [{ sourceVehicleId: bike, vehicleClass: 'bike' }],
+    [rosterData.assets[0], { ...rosterData.assets[1], trackerAlias: 'fixture-van' }],
+    [{ ...rosterData.assets[0], vehicleClass: 'unknown' }],
+  ]) {
+    assert.throws(() => fleetRoster({ ...env, MATTER_DISPATCH_FLEET_ROSTER: JSON.stringify({ ...rosterData, assets }) }), { status: 503 });
   }
-  const closed = { ...cutoff, to: '2026-11-26T23:55:00+04:00' };
-  await assert.rejects(dispatchFleet(withProof(closed), deps), { status: 422 });
-  assert.equal(phases.at(-1).phase, 'receipt');
-  assert.equal('expiresAt' in phases.at(-1), false);
-  const historical = { ...stale, kind: 'correct' };
-  await assert.rejects(dispatchFleet(withProof(historical), deps), { status: 403 });
-  assert.deepEqual(await dispatchFleet(withProof(historical), { ...deps, allowCorrection: true }), receipt);
 });
 
-test('a stale or newly ineligible retry looks up the exact prior receipt and cannot write', async () => {
-  const sent = [];
-  let eligible = true;
-  let serverNow = now;
-  const { deps, withProof } = fixture({
-    clock: () => serverNow,
-    checkRoster: async () => eligible,
-    send: async request => {
-      sent.push(request);
-      if (request.phase === 'commit') throw Object.assign(new Error('Lost response'), { status: 503 });
-      return receipt;
-    },
-  });
-  const request = withProof(current);
-  await assert.rejects(dispatchFleet(request, deps), { status: 503 });
-  eligible = false;
-  assert.deepEqual(await dispatchFleet(request, deps), receipt);
-  serverNow += 600_000;
-  assert.deepEqual(await dispatchFleet(request, deps), receipt);
-  const saving = { phase: 'commit', actorId, operationId: operation.operationId, command: current };
-  const lookup = { ...saving, phase: 'receipt' };
-  assert.deepEqual(sent, [{ ...saving, expiresAt: now + 600_000 }, lookup, lookup]);
+test('rejects client scheduling and malformed swaps before touching assignments', () => {
+  const assign = command('assign', [first, van]);
+  assert.deepEqual(readFleetCommand(assign), assign);
+  assert.throws(() => readFleetCommand({ ...assign, from: '2099-01-02T03:04:00.000Z' }), { status: 400 });
+  assert.throws(() => readFleetCommand({ ...assign, to: null }), { status: 400 });
+  assert.throws(() => readFleetCommand(command('correct', [first, van])), { status: 400 });
+  assert.throws(() => readFleetCommand(command('swap', [first, van], [first, bike])), { status: 400 });
+  assert.throws(() => readFleetCommand(command('swap', [first, van], [second, van])), { status: 400 });
 });
 
-test('an expired review without a receipt cannot save and an uncertain lookup preserves retry', async () => {
-  const { phases, deps, withProof } = fixture();
-  assert.deepEqual(await dispatchFleet(withProof(current, now - 599_999), deps), receipt);
-  const request = withProof(current, now - 600_000);
-  await assert.rejects(dispatchFleet(request, deps), { status: 422 });
-  assert.deepEqual(phases.map(request => request.phase), ['commit', 'receipt']);
-  const uncertain = { ...deps, send: async () => { throw Object.assign(new Error('Unconfirmed'), { status: 503 }); } };
-  await assert.rejects(dispatchFleet(request, uncertain), { status: 503 });
-  await assert.rejects(dispatchFleet({ ...request, command: { ...current, to: command.to } }, deps), { status: 400 });
-  await assert.rejects(dispatchFleet({ ...request, command: { ...current, to: '2026-11-28T12:00:00+04:00' } }, deps), { status: 422 });
-  assert.equal(phases.length, 2);
+test('binds the review clock and current state to the same operator, operation and command', () => {
+  const swap = command('swap', [first, bike], [second, van]);
+  const fingerprint = buildFleetPlan(swap, state(), fleetRoster(env)).fingerprint;
+  const proof = fleetReviewProof(secret, actor, op, swap, fingerprint, now);
+  assert.deepEqual(readFleetReview(secret, actor, op, swap, proof), { fingerprint, expiresAt: now + 600_000 });
+  assert.equal(readFleetReview(secret, outside, op, swap, proof), null);
+  assert.equal(readFleetReview(secret, actor, op, command('assign', [first, bike]), proof), null);
+  assert.equal(readFleetReview(secret, actor, op.replace(/^a/, 'b'), swap, proof), null);
+  assert.equal(readFleetReview(secret, actor, op, swap, proof.replace(String(now + 600_000), String(now + 700_000))), null);
+  const changed = state();
+  changed.vehicles[0].status = 'idle';
+  assert.notEqual(buildFleetPlan(swap, changed, fleetRoster(env)).fingerprint, fingerprint);
 });
 
-test('the roster only accepts a matching verified vehicle class for immutable source IDs', () => {
-  const van = { _id: 'c'.repeat(24), type: 'van' };
-  const changed = { _id: 'd'.repeat(24), type: 'van' };
-  const unverified = { _id: 'e'.repeat(24), type: 'bike' };
-  assert.deepEqual(confirmedFleetVehicles([van, changed, unverified], [
-    { sourceVehicleId: van._id, vehicleClass: 'van' },
-    { sourceVehicleId: changed._id, vehicleClass: 'bike' },
-  ]), [van]);
+test('a reciprocal swap updates both vehicle owners and clears tracking for the untracked bike', () => {
+  const swap = command('swap', [first, bike], [second, van]);
+  const roster = fleetRoster(env);
+  const data = state();
+  assert.deepEqual(buildFleetPlan(swap, data, roster).changes, [
+    { sourceVehicleId: van, vehicleClass: 'van', trackerAlias: 'fixture-van', previousDriverId: first, driverId: second },
+    { sourceVehicleId: bike, vehicleClass: 'bike', trackerAlias: null, previousDriverId: second, driverId: first },
+  ]);
+  assert.throws(() => buildFleetPlan(command('swap', [first, van], [second, bike]), data, roster), { status: 409 });
+  assert.throws(() => buildFleetPlan(command('assign', [first, bike]), data, roster), { status: 409 });
+  data.vehicles[1].assignedDriver = null;
+  assert.deepEqual(buildFleetPlan(command('assign', [first, bike]), data, roster).changes.map(change => change.driverId), [null, first]);
 });
 
-test('signed receipt lookup distinguishes absent, mismatched and uncertain results', async () => {
-  const lookup = { ...operation, phase: 'receipt' };
-  const fetchReceipt = response => fleetDispatchClient(env, {
-    clock: () => now,
-    fetchImpl: async (_url, { body, headers }) => {
-      assert.deepEqual(JSON.parse(body), lookup);
-      assert.match(headers['x-matter-fleet-signature'], /^[a-f0-9]{64}$/);
-      return response;
-    },
-  })(lookup);
-  assert.deepEqual(await fetchReceipt(Response.json({ state: 'not-found' })), { state: 'not-found' });
-  assert.deepEqual(await fetchReceipt(Response.json(receipt)), receipt);
-  await assert.rejects(fetchReceipt(Response.json({ state: 'saved', operationId: 'other' })), { status: 503 });
-  await assert.rejects(fetchReceipt(new Response(null, { status: 409 })), { status: 409 });
-  await assert.rejects(fetchReceipt(new Response(null, { status: 503 })), { status: 503 });
+test('records the first confirmation of a current pair and rejects an already recorded no-op', () => {
+  const assign = command('assign', [first, van]);
+  const roster = fleetRoster(env);
+  const existing = state();
+  const { changes } = buildFleetPlan(assign, existing, roster);
+  assert.deepEqual(changes, [
+    { sourceVehicleId: van, vehicleClass: 'van', trackerAlias: 'fixture-van', previousDriverId: first, driverId: first },
+  ]);
+  existing.heads.set(van, { id: '4'.repeat(24), change: changes[0] });
+  assert.throws(() => buildFleetPlan(assign, existing, roster), { status: 409 });
+  existing.drivers[0].isActive = false;
+  existing.vehicles[0].status = 'maintenance';
+  assert.deepEqual(buildFleetPlan(command('end', [first, null]), existing, roster).changes.map(change => change.driverId), [null]);
+});
+
+test('an unmanaged Fleet link or competing tracker holder stops the operation before writes', () => {
+  const roster = fleetRoster(env);
+  const swap = command('swap', [first, bike], [second, van]);
+  const overlappingFleet = state();
+  overlappingFleet.vehicles.push({ _id: outsideVehicle, type: 'van', assignedDriver: first, status: 'active' });
+  assert.throws(() => buildFleetPlan(swap, overlappingFleet, roster), { status: 409 });
+  const duplicateAlias = state();
+  duplicateAlias.drivers.push({ _id: outside, role: 'driver', isActive: true, profile: { truckoomVehicleNo: ' fixture-van ' } });
+  assert.throws(() => buildFleetPlan(swap, duplicateAlias, roster), { status: 409 });
+  const outsideAlias = state({ firstAlias: 'outside-tracker' });
+  assert.throws(() => buildFleetPlan(swap, outsideAlias, roster), { status: 409 });
+});
+
+test('a verified alias can change only after the last receipt ended active custody', () => {
+  const nextRoster = fleetRoster({ ...env, MATTER_DISPATCH_FLEET_ROSTER: JSON.stringify({
+    ...rosterData, assets: [{ ...rosterData.assets[0], trackerAlias: 'replacement-alias' }, rosterData.assets[1]],
+  }) });
+  const oldChange = { sourceVehicleId: van, vehicleClass: 'van', trackerAlias: 'fixture-van', previousDriverId: first, driverId: first };
+  const live = state({ heads: [[van, { id: '4'.repeat(24), change: oldChange }]] });
+  assert.throws(() => buildFleetPlan(command('end', [first, null]), live, nextRoster), { status: 409 });
+
+  const closed = state({ vanDriver: null, firstAlias: null, heads: [[van, { id: '5'.repeat(24),
+    change: { ...oldChange, driverId: null } }]] });
+  assert.deepEqual(buildFleetPlan(command('assign', [first, van]), closed, nextRoster).changes, [
+    { sourceVehicleId: van, vehicleClass: 'van', trackerAlias: 'replacement-alias', previousDriverId: null, driverId: first },
+  ]);
 });

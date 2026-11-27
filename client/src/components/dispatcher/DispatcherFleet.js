@@ -1,18 +1,9 @@
 import React, { useRef, useState } from 'react';
 import api from '../../utils/api';
-import { businessComponentsToUtcDate, formatBusinessDateInput, formatBusinessDateTime, formatBusinessTimeInput } from '../../utils/businessTime';
 import { errorMessage, staffName } from '../../utils/dispatcher';
 import { DispatcherDialog } from './DispatcherFilters';
 
-function initial() {
-  const now = new Date();
-  return { kind: 'assign', driverId: '', vehicleId: '', otherDriverId: '', otherVehicleId: '',
-    from: formatBusinessDateInput(now) + 'T' + formatBusinessTimeInput(now), to: '', ongoing: false };
-}
-const utc = value => {
-  const [date, time] = value.split('T');
-  return businessComponentsToUtcDate(date, time)?.toISOString();
-};
+const initial = { kind: 'assign', driverId: '', vehicleId: '' };
 
 function storedOperation(key) {
   try {
@@ -45,24 +36,32 @@ export default function DispatcherFleet({ actor, roster, reloadRoster, pending, 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const lock = useRef(false);
-  const { kind, vehicleId, otherDriverId, otherVehicleId, ongoing } = fields;
+  const { kind, driverId, vehicleId } = fields;
   const end = kind === 'end';
   const swap = kind === 'swap';
-  const vehicles = roster?.vehicles ?? [];
+  const rosterVehicles = roster?.vehicles ?? [];
   const choices = roster?.drivers ?? [];
-  const drivers = choices.filter(driver => driver.isActive === true);
   const name = id => staffName(choices.find(driver => String(driver._id) === id));
-  const vehicleName = id => vehicles.find(vehicle => vehicle.id === id)?.label || 'Vehicle';
-  const canStart = roster?.vehicles && (end || vehicles.length > 0);
+  const vehicleName = id => rosterVehicles.find(vehicle => vehicle.id === id)?.label || 'Vehicle';
+  const held = id => rosterVehicles.find(vehicle => vehicle.driverId === id);
+  const active = choices.filter(driver => driver.isActive === true);
+  const drivers = end ? choices.filter(driver => held(driver._id)) : active;
+  const currentVehicle = held(driverId);
+  const vehicles = rosterVehicles.filter(vehicle => vehicle.available && (swap
+    ? currentVehicle?.available && vehicle.driverId && vehicle.driverId !== driverId
+      && active.some(driver => driver._id === vehicle.driverId)
+    : !vehicle.driverId || vehicle.driverId === driverId));
+  const selectedVehicle = vehicles.find(vehicle => vehicle.id === vehicleId);
+  const canStart = drivers.some(driver => driver._id === driverId) && Boolean(end || selectedVehicle);
 
   function update(event) {
     if (lock.current) return;
-    const { name, value, checked, type } = event.target;
+    const { name, value } = event.target;
     setFields(previous => ({
       ...previous,
-      [name]: type === 'checkbox' ? checked : value,
-      ...(name === 'kind' && value !== 'end' && !drivers.some(driver => String(driver._id) === previous.driverId)
-        && { driverId: '' }),
+      [name]: value,
+      ...(name === 'kind' && { driverId: '' }),
+      ...(name !== 'vehicleId' && { vehicleId: '' }),
     }));
     setReview(null);
     setError('');
@@ -73,19 +72,13 @@ export default function DispatcherFleet({ actor, roster, reloadRoster, pending, 
     if (lock.current || (!pending && !canStart)) return;
     let request = pending;
     if (!request && review) {
-      const { operationId, reviewProof, command, expected, expectedAssets } = review;
-      request = { phase: 'commit', operationId, reviewProof, command: { ...command, expected, expectedAssets } };
+      const { operationId, reviewProof, command } = review;
+      request = { phase: 'commit', operationId, reviewProof, command };
     }
     if (!request) {
-      const from = utc(fields.from);
-      const to = end || ongoing ? null : utc(fields.to);
-      if (!from || (!end && !ongoing && (!to || to <= from))) {
-        setError('Choose an effective time and a shift end after it.');
-        return;
-      }
-      const pairs = [{ driverId: fields.driverId, sourceVehicleId: end ? null : vehicleId }];
-      if (swap) pairs.push({ driverId: otherDriverId, sourceVehicleId: otherVehicleId });
-      request = { phase: 'review', command: { kind, from, to, pairs } };
+      const pairs = [{ driverId, sourceVehicleId: end ? null : vehicleId }];
+      if (swap) pairs.push({ driverId: selectedVehicle.driverId, sourceVehicleId: currentVehicle.id });
+      request = { phase: 'review', command: { kind, pairs } };
     }
     const committing = request.phase === 'commit';
     lock.current = true;
@@ -102,8 +95,14 @@ export default function DispatcherFleet({ actor, roster, reloadRoster, pending, 
         }
         setPending(null);
         onSaved('Vehicle pairing saved.');
-      } else setReview({ ...data, command: request.command });
+      } else {
+        if (!Array.isArray(data?.changes) || !data.changes.length || !data.operationId || !data.reviewProof) {
+          throw new Error('Vehicle pairing could not be reviewed. Try again.');
+        }
+        setReview({ ...data, command: request.command });
+      }
     } catch (failure) {
+      if (failure.response?.status === 409) reloadRoster();
       if (committing && [400, 409, 422].includes(failure.response?.status)) {
         setPending(null);
         setReview(null);
@@ -120,46 +119,29 @@ export default function DispatcherFleet({ actor, roster, reloadRoster, pending, 
       {pending ? <p role="status">This save is unconfirmed. Retry to check or finish the original save.</p> : <>
         {roster?.error && <p className="dp-error" role="alert">{roster.error} <button type="button" onClick={reloadRoster}>Retry vehicle options</button></p>}
         {roster?.loading && <p role="status">Loading vehicle options…</p>}
-        {!end && roster?.vehicles?.length === 0 && <p role="status">No confirmed vehicles are available.</p>}
+        {!end && roster?.vehicles && vehicles.length === 0 && (!swap || driverId)
+          && <p role="status">{swap ? 'This driver has no available reciprocal swap.' : 'No confirmed vehicles are available.'}</p>}
         <label className="dp-field">Action<select name="kind" value={kind} onChange={update} disabled={busy}>
           <option value="assign">Assign vehicle</option><option value="swap">Swap two vehicles</option>
           <option value="end">End assignment</option>
         </select></label>
-        <label className="dp-field">Driver<select name="driverId" value={fields.driverId} onChange={update} required disabled={busy}>
+        <label className="dp-field">Driver<select name="driverId" value={driverId} onChange={update} required disabled={busy}>
           <option value="">Choose a driver</option>
-          {(end ? choices : drivers).map(driver => <option key={driver._id} value={driver._id}>
+          {drivers.map(driver => <option key={driver._id} value={driver._id}>
             {staffName(driver)}{driver.isActive === false ? ' · Inactive' : ''}
           </option>)}
         </select></label>
-        {!end && <label className="dp-field">Vehicle<select name="vehicleId" value={vehicleId} onChange={update} required disabled={busy}>
+        {!end && <label className="dp-field">Vehicle<select name="vehicleId" value={vehicleId} onChange={update} required disabled={busy || !driverId}>
           <option value="">Choose a vehicle</option>
-          {vehicles.map(vehicle => <option key={vehicle.id} value={vehicle.id}>{vehicle.label} · {vehicle.type}</option>)}
+          {vehicles.map(vehicle => <option key={vehicle.id} value={vehicle.id}>
+            {vehicle.label} · {vehicle.type}{swap ? ' · ' + name(vehicle.driverId) : ''}
+          </option>)}
         </select></label>}
-        {swap && <>
-          <label className="dp-field">Second driver<select name="otherDriverId" value={otherDriverId} onChange={update} required disabled={busy}>
-            <option value="">Choose a driver</option>
-            {drivers.filter(item => String(item._id) !== fields.driverId).map(item =>
-              <option key={item._id} value={item._id}>{staffName(item)}</option>)}
-          </select></label>
-          <label className="dp-field">Second vehicle<select name="otherVehicleId" value={otherVehicleId} onChange={update} required disabled={busy}>
-            <option value="">Choose a vehicle</option>
-            {vehicles.filter(item => item.id !== vehicleId).map(item =>
-              <option key={item.id} value={item.id}>{item.label} · {item.type}</option>)}
-          </select></label>
-        </>}
-        <label className="dp-field">Effective time in Dubai
-          <input type="datetime-local" name="from" value={fields.from} onChange={update} required disabled={busy} />
-        </label>
-        {!end && <>
-          <label><input type="checkbox" name="ongoing" checked={ongoing} onChange={update} disabled={busy} /> Ongoing custody</label>
-          {!ongoing && <label className="dp-field">Shift end in Dubai
-            <input type="datetime-local" name="to" value={fields.to} onChange={update} required disabled={busy} />
-          </label>}
-        </>}
-        {review?.current.length > 0 && <div>
-          <p>This change will end or replace these pairings.</p>
-          <ul>{review.current.map(row => <li key={row.id}>
-            {name(row.driverId)} · {vehicleName(row.sourceVehicleId)} · {formatBusinessDateTime(row.from)}
+        {swap && selectedVehicle && <p>{currentVehicle.label} goes to {name(selectedVehicle.driverId)}.</p>}
+        {review && <div>
+          <p>This change takes effect when saved.</p>
+          <ul>{review.changes.map(change => <li key={change.sourceVehicleId}>
+            {vehicleName(change.sourceVehicleId)} · {change.driverId ? name(change.driverId) : 'Unassigned'}
           </li>)}</ul>
         </div>}
       </>}

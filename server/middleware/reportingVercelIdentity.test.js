@@ -44,12 +44,13 @@ function verifier(overrides = {}) {
 
 test('accepts only the scoped reporting reads and reuses the pinned Vercel keys', async () => {
   const { authorize, calls } = verifier();
-  for (const path of ['/changes', '/readiness', '/deliveries/' + fixtureId, '/days/2026-11-22/ids',
+  for (const path of ['/changes', '/readiness', '/deliveries/' + fixtureId, '/fleet-assignments/' + fixtureId, '/days/2026-11-22/ids',
     '/gps-batches/vehicle-location%3A2026-11-22T10%3A00%3A00.000Z']) {
     assert.equal(await authorize(request(path)), true, path);
   }
   assert.deepEqual(calls, [{ url: fixtureIssuer + '/.well-known/jwks', redirect: 'error' }]);
-  for (const path of ['/deliveries', '/days/2026-11-22', '/gps-batches', '/arbitrary', '/api/external/deliveries/' + fixtureId]) {
+  for (const path of ['/deliveries', '/days/2026-11-22', '/gps-batches', '/arbitrary', '/api/external/deliveries/' + fixtureId,
+    '/fleet-assignments', '/fleet-assignments/short', '/fleet-assignments/' + fixtureId + '/details']) {
     assert.equal(isReportingVercelRead(request(path)), false, path);
   }
   assert.equal(await authorize(request('/changes', token(), 'POST')), false);

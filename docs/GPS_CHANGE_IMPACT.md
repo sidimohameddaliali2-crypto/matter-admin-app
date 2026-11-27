@@ -48,12 +48,9 @@ The protected versioned reporting feed may include the observed Truckoom Company
 
 ### Assignments
 
-Driver assignments can be edited through both:
+For the enrolled pilot, Dispatch vehicle assignment is the write path for Fleet custody and the Live Tracking driver link. One transaction updates `Vehicle.assignedDriver` and `User.profile.truckoomVehicleNo`, stores the exact confirmed class and alias in the handover receipt, and records the reporting event. The explicit untracked binding clears the driver alias. Fleet Management, Live Tracking and the collector continue to read their existing fields. After a driver's first Sidi handover, customer visits use the receipt active at the authenticated photo capture and require unchanged custody through server receipt. Photos received before the first handover keep their previous verification path. They search only the dated custody interval and preserve the replaced visit snapshot alongside the existing original GPS snapshot. An untracked or unresolved pairing produces no tracker verdict. [Dispatch vehicle handover qualification](driver-audits/maintenance-map.md#dispatch-vehicle-handover-qualification)
 
-- `PUT /api/truckoom/vehicles/:vehicleNo/driver` from Live Tracking.
-- Driver profile editing through `routes/drivers.js` and `EditDriverModal`.
-
-The base implementation does not establish an immutable effective-dated assignment history. A capture-time mapping is an observation of configuration, not proof of who drove at an older GPS fix time. Detect ambiguity in reads/capture; do not assume one write endpoint prevents conflicting assignments everywhere. Avoid adding uniqueness constraints to existing user data without a separate compatibility and migration review.
+Outside the enrolled pilot, the existing Fleet, Live Tracking and driver profile pairing controls continue to operate. A capture-time mapping records configuration at observation time. Report attribution still needs the dated vehicle assignment and independently verified tracker identity for the relevant fix time. Leave ambiguous mappings and unsupported historical rows unresolved.
 
 ### Delivery proof and visit presentation
 

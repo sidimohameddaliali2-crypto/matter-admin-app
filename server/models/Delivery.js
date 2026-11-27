@@ -6,6 +6,7 @@ import { applyZoneRules, isAbuDhabiEmirate, ABU_DHABI_ZONE } from '../config/zon
 
 function hideFleetProofReceipt(_delivery, output) {
   delete output.fleetProofReceipt;
+  if (output.trackerVisitGpsBaseline) delete output.trackerVisitGpsBaseline.beforeFleet;
   return output;
 }
 
@@ -307,8 +308,14 @@ deliveryType: {
     errorStage: String,
     errorCode: String,
   },
-  // One server-owned pre-quality-method GPS result, preserved across proof resets.
-  trackerVisitGpsBaseline: { recordedAt: Date, evidence: mongoose.Schema.Types.Mixed },
+  // Server-owned evidence preserved across proof resets and changes to verification.
+  trackerVisitGpsBaseline: {
+    recordedAt: Date,
+    evidence: mongoose.Schema.Types.Mixed,
+    beforeFleet: { select: false, type: new mongoose.Schema({
+      recordedAt: Date, evidence: mongoose.Schema.Types.Mixed,
+    }, { _id: false }) },
+  },
   timeline: [{
     status: String,
     timestamp: {

@@ -6,6 +6,7 @@ import { protect, admin } from '../middleware/auth.js';
 import { getDirections } from '../services/googleDirectionsService.js';
 import { addressForDriver } from '../services/reverseGeocode.js';
 import { mapWithLimit } from '../utils/concurrency.js';
+import { fleetRoster, legacyFleetConflict, trackerAlias } from '../services/fleetDispatch.js';
 
 const router = express.Router();
 
@@ -595,6 +596,16 @@ router.put('/:id', protect, admin, async (req, res) => {
       return res.status(404).json({ message: 'Driver not found' });
     }
 
+    let keepTracker = false;
+    if (profile && Object.hasOwn(profile, 'truckoomVehicleNo')) {
+      const roster = fleetRoster();
+      const previous = trackerAlias(driver.profile?.truckoomVehicleNo);
+      const requested = trackerAlias(profile.truckoomVehicleNo);
+      keepTracker = Boolean(roster && (roster.driverIds.has(String(driver._id))
+        || roster.trackerAliases.has(previous) || roster.trackerAliases.has(requested)));
+      if (keepTracker && previous !== requested) throw legacyFleetConflict();
+    }
+
     if (email) {
       driver.email = email;
     }
@@ -612,7 +623,7 @@ router.put('/:id', protect, admin, async (req, res) => {
 
     if (profile && typeof profile === 'object') {
       Object.entries(profile).forEach(([field, value]) => {
-        if (value !== undefined) {
+        if (value !== undefined && (!keepTracker || field !== 'truckoomVehicleNo')) {
           driver.profile[field] = value;
         }
       });
@@ -623,6 +634,7 @@ router.put('/:id', protect, admin, async (req, res) => {
     const updatedDriver = await User.findById(driver._id).select('-password');
     res.json(updatedDriver);
   } catch (error) {
+    if ([409, 503].includes(error.status)) return res.status(error.status).json({ message: error.message });
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
