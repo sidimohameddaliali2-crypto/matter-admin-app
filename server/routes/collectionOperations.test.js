@@ -34,6 +34,11 @@ test('demo email denies dispatchers before provider access', async () => {
   const denied = await invoke('/refund-email-demo', 'post', { user: { ...manager, role: 'dispatcher' }, body: {} });
   assert.equal(denied.code, 403); assert.equal(fetcher.mock.callCount(), 0);
 });
+test('portal email and reminder configuration remain management-only', async () => {
+  const user = { ...manager, role: 'dispatcher' };
+  assert.equal((await invoke('/refund-portal-email', 'post', { user, body: {} })).code, 403);
+  assert.equal((await invoke('/refund-escalation-config', 'get', { user })).code, 403);
+});
 test('assignment handler validates owner and refuses customers already recorded as refunded', async () => {
   let write = stubAssignment({ paid: ['C001'] });
   let res = await invoke('/:id/refund-assignment', 'post');
