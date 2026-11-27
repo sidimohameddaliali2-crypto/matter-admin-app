@@ -5,6 +5,7 @@ const audience = 'https://matterapp.online/api/external/reporting';
 const ownerId = 'team_kVKDtA3C2ZkzLbDfHtCNz225';
 const projectId = 'prj_9vDb9dhZlbcF4H4jxwsbY3G4AVqU';
 const subject = 'owner:populus-ai:project:matter-private-reporting:environment:';
+const workerEnvironment = 'driver-reports-worker-preview';
 const jwksUrl = issuer + '/.well-known/jwks';
 const maxTokenBytes = 8192;
 const maxJwksBytes = 64 * 1024;
@@ -40,15 +41,24 @@ export function isReportingVercelRead(req) {
     && !req.headers['x-api-key'] && readBearer(req.headers.authorization)?.claims?.iss === issuer;
 }
 
+function isAllowedEnvironment(claims, env) {
+  if (claims.environment === workerEnvironment) {
+    const id = env.MATTER_REPORTING_VERCEL_OIDC_WORKER_ENVIRONMENT_ID;
+    // Vercel documents env_ as a prefix and treats the suffix as opaque.
+    return typeof id === 'string' && id.startsWith('env_') && id.length > 4 && !/\s/.test(id)
+      && claims.custom_environment_id === id;
+  }
+  return !Object.hasOwn(claims, 'custom_environment_id') && (claims.environment === 'preview'
+    || (claims.environment === 'production' && env.MATTER_REPORTING_VERCEL_OIDC_PRODUCTION_ENABLED === '1'));
+}
+
 function isAllowedToken(token, now, environment) {
   const { header, claims } = token ?? {};
   if (!header || !claims || header.alg !== 'RS256' || header.typ !== 'JWT'
       || typeof header.kid !== 'string' || !keyIdPattern.test(header.kid) || Object.hasOwn(header, 'crit')) return false;
-  const tokenEnvironment = claims.environment;
-  const environmentAllowed = tokenEnvironment === 'preview'
-    || (tokenEnvironment === 'production' && environment.MATTER_REPORTING_VERCEL_OIDC_PRODUCTION_ENABLED === '1');
-  if (!environmentAllowed || claims.iss !== issuer || claims.aud !== audience || claims.owner_id !== ownerId
-      || claims.project_id !== projectId || claims.sub !== subject + tokenEnvironment) return false;
+  if (!isAllowedEnvironment(claims, environment) || claims.iss !== issuer || claims.aud !== audience
+      || claims.owner_id !== ownerId || claims.project_id !== projectId
+      || claims.sub !== subject + claims.environment) return false;
   const { iat, nbf, exp } = claims;
   return Number.isSafeInteger(iat) && Number.isSafeInteger(nbf) && Number.isSafeInteger(exp)
     && exp > now && exp > iat && exp > nbf && exp - iat <= maxTokenLifetimeSeconds

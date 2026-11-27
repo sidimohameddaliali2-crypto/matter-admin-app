@@ -90,4 +90,44 @@ test('requires explicit opt-in and keeps source data off before capture', async 
   assert.equal(await production.authorize(request('/changes', token({
     environment: 'production', sub: fixtureSubject + 'production',
   }))), true);
+  assert.equal(await production.authorize(request('/changes', token({
+    environment: 'production', sub: fixtureSubject + 'production', custom_environment_id: 'env_fixture123',
+  }))), false);
+});
+
+test('custom worker access requires the exact signed slug, subject, and pinned environment ID', async () => {
+  const slug = 'driver-reports-worker-preview';
+  const id = 'env_fixture123';
+  const setting = 'MATTER_REPORTING_VERCEL_OIDC_WORKER_ENVIRONMENT_ID';
+  const workerClaims = { environment: slug, sub: fixtureSubject + slug, custom_environment_id: id };
+  for (const configured of [undefined, '', 'env_', 'env_fixture123\n', 'fixture123']) {
+    const { authorize, calls } = verifier({ [setting]: configured });
+    assert.equal(await authorize(request('/readiness', token(workerClaims))), false);
+    assert.equal(await authorize(request('/readiness', token({ ...workerClaims, custom_environment_id: configured }))), false);
+    assert.equal(calls.length, 0);
+  }
+
+  const { authorize, calls } = verifier({ [setting]: id });
+  for (const overrides of [
+    { custom_environment_id: undefined }, { custom_environment_id: ['env_fixture123'] },
+    { custom_environment_id: 'env_other' }, { sub: fixtureSubject + 'preview' },
+    { environment: 'preview', sub: fixtureSubject + 'preview' },
+    { environment: 'staff-preview', sub: fixtureSubject + 'staff-preview' },
+    { environment: 'production', sub: fixtureSubject + 'production' },
+    { iss: 'https://oidc.vercel.com/other' }, { aud: 'https://vercel.com/populus-ai' },
+    { owner_id: 'team_other' }, { project_id: 'prj_other' }, { exp: fixtureTime },
+  ]) {
+    assert.equal(await authorize(request('/changes', token({ ...workerClaims, ...overrides }))), false, JSON.stringify(overrides));
+  }
+  const workerToken = token(workerClaims);
+  assert.equal(await authorize(request('/changes', workerToken, 'POST')), false);
+  assert.equal(await authorize(request('/arbitrary', workerToken)), false);
+  assert.equal(calls.length, 0);
+  assert.equal(await authorize(request('/changes', workerToken)), true);
+  assert.equal(await authorize(request('/changes')), true);
+  assert.equal(calls.length, 1);
+
+  const captureOff = verifier({ [setting]: id, MATTER_REPORTING_CAPTURE_ENABLED: '0' });
+  assert.equal(await captureOff.authorize(request('/deliveries/' + fixtureId, workerToken)), false);
+  assert.equal(await captureOff.authorize(request('/readiness', workerToken)), true);
 });
