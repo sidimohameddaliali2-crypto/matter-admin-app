@@ -29,6 +29,11 @@ test('assignment handler restricts writes to management', async () => {
   const res = await invoke('/:id/refund-assignment', 'post', { user: { ...manager, role: 'dispatcher' } });
   assert.equal(res.code, 403);
 });
+test('demo email denies dispatchers before provider access', async () => {
+  const fetcher = mock.method(globalThis, 'fetch', () => assert.fail('Must not send a demo'));
+  const denied = await invoke('/refund-email-demo', 'post', { user: { ...manager, role: 'dispatcher' }, body: {} });
+  assert.equal(denied.code, 403); assert.equal(fetcher.mock.callCount(), 0);
+});
 test('assignment handler validates owner and refuses customers already recorded as refunded', async () => {
   let write = stubAssignment({ paid: ['C001'] });
   let res = await invoke('/:id/refund-assignment', 'post');

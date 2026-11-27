@@ -6,7 +6,7 @@ import User from '../models/User.js';
 import BagRefundCase from '../models/BagRefundCase.js';
 import CollectionRefundLink from '../models/CollectionRefundLink.js';
 import { enqueueRefundLink, refundEmailStatus, refundEmailEnabled, refundLinkOrigin } from '../services/collectionRefundLinks.js';
-import { refundEmailConfiguration } from '../services/collectionRefundEmail.js';
+import { refundEmailConfiguration, sendDemoRefundEmail } from '../services/collectionRefundEmail.js';
 import { collectionRefundFilter, collectionRefundQueueFilter, canRecordCollectionRefund, buildCollectionRefundUpdate, refundError } from '../services/collectionRefund.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { effectivePermissions } from '../models/User.js';
@@ -28,6 +28,16 @@ async function paidCustomerIds() {
   const [local, bags] = await Promise.all([Delivery.distinct('customerId', { 'collectionRefund.status': 'refunded' }), BagRefundCase.distinct('customerId', { status: 'completed' })]);
   return [...new Set([...local, ...bags])];
 }
+router.post('/refund-email-demo', async (req, res) => {
+  try {
+    if (!canRecordCollectionRefund(req.user)) throw refundError('Management access is required to email Accounts.', 403);
+    if (!refundEmailEnabled()) throw refundError('Refund email configuration is missing or sending is paused.', 503);
+    if (typeof req.body.messageKey !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.body.messageKey)) throw refundError('A valid demo send ID is required.');
+    // No collection lookup, link creation, ledger update or payment operation.
+    const result = await sendDemoRefundEmail(req.body.messageKey);
+    res.json({ success: true, message: 'Brevo accepted the demo email to accounts@matternutrition.xyz. No real refund was changed.', messageId: result.messageId, duplicate: result.duplicate === true });
+  } catch (error) { res.status(error.statusCode || 502).json({ success: false, message: error.statusCode ? error.message : 'Brevo did not confirm the demo email. Retry with the same send ID to avoid duplicate emails.' }); }
+});
 router.get('/refund-email-config', async (req, res) => {
   try {
     if (!canRecordCollectionRefund(req.user)) throw refundError('Management access is required.', 403);

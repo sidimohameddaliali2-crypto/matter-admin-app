@@ -28,3 +28,7 @@ The worker uses MongoDB leases across application instances and a stable UUID `i
 Local fixtures cover invalid/expired credentials, record scoping, stored-hash lookup, mandatory transaction reference/confirmation, stale writes, existing Bag Operations payments, terminal receipts, missing storage, Brevo acceptance/idempotency, uncertainty cut-off and insert-only automatic enqueueing. Public-page tests use no staff credentials. No real refund should be completed merely to test deployment.
 
 Live verification must distinguish the website/API health and configuration from actual email acceptance and inbox delivery. If no eligible pending refund exists, the first real notification remains to be observed when a genuine collection becomes eligible. Tests and sandbox acceptance do not establish inbox delivery.
+
+## Safe email demo
+
+Management can use Send demo to Accounts to send a clearly labelled Brevo email only to accounts@matternutrition.xyz. The link opens /refund/complete?demo=1 with example data and no capability. The form makes no API calls, writes no storage and updates only component state. Reset/reopen returns to Pending. A real token takes priority if present. The authenticated send endpoint has no customer lookup, collection creation, link creation or ledger write; it accepts only a UUID send ID reused on retry for Brevo deduplication. Demo inbox delivery must be checked separately from API acceptance.
