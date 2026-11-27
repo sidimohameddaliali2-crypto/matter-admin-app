@@ -14,7 +14,7 @@ test('demo email contains only example instructions and a non-capability demo UR
   const key = '720c802c-2f40-4b18-a92b-b4099bd6438a', payload = demoRefundEmailPayload(key);
   assert.deepEqual(payload.to, [{ email: 'accounts@matternutrition.xyz', name: 'MATTER Accounts' }]);
   assert.match(payload.subject, /DEMO ONLY/); assert.match(payload.textContent, /No payment or real refund will change/);
-  assert.match(payload.htmlContent, /https:\/\/matterapp.online\/refund\/complete\?demo=1/);
+  assert.match(payload.htmlContent, /https:\/\/matterapp.online\/refund\/portal\?demo=1/);
   assert.equal(payload.headers.idempotencyKey, key); assert.ok(!payload.htmlContent.includes('/complete#'));
   mock.method(Delivery, 'findOne', () => assert.fail('Demo must not read live refunds'));
   mock.method(Delivery, 'findOneAndUpdate', () => assert.fail('Demo must not update live refunds'));

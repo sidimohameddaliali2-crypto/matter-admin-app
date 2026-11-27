@@ -2,9 +2,10 @@ import React, { lazy, Suspense } from 'react';
 
 const StaffApp = lazy(() => import('./App'));
 const PublicMenuApp = lazy(() => import('./pages/PublicMenuApp'));
+const PublicRefundPortal = lazy(() => import('./pages/AccountsRefundPortal'));
 const PublicRefundApp = lazy(() => import('./pages/CollectionRefundComplete'));
 export const isPublicMenuPath = path => /^\/(?:menu-select|m)\/[^/]+\/?$/.test(path);
-export const isPublicPath = path => isPublicMenuPath(path) || path === '/refund/complete';
+export const isPublicPath = path => isPublicMenuPath(path) || ['/refund/complete', '/refund/portal'].includes(path);
 
 export class EntryBoundary extends React.Component {
   state = { failed: false };
@@ -22,6 +23,7 @@ export class EntryBoundary extends React.Component {
 export default function EntryApp() {
   // Do not evaluate the staff Redux stores for a customer link: some stores
   // read localStorage while loading and can fail before React renders in Safari.
-  const App = window.location.pathname === '/refund/complete' ? PublicRefundApp : isPublicMenuPath(window.location.pathname) ? PublicMenuApp : StaffApp;
+  const portalDemo = window.location.pathname === '/refund/complete' && !window.location.hash && new URLSearchParams(window.location.search).get('demo') === '1';
+  const App = portalDemo || window.location.pathname === '/refund/portal' ? PublicRefundPortal : window.location.pathname === '/refund/complete' ? PublicRefundApp : isPublicMenuPath(window.location.pathname) ? PublicMenuApp : StaffApp;
   return <EntryBoundary><Suspense fallback={<p role="status" style={{ padding: 32, textAlign: 'center' }}>Loading…</p>}><App /></Suspense></EntryBoundary>;
 }

@@ -6,7 +6,9 @@ import User from '../models/User.js';
 import BagRefundCase from '../models/BagRefundCase.js';
 import CollectionRefundLink from '../models/CollectionRefundLink.js';
 import { enqueueRefundLink, refundEmailStatus, refundEmailEnabled, refundLinkOrigin } from '../services/collectionRefundLinks.js';
-import { refundEmailConfiguration, sendDemoRefundEmail } from '../services/collectionRefundEmail.js';
+import { refundEmailConfiguration, sendDemoRefundEmail, emailAccountsPortal } from '../services/collectionRefundEmail.js';
+import RefundEscalation from '../models/RefundEscalation.js';
+import { refundSlackReadiness } from '../services/refundEscalations.js';
 import { collectionRefundFilter, collectionRefundQueueFilter, canRecordCollectionRefund, buildCollectionRefundUpdate, refundError } from '../services/collectionRefund.js';
 import { protect, authorize } from '../middleware/auth.js';
 import { effectivePermissions } from '../models/User.js';
@@ -37,6 +39,21 @@ router.post('/refund-email-demo', async (req, res) => {
     const result = await sendDemoRefundEmail(req.body.messageKey);
     res.json({ success: true, message: 'Brevo accepted the demo email to accounts@matternutrition.xyz. No real refund was changed.', messageId: result.messageId, duplicate: result.duplicate === true });
   } catch (error) { res.status(error.statusCode || 502).json({ success: false, message: error.statusCode ? error.message : 'Brevo did not confirm the demo email. Retry with the same send ID to avoid duplicate emails.' }); }
+});
+router.post('/refund-portal-email', async (req, res) => {
+  try {
+    if (!canRecordCollectionRefund(req.user)) throw refundError('Management access is required.', 403);
+    if (!refundEmailEnabled()) throw refundError('Email sending is missing or paused.', 503);
+    if (typeof req.body.messageKey !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.body.messageKey)) throw refundError('A valid send ID is required.');
+    await emailAccountsPortal(req.body.messageKey);
+    res.json({ success: true, message: 'Brevo accepted the Accounts portal email. The link opens all pending bag refunds.' });
+  } catch (error) { res.status(error.statusCode || 502).json({ success: false, message: error.statusCode ? error.message : 'Portal email was not confirmed. Retry with the same send ID.' }); }
+});
+router.get('/refund-escalation-config', async (req, res) => {
+  try {
+    if (!canRecordCollectionRefund(req.user)) throw refundError('Management access is required.', 403);
+    res.json({ success: true, slack: await refundSlackReadiness(), email: await refundEmailConfiguration(), jana: 'jana@matternutrition.xyz', enabled: process.env.COLLECTION_REFUND_ESCALATIONS_ENABLED !== 'false', needsReview: await RefundEscalation.countDocuments({ state: 'needs_review' }) });
+  } catch (error) { res.status(error.statusCode || 503).json({ success: false, message: error.statusCode ? error.message : 'Could not check reminder setup.' }); }
 });
 router.get('/refund-email-config', async (req, res) => {
   try {
@@ -98,7 +115,8 @@ router.get('/refunds', async (req, res) => {
     ]);
     const links = await CollectionRefundLink.find({ delivery: { $in: records.map(record => record._id) } }).select('delivery state sentAt expiresAt usedAt errorCode').lean();
     const byDelivery = new Map(links.map(link => [String(link.delivery), link]));
-    res.json({ success: true, data: records.map(record => ({ ...record, accountsEmail: refundEmailStatus(byDelivery.get(String(record._id))), refundStatus: paid.includes(record.customerId) ? 'refunded' : record.collectionRefund?.status || 'pending', recordedForCustomer: paid.includes(record.customerId) && record.collectionRefund?.status !== 'refunded' })), total, page, pages: Math.ceil(total / 25), canUpdate: canRecordCollectionRefund(req.user), emailEnabled: refundEmailEnabled() });
+    const escalations = await RefundEscalation.find({ delivery: { $in: records.map(record => record._id) } }).select('delivery stage dueAt state sentAt errorCode').lean();
+    res.json({ success: true, data: records.map(record => ({ ...record, escalations: escalations.filter(item => String(item.delivery) === String(record._id)).map(({ stage, dueAt, state, sentAt, errorCode }) => ({ stage, dueAt, state, sentAt, errorCode })), accountsEmail: refundEmailStatus(byDelivery.get(String(record._id))), refundStatus: paid.includes(record.customerId) ? 'refunded' : record.collectionRefund?.status || 'pending', recordedForCustomer: paid.includes(record.customerId) && record.collectionRefund?.status !== 'refunded' })), total, page, pages: Math.ceil(total / 25), canUpdate: canRecordCollectionRefund(req.user), emailEnabled: refundEmailEnabled() });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Unable to load refund tracking.' }); }
 });
 

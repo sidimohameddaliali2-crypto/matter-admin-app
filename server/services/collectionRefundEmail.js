@@ -1,4 +1,5 @@
 import { ACCOUNTS_EMAIL, deriveRefundToken, hashRefundToken, refundLinkOrigin } from './collectionRefundLinks.js';
+import { ensureAccountsPortal, accountsPortalUrl } from './accountsRefundPortal.js';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 export async function refundEmailConfiguration(fetcher = fetch) {
   if (!process.env.BREVO_API_KEY?.trim()) return { ready: false, code: 'missing_configuration' };
@@ -29,8 +30,25 @@ export function refundEmailPayload(record, link) {
 export async function sendRefundEmail(record, link, fetcher = fetch) {
   return sendPayload(refundEmailPayload(record, link), fetcher);
 }
+export async function sendPortalRefundEmail(record, link, fetcher = fetch) {
+  return sendPayload(portalRefundEmailPayload(record, link.messageKey, await ensureAccountsPortal()), fetcher);
+}
+export function portalRefundEmailPayload(record, messageKey, portal) {
+  const url = accountsPortalUrl(portal);
+  return {
+    sender: { email: process.env.BREVO_SENDER_EMAIL?.trim() || 'noreply@matternutrition.xyz', name: process.env.BREVO_SENDER_NAME?.trim() || 'MATTER Accounts' },
+    to: [{ email: ACCOUNTS_EMAIL, name: 'Jenniza · MATTER Accounts' }],
+    subject: `Accounts refund portal${record ? ` — pending refund for ${String(record.customerName || 'Customer').replace(/[\r\n]/g, ' ').slice(0, 100)}` : ' — all pending bag refunds'}`,
+    headers: { idempotencyKey: messageKey }, tags: ['collection-refund-portal'],
+    htmlContent: `<div style="font-family:Arial,sans-serif;max-width:620px;color:#12213b"><h1>Accounts refund portal</h1>${record ? `<p>A completed collection for <strong>${escape(record.customerName)}</strong> (${escape(record.customerId)}) is awaiting its AED 155 refund.</p>` : ''}<p>Jenniza, open the portal to review <strong>all pending bag refunds</strong> without logging in. Select a refund, choose credit/debit card or bank account, enter its transaction reference and confirm after making payment. Repeat for the remaining refunds.</p><p><a href="${escape(url)}" style="display:inline-block;background:#c4ef81;color:#12213b;padding:14px 20px;text-decoration:none;border-radius:8px;font-weight:bold">Open all pending refunds</a></p><p>This private link can view and update all eligible pending bag refunds. Keep it within Accounts. It expires ${escape(new Date(portal.expiresAt).toLocaleDateString('en-GB', { timeZone: 'Asia/Dubai' }))} (Dubai). Opening it does not record a payment. This portal records refunds only; it does not send money.</p></div>`,
+    textContent: `Jenniza — Accounts refund portal\n${record ? `Pending: ${record.customerName} (${record.customerId}) — AED 155\n` : ''}Open ALL pending bag refunds without login: ${url}\nChoose a destination, enter the transaction reference and confirm each completed payment. This private link grants access to all pending bag refunds; keep within Accounts. Expires ${new Date(portal.expiresAt).toISOString()}. No money is sent by the portal.`
+  };
+}
+export async function emailAccountsPortal(messageKey) {
+  return sendPayload(portalRefundEmailPayload(null, messageKey, await ensureAccountsPortal()));
+}
 export function demoRefundEmailPayload(messageKey) {
-  const url = `${refundLinkOrigin()}/refund/complete?demo=1`;
+  const url = `${refundLinkOrigin()}/refund/portal?demo=1`;
   return {
     sender: { email: process.env.BREVO_SENDER_EMAIL?.trim() || 'noreply@matternutrition.xyz', name: process.env.BREVO_SENDER_NAME?.trim() || 'MATTER Accounts' },
     to: [{ email: ACCOUNTS_EMAIL, name: 'MATTER Accounts' }],
@@ -43,7 +61,7 @@ export function demoRefundEmailPayload(messageKey) {
 export async function sendDemoRefundEmail(messageKey, fetcher = fetch) {
   return sendPayload(demoRefundEmailPayload(messageKey), fetcher);
 }
-async function sendPayload(payload, fetcher) {
+export async function sendPayload(payload, fetcher = fetch) {
   const response = await fetcher('https://api.brevo.com/v3/smtp/email', { method: 'POST', signal: AbortSignal.timeout(20000), headers: { 'api-key': process.env.BREVO_API_KEY?.trim(), accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(payload) });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {

@@ -3,10 +3,10 @@ import Delivery from '../models/Delivery.js';
 import CollectionRefundLink from '../models/CollectionRefundLink.js';
 import { collectionRefundFilter } from '../services/collectionRefund.js';
 import { enqueueRefundLink, refundAlreadyPaid } from '../services/collectionRefundLinks.js';
-import { sendRefundEmail } from '../services/collectionRefundEmail.js';
+import { sendPortalRefundEmail } from '../services/collectionRefundEmail.js';
 
 export const EMAIL_RETRY_WINDOW_MS = 20 * 60000; // Less than Brevo's 30-minute deduplication window.
-export async function runCollectionRefundEmailsOnce({ send = sendRefundEmail, now } = {}) {
+export async function runCollectionRefundEmailsOnce({ send = sendPortalRefundEmail, now } = {}) {
   if (!process.env.BREVO_API_KEY?.trim() || process.env.COLLECTION_REFUND_EMAILS_ENABLED === 'false') return;
   await CollectionRefundLink.init();
   const known = await CollectionRefundLink.distinct('delivery');
