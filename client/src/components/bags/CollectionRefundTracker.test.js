@@ -103,18 +103,13 @@ test('clearing filters restores the pending queue and removes the owner restrict
   expect(container.querySelector('#collection-refund-owner-filter').value).toBe('');
   expect(api.get).toHaveBeenLastCalledWith('/collections/refunds',{params:expect.objectContaining({status:'pending',owner:'',page:1})});
 });
-test('Accounts emails are queued independently of payment recording', async () => {
-  api.get.mockResolvedValue({data:{data:[row],total:1,pages:1,canUpdate:true,emailEnabled:true}});
-  await click('Refresh refunds'); await click('Email Accounts portal');
-  expect(api.post).toHaveBeenLastCalledWith('/collections/collection-1/refund-email',{});
-  expect(container.textContent).toContain('Accounts email queued');
-});
-test('resending an Accounts link requires explicit confirmation and does not mark the refund Done', async () => {
-  row={...row,accountsEmail:{state:'sent',expiresAt:'2099-01-01T00:00:00Z'}};
-  api.get.mockResolvedValue({data:{data:[row],total:1,pages:1,canUpdate:true,emailEnabled:true}});
-  await click('Refresh refunds'); await click('Resend Accounts portal');
-  await save(); expect(api.post).not.toHaveBeenCalled();
-  await act(async()=>container.querySelector('[type="checkbox"]').click());
-  await save(); expect(api.post).toHaveBeenLastCalledWith('/collections/collection-1/refund-email',{resend:true});
-  expect(api.post.mock.calls.every(([path])=>path.endsWith('/refund-email'))).toBe(true);
+test('one portal email action handles the entire queue and does not record payment', async () => {
+  Object.defineProperty(window, 'crypto', { configurable: true, value: { randomUUID: () => '720c802c-2f40-4b18-a92b-b4099bd6438a' } });
+  api.get.mockResolvedValue({ data: { data: [row], total: 1, pages: 1, canUpdate: true, emailEnabled: true } });
+  api.post.mockResolvedValue({ data: { success: true, message: 'Accounts has already received today’s refund email. No second email will be sent.' } });
+  await click('Refresh refunds'); await click('Email today’s portal to Accounts');
+  expect(api.post).toHaveBeenLastCalledWith('/collections/refund-portal-email', { messageKey: expect.any(String) });
+  expect(container.textContent).toContain('No second email will be sent.');
+  expect(button('Portal email accepted by Brevo').disabled).toBe(true);
+  expect([...container.querySelectorAll('button')].some(el => el.textContent === 'Email Accounts portal')).toBe(false);
 });

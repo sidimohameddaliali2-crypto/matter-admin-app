@@ -44,9 +44,6 @@ export function portalRefundEmailPayload(record, messageKey, portal) {
     textContent: `Jenniza — Accounts refund portal\n${record ? `Pending: ${record.customerName} (${record.customerId}) — AED 155\n` : ''}Open ALL pending bag refunds without login: ${url}\nChoose a destination, enter the transaction reference and confirm each completed payment. This private link grants access to all pending bag refunds; keep within Accounts. Expires ${new Date(portal.expiresAt).toISOString()}. No money is sent by the portal.`
   };
 }
-export async function emailAccountsPortal(messageKey) {
-  return sendPayload(portalRefundEmailPayload(null, messageKey, await ensureAccountsPortal()));
-}
 export function demoRefundEmailPayload(messageKey) {
   const url = `${refundLinkOrigin()}/refund/portal?demo=1`;
   return {

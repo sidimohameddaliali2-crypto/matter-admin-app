@@ -4,10 +4,12 @@ import Delivery from '../models/Delivery.js';
 import Customer from '../models/Customer.js';
 import User from '../models/User.js';
 import BagRefundCase from '../models/BagRefundCase.js';
-import CollectionRefundLink from '../models/CollectionRefundLink.js';
-import { enqueueRefundLink, refundEmailStatus, refundEmailEnabled, refundLinkOrigin } from '../services/collectionRefundLinks.js';
-import { refundEmailConfiguration, sendDemoRefundEmail, emailAccountsPortal } from '../services/collectionRefundEmail.js';
+
+import { refundEmailEnabled, refundLinkOrigin } from '../services/collectionRefundLinks.js';
+import { refundEmailConfiguration, sendDemoRefundEmail } from '../services/collectionRefundEmail.js';
 import RefundEscalation from '../models/RefundEscalation.js';
+import RefundDailyDigest from '../models/RefundDailyDigest.js';
+import { sendDailyRefundDigest } from '../services/refundDailyDigests.js';
 import { refundSlackReadiness } from '../services/refundEscalations.js';
 import { collectionRefundFilter, collectionRefundQueueFilter, canRecordCollectionRefund, buildCollectionRefundUpdate, refundError } from '../services/collectionRefund.js';
 import { protect, authorize } from '../middleware/auth.js';
@@ -45,14 +47,14 @@ router.post('/refund-portal-email', async (req, res) => {
     if (!canRecordCollectionRefund(req.user)) throw refundError('Management access is required.', 403);
     if (!refundEmailEnabled()) throw refundError('Email sending is missing or paused.', 503);
     if (typeof req.body.messageKey !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(req.body.messageKey)) throw refundError('A valid send ID is required.');
-    await emailAccountsPortal(req.body.messageKey);
-    res.json({ success: true, message: 'Brevo accepted the Accounts portal email. The link opens all pending bag refunds.' });
+    const result = await sendDailyRefundDigest({ kind: 'accounts', manual: true });
+    res.status(result.accepted || result.alreadySent ? 200 : 202).json({ success: true, message: result.accepted ? 'Brevo accepted today’s Accounts portal email. It opens all pending bag refunds. No further Accounts emails will be sent today.' : result.alreadySent ? 'Accounts has already received today’s refund email. The daily limit prevents another email.' : 'Today’s portal email is queued or needs review. The daily limit is preserved.' });
   } catch (error) { res.status(error.statusCode || 502).json({ success: false, message: error.statusCode ? error.message : 'Portal email was not confirmed. Retry with the same send ID.' }); }
 });
 router.get('/refund-escalation-config', async (req, res) => {
   try {
     if (!canRecordCollectionRefund(req.user)) throw refundError('Management access is required.', 403);
-    res.json({ success: true, slack: await refundSlackReadiness(), email: await refundEmailConfiguration(), jana: 'jana@matternutrition.xyz', enabled: process.env.COLLECTION_REFUND_ESCALATIONS_ENABLED !== 'false', needsReview: await RefundEscalation.countDocuments({ state: 'needs_review' }) });
+    res.json({ success: true, slack: await refundSlackReadiness(), email: await refundEmailConfiguration(), jana: 'jana@matternutrition.xyz', enabled: process.env.COLLECTION_REFUND_ESCALATIONS_ENABLED !== 'false', needsReview: await RefundEscalation.countDocuments({ state: 'needs_review' }) + await RefundDailyDigest.countDocuments({ state: 'needs_review' }) });
   } catch (error) { res.status(error.statusCode || 503).json({ success: false, message: error.statusCode ? error.message : 'Could not check reminder setup.' }); }
 });
 router.get('/refund-email-config', async (req, res) => {
@@ -113,10 +115,10 @@ router.get('/refunds', async (req, res) => {
       Delivery.find(filter).select('customerId customerName scheduledTime collectionDetails completedAt collectionRefund').sort(sort).skip((page - 1) * 25).limit(25).lean(),
       Delivery.countDocuments(filter)
     ]);
-    const links = await CollectionRefundLink.find({ delivery: { $in: records.map(record => record._id) } }).select('delivery state sentAt expiresAt usedAt errorCode').lean();
-    const byDelivery = new Map(links.map(link => [String(link.delivery), link]));
+
+    const daily = await RefundDailyDigest.findOne({ kind: 'accounts', dateKey: toBusinessDateKey(new Date()) }).select('state sentAt errorCode').lean();
     const escalations = await RefundEscalation.find({ delivery: { $in: records.map(record => record._id) } }).select('delivery stage dueAt state sentAt errorCode').lean();
-    res.json({ success: true, data: records.map(record => ({ ...record, escalations: escalations.filter(item => String(item.delivery) === String(record._id)).map(({ stage, dueAt, state, sentAt, errorCode }) => ({ stage, dueAt, state, sentAt, errorCode })), accountsEmail: refundEmailStatus(byDelivery.get(String(record._id))), refundStatus: paid.includes(record.customerId) ? 'refunded' : record.collectionRefund?.status || 'pending', recordedForCustomer: paid.includes(record.customerId) && record.collectionRefund?.status !== 'refunded' })), total, page, pages: Math.ceil(total / 25), canUpdate: canRecordCollectionRefund(req.user), emailEnabled: refundEmailEnabled() });
+    res.json({ success: true, data: records.map(record => ({ ...record, escalations: escalations.filter(item => String(item.delivery) === String(record._id)).map(({ stage, dueAt, state, sentAt, errorCode }) => ({ stage, dueAt, state, sentAt, errorCode })), accountsEmail: daily ? { state: daily.state, sentAt: daily.sentAt, errorCode: daily.errorCode, recipient: 'accounts@matternutrition.xyz' } : { state: 'not_queued' }, refundStatus: paid.includes(record.customerId) ? 'refunded' : record.collectionRefund?.status || 'pending', recordedForCustomer: paid.includes(record.customerId) && record.collectionRefund?.status !== 'refunded' })), total, page, pages: Math.ceil(total / 25), canUpdate: canRecordCollectionRefund(req.user), emailEnabled: refundEmailEnabled() });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Unable to load refund tracking.' }); }
 });
 
@@ -126,9 +128,8 @@ router.post('/:id/refund-email', async (req, res) => {
     if (!mongoose.isValidObjectId(req.params.id)) throw refundError('Invalid collection ID.');
     const record = await Delivery.findOne({ ...collectionRefundFilter(), _id: req.params.id, 'collectionRefund.status': { $ne: 'refunded' } }).select('_id customerId').lean();
     if (!record) throw refundError('A pending refund after a completed collection is required.', 409);
-    const actorName = [req.user.profile?.firstName, req.user.profile?.lastName].filter(Boolean).join(' ') || req.user.email;
-    const link = await enqueueRefundLink(record, { resend: req.body.resend === true, actorName });
-    res.json({ success: true, accountsEmail: refundEmailStatus(link), message: 'Accounts email queued. It will be sent shortly.' });
+    const result = await sendDailyRefundDigest({ kind: 'accounts', manual: true });
+    res.json({ success: true, message: result.accepted ? 'Brevo accepted today’s Accounts portal summary.' : result.alreadySent ? 'Accounts has already received today’s refund email. No second email will be sent.' : 'Today’s summary is queued or needs review.' });
   } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : 'Could not queue the Accounts email.' }); }
 });
 
