@@ -46,6 +46,8 @@ jest.mock('../components/SimpleQrScanner', () => ({
 }])}>Scan test bag</button>);
 global.IS_REACT_ACT_ENVIRONMENT = true;
 let container, root, deliveries, drivers;
+const fleetFlag = process.env.REACT_APP_DISPATCH_FLEET_ENABLED;
+const fleetSessionKey = 'matter-fleet-operation:staff';
 const defaultDate = () => dispatchDateWindow().defaultDate;
 const buttons = () => [...container.querySelectorAll('button')];
 const button = text => buttons().find(b => b.textContent.trim() === text || b.getAttribute('aria-label') === text);
@@ -68,6 +70,7 @@ const submit = async form => act(async () => form.dispatchEvent(new Event('submi
 const select = async name => act(async () => container.querySelector(`[aria-label="Select ${name}"]`).click());
 const pickFirst = async () => act(async () => container.querySelector('.dp-driver-choices button').click());
 beforeEach(async () => {
+  delete process.env.REACT_APP_DISPATCH_FLEET_ENABLED;
   jest.spyOn(window, 'scrollTo').mockImplementation(() => {});
   mockScan = 'BAG_00001';
   mockSocket = null;
@@ -213,6 +216,86 @@ afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
   jest.restoreAllMocks();
+  if (fleetFlag === undefined) delete process.env.REACT_APP_DISPATCH_FLEET_ENABLED;
+  else process.env.REACT_APP_DISPATCH_FLEET_ENABLED = fleetFlag;
+  sessionStorage.removeItem(fleetSessionKey);
+});
+
+function fleetOptions(load) {
+  process.env.REACT_APP_DISPATCH_FLEET_ENABLED = '1';
+  const other = api.get.getMockImplementation();
+  api.get.mockImplementation((path, ...args) => path === '/dispatcher-fleet/options' ? load() : other(path, ...args));
+}
+
+test('a pending fleet save stays reachable during a roster outage and retries its original request', async () => {
+  const request = { phase: 'commit', operationId: 'original', reviewProof: 'original-proof',
+    command: { kind: 'assign', from: '2026-11-27T08:00:00.000Z', to: null, pairs: [] } };
+  sessionStorage.setItem(fleetSessionKey, JSON.stringify(request));
+  const roster = jest.fn().mockRejectedValue(new Error('Roster unavailable'));
+  fleetOptions(roster);
+  api.post.mockRejectedValueOnce(new Error('Could not confirm the save')).mockResolvedValueOnce({
+    data: { data: { state: 'saved', operationId: request.operationId } },
+  });
+
+  await click('Drivers');
+  expect(container.textContent).toContain('Roster unavailable');
+  await click('Retry vehicle options');
+  expect(roster).toHaveBeenCalledTimes(2);
+  await click('Resume vehicle save');
+  await click('Retry save');
+  expect(JSON.parse(sessionStorage.getItem(fleetSessionKey))).toEqual(request);
+  await click('Retry save');
+  expect(sessionStorage.getItem(fleetSessionKey)).toBeNull();
+  expect(api.post.mock.calls.map(([path, body]) => [path, body])).toEqual([
+    ['/dispatcher-fleet', request], ['/dispatcher-fleet', request],
+  ]);
+  expect(container.textContent).toContain('Vehicle pairing saved.');
+});
+
+test('review locks the form during the request and save uses the submitted command', async () => {
+  fleetOptions(async () => ({ data: { data: [{ id: 'van', label: 'Van 1', type: 'van' },
+    { id: 'bike', label: 'Bike 1', type: 'bike' }], currentDriverIds: [] } }));
+  let finishReview;
+  const review = { operationId: 'reviewed', reviewProof: 'proof', current: [], expected: [], expectedAssets: [] };
+  api.post.mockImplementationOnce(() => new Promise(resolve => { finishReview = resolve; })).mockResolvedValueOnce({
+    data: { data: { state: 'saved', operationId: review.operationId } },
+  });
+
+  await click('Drivers');
+  await click('Vehicle assignment');
+  const dialog = container.querySelector('[role="dialog"]');
+  await fill(dialog.querySelector('select[name="driverId"]'), 'driver-1');
+  const vehicle = dialog.querySelector('select[name="vehicleId"]');
+  await fill(vehicle, 'van');
+  await act(async () => dialog.querySelector('input[name="ongoing"]').click());
+  await click('Review pairing');
+  const submitted = api.post.mock.calls[0][1].command;
+  expect(vehicle.disabled).toBe(true);
+  await fill(vehicle, 'bike');
+  await act(async () => finishReview({ data: { data: review } }));
+  await click('Save pairing');
+  expect(api.post.mock.calls[1][1]).toEqual({
+    phase: 'commit', operationId: review.operationId, reviewProof: review.reviewProof,
+    command: { ...submitted, expected: review.expected, expectedAssets: review.expectedAssets },
+  });
+  expect(submitted.pairs[0].sourceVehicleId).toBe('van');
+});
+
+test('inactive drivers with current ledger custody can be selected only for End assignment', async () => {
+  drivers.push({ _id: 'former', name: 'Former driver', isActive: false },
+    { _id: 'other', name: 'Other inactive driver', isActive: false });
+  // Reload workspace driver state with the fixture inactive drivers.
+  await act(async () => root.render(null));
+  fleetOptions(async () => ({ data: { data: [], currentDriverIds: ['former'] } }));
+  await act(async () => root.render(<DispatcherWorkspace />));
+  await click('Drivers');
+  await click('Vehicle assignment');
+  const dialog = container.querySelector('[role="dialog"]');
+  const driver = dialog.querySelector('select[name="driverId"]');
+  expect(driver.querySelector('option[value="former"]')).toBeNull();
+  await fill(dialog.querySelector('select[name="kind"]'), 'end');
+  expect(driver.querySelector('option[value="former"]').textContent).toContain('Former driver');
+  expect(driver.querySelector('option[value="other"]')).toBeNull();
 });
 test('advanced and driver filters are available without print, routing or grid controls', () => {
   expect(container.querySelectorAll('.dp-filter-trigger:not(.dp-driver-filter)')).toHaveLength(1);
