@@ -5,10 +5,26 @@ import BagRefundCase from '../models/BagRefundCase.js';
 import Link from '../models/CollectionRefundLink.js';
 import router from '../routes/collectionRefundLinks.js';
 import { newRefundLink, deriveRefundToken, hashRefundToken, accountsRefundUpdate, refundEmailStatus, resolveRefundLink, enqueueRefundLink } from './collectionRefundLinks.js';
-import { refundEmailPayload, sendRefundEmail, refundEmailConfiguration } from './collectionRefundEmail.js';
+import { refundEmailPayload, sendRefundEmail, refundEmailConfiguration, demoRefundEmailPayload, sendDemoRefundEmail } from './collectionRefundEmail.js';
 import { runCollectionRefundEmailsOnce } from '../jobs/collectionRefundEmails.js';
 const env = { JWT_SECRET: process.env.JWT_SECRET, BREVO_API_KEY: process.env.BREVO_API_KEY, PUBLIC_APP_URL: process.env.PUBLIC_APP_URL, COLLECTION_REFUND_EMAILS_ENABLED: process.env.COLLECTION_REFUND_EMAILS_ENABLED };
 const record = { _id:'507f1f77bcf86cd799439011',customerId:'C001',customerName:'Sara <script>',type:'Collection',status:'collected',collectionRequest:{refundRequestedAfterCollection:true},collectionDetails:{collectedAt:'2026-11-27T08:00:00Z'} };
+test('demo email contains only example instructions and a non-capability demo URL to fixed Accounts recipient', async () => {
+  process.env.PUBLIC_APP_URL = 'https://matterapp.online';
+  const key = '720c802c-2f40-4b18-a92b-b4099bd6438a', payload = demoRefundEmailPayload(key);
+  assert.deepEqual(payload.to, [{ email: 'accounts@matternutrition.xyz', name: 'MATTER Accounts' }]);
+  assert.match(payload.subject, /DEMO ONLY/); assert.match(payload.textContent, /No payment or real refund will change/);
+  assert.match(payload.htmlContent, /https:\/\/matterapp.online\/refund\/complete\?demo=1/);
+  assert.equal(payload.headers.idempotencyKey, key); assert.ok(!payload.htmlContent.includes('/complete#'));
+  mock.method(Delivery, 'findOne', () => assert.fail('Demo must not read live refunds'));
+  mock.method(Delivery, 'findOneAndUpdate', () => assert.fail('Demo must not update live refunds'));
+  mock.method(Link, 'create', () => assert.fail('Demo must not create a real link'));
+  const result = await sendDemoRefundEmail(key, async (url, options) => {
+    assert.equal(url, 'https://api.brevo.com/v3/smtp/email'); assert.deepEqual(JSON.parse(options.body), payload);
+    return { ok: true, json: async () => ({ messageId: 'demo-fixture-id' }) };
+  });
+  assert.equal(result.messageId, 'demo-fixture-id');
+});
 beforeEach(()=>{process.env.JWT_SECRET='fixture-secret-for-refund-links-only';process.env.BREVO_API_KEY='fixture';process.env.PUBLIC_APP_URL='https://matterapp.online';delete process.env.COLLECTION_REFUND_EMAILS_ENABLED;});
 afterEach(()=>{mock.restoreAll();for(const [key,value] of Object.entries(env)){if(value===undefined)delete process.env[key];else process.env[key]=value;}});
 function stubToken(link = {}) {

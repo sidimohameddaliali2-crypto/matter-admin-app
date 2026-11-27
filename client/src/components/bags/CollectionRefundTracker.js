@@ -13,6 +13,8 @@ export default function CollectionRefundTracker({ search = '', dateFrom = '', da
   const [ownerFilter, setOwnerFilter] = useState(''), [mode, setMode] = useState('refund'), [ownerId, setOwnerId] = useState(''), [dueDate, setDueDate] = useState(''), [exporting, setExporting] = useState(false);
   const [emailEnabled, setEmailEnabled] = useState(false), [emailConfirmed, setEmailConfirmed] = useState(false);
   const [checkingEmail, setCheckingEmail] = useState(false);
+  const [sendingDemo, setSendingDemo] = useState(false), [demoSent, setDemoSent] = useState(false);
+  const demoKey = useRef('');
   useEffect(() => { setOwnerFilter(''); setFilter('pending'); setPage(1); setSelected(null); }, [resetKey]);
   const load = useCallback(async () => {
     const current = ++request.current; setLoading(true); setError('');
@@ -66,6 +68,17 @@ export default function CollectionRefundTracker({ search = '', dateFrom = '', da
     } catch (err) { setError(err.response?.data?.message || 'Could not check email setup.'); }
     finally { setCheckingEmail(false); }
   }
+  async function sendDemo() {
+    if (saving.current || demoSent) return;
+    demoKey.current ||= window.crypto?.randomUUID?.();
+    if (!demoKey.current) { setError('Use a secure browser to send the demo email.'); return; }
+    saving.current = true; setSendingDemo(true); setError(''); setNotice('');
+    try {
+      const { data } = await api.post('/collections/refund-email-demo', { messageKey: demoKey.current });
+      setNotice(data.message); setDemoSent(true);
+    } catch (err) { setError(err.response?.data?.message || 'Demo send was not confirmed. Retry this button to reuse the same send ID.'); }
+    finally { saving.current = false; setSendingDemo(false); }
+  }
   async function exportRows() {
     setExporting(true); setError('');
     try { await exportCollectionRows(api, { report: 'refunds', status: filter, search, dateFrom, dateTo, owner: ownerFilter }, 'refunds.csv'); }
@@ -76,6 +89,7 @@ export default function CollectionRefundTracker({ search = '', dateFrom = '', da
     <div className="collection-register-heading"><h2>Refund tracking <span>{total}</span></h2><button type="button" className="collection-secondary" onClick={load} disabled={loading || busy}>Refresh refunds</button></div>
     <p className="collection-hint">Completed collections with a refund request. AED 155 per customer deposit.</p>
     {canUpdate && <button type="button" className="collection-secondary" disabled={checkingEmail || busy} onClick={checkEmailSetup}>{checkingEmail ? 'Checking email setup…' : 'Check Accounts email setup'}</button>}
+    {canUpdate && emailEnabled && <button type="button" className="collection-secondary" disabled={sendingDemo || demoSent || busy} onClick={sendDemo}>{demoSent ? 'Demo accepted by Brevo' : sendingDemo ? 'Sending demo…' : 'Send demo to Accounts'}</button>}
     <div className="collection-refund-filters" aria-label="Refund status filters">{[['pending', 'Pending'], ['refunded', 'Done']].map(([key, label]) => <button key={key} type="button" className="collection-secondary" aria-pressed={filter === key} disabled={busy} onClick={() => { setFilter(key); setPage(1); setSelected(null); }}>{label}</button>)}</div>
     <label htmlFor="collection-refund-owner-filter">Refund owner</label><select id="collection-refund-owner-filter" value={ownerFilter} disabled={busy} onChange={event => setOwnerFilter(event.target.value)}><option value="">All owners</option><option value="unassigned">Unassigned</option>{owners.map(owner => <option key={owner._id} value={owner._id}>{owner.name}</option>)}</select>
     <button type="button" className="collection-secondary collection-export" onClick={exportRows} disabled={busy || loading || exporting}>{exporting ? 'Exporting…' : 'Export matching refunds'}</button>

@@ -44,3 +44,21 @@ test('a failed save keeps the reference and confirmation for a safe retry', asyn
   fetch.mockResolvedValueOnce({ ok: false, json: async () => ({ message: 'This refund changed. Reload before updating.' }) });
   await submit(); expect(container.querySelector('#accounts-refund-reference').value).toBe('TXN-RETRY'); expect(container.querySelector('[type="checkbox"]').checked).toBe(true); expect(container.textContent).toContain('This refund changed');
 });
+test('demo completion and reset never call a refund API or persist a real refund', async () => {
+  await act(async () => root.unmount()); root = createRoot(container); fetch.mockClear();
+  window.history.replaceState({}, '', '/refund/complete?demo=1');
+  await act(async () => root.render(<CollectionRefundComplete />));
+  expect(container.textContent).toContain('DEMO ONLY'); expect(fetch).not.toHaveBeenCalled();
+  await change('#accounts-refund-reference', 'DEMO-REF-001');
+  await act(async () => container.querySelector('[type="checkbox"]').click()); await submit();
+  expect(container.textContent).toContain('Demo complete. Nothing was saved');
+  expect(container.textContent).toContain('DEMO-REF-001'); expect(fetch).not.toHaveBeenCalled();
+  await act(async () => [...container.querySelectorAll('button')].find(el => el.textContent === 'Reset demo').click());
+  expect(container.querySelector('form')).not.toBeNull(); expect(container.querySelector('#accounts-refund-reference').value).toBe(''); expect(fetch).not.toHaveBeenCalled();
+});
+test('a real token takes priority over the demo query and still uses the scoped API', async () => {
+  await act(async () => root.unmount()); root = createRoot(container); fetch.mockClear();
+  window.history.replaceState({}, '', `/refund/complete?demo=1#${token}`);
+  await act(async () => root.render(<CollectionRefundComplete />));
+  expect(container.textContent).not.toContain('DEMO ONLY'); expect(fetch).toHaveBeenCalledTimes(1);
+});

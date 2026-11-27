@@ -27,7 +27,24 @@ export function refundEmailPayload(record, link) {
   };
 }
 export async function sendRefundEmail(record, link, fetcher = fetch) {
-  const response = await fetcher('https://api.brevo.com/v3/smtp/email', { method: 'POST', signal: AbortSignal.timeout(20000), headers: { 'api-key': process.env.BREVO_API_KEY?.trim(), accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(refundEmailPayload(record, link)) });
+  return sendPayload(refundEmailPayload(record, link), fetcher);
+}
+export function demoRefundEmailPayload(messageKey) {
+  const url = `${refundLinkOrigin()}/refund/complete?demo=1`;
+  return {
+    sender: { email: process.env.BREVO_SENDER_EMAIL?.trim() || 'noreply@matternutrition.xyz', name: process.env.BREVO_SENDER_NAME?.trim() || 'MATTER Accounts' },
+    to: [{ email: ACCOUNTS_EMAIL, name: 'MATTER Accounts' }],
+    subject: 'DEMO ONLY — Test the bag refund page (no real refund)',
+    headers: { idempotencyKey: messageKey }, tags: ['collection-refund-demo'],
+    htmlContent: `<div style="font-family:Arial,sans-serif;max-width:600px;color:#12213b"><h1>DEMO ONLY — Bag refund page</h1><p>This email uses example data only. No payment or real refund will change.</p><p>Open the page without logging in, enter an example transaction reference such as DEMO-REF-001, then confirm to see the Done screen.</p><p><a href="${escape(url)}" style="display:inline-block;background:#c4ef81;color:#12213b;padding:14px 20px;text-decoration:none;border-radius:8px;font-weight:bold">Open safe refund demo</a></p><p>The demo only changes the page you see. It has no access to any customer or refund record. Reset or reopen it to test again.</p></div>`,
+    textContent: `DEMO ONLY — No payment or real refund will change.\nOpen the safe refund demo (no login): ${url}\nUse an example reference such as DEMO-REF-001. Nothing is saved to the refund tracker. Reset or reopen to test again.`
+  };
+}
+export async function sendDemoRefundEmail(messageKey, fetcher = fetch) {
+  return sendPayload(demoRefundEmailPayload(messageKey), fetcher);
+}
+async function sendPayload(payload, fetcher) {
+  const response = await fetcher('https://api.brevo.com/v3/smtp/email', { method: 'POST', signal: AbortSignal.timeout(20000), headers: { 'api-key': process.env.BREVO_API_KEY?.trim(), accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify(payload) });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     if (data.code === 'duplicate_parameter') return { duplicate: true };
