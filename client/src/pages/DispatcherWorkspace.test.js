@@ -15,6 +15,7 @@ jest.mock('../utils/api', () => ({
 jest.mock('react-redux', () => ({
   useSelector: fn => fn({
     auth: {
+      token: 'fleet-fixture-token',
       user: {
         _id: 'staff',
         role: 'dispatcher',
@@ -210,6 +211,7 @@ beforeEach(async () => {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
+  localStorage.setItem('token', 'fleet-fixture-token');
   await act(async () => root.render(<DispatcherWorkspace />));
 });
 afterEach(async () => {
@@ -219,6 +221,7 @@ afterEach(async () => {
   if (fleetFlag === undefined) delete process.env.REACT_APP_DISPATCH_FLEET_ENABLED;
   else process.env.REACT_APP_DISPATCH_FLEET_ENABLED = fleetFlag;
   sessionStorage.removeItem(fleetSessionKey);
+  localStorage.removeItem('token');
 });
 
 function fleetOptions(load) {
@@ -279,7 +282,26 @@ test('review locks the form during the request and save uses the submitted comma
     phase: 'commit', operationId: review.operationId, reviewProof: review.reviewProof,
     command: { ...submitted, expected: review.expected, expectedAssets: review.expectedAssets },
   });
+  expect(api.post.mock.calls[1][2].headers['x-matter-fleet-actor']).toBe('staff');
   expect(submitted.pairs[0].sourceVehicleId).toBe('van');
+});
+
+test('a credential change in another tab hides fleet data and retains the original pending receipt', async () => {
+  const request = { phase: 'commit', operationId: 'original', reviewProof: 'original-proof', command: {} };
+  sessionStorage.setItem(fleetSessionKey, JSON.stringify(request));
+  fleetOptions(async () => ({ data: { data: [], drivers: [] } }));
+  await click('Drivers');
+  await click('Resume vehicle save');
+  expect(button('Retry save')).toBeDefined();
+
+  await act(async () => {
+    localStorage.setItem('token', 'other-fixture-token');
+    window.dispatchEvent(new StorageEvent('storage', { key: 'token', storageArea: localStorage }));
+  });
+  expect(button('Resume vehicle save')).toBeUndefined();
+  expect(button('Retry save')).toBeUndefined();
+  expect(JSON.parse(sessionStorage.getItem(fleetSessionKey))).toEqual(request);
+  expect(api.post).not.toHaveBeenCalled();
 });
 
 test('inactive drivers with current ledger custody can be selected only for End assignment', async () => {

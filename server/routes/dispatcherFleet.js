@@ -11,6 +11,9 @@ router.use(protect, dispatcher, (req, res, next) => {
   res.set('Cache-Control', 'private, no-store');
   if (!operatorAllowed(req.user, process.env)) return res.sendStatus(404);
   if (req.headers['sec-fetch-site'] === 'cross-site') return res.sendStatus(403);
+  if (req.get('x-matter-fleet-actor') !== String(req.user._id)) {
+    return res.status(403).json({ message: 'The Dispatch account changed. Reload to continue with the current account.' });
+  }
   req.sendFleetDispatch = fleetDispatchClient(process.env);
   if (!req.sendFleetDispatch) return res.status(503).json({ message: 'Vehicle assignments are temporarily unavailable.' });
   return next();

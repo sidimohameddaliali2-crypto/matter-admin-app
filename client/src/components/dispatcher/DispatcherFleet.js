@@ -39,7 +39,7 @@ export function usePendingFleetOperation(actor) {
   return [pending, setPending];
 }
 
-export default function DispatcherFleet({ roster, reloadRoster, pending, setPending, onClose, onSaved }) {
+export default function DispatcherFleet({ actor, roster, reloadRoster, pending, setPending, onClose, onSaved }) {
   const [fields, setFields] = useState(initial);
   const [review, setReview] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -93,7 +93,9 @@ export default function DispatcherFleet({ roster, reloadRoster, pending, setPend
     setError('');
     if (committing && !pending) setPending(request);
     try {
-      const { data: { data } } = await api.post('/dispatcher-fleet', request, { timeout: 10_000 });
+      const { data: { data } } = await api.post('/dispatcher-fleet', request, {
+        timeout: 10_000, headers: { 'x-matter-fleet-actor': actor },
+      });
       if (committing) {
         if (data?.state !== 'saved' || data.operationId !== request.operationId) {
           throw new Error('Vehicle save could not be confirmed. Retry this same request.');

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { useNavigate } from 'react-router-dom';
 import { ArrowRight, CalendarDays, Check, Clock, History, LayoutDashboard, ListOrdered, LogOut, MapPin, Package, Plus, RefreshCw, Search, Truck, Users, X } from 'lucide-react';
@@ -16,9 +16,19 @@ import DispatcherHandover from '../components/dispatcher/DispatcherHandover';
 import '../styles/dispatcherWorkspace.css';
 const navigation = [['dispatch', 'Dispatch', LayoutDashboard], ['drivers', 'Drivers', Users], ['handover', 'Handover', Truck], ['history', 'History', History]];
 const labelStatus = d => !d.driver && d.status === 'pending' ? 'Unassigned' : String(d.status || 'pending').replaceAll('_', ' ');
+function activeCredential() {
+  try { return localStorage.getItem('token'); } catch { return null; }
+}
+function subscribeToCredential(onChange) {
+  const changed = ({ key, storageArea }) => {
+    if ((!storageArea || storageArea === localStorage) && (key === null || key === 'token')) onChange();
+  };
+  window.addEventListener('storage', changed);
+  return () => window.removeEventListener('storage', changed);
+}
 export default function DispatcherWorkspace() {
   const {
-      user
+      user, token: authToken
     } = useSelector(s => s.auth),
     dispatch = useDispatch(),
     navigate = useNavigate(),
@@ -57,7 +67,9 @@ export default function DispatcherWorkspace() {
     [historyTruncated, setHistoryTruncated] = useState(false);
   const [fleetRoster, setFleetRoster] = useState(null);
   const [fleetRosterVersion, setFleetRosterVersion] = useState(0);
-  const fleetActor = process.env.REACT_APP_DISPATCH_FLEET_ENABLED === '1' && user?._id ? String(user._id) : null;
+  const credential = useSyncExternalStore(subscribeToCredential, activeCredential);
+  const fleetActor = process.env.REACT_APP_DISPATCH_FLEET_ENABLED === '1'
+    && authToken && credential === authToken && user?._id ? String(user._id) : null;
   const [pendingFleet, setPendingFleet] = usePendingFleetOperation(fleetActor);
   const roster = fleetRoster?.actor === fleetActor ? fleetRoster : null;
   const reloadFleetRoster = () => setFleetRosterVersion(version => version + 1);
@@ -118,7 +130,9 @@ export default function DispatcherWorkspace() {
     if (!fleetActor || view !== 'drivers') return;
     const controller = new AbortController();
     setFleetRoster({ actor: fleetActor, loading: true });
-    api.get('/dispatcher-fleet/options', { signal: controller.signal, timeout: 6000 })
+    api.get('/dispatcher-fleet/options', {
+      signal: controller.signal, timeout: 6000, headers: { 'x-matter-fleet-actor': fleetActor },
+    })
       .then(({ data }) => {
         if (controller.signal.aborted) return;
         if (!Array.isArray(data?.data) || !Array.isArray(data.drivers)) {
@@ -411,7 +425,7 @@ export default function DispatcherWorkspace() {
         delivery: d
       })} onAssign={openAssign} onUnassign={openUnassign} />} {formError && <p className="dp-error" role="alert">{formError}</p>}</DispatcherDialog>}
  {modal?.type === 'assign' && <DispatcherAssignment targets={modal.targets} deliveries={deliveries} drivers={drivers} date={date} onClose={close} onSaved={assignmentSaved} />}
- {fleetActor && modal?.type === 'vehicle' && <DispatcherFleet key={fleetActor} roster={roster} reloadRoster={reloadFleetRoster}
+ {fleetActor && modal?.type === 'vehicle' && <DispatcherFleet key={fleetActor} actor={fleetActor} roster={roster} reloadRoster={reloadFleetRoster}
    pending={pendingFleet} setPending={setPendingFleet} onClose={close}
    onSaved={message => { close(); setNotice(message); reloadFleetRoster(); }} />}
  {modal?.type === 'unassign' && <DispatcherDialog title="Unassign driver?" busy={busy} onClose={close}><p>Remove the driver assignment from {modal.targets.length} {modal.targets.length === 1 ? 'delivery' : 'deliveries'}?</p>{formError && <p className="dp-error" role="alert">{formError}</p>}<div className="dp-actions"><button disabled={busy} onClick={close}>Keep assignment</button><button disabled={busy || !modal.targets.length} onClick={unassign}>{busy ? 'Saving…' : 'Confirm unassign'}</button></div></DispatcherDialog>}
