@@ -6,6 +6,7 @@ import { applyZoneRules, isAbuDhabiEmirate, ABU_DHABI_ZONE } from '../config/zon
 
 function hideFleetProofReceipt(_delivery, output) {
   delete output.fleetProofReceipt;
+  delete output.matterBookingObservations;
   if (output.trackerVisitGpsBaseline) delete output.trackerVisitGpsBaseline.beforeFleet;
   return output;
 }
@@ -44,6 +45,7 @@ const deliverySchema = new mongoose.Schema({
   // Independent of editable delivery names, times and subscription references.
   // Never reprice completed work from a newer subscription.
   matterRevenue: { type: mongoose.Schema.Types.Mixed, default: undefined, select: false },
+  matterBookingObservations: { type: [mongoose.Schema.Types.Mixed], default: undefined, immutable: true, select: false },
   matterSource: { fetchedAt: Date, updatedAt: String, effectiveState: String, pinSource: String },
   // Matter's own id for the saved address this delivery goes to
   // (customer_addresses[].id, as a string) — a stable identity for "this
@@ -250,6 +252,7 @@ deliveryType: {
     bagId: String,
     bagIds: [String],
     bagScanCodes: [String],
+    bagAcquisitions: { type: [new mongoose.Schema({ orderId:String, bagId:String, method:{type:String,enum:['qr','manual']}, scannedAt:Date }, {_id:false})], default:undefined },
     scannedBags: [String],
     returnedBags: [String],
     bagEventId: String,

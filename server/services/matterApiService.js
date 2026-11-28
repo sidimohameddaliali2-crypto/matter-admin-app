@@ -8,6 +8,7 @@ import { normalizeMatterAllergens } from './matterAllergens.js';
 import { menuNutritionForDate } from './menuPlanSchedule.js';
 import { isDateKey } from '../utils/businessDate.js';
 import { readMatterGet } from './matterReadRetry.js';
+import { observeWebsiteDeadline, websiteDeadlineSource, withholdOverlappingWebsiteDeadlines } from './matterBookingDeadline.js';
 import { resolveMatterDeliveryAddress, matterMealContract, matterWeekendEnabled, matterDoubleDeliveryDates } from './matterSubscriptionContract.js';
 
 // A customer's macro/plan config on Matter changes on the order of days or
@@ -486,7 +487,7 @@ class MatterApiService {
    * already fetched in one shot and just gets checked against every date in
    * range.
    */
-  async findSubscriptionsWithDeliveryInRange(startDateKey, endDateKey, { includeKitchenInputs = false, onProgress } = {}) {
+  async findSubscriptionsWithDeliveryInRange(startDateKey, endDateKey, { includeKitchenInputs = false, includeBookingEvidence = false, onProgress } = {}) {
     const all = await this.listAllSubscriptions({ onProgress });
     const candidates = all.filter(sub => canSupplyDelivery(sub, startDateKey));
 
@@ -506,7 +507,10 @@ class MatterApiService {
         if (!detail || (includeKitchenInputs && String(detail.subscription_id ?? '') !== String(sub.subscription_id))) {
           throw new Error('Matter subscription identity could not be verified');
         }
-        return { ...detail, name: detail.name || sub.name, email: detail.email || sub.email,
+        const observedAt = includeBookingEvidence && sub.customer_id != null
+          && String(detail.subscription_id ?? '') === String(sub.subscription_id)
+          && String(detail.customer_id ?? '') === String(sub.customer_id) ? new Date().toISOString() : null;
+        return { ...detail, observedAt, name: detail.name || sub.name, email: detail.email || sub.email,
           subscription_status: detail.subscription_status || sub.subscription_status };
       } catch (error) {
         recordFailure(error, sub.subscription_id);
@@ -544,7 +548,16 @@ class MatterApiService {
               .map((entry) => String(entry.date).slice(0, 10))
               .sort();
             if (deliveryDates.length === 0) return [];
+            let bookingSource = null;
+            if (root.observedAt && String(detail.data.customer_id) === String(root.customer_id)) {
+              try { bookingSource = websiteDeadlineSource(detail.data, root.observedAt); }
+              catch {
+                bookingSource = { observedAt: root.observedAt, subscriptionId: String(sub.subscription_id),
+                  matterCustomerId: String(sub.customer_id), addressId: '', unreadable: true };
+              }
+            }
             return deliveryDates.map((deliveryDate) => ({
+              ...(includeBookingEvidence && { bookingObservation: observeWebsiteDeadline(bookingSource, deliveryDate) }),
               ...(includeKitchenInputs ? { kitchen_inputs: buildNutritionResult({ ...detail.data, email: detail.data.email || sub.email }, version.is_upcoming_plan === true, version.is_upcoming_plan ? root.subscription_id : null) } : {}),
               subscription_id: sub.subscription_id,
               customer_id: detail.data.customer_id ?? sub.customer_id,
@@ -605,6 +618,7 @@ class MatterApiService {
       error.discovery = { complete: false, candidates: candidates.length, verified: candidates.length - failures.length, failed: failures.length, errors: failures };
       throw error;
     }
+    if (includeBookingEvidence) withholdOverlappingWebsiteDeadlines(matches);
     return matches;
   }
 

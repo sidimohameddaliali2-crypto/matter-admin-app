@@ -8,7 +8,8 @@ import { displayMatterName } from '../utils/matterName.js';
 import { resolveMatterDeliveryAddress } from './matterSubscriptionContract.js';
 import { compareMatterDelivery } from './matterDeliveryComparison.js';
 import { capturePendingMatterRevenue } from './matterSalesService.js';
-import { recordReportingDeliveryChanges, withReportingEvents } from './reportingOutbox.js';
+import { appendWebsiteDeadline } from './matterBookingCapture.js';
+import { recordReportingDeliveryChanges, reportingCaptureEnabled, withReportingEvents } from './reportingOutbox.js';
 
 // Only pending/assigned work today or later can receive a name refresh.
 const EDITABLE_STATUSES = new Set(['pending', 'assigned']);
@@ -156,7 +157,7 @@ export function buildMatterDeliverySnapshot(sub, dateKey, customer = null) {
 export async function importMatterDeliveriesForDate(dateKey, { onProgress, assertActive } = {}) {
   let matches;
   try {
-    matches = await matterApiService.findSubscriptionsWithDeliveryOnDate(dateKey, { onProgress });
+    matches = await matterApiService.findSubscriptionsWithDeliveryOnDate(dateKey, { onProgress, includeBookingEvidence: reportingCaptureEnabled() });
   } catch (error) {
     if (error.code !== 'INCOMPLETE_DELIVERY_ROSTER') throw error;
     return { date: dateKey, complete: false, total: error.discovery.candidates, created: 0, alreadyExisted: 0, alreadyHadOtherDelivery: 0, customersCreated: 0, noCurrentAddress: 0, failed: error.discovery.failed, discoveryFailed: error.discovery.failed, writeFailed: 0, errors: error.discovery.errors };
@@ -180,9 +181,13 @@ export async function importMatterDeliveriesForDate(dateKey, { onProgress, asser
       const existingFromThisImport = await Delivery.findOne({
         matterSubscriptionId: subscriptionId,
         scheduledTime: { $gte: startOfDay, $lt: endOfDayExclusive }
-      }).select('_id customerName status addressId address addressDetails zone gpsLocation scheduledTime');
+      }).select('_id customerName customerId matterCustomerId matterSubscriptionId matterImportKey status addressId address addressDetails zone gpsLocation scheduledTime');
       if (existingFromThisImport) {
         summary.alreadyExisted += 1;
+        if (reportingCaptureEnabled() && sub.bookingObservation && existingFromThisImport.matterImportKey === dateKey + ':' + subscriptionId) {
+          await assertActive?.();
+          await appendWebsiteDeadline(existingFromThisImport, sub.bookingObservation);
+        }
         const proposed = buildMatterDeliverySnapshot(sub, dateKey);
         summary.comparisons.push(proposed
           ? compareMatterDelivery(existingFromThisImport, proposed, { date: dateKey, fetchedAt: sub.source_fetched_at, addressResolution: resolveMatterDeliveryAddress(sub.customer_addresses) })
@@ -267,6 +272,10 @@ export async function importMatterDeliveriesForDate(dateKey, { onProgress, asser
       }
 
       const snapshot = buildMatterDeliverySnapshot(sub, dateKey, customer);
+      if (reportingCaptureEnabled() && sub.bookingObservation && snapshot.customerId
+        && (!customer.matterCustomerId || String(customer.matterCustomerId) === snapshot.matterCustomerId)) {
+        snapshot.matterBookingObservations = [{ ...sub.bookingObservation, customerId: String(snapshot.customerId) }];
+      }
       snapshot.customerName = displayMatterName(sub.name)
         || [customer.firstName, customer.lastName].filter(Boolean).join(' ').trim() || 'Matter Customer';
       await assertActive?.();

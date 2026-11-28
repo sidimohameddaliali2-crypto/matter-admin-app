@@ -1,4 +1,4 @@
-import { updateReportingDelivery } from '../services/reportingOutbox.js';
+import { saveAppliedChange, updateReportingDelivery } from '../services/reportingOutbox.js';
 import express from 'express';
 import multer from 'multer';
 import csv from 'csv-parser';
@@ -361,7 +361,7 @@ export async function applyChangesToDelivery(delivery, changes) {
         }
       }
 
-      await deliveryChange.save();
+      await saveAppliedChange(deliveryChange,deliveries.map(delivery => delivery._id),Delivery.collection);
       await deliveryChange.populate([
         { path: 'uploadedBy', select: 'profile firstName lastName email' },
         { path: 'appliedToDelivery', select: 'customerName scheduledTime status' }
@@ -683,7 +683,7 @@ router.post('/:id/apply', protect, async (req, res) => {
     change.status = 'applied';
     change.appliedAt = new Date();
     change.appliedToDelivery = delivery._id;
-    await change.save();
+    await saveAppliedChange(change,[delivery._id],Delivery.collection);
 
     // Populate the updated delivery for response
     const populatedDelivery = await Delivery.findById(updatedDelivery._id)
@@ -753,7 +753,7 @@ router.post('/apply/:changeId', protect, admin, async (req, res) => {
     change.status = 'applied';
     change.appliedAt = new Date();
     change.appliedToDelivery = delivery._id;
-    await change.save();
+    await saveAppliedChange(change,[delivery._id],Delivery.collection);
 
     res.json({ 
       message: 'Changes applied successfully',

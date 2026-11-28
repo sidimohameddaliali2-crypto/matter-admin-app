@@ -4,6 +4,9 @@ import Customer from '../models/Customer.js';
 import matter from './matterApiService.js';
 import { getBusinessDayBounds, isDateKey, toBusinessDateKey } from '../utils/businessDate.js';
 import { normalizeSalesProfile, hashSalesValue, captureSalesAllocation, buildMatterSalesReport } from './matterSalesCalculations.js';
+import { salesWebsiteDeadlineSources } from './matterBookingDeadline.js';
+import { captureTomorrowWebsiteDeadlines } from './matterBookingCapture.js';
+import { reportingCaptureEnabled } from './reportingOutbox.js';
 
 let inFlight;
 let lastRefresh = 0;
@@ -31,11 +34,24 @@ export async function refreshMatterSales() {
   inFlight = (async () => {
     const list = await readSalesSubscriptionList();
     const profiles = [];
+    const bookingSources = [];
+    const captureBookings = reportingCaptureEnabled();
+    let unreadableSources = 0;
     for (let offset = 0; offset < list.length; offset += 20) {
       profiles.push(...await Promise.all(list.slice(offset, offset + 20).map(async (row) => {
         const sub = (await matter.getSubscription(row.subscription_id))?.data;
         if (!sub || String(sub.subscription_id) !== String(row.subscription_id) || String(sub.customer_id) !== String(row.customer_id)) throw new Error('Matter sales identity could not be verified.');
-        return normalizeSalesProfile({ ...sub, subscription_status: sub.subscription_status || row.subscription_status });
+        const profile = normalizeSalesProfile({ ...sub, subscription_status: sub.subscription_status || row.subscription_status });
+        if (captureBookings) {
+          const receiptClock = new Date();
+          try { bookingSources.push(...salesWebsiteDeadlineSources(sub, receiptClock, profile)); }
+          catch {
+            unreadableSources += 1;
+            bookingSources.push({ subscriptionId: profile.subscriptionId, matterCustomerId: profile.customerId,
+              observedAt: receiptClock.toISOString(), addressId: '', unreadable: true });
+          }
+        }
+        return profile;
       })));
     }
     // No write happens until every source profile has been verified.
@@ -47,8 +63,18 @@ export async function refreshMatterSales() {
     else await Snapshot.updateOne({ _id: previous._id }, { $set: { lastVerifiedAt: observedAt } });
     const today = toBusinessDateKey(observedAt);
     const capturedDeliveries = await capturePendingMatterRevenue(profiles, observedAt);
+    let bookingCapture = { state: 'disarmed' };
+    if (captureBookings) {
+      try {
+        const changed = await captureTomorrowWebsiteDeadlines(bookingSources, observedAt);
+        bookingCapture = { state: unreadableSources ? 'partial' : 'complete', changed, unreadableSources };
+      } catch {
+        console.warn('[MatterSales] Website deadline capture incomplete; the next hourly read will retry.');
+        bookingCapture = { state: 'incomplete' };
+      }
+    }
     lastRefresh = Date.now();
-    return { observedAt, today, profiles: profiles.length, capturedDeliveries };
+    return { observedAt, today, profiles: profiles.length, capturedDeliveries, bookingCapture };
   })();
   try { return await inFlight; } finally { inFlight = undefined; }
 }

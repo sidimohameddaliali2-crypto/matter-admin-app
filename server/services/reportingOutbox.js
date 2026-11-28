@@ -145,6 +145,22 @@ export async function saveReportingDelivery(delivery) {
   }
 }
 
+// The change receipt is persisted after the delivery edit. Wake reporting in
+// that receipt's own transaction so an early read cannot miss the amendment.
+export async function saveAppliedChange(change, deliveries, collection) {
+  const ids = [...new Set(deliveries.map(String))];
+  if (!ids.length) return change.save();
+  change.appliedOrderIds = ids;
+  const prior = change.$session();
+  try {
+    return await withReportingEvents(async (session,enqueue) => {
+      const saved = await change.save({session});
+      await recordReportingDeliveryChanges(session,enqueue,ids,collection);
+      return saved;
+    });
+  } finally { change.$session(prior); }
+}
+
 export function reportingEnvelope(row) {
   return {
     eventId: 'reporting-v1:' + row.sourceVersion,
