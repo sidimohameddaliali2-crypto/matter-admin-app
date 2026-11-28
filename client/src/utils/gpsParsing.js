@@ -1,76 +1,75 @@
 // Extracts { lat, lng } from a Google/Apple Maps link, a raw "lat,lng" string, or any
 // text containing coordinates. Returns null if nothing parseable is found.
+//
+// On a map link, the first decimal pair is often the @ viewing centre. Place
+// links also embed the destination as !3d/!4d (or q/query/ll/destination).
+// That destination wins; @ is used only when the link has no destination pair
+// (issue #2, SYNC-04). Keep this in step with extractCoordsFromGoogleMapsUrl.
+const DECIMAL_PAIR = '(-?\\d{1,3}\\.\\d+)\\s*,\\s*(-?\\d{1,3}\\.\\d+)';
+
+function coordinatePair(lat, lng) {
+  const la = parseFloat(lat);
+  const ln = parseFloat(lng);
+  if (!Number.isFinite(la) || !Number.isFinite(ln)) return null;
+  if (Math.abs(la) > 90 || Math.abs(ln) > 180) return null;
+  return { lat: la, lng: ln };
+}
+
+function pairIn(text) {
+  if (!text) return null;
+  const match = String(text).match(new RegExp(DECIMAL_PAIR));
+  if (!match) return null;
+  return coordinatePair(match[1], match[2]);
+}
+
+function decodeMapText(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function destinationFromMapLink(text) {
+  const place = text.match(/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/);
+  if (place) {
+    const coords = coordinatePair(place[1], place[2]);
+    if (coords) return coords;
+  }
+
+  const query = text.match(new RegExp(`[?&](?:destination|daddr|q|query|ll)=(?:loc:)?${DECIMAL_PAIR}`, 'i'));
+  if (query) {
+    const coords = coordinatePair(query[1], query[2]);
+    if (coords) return coords;
+  }
+
+  const loc = text.match(new RegExp(`loc:${DECIMAL_PAIR}`, 'i'));
+  if (loc) {
+    const coords = coordinatePair(loc[1], loc[2]);
+    if (coords) return coords;
+  }
+
+  return null;
+}
+
 export function parseGPSFromLink(link) {
   if (!link || typeof link !== 'string') return null;
 
   const str = link.trim();
+  if (!str) return null;
+  const text = decodeMapText(str);
+  const looksLikeUrl = /https?:\/\/|google\.|goo\.gl|maps\.app\.goo\.gl|maps\.apple\.com/i.test(text);
 
-  const extractFromText = (text) => {
-    const m = text.match(/(-?\d{1,3}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)/);
-    if (m) {
-      const lat = parseFloat(m[1]);
-      const lng = parseFloat(m[2]);
-      if (!Number.isNaN(lat) && !Number.isNaN(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
-        return { lat, lng };
-      }
-    }
-    return null;
-  };
+  if (!looksLikeUrl) return pairIn(text);
 
-  const direct = extractFromText(str);
-  if (direct) return direct;
+  const destination = destinationFromMapLink(text);
+  if (destination) return destination;
 
-  let normalized = str;
-  if (!/^https?:\/\//i.test(normalized) && /(google\.|goo\.gl|maps\.app\.goo\.gl|maps\.apple\.com)/i.test(normalized)) {
-    normalized = `https://${normalized}`;
+  const at = text.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+  if (at) {
+    const coords = coordinatePair(at[1], at[2]);
+    if (coords) return coords;
   }
 
-  try {
-    const url = new URL(normalized);
-    const host = url.hostname;
-
-    if (/google\.com|goo\.gl|maps\.app\.goo\.gl/i.test(host)) {
-      const qParam = url.searchParams.get('q');
-      if (qParam) {
-        const parsed = extractFromText(qParam);
-        if (parsed) return parsed;
-      }
-
-      const queryParam = url.searchParams.get('query');
-      if (queryParam) {
-        const parsed = extractFromText(queryParam);
-        if (parsed) return parsed;
-      }
-
-      const llParam = url.searchParams.get('ll');
-      if (llParam) {
-        const parsed = extractFromText(llParam);
-        if (parsed) return parsed;
-      }
-
-      const pathMatch = url.pathname.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
-      if (pathMatch) {
-        const lat = parseFloat(pathMatch[1]);
-        const lng = parseFloat(pathMatch[2]);
-        if (!Number.isNaN(lat) && !Number.isNaN(lng)) return { lat, lng };
-      }
-
-      const fromWhole = extractFromText(normalized);
-      if (fromWhole) return fromWhole;
-    }
-
-    if (/maps\.apple\.com/i.test(host)) {
-      const llParam = url.searchParams.get('ll');
-      if (llParam) {
-        const parsed = extractFromText(llParam);
-        if (parsed) return parsed;
-      }
-      const fromWhole = extractFromText(normalized);
-      if (fromWhole) return fromWhole;
-    }
-
-    return extractFromText(normalized);
-  } catch {
-    return extractFromText(str);
-  }
+  return pairIn(text);
 }
