@@ -140,6 +140,7 @@ const DriverMobile = () => {
   const [bagState, setBagState] = useState({
     scannedBagId: '',
     scannedBags: [],
+    bagAcquisitions: [],
     returnedBags: [],
     collectionScans: [],
     toReturn: [],
@@ -901,7 +902,7 @@ const DriverMobile = () => {
     const isCollection = delivery?.type === 'Collection';
     const shouldStartBagCollection = delivery?.type === 'Task' && delivery?.taskType === 'Bag Collection';
     setCurrentStep(isCollection ? 'collection_action' : (shouldStartBagCollection ? 'bag_collection_qr' : 'delivery'));
-    changeBagDraft({ scannedBagId: '', scannedBags: [], returnedBags: [], collectionScans: [], toReturn: [], qrSkipped: false });
+    changeBagDraft({ scannedBagId: '', scannedBags: [], bagAcquisitions: [], returnedBags: [], collectionScans: [], toReturn: [], qrSkipped: false });
     changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));
     setFeedback({ scanError: '', scanSuccess: '', isUploading: false });
     setFlowState(prev => ({ ...prev, showReturnFlow: false, isBagCollectionFlow: shouldStartBagCollection }));
@@ -911,7 +912,7 @@ const DriverMobile = () => {
   const handleCompleteDeliveryFlow = (skipQr = false) => {
     setFeedback(prev => ({ ...prev, scanError: '' }));
     setFlowState(prev => ({ ...prev, showReturnFlow: false }));
-    changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [] }));
+    changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [], bagAcquisitions: [] }));
     if (!skipQr) {
       changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));  // Only reset photo if NOT skipping QR
     }
@@ -1603,7 +1604,9 @@ const DriverMobile = () => {
       // Add bag to scannedBags array
       const updatedBags = [...bagState.scannedBags, value];
       console.log('[QR Scan] Adding bag to delivery:', value, 'Total bags:', updatedBags.length);
-      changeBagDraft(prev => ({...prev, scannedBagId: value, scannedBags: updatedBags}));
+      const acquisition = {orderId:currentDelivery?._id,bagId:value,method:'qr',scannedAt:new Date().toISOString()};
+      changeBagDraft(prev => ({...prev, scannedBagId: value, scannedBags: updatedBags,
+        bagAcquisitions:[...(prev.bagAcquisitions ?? []),acquisition]}));
       
       setFeedback(prev => ({...prev, scanSuccess: `Bag ${value} scanned! (${updatedBags.length} total)`, scanError: ''}));
       
@@ -1695,7 +1698,8 @@ const DriverMobile = () => {
       changeBagDraft(prev => ({
         ...prev,
         scannedBags: [...prev.scannedBags, enteredBagId],
-        scannedBagId: enteredBagId
+        scannedBagId: enteredBagId,
+        bagAcquisitions:[...(prev.bagAcquisitions ?? []),{orderId:currentDelivery?._id,bagId:enteredBagId,method:'manual'}]
       }));
       
       if (flowState.isBagCollectionFlow) {
@@ -1747,6 +1751,7 @@ const DriverMobile = () => {
           type: bagState.qrSkipped ? 'photo_only' : 'qr_and_photo',
           verified: !bagState.qrSkipped,
           bagIds: bagIdsToUse,
+          bagAcquisitions: (bagState.bagAcquisitions ?? []).filter(record => record.orderId === currentDelivery._id && bagIdsToUse.includes(record.bagId)),
           images: [], // Will be populated with photo URL
           deliveryMethod: bagState.qrSkipped ? 'photo_only' : 'qr_verified',
           photoUrl: '', // Will be populated with photo URL
@@ -1803,7 +1808,7 @@ const DriverMobile = () => {
             setTimeout(() => {
               setFeedback(prev => ({ ...prev, isUploading: false }));
               setCurrentStep('delivery');
-              setBagState(prev => ({...prev, scannedBagId: '', scannedBags: [], qrSkipped: false}));
+              setBagState(prev => ({...prev, scannedBagId: '', scannedBags: [], bagAcquisitions: [], qrSkipped: false}));
               setCameraState(prev => ({...prev, capturedPhoto: null}));
               setFeedback(prev => ({...prev, scanError: ''}));
               setBagState(prev => ({...prev, toReturn: []}));
@@ -1861,7 +1866,7 @@ const DriverMobile = () => {
         setTimeout(() => {
           setFeedback({ scanError: '', scanSuccess: '', isUploading: false });
           setCurrentStep('delivery');
-          setBagState({ scannedBagId: '', scannedBags: [], returnedBags: [], collectionScans: [], toReturn: [], qrSkipped: false });
+          setBagState({ scannedBagId: '', scannedBags: [], bagAcquisitions: [], returnedBags: [], collectionScans: [], toReturn: [], qrSkipped: false });
           setCameraState(prev => ({ ...prev, capturedPhoto: null }));
           setFlowState(prev => ({ ...prev, showReturnBagsQuestion: false, isReturningBags: false }));
           dispatch(clearCurrentDelivery());
@@ -1906,7 +1911,7 @@ const DriverMobile = () => {
       // Reset return flow
       setFlowState(prev => ({ ...prev, showReturnFlow: false }));
       setCurrentStep('delivery');
-      setBagState(prev => ({ ...prev, scannedBagId: '', scannedBags: [], qrSkipped: false }));
+      setBagState(prev => ({ ...prev, scannedBagId: '', scannedBags: [], bagAcquisitions: [], qrSkipped: false }));
       setFeedback(prev => ({ ...prev, scanError: '', scanSuccess: 'Bag returned successfully!' }));
       lastScannedValueRef.current = '';
 
@@ -1933,7 +1938,7 @@ const DriverMobile = () => {
     }
     setCurrentStep('delivery');
     setFeedback({ scanError: '', scanSuccess: '', isUploading: false });
-    changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [], qrSkipped: false }));
+    changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [], bagAcquisitions: [], qrSkipped: false }));
     changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));
     stopCamera();
     lastScannedValueRef.current = '';
@@ -1946,7 +1951,7 @@ const DriverMobile = () => {
 
     setCurrentStep('qr');
     setFeedback({ scanError: '', scanSuccess: '', isUploading: false });
-    changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [], qrSkipped: false }));
+    changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [], bagAcquisitions: [], qrSkipped: false }));
     changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));
     stopCamera();
     lastScannedValueRef.current = '';
@@ -3588,7 +3593,10 @@ const DriverMobile = () => {
                   <div key={index} className="flex items-center justify-between bg-green-700 p-2 rounded">
                     <span className="font-medium">Bag {index + 1}: {bagId}</span>
                     <button
-                      onClick={() => changeBagDraft((prev) => ({...prev, scannedBags: prev.scannedBags.filter((_, i) => i !== index)}))}
+                      onClick={() => changeBagDraft(prev => ({
+                        ...prev, scannedBags: prev.scannedBags.filter((_, i) => i !== index),
+                        bagAcquisitions: (prev.bagAcquisitions ?? []).filter(record => record.bagId !== bagId)
+                      }))}
                       className="p-1 hover:bg-green-800 rounded transition"
                       title="Remove this bag"
                     >
@@ -4157,7 +4165,7 @@ const DriverMobile = () => {
               onClick={() => {
                 dispatch(clearCurrentDelivery());
                 setCurrentStep('delivery');
-                changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [], qrSkipped: false }));
+                changeBagDraft(prev => ({ ...prev, scannedBagId: '', scannedBags: [], bagAcquisitions: [], qrSkipped: false }));
                 changeCameraDraft(prev => ({ ...prev, capturedPhoto: null }));
                 setFeedback(prev => ({ ...prev, scanError: '', scanSuccess: '' }));
                 lastScannedValueRef.current = '';

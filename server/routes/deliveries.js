@@ -1,4 +1,4 @@
-import { recordReportingDeliveryChanges, saveReportingDelivery, updateReportingDelivery, withReportingEvents } from '../services/reportingOutbox.js';
+import { saveAppliedChange, recordReportingDeliveryChanges, saveReportingDelivery, updateReportingDelivery, withReportingEvents } from '../services/reportingOutbox.js';
 import { recordDeliveryBagMovements, legacyBagReturn } from '../services/deliveryBagMovements.js';
 import { recordCompletionFailure } from '../services/deliveryCompletionFailure.js';
 import { findRegisteredBag } from '../services/bagRecordLookup.js';
@@ -349,7 +349,7 @@ async function checkAndApplyPendingChanges(delivery) {
       console.log('Change status AFTER update (before save):', change.status);
       console.log('AppliedToDelivery:', change.appliedToDelivery.toString());
       
-      await change.save();
+      await saveAppliedChange(change,[delivery._id],Delivery.collection);
       
       console.log('✅ Pending change applied successfully and SAVED:', change._id.toString());
       
@@ -2232,7 +2232,7 @@ router.put('/:id', authorize(['admin', 'super_admin', 'dispatcher', 'manager']),
 
     // Create delivery change record if there are changes
     if (changesMap.size > 0) {
-      await DeliveryChange.create({
+      await saveAppliedChange(new DeliveryChange({
         customerId: delivery.customerId || 'UNKNOWN',
         customerName: delivery.customerName || 'Unknown Customer',
         customerPhone: '',
@@ -2241,8 +2241,9 @@ router.put('/:id', authorize(['admin', 'super_admin', 'dispatcher', 'manager']),
         uploadedBy: req.user._id,
         changes: changesMap,
         reason: updateData.changeReason || 'Delivery updated',
-        status: 'applied'
-      });
+        status: 'applied',
+        appliedAt: new Date()
+      }), [delivery._id], Delivery.collection);
     }
 
     // Surface a "changed since assignment" banner to the driver app when a

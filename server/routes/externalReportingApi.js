@@ -1,8 +1,12 @@
 import express from 'express';
 import mongoose from 'mongoose';
+import Bag from '../models/Bag.js';
+import DeliveryChange from '../models/DeliveryChange.js';
+import { amendmentEvidence, amendmentReadLimit, bagAliasQuery, bagEvidence } from '../services/arrivalSourceEvidence.js';
+import { bookingDeadlineEvidence } from '../services/matterBookingDeadline.js';
 import Delivery from '../models/Delivery.js';
 import { ABU_DHABI_ZONE } from '../config/zoneRules.js';
-import { getBusinessDayBounds, isDateKey } from '../utils/businessDate.js';
+import { getBusinessDayBounds, isDateKey, toBusinessDateKey } from '../utils/businessDate.js';
 import { apiKeyAuth, isReportingApiClient } from '../middleware/apiKeyAuth.js';
 import { createReportingVercelIdentity, isReportingVercelRead } from '../middleware/reportingVercelIdentity.js';
 import VehicleLocationHistory from '../models/VehicleLocationHistory.js';
@@ -72,18 +76,93 @@ export function serializeReportingDelivery(delivery) {
   };
 }
 
+// Return bounded coverage for this allocation even after years of bag reuse.
+// Retain malformed or unclocked deliver rows conservatively. The native bag
+// history remains unmodified, including movements omitted from this projection.
+async function readRelevantBags(aliases, orderId, session) {
+  const ownEventIds = aliases.map(label => 'delivery:' + orderId + ':deliver:' + label);
+  const isOwn = {$or:[{$eq:['$$h.deliveryId',new mongoose.Types.ObjectId(String(orderId))]},{$in:['$$h.eventId',ownEventIds]}]};
+  const clock = field => ({$convert:{input:field,to:'date',onNull:null,onError:null}});
+  const close = (a,b) => ({$let:{vars:{a:clock(a),b:clock(b)},in:{$and:[{$ne:['$$a',null]},{$ne:['$$b',null]},
+    {$lte:[{$abs:{$subtract:['$$a','$$b']}},5*60*1000]}]}}});
+  const device = ['occurredAt','scannedAt'];
+  const near = {$or:[close('$$h.timestamp','$$own.timestamp'),...device.flatMap(a => device.map(b => close('$$h.'+a,'$$own.'+b)))]};
+  return Bag.aggregate([
+    {$match:{bagId:{$in:aliases}}},
+    {$limit:65},
+    {$set:{own:{$filter:{input:{$ifNull:['$history',[]]},as:'h',cond:isOwn}}}},
+    {$set:{history:{$slice:[{$filter:{input:{$ifNull:['$history',[]]},as:'h',cond:{$and:[
+      {$eq:['$$h.eventType','deliver']},{$or:[isOwn,{$eq:[clock('$$h.occurredAt'),null]},{$eq:[clock('$$h.timestamp'),null]},
+        {$anyElementTrue:[{$map:{input:'$own',as:'own',in:near}}]}]},
+    ]}}},513]}}},
+    {$project:{bagId:1,history:{$map:{input:'$history',as:'h',in:{
+      eventType:'$$h.eventType',eventId:'$$h.eventId',deliveryId:'$$h.deliveryId',
+      physicalScan:'$$h.physicalScan',acquisition:'$$h.acquisition',scannedAt:'$$h.scannedAt',
+      occurredAt:'$$h.occurredAt',timestamp:'$$h.timestamp',assignedBy:{user:'$$h.assignedBy.user'},
+      assignedTo:{driver:'$$h.assignedTo.driver',customer:{customerId:'$$h.assignedTo.customer.customerId'}},
+    }}}}},
+  ]).session(session).option({maxTimeMS:5000});
+}
+
+export async function readReportingDeliverySnapshot(orderId) {
+  let data;
+  const readSnapshot = async session => {
+    const query = Delivery.findById(orderId).read('primary');
+    if (session) query.session(session);
+    else query.readConcern('majority');
+    const delivery = await query
+      .select('customerId customerName company otherCompany type status address addressId addressDetails zone matterSubscriptionId matterCustomerId scheduledTime deliveredTime completedAt deliveryType lateMinutes earlyMinutes driver proof.photoUrl proof.images proof.timestamp proof.receivedAt proof.photoCapturedAt proof.photoSource proof.location proof.bagIds proof.bagId proof.qrSkipped gpsLocation updatedAt +reportingVersion +fleetProofReceipt +matterBookingObservations')
+      .populate({path:'driver',select:'profile.firstName profile.lastName profile.vehicleType',options:{session}}).maxTimeMS(5000).lean();
+    if (!Number.isSafeInteger(delivery?.reportingVersion) || delivery.reportingVersion < 1) { data = null; return; }
+    data = serializeReportingDelivery(delivery);
+    // Keep the existing restricted zone summary and non-delivery responses.
+    if (data.type !== 'Delivery' || !session) return;
+    const serviceDate = toBusinessDateKey(delivery.scheduledTime);
+    const aliases = bagAliasQuery(delivery);
+    const inventory = aliases.length ? await readRelevantBags(aliases, orderId, session) : [];
+    const bags = bagEvidence(delivery,inventory);
+    if (inventory.length === 65) bags.state = 'partial';
+    if (bags.peerEvents.length) {
+      // Excluded or missing peers prevent attribution. Leave their private
+      // records outside the reporting response.
+      const peers = await Delivery.find({_id:{$in:bags.peerEvents.map(row => row.orderId)}})
+        .session(session).select('zone').maxTimeMS(5000).lean();
+      const eligible = new Set(peers.filter(row => String(row.zone ?? '').trim().toLowerCase() !== ABU_DHABI_ZONE.toLowerCase()).map(row => String(row._id)));
+      if (bags.peerEvents.some(row => !eligible.has(row.orderId))) {
+        bags.state = 'partial';
+        bags.peerEvents = bags.peerEvents.filter(row => eligible.has(row.orderId));
+      }
+    }
+    const bounds = getBusinessDayBounds(serviceDate);
+    const changes = await DeliveryChange.find({status:'applied',$or:[
+      {appliedToDelivery:delivery._id}, {appliedOrderIds:delivery._id},
+      // Older same-day bulk edits named only the first affected order.
+      {appliedOrderIds:{$exists:false},customerId:delivery.customerId,
+        scheduledDate:{$gte:bounds.startOfDay,$lt:bounds.endOfDayExclusive}},
+    ]})
+      .session(session).select('appliedToDelivery +appliedOrderIds scheduledDate customerId status appliedAt changes')
+      .sort({appliedAt:1,_id:1}).limit(amendmentReadLimit).maxTimeMS(5000).lean();
+    data.arrivalEvidence = {version:1,orderId:data.id,serviceDate,customerId:String(data.customerId ?? ''),
+      subscriptionId:data.matterSubscriptionId == null ? null : String(data.matterSubscriptionId),
+      addressId:data.addressId == null ? null : String(data.addressId),
+      booking:bookingDeadlineEvidence(delivery), amendments:amendmentEvidence(delivery,changes), bags};
+  };
+  // Disarming transactional capture preserves the old single-document
+  // majority read. Supplemental rows could have changed without a version.
+  if (reportingCaptureEnabled()) {
+    await mongoose.connection.transaction(readSnapshot, {readConcern:{level:'snapshot'},writeConcern:{w:'majority'}});
+  } else await readSnapshot(null);
+  return data;
+}
+
 router.get('/deliveries/:id', async (req, res) => {
   if (!/^[a-f0-9]{24}$/i.test(req.params.id)) {
     return res.status(400).json({ success: false, message: 'Invalid delivery id' });
   }
   try {
-    const delivery = await Delivery.findById(req.params.id).read('primary').readConcern('majority')
-      .select('customerId customerName company otherCompany type status address addressId addressDetails zone matterSubscriptionId scheduledTime deliveredTime completedAt deliveryType lateMinutes earlyMinutes driver proof.photoUrl proof.images proof.timestamp proof.receivedAt proof.photoCapturedAt proof.photoSource proof.location gpsLocation updatedAt +reportingVersion +fleetProofReceipt')
-      .populate('driver', 'profile.firstName profile.lastName profile.vehicleType').maxTimeMS(5000).lean();
-    if (!Number.isSafeInteger(delivery?.reportingVersion) || delivery.reportingVersion < 1) {
-      return res.status(404).json({ success: false, message: 'Versioned reporting delivery not found' });
-    }
-    return res.json({ success: true, data: serializeReportingDelivery(delivery) });
+    const data = await readReportingDeliverySnapshot(req.params.id);
+    if (!data) return res.status(404).json({success:false,message:'Versioned reporting delivery not found'});
+    return res.json({success:true,data});
   } catch {
     console.error('Reporting delivery snapshot is unavailable');
     return res.status(503).json({ success: false, message: 'Reporting delivery snapshot is unavailable' });

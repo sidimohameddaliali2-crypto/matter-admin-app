@@ -139,8 +139,8 @@
     "server/routes/customerServiceGallabox.js": "be4c4acdb13d8c5e1a6396e4bfce473871d16bb9d6723aca96b0a10910a5e709",
     "server/routes/customerServiceMedia.js": "859ce650109cba321179faac0a7dd8c2f54bc1a0a5001a78ea908abb9400abd7",
     "server/routes/customerServiceWebhook.js": "c9741bdaeb62a0f0b0c7e0434594f438fdb4a03f1b260aa0849d1feca52b60e9",
-    "server/routes/deliveries.js": "860fb8b5542afb83d7c3ccc88769de895506afaa7401e98b5c978e3f18aa45a7",
-    "server/routes/deliveryChanges.js": "1484012ff6ff30cdefd9e70f6f665f7970bc8586b434cb2067dd88b258a91c89",
+    "server/routes/deliveries.js": "ceeb01f2820d093c02be746d4bd3deaec0d9ee2ce5e412999a2b717a4bc024d8",
+    "server/routes/deliveryChanges.js": "08ba5b4d33dd8dca224cb8aa00c4372a644ddbbdc7f57cbcfce0e767cd5f1583",
     "server/routes/deliveryIssues.js": "0de921f1e6e027c8ed5d2cb75910267d025bce3c0605ecdd09c5e67fa8fd166b",
     "server/routes/deliveryOrder.js": "8ac06833fbcaa1cbc086af60731ed7f78f9b9af0fd88811ec9209738cb8bfb2f",
     "server/routes/dispatcherFleet.js": "fc95131f42d626889e8ea6b54e0d0cb9f3fc66e66fee5229eda3b87e9ee9dbf4",
@@ -151,7 +151,7 @@
     "server/routes/events.js": "2cf1b2fadd6b12b8d9927c3edfcff7c19ae0481d012b817fa35a4242079108cf",
     "server/routes/externalDeliveryApi.js": "46f9a078ea23e8a42e9259a75d4b4016e983eb8730ae45212f63d54a930fcab0",
     "server/routes/externalDriverLocationApi.js": "4e0e3a740bbfbd56aee46fea293a20601a8bc0ce05d4d1f1c8595ce4d02d5f28",
-    "server/routes/externalReportingApi.js": "b8a70cef843c1526554d4a9e662ef0eee2995e621bbddb8bca4dfd6159dc734d",
+    "server/routes/externalReportingApi.js": "ca5a4364b746eeed2ae0be66702a113cbb61c34f9a6db1de3f916ee5debbc040",
     "server/routes/handoffs.js": "93d78d2adf199e0681f35f0620b1674d2c09a458612282043a0e112eaf085927",
     "server/routes/incidents.js": "23a9d4cd19c8ca5290471a02ba4e5d80d49ca6c504554a25819aab76ca458ddf",
     "server/routes/index.js": "b958488aa38e5b94ca235ad490446fba34b63cdb9d15cfc31c020950e08331d5",
@@ -2937,8 +2937,8 @@
       ],
       "referencedCalls": [
         "Delivery.findById",
-        "DeliveryChange.create",
         "flagDeliveryChangeIfNeeded",
+        "saveAppliedChange",
         "sendDeliveryPushToDriver",
         "updateReportingDelivery"
       ],
@@ -2953,7 +2953,7 @@
     {
       "id": "b928c89b40f2a298",
       "method": "POST",
-      "source": "server/routes/deliveries.js:2305",
+      "source": "server/routes/deliveries.js:2306",
       "description": "Start delivery (Driver)",
       "handlerGuards": [
         "[ body('bagQRCode').notEmpty() ]"
@@ -2993,7 +2993,7 @@
     {
       "id": "611b2a5a9f7a227e",
       "method": "POST",
-      "source": "server/routes/deliveries.js:2406",
+      "source": "server/routes/deliveries.js:2407",
       "description": "Mark a collection as collected (Driver uploads proof photo)",
       "handlerGuards": [
         "upload.single('proofImage')",
@@ -3031,7 +3031,7 @@
     {
       "id": "a241f0c8a26e1788",
       "method": "POST",
-      "source": "server/routes/deliveries.js:2464",
+      "source": "server/routes/deliveries.js:2465",
       "description": "Complete delivery (Driver)",
       "handlerGuards": [
         "upload.array('proofImages', 5)",
@@ -3076,7 +3076,7 @@
     {
       "id": "5a6bbebd003a5958",
       "method": "POST",
-      "source": "server/routes/deliveries.js:2585",
+      "source": "server/routes/deliveries.js:2586",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -3103,7 +3103,7 @@
     {
       "id": "bb9e25613d764fd6",
       "method": "GET",
-      "source": "server/routes/deliveries.js:2591",
+      "source": "server/routes/deliveries.js:2592",
       "description": "Get driver's today deliveries",
       "handlerGuards": [
         "protect"
@@ -3133,7 +3133,7 @@
     {
       "id": "f4a109ef0f8b3f15",
       "method": "PATCH",
-      "source": "server/routes/deliveries.js:2636",
+      "source": "server/routes/deliveries.js:2637",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -3165,7 +3165,7 @@
     {
       "id": "27c3b83e9814c11b",
       "method": "PATCH",
-      "source": "server/routes/deliveries.js:2667",
+      "source": "server/routes/deliveries.js:2668",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -3201,7 +3201,7 @@
     {
       "id": "c1ab7a08f0fb8a58",
       "method": "PATCH",
-      "source": "server/routes/deliveries.js:2737",
+      "source": "server/routes/deliveries.js:2738",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -3242,7 +3242,7 @@
     {
       "id": "94efd6c3126b63c1",
       "method": "DELETE",
-      "source": "server/routes/deliveries.js:2884",
+      "source": "server/routes/deliveries.js:2885",
       "description": "Delete deliveries by ids",
       "handlerGuards": [
         "authorize(['admin', 'super_admin'])"
@@ -3273,7 +3273,7 @@
     {
       "id": "a596ab2b3f37b0e4",
       "method": "DELETE",
-      "source": "server/routes/deliveries.js:2947",
+      "source": "server/routes/deliveries.js:2948",
       "description": "Delete deliveries by date range",
       "handlerGuards": [
         "authorize(['admin', 'super_admin'])"
@@ -3304,7 +3304,7 @@
     {
       "id": "d3b221efd4b5f73c",
       "method": "PATCH",
-      "source": "server/routes/deliveries.js:3036",
+      "source": "server/routes/deliveries.js:3037",
       "description": null,
       "handlerGuards": [
         "authorize(['admin', 'super_admin', 'dispatcher', 'manager'])"
@@ -3340,7 +3340,7 @@
     {
       "id": "3a5e721bbb62cbd4",
       "method": "POST",
-      "source": "server/routes/deliveries.js:3071",
+      "source": "server/routes/deliveries.js:3072",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -3376,7 +3376,7 @@
     {
       "id": "c70ef4256a960850",
       "method": "GET",
-      "source": "server/routes/deliveries.js:3230",
+      "source": "server/routes/deliveries.js:3231",
       "description": null,
       "handlerGuards": [
         "protect"
@@ -3416,7 +3416,7 @@
     {
       "id": "bec601bee5c7f984",
       "method": "POST",
-      "source": "server/routes/deliveries.js:3354",
+      "source": "server/routes/deliveries.js:3355",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -3447,7 +3447,7 @@
     {
       "id": "3cac2dc1120defdb",
       "method": "POST",
-      "source": "server/routes/deliveries.js:3381",
+      "source": "server/routes/deliveries.js:3382",
       "description": null,
       "handlerGuards": [
         "protect",
@@ -5529,7 +5529,8 @@
         "Delivery.findById",
         "Delivery.findOne",
         "DeliveryChange.findById",
-        "flagDeliveryChangeIfNeeded"
+        "flagDeliveryChangeIfNeeded",
+        "saveAppliedChange"
       ],
       "path": "/api/delivery-changes/:id/apply",
       "middlewareDeclarations": []
@@ -5561,7 +5562,8 @@
       "referencedCalls": [
         "Delivery.findOne",
         "DeliveryChange.findById",
-        "flagDeliveryChangeIfNeeded"
+        "flagDeliveryChangeIfNeeded",
+        "saveAppliedChange"
       ],
       "path": "/api/delivery-changes/apply/:changeId",
       "middlewareDeclarations": []
@@ -12141,7 +12143,7 @@
     {
       "id": "d4ab8afcf8dd8875",
       "method": "GET",
-      "source": "server/routes/externalReportingApi.js:75",
+      "source": "server/routes/externalReportingApi.js:158",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -12157,16 +12159,14 @@
       "requestKeys": [
         "params.id"
       ],
-      "referencedCalls": [
-        "Delivery.findById"
-      ],
+      "referencedCalls": [],
       "path": "/api/external/reporting/deliveries/:id",
       "middlewareDeclarations": []
     },
     {
       "id": "14512468a814e23a",
       "method": "GET",
-      "source": "server/routes/externalReportingApi.js:93",
+      "source": "server/routes/externalReportingApi.js:172",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -12192,7 +12192,7 @@
     {
       "id": "d530d2215b5fecb5",
       "method": "GET",
-      "source": "server/routes/externalReportingApi.js:109",
+      "source": "server/routes/externalReportingApi.js:188",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [],
@@ -12210,7 +12210,7 @@
     {
       "id": "e7e38512dab62a1e",
       "method": "GET",
-      "source": "server/routes/externalReportingApi.js:122",
+      "source": "server/routes/externalReportingApi.js:201",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -12234,7 +12234,7 @@
     {
       "id": "a21c7979fcb6b128",
       "method": "GET",
-      "source": "server/routes/externalReportingApi.js:136",
+      "source": "server/routes/externalReportingApi.js:215",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -12260,7 +12260,7 @@
     {
       "id": "da616ff6e9c84fb4",
       "method": "GET",
-      "source": "server/routes/externalReportingApi.js:173",
+      "source": "server/routes/externalReportingApi.js:252",
       "description": null,
       "handlerGuards": [],
       "declaredStatuses": [
@@ -13431,42 +13431,42 @@
     {
       "event": "delivery:updated",
       "direction": "emit",
-      "source": "server/routes/deliveries.js:2255"
+      "source": "server/routes/deliveries.js:2256"
     },
     {
       "event": "delivery:statusUpdate",
-      "direction": "emit",
-      "source": "server/routes/deliveries.js:2380"
-    },
-    {
-      "event": "driver:statusUpdate",
       "direction": "emit",
       "source": "server/routes/deliveries.js:2381"
     },
     {
+      "event": "driver:statusUpdate",
+      "direction": "emit",
+      "source": "server/routes/deliveries.js:2382"
+    },
+    {
       "event": "delivery:updated",
       "direction": "emit",
-      "source": "server/routes/deliveries.js:2452"
+      "source": "server/routes/deliveries.js:2453"
     },
     {
       "event": "delivery:statusUpdate",
       "direction": "emit",
-      "source": "server/routes/deliveries.js:2553"
+      "source": "server/routes/deliveries.js:2554"
     },
     {
       "event": "driver:statusUpdate",
       "direction": "emit",
-      "source": "server/routes/deliveries.js:2554"
+      "source": "server/routes/deliveries.js:2555"
     },
     {
       "event": "deliveries:deleted",
       "direction": "emit",
-      "source": "server/routes/deliveries.js:2926"
+      "source": "server/routes/deliveries.js:2927"
     },
     {
       "event": "deliveries:deleted",
       "direction": "emit",
-      "source": "server/routes/deliveries.js:2999"
+      "source": "server/routes/deliveries.js:3000"
     }
   ],
   "unmounted": [

@@ -1,3 +1,5 @@
+import { reportingCaptureEnabled, recordReportingDeliveryChanges, withReportingEvents } from './reportingOutbox.js';
+import { affectedBagDeliveries } from './arrivalSourceEvidence.js';
 import Bag from '../models/Bag.js';
 import User from '../models/User.js';
 import Delivery from '../models/Delivery.js';
@@ -5,35 +7,54 @@ import mongoose from 'mongoose';
 import { executeBagMovement } from './bagLifecycleService.js';
 import { findRegisteredBag } from './bagRecordLookup.js';
 
-const repository={
-  find:bagId=>findRegisteredBag(Bag.collection,bagId),
+const repository = session => ({
+  find:bagId=>findRegisteredBag(Bag.collection,bagId,session),
   create:async(bag,plan)=>{
     // The new record and its first customer handover are one insert. There is
     // no intermediate available/warehouse record and no fabricated receipt.
     const document={_id:new mongoose.Types.ObjectId(),bagId:bag.bagId,bagType:'standard',...plan.set,custodyVersion:1,createdAt:plan.set.updatedAt,history:[plan.event]};
-    try{await Bag.collection.insertOne(document);return document;}
-    catch(e){if(e.code===11000)return null;throw e;}
+    try{await Bag.collection.insertOne(document, {session});return document;}
+    catch(e){if(e.code===11000 && !session)return null;throw e;}
   },
   commit:async(bag,plan)=>{
     const version=bag.custodyVersion===undefined?{custodyVersion:{$exists:false}}:{custodyVersion:bag.custodyVersion};
     const update={$set:{...plan.set,custodyVersion:(bag.custodyVersion||0)+1},$push:{history:plan.event}};
     if(Object.keys(plan.unset).length)update.$unset=plan.unset;
-    const result=await Bag.collection.findOneAndUpdate({_id:bag._id,...version,'history.eventId':{$ne:plan.event.eventId}},update,{returnDocument:'after'});
+    const result=await Bag.collection.findOneAndUpdate({_id:bag._id,...version,'history.eventId':{$ne:plan.event.eventId}},update,{returnDocument:'after', session});
     return result?.value??null;
   }
-};
+});
+function bindDelivery(command,user,delivery) {
+  if(!delivery||String(delivery.driver)!==String(user._id))throw Object.assign(new Error('This delivery is not assigned to you.'),{statusCode:403});
+  if(command.customerId&&delivery.customerId!==command.customerId)throw Object.assign(new Error('Customer does not match the delivery.'),{statusCode:409});
+  return {...command,deliveryId:delivery._id,customerId:delivery.customerId,customerName:delivery.customerName};
+}
+
 export async function moveBag(bagId,command,user) {
   for(const value of [command.driverId,command.deliveryId])if(value&&!mongoose.isValidObjectId(value))throw Object.assign(new Error('Invalid driver or delivery reference.'),{statusCode:400});
   if(command.driverId){const target=await User.findById(command.driverId).select('role isActive');if(!target||target.role!=='driver'||!target.isActive)throw Object.assign(new Error('Select an active driver.'),{statusCode:400});command={...command,driverId:new mongoose.Types.ObjectId(String(command.driverId))};}
+  const name=[user.profile?.firstName,user.profile?.lastName].filter(Boolean).join(' ')||user.name||user.role;
+  const actor={_id:user._id,role:user.role,name};
+  if (command.action==='deliver' && command.deliveryId && reportingCaptureEnabled()) {
+    return withReportingEvents(async (session,enqueue) => {
+      const delivery = await Delivery.findById(command.deliveryId).session(session).select('driver customerId customerName');
+      const movement = bindDelivery(command,user,delivery);
+      const result = await executeBagMovement(repository(session),bagId,movement,actor);
+      if (!result.duplicate) {
+        const affected = affectedBagDeliveries(result.bag,movement.eventId);
+        // Old bag custody can refer to an order subsequently deleted.
+        const existing = await Delivery.find({_id:{$in:affected}}).session(session).select('_id').lean();
+        await recordReportingDeliveryChanges(session,enqueue,existing.map(row=>row._id),Delivery.collection);
+      }
+      return result;
+    });
+  }
   if(['deliver','collect'].includes(command.action)&&command.deliveryId){
     const delivery=await Delivery.findById(command.deliveryId).select('driver customerId customerName');
-    if(!delivery||String(delivery.driver)!==String(user._id))throw Object.assign(new Error('This delivery is not assigned to you.'),{statusCode:403});
-    if(command.customerId&&delivery.customerId!==command.customerId)throw Object.assign(new Error('Customer does not match the delivery.'),{statusCode:409});
-    command={...command,deliveryId:delivery._id,customerId:delivery.customerId,customerName:delivery.customerName};
+    command=bindDelivery(command,user,delivery);
   }
   if(command.action==='deliver'&&!command.deliveryId)throw Object.assign(new Error('Delivery is required.'),{statusCode:400});
-  const name=[user.profile?.firstName,user.profile?.lastName].filter(Boolean).join(' ')||user.name||user.role;
-  const result=await executeBagMovement(repository,bagId,command,{_id:user._id,role:user.role,name});
+  const result=await executeBagMovement(repository(),bagId,command,actor);
   // Bag state + receipt are authoritative and atomic. Updating the related
   // delivery is retryable from that same receipt, never from all historical uses.
   if(command.action==='receive'){

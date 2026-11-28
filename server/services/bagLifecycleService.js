@@ -116,6 +116,16 @@ export async function executeBagMovement(repository,bagId,command,actor) {
   const plan=planBagMovement(bag,command,actor);
   if(plan.duplicate)return {bag,duplicate:true};
   if(typeof command.scanCode==='string')plan.event.scanCode=command.scanCode;
+  if (command.action === 'deliver' && command.deliveryId) plan.event.deliveryId = command.deliveryId;
+  // Immutable metadata on the first accepted movement. Replays above return
+  // the original event, including a historical event with unknown acquisition.
+  if (command.physicalScan === true && command.action === 'deliver' && actor.role === 'driver') {
+    if (command.acquisition === 'manual') plan.event.acquisition = 'manual';
+    if (command.acquisition === 'qr' && command.scannedAt) {
+      plan.event.acquisition = 'qr';
+      plan.event.scannedAt = new Date(command.scannedAt);
+    }
+  }
   const updated=createFromScan?await repository.create(bag,plan):await repository.commit(bag,plan);
   if(updated)return {bag:updated,duplicate:false};
   // Concurrent identical retries may have committed while we were reading.

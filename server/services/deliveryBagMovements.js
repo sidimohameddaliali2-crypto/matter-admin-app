@@ -1,3 +1,4 @@
+import { acquisitionForProof } from './arrivalSourceEvidence.js';
 import Bag from '../models/Bag.js';
 import {moveBag} from './bagMovementStore.js';
 import {normalizeBagId} from './bagInventoryAudit.js';
@@ -25,7 +26,9 @@ export async function recordDeliveryBagMovements(delivery,payload,user) {
   const scannedStock=new Set(scanned.map(code=>registered.get(code)).filter(Boolean));
   if(outgoing.some(code=>incoming.includes(code)))throw Object.assign(new Error('A bag cannot be delivered and collected in the same stop. Check both lists.'),{statusCode:400});
   for(const [action,list] of [['deliver',outgoing],['collect',incoming]])for(const bagId of list){
-    await moveBag(bagId,{action,eventId:`delivery:${delivery._id}:${action}:${bagId}`,physicalScan:scannedStock.has(bagId),scanCode:scanCodes.get(bagId),occurredAt:proof.timestamp||payload.capturedAt,note:`${action} at delivery ${delivery._id}`,deliveryId:String(delivery._id),customerId:delivery.customerId},user);
+    await moveBag(bagId,{action,eventId:`delivery:${delivery._id}:${action}:${bagId}`,physicalScan:scannedStock.has(bagId),
+      ...(!collection && scannedStock.has(bagId) ? acquisitionForProof(proof,scanCodes.get(bagId),delivery._id) : {}),
+      scanCode:scanCodes.get(bagId),occurredAt:proof.timestamp||payload.capturedAt,note:`${action} at delivery ${delivery._id}`,deliveryId:String(delivery._id),customerId:delivery.customerId},user);
   }
   if(outgoing.length)delivery.bagAssignment={bagId:outgoing[0],assignedAt:new Date(),assignedBy:user._id,status:'delivered'};
   // All IDs are preserved in typed proof fields; the primary bag is compatibility only.

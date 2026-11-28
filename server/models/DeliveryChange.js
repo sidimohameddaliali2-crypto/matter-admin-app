@@ -31,6 +31,7 @@ const deliveryChangeSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Delivery'
   },
+  appliedOrderIds: {type:[mongoose.Schema.Types.ObjectId], default:undefined, select:false},
   reason: String,
   uploadedBy: {
     type: mongoose.Schema.Types.ObjectId,

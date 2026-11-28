@@ -69,7 +69,10 @@ async function initializeOutbox() {
 export async function withReportingEvents(write) {
   if (!reportingCaptureEnabled()) return write(undefined, async () => {});
   await initializeOutbox();
-  return mongoose.connection.transaction(async session => {
+  // The installed Mongo driver returns the commit response. Callers need the
+  // last successful callback's business result after its transaction commits.
+  let result;
+  await mongoose.connection.transaction(async session => {
     async function enqueue(eventType, subjectIds, occurredAt) {
       const ids = [...new Set(subjectIds.map(String))];
       if (ids.length === 0) return;
@@ -84,8 +87,9 @@ export async function withReportingEvents(write) {
       await ReportingOutbox.insertMany(events, { session });
       return events;
     }
-    return write(session, enqueue);
+    result = await write(session, enqueue);
   }, { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } });
+  return result;
 }
 
 export async function recordReportingDeliveryChanges(session, enqueue, ids, collection) {
@@ -143,6 +147,22 @@ export async function saveReportingDelivery(delivery) {
   } finally {
     delivery.$session(originalSession);
   }
+}
+
+// The change receipt is persisted after the delivery edit. Wake reporting in
+// that receipt's own transaction so an early read cannot miss the amendment.
+export async function saveAppliedChange(change, deliveries, collection) {
+  const ids = [...new Set(deliveries.map(String))];
+  if (!ids.length) return change.save();
+  change.appliedOrderIds = ids;
+  const prior = change.$session();
+  try {
+    return await withReportingEvents(async (session,enqueue) => {
+      const saved = await change.save({session});
+      await recordReportingDeliveryChanges(session,enqueue,ids,collection);
+      return saved;
+    });
+  } finally { change.$session(prior); }
 }
 
 export function reportingEnvelope(row) {

@@ -1,6 +1,7 @@
 import { MATTER_IMPORT_IDENTITIES } from '../config/matterImportIdentity.js';
 
 const protectedNames = new Set(MATTER_IMPORT_IDENTITIES.map(([field]) => field));
+protectedNames.add('matterBookingObservations');
 const protectedPath = value => String(value).split('.').some(part => protectedNames.has(part));
 
 export function removeClientMatterImportIdentity(value) {
