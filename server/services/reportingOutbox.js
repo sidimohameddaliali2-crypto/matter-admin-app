@@ -69,7 +69,10 @@ async function initializeOutbox() {
 export async function withReportingEvents(write) {
   if (!reportingCaptureEnabled()) return write(undefined, async () => {});
   await initializeOutbox();
-  return mongoose.connection.transaction(async session => {
+  // The installed Mongo driver returns the commit response. Callers need the
+  // last successful callback's business result after its transaction commits.
+  let result;
+  await mongoose.connection.transaction(async session => {
     async function enqueue(eventType, subjectIds, occurredAt) {
       const ids = [...new Set(subjectIds.map(String))];
       if (ids.length === 0) return;
@@ -84,8 +87,9 @@ export async function withReportingEvents(write) {
       await ReportingOutbox.insertMany(events, { session });
       return events;
     }
-    return write(session, enqueue);
+    result = await write(session, enqueue);
   }, { readConcern: { level: 'snapshot' }, writeConcern: { w: 'majority' } });
+  return result;
 }
 
 export async function recordReportingDeliveryChanges(session, enqueue, ids, collection) {

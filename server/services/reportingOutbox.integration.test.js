@@ -84,6 +84,8 @@ test('a rapid second bag use republishes both source versions; amendment save in
   assert.equal(uri,'mongodb://127.0.0.1:27017/driver_reports_ci?directConnection=true');
   const { default:DeliveryChange } = await import('../models/DeliveryChange.js');
   const { recordDeliveryBagMovements } = await import('./deliveryBagMovements.js');
+  const { moveBag } = await import('./bagMovementStore.js');
+  const { applyChangesToDelivery } = await import('../routes/deliveryChanges.js');
   const { readReportingDeliverySnapshot } = await import('../routes/externalReportingApi.js');
   const { saveAppliedChange } = await import('./reportingOutbox.js');
   await mongoose.connect(uri,{autoCreate:false,autoIndex:false,serverSelectionTimeoutMS:5000});
@@ -108,14 +110,30 @@ test('a rapid second bag use republishes both source versions; amendment save in
   assert.ok(captured.reportingVersion > before+1);
   assert.equal(captured.arrivalEvidence.bags.events[0].physicalScan,true);
   assert.equal(captured.arrivalEvidence.bags.peerEvents[0].orderId,String(second._id));
+  const independentBag = bagId.replace('BAG-', 'BAG-A');
+  const command = { action: 'deliver', deliveryId: String(second._id), customerId: second.customerId,
+    eventId: 'delivery:' + second._id + ':deliver:' + independentBag, physicalScan: true, occurredAt: now };
+  const deliveredBag = await moveBag(independentBag, command, actor);
+  assert.equal(deliveredBag.duplicate, false);
+  assert.equal(deliveredBag.bag.bagId, independentBag);
   const latest = await readReportingWatermark();
+  const replayedBag = await moveBag(independentBag, command, actor);
+  assert.equal(replayedBag.duplicate, true);
+  assert.equal(String(replayedBag.bag._id), String(deliveredBag.bag._id));
   await movement(second);
   assert.equal(await readReportingWatermark(),latest);
   const change = new DeliveryChange({customerId:first.customerId,customerName:'Fixture',scheduledDate:now,status:'applied',
     appliedAt:now,appliedToDelivery:first._id,changes:{scheduledTime:'09:00'}});
-  await saveAppliedChange(change,[first._id],Delivery.collection);
+  const updatedDelivery = await applyChangesToDelivery(first, change.changes);
+  assert.equal(String(updatedDelivery.toObject()._id), String(first._id));
+  const savedChange = await saveAppliedChange(change, [updatedDelivery._id], Delivery.collection);
+  assert.equal(String(savedChange._id), String(change._id));
+  assert.equal(String(savedChange.appliedToDelivery), String(first._id));
+  const storedChange = await DeliveryChange.findById(change._id).select('+appliedOrderIds').lean();
+  assert.deepEqual(storedChange.appliedOrderIds.map(String), [String(first._id)]);
   const amended = await readReportingDeliverySnapshot(first._id);
-  assert.equal(amended.reportingVersion,latest+1);
+  assert.equal(amended.reportingVersion,latest+2);
+  assert.equal(amended.scheduledTime.toISOString(), updatedDelivery.scheduledTime.toISOString());
   assert.equal(amended.arrivalEvidence.amendments.events[0].changeId,String(change._id));
   // The existing exclusion applies to peers and to the selected order.
   await Delivery.collection.updateOne({_id:second._id},{$set:{zone:'Abu Dhabi'}});
