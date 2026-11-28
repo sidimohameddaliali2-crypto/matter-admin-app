@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import Delivery from '../models/Delivery.js';
 import Customer from '../models/Customer.js';
 import { appendWebsiteDeadline, captureTomorrowWebsiteDeadlines } from './matterBookingCapture.js';
-import { bookingDeadlineEvidence, websiteDeadlineSource } from './matterBookingDeadline.js';
+import { bookingDeadlineEvidence, observeWebsiteDeadline, websiteDeadlineSource } from './matterBookingDeadline.js';
 import matter from './matterApiService.js';
 import Snapshot from '../models/MatterSalesSnapshot.js';
 import { refreshMatterSales } from './matterSalesService.js';
@@ -22,6 +22,27 @@ const order = {
   addressId: 'address', company: 'Matter', scheduledTime: new Date('2026-12-01T02:00:00.000Z'), status: 'pending',
 };
 const query = value => ({ select() { return this; }, sort() { return this; }, lean: async () => value });
+
+function captureStore(t) {
+  const writes = [];
+  t.mock.method(Delivery.collection, 'findOneAndUpdate', async (filter, update, options) => {
+    const record = update.$push.matterBookingObservations.$each[0];
+    assert.equal(filter._id, order._id);
+    assert.equal(filter.scheduledTime, order.scheduledTime);
+    assert.equal(filter.matterCustomerId, order.matterCustomerId);
+    assert.deepEqual(filter.matterBookingObservations.$not.$elemMatch,
+      { reference: record.reference, observedAt: record.observedAt });
+    assert.equal(filter.$or, undefined);
+    assert.deepEqual(update.$push.matterBookingObservations.$sort, { observedAt: 1, reference: 1 });
+    assert.equal(options.returnDocument, 'after');
+    assert.equal(options.includeResultMetadata, false);
+    if (writes.some(row => row.reference === record.reference && row.observedAt === record.observedAt)) return null;
+    writes.push(record);
+    writes.sort((a, b) => a.observedAt.localeCompare(b.observedAt) || a.reference.localeCompare(b.reference));
+    return { ...order, matterBookingObservations: [...writes] };
+  });
+  return writes;
+}
 
 test('a supplemental failure after the financial receipt leaves the financial capture and cooldown usable', async t => {
   const previous = process.env.MATTER_REPORTING_CAPTURE_ENABLED;
@@ -52,17 +73,7 @@ test('hourly source captures a unique linked future order and holds ambiguous or
   const deliveries = [{ ...order }];
   t.mock.method(Delivery, 'find', () => query(deliveries));
   t.mock.method(Customer, 'find', () => query([{ customerId: order.customerId, matterCustomerId: order.matterCustomerId }]));
-  const writes = [];
-  t.mock.method(Delivery.collection, 'updateOne', async (filter, update) => {
-    const record = update.$push.matterBookingObservations.$each[0];
-    assert.equal(filter._id, order._id);
-    assert.equal(filter.scheduledTime, order.scheduledTime);
-    assert.equal(filter.matterCustomerId, order.matterCustomerId);
-    assert.ok(filter.matterBookingObservations.$not.$elemMatch.reference);
-    assert.deepEqual(update.$push.matterBookingObservations.$sort, { observedAt: 1, reference: 1 });
-    writes.push(record);
-    return { modifiedCount: 1 };
-  });
+  const writes = captureStore(t);
   const source = websiteDeadlineSource(subscription, clock);
   assert.equal(await captureTomorrowWebsiteDeadlines([source], clock), 1);
   assert.equal(bookingDeadlineEvidence({ ...order, matterBookingObservations: writes }).effective.end, '2026-12-01T02:00:00.000Z');
@@ -75,6 +86,32 @@ test('hourly source captures a unique linked future order and holds ambiguous or
   assert.equal(writes.at(-1).reason, 'subscription-unavailable-in-website-read');
   assert.equal(bookingDeadlineEvidence({ ...order, matterBookingObservations: writes }).original.reference, writes[0].reference);
   assert.equal(await appendWebsiteDeadline({ ...order, matterCustomerId: 'another-customer' }, writes[0]), false);
+});
+
+test('an unchanged later poll brackets a delayed revision without republishing stable reads or exact retries', async t => {
+  const writes = captureStore(t);
+  const reading = (time, label) => observeWebsiteDeadline(websiteDeadlineSource({
+    ...subscription, delivery_window: { ...subscription.delivery_window, label },
+  }, '2026-11-30T' + time + ':00.000Z'), date);
+  const original = reading('08:00', 'By 6 AM');
+  const changed = reading('10:00', 'By 7 AM');
+  const restored = reading('12:00', 'By 6 AM');
+  const read = () => bookingDeadlineEvidence({ ...order, matterBookingObservations: writes });
+  assert.equal(await appendWebsiteDeadline(order, original), true);
+  const before = read();
+  assert.equal(await appendWebsiteDeadline(order, restored), false);
+  assert.deepEqual(read(), before);
+  assert.equal(writes.length, 2);
+  assert.equal(await appendWebsiteDeadline(order, changed), true);
+  const after = read();
+  assert.equal(after.effective.reference, original.reference);
+  assert.equal(after.effective.observedAt, restored.observedAt);
+  assert.equal(after.firstDifferentObservation.reference, changed.reference);
+  assert.equal(await appendWebsiteDeadline(order, changed), false);
+  assert.equal(writes.length, 3);
+  assert.equal(await appendWebsiteDeadline(order, reading('13:00', 'By 6 AM')), false);
+  assert.deepEqual(read(), after);
+  assert.equal(writes.length, 4);
 });
 
 test('only the importer asks the dated roster for a native website receipt', async t => {

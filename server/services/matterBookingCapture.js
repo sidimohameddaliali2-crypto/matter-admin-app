@@ -1,7 +1,8 @@
+import { isDeepStrictEqual } from 'node:util';
 import Delivery from '../models/Delivery.js';
 import Customer from '../models/Customer.js';
 import { addDaysToDateKey, getBusinessDayBounds, toBusinessDateKey } from '../utils/businessDate.js';
-import { observeWebsiteDeadline } from './matterBookingDeadline.js';
+import { bookingDeadlineEvidence, observeWebsiteDeadline } from './matterBookingDeadline.js';
 import { recordReportingDeliveryChanges, withReportingEvents } from './reportingOutbox.js';
 
 export async function appendWebsiteDeadline(delivery, observation) {
@@ -12,23 +13,22 @@ export async function appendWebsiteDeadline(delivery, observation) {
   const record = { ...observation, customerId: String(delivery.customerId) };
   const path = 'matterBookingObservations';
   return withReportingEvents(async (session, enqueue) => {
-    const result = await Delivery.collection.updateOne({
+    const updated = await Delivery.collection.findOneAndUpdate({
       _id: delivery._id, type: 'Delivery', customerId: delivery.customerId, company: /^matter$/i,
       matterSubscriptionId: delivery.matterSubscriptionId, matterCustomerId: delivery.matterCustomerId,
       scheduledTime: delivery.scheduledTime, status: { $in: ['pending', 'assigned'] },
       [path]: { $not: { $elemMatch: { reference: record.reference, observedAt: record.observedAt } } },
-      $or: [
-        { [path + '.0']: { $exists: false } },
-        // Skip unchanged polls. A late-arriving earlier read still belongs in
-        // chronological order and cannot replace a more recent observation.
-        { $expr: { $or: [
-          { $ne: [{ $arrayElemAt: ['$' + path + '.reference', -1] }, record.reference] },
-          { $lt: [record.observedAt, { $arrayElemAt: ['$' + path + '.observedAt', -1] }] },
-        ] } },
-      ],
     }, { $push: { [path]: { $each: [record], $sort: { observedAt: 1, reference: 1 } } } },
-    session ? { session } : {});
-    if (!result.modifiedCount) return false;
+    { session, returnDocument: 'after', includeResultMetadata: false, projection: {
+      customerId: 1, matterSubscriptionId: 1, matterCustomerId: 1, scheduledTime: 1, addressId: 1, [path]: 1,
+    } });
+    if (!updated) return false;
+    // The guard admitted exactly one new (reference, clock) pair. Removing it
+    // from this atomic postimage recovers the projection before this write,
+    // even if another reader wrote after the caller loaded the delivery.
+    const previous = { ...updated, [path]: updated[path].filter(row =>
+      row.reference !== record.reference || row.observedAt !== record.observedAt) };
+    if (isDeepStrictEqual(bookingDeadlineEvidence(previous), bookingDeadlineEvidence(updated))) return false;
     await recordReportingDeliveryChanges(session, enqueue, [delivery._id], Delivery.collection);
     return true;
   });

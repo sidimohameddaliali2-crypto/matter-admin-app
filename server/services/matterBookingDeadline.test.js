@@ -66,6 +66,7 @@ test('a later website observation preserves the dated first observation through 
   assert.equal(result.original.reference, first.reference);
   assert.equal(result.effective.end, '2026-11-29T03:00:00.000Z');
   assert.notEqual(result.effective.reference, result.original.reference);
+  assert.deepEqual(result.firstDifferentObservation, result.effective);
   const unavailable = read([first, observe({ payments: [] }, clock)]);
   assert.equal(unavailable.original.reference, first.reference);
   assert.equal(unavailable.effective, null);
@@ -74,6 +75,31 @@ test('a later website observation preserves the dated first observation through 
   assert.equal(read([first], { matterCustomerId: 'different' }).state, 'unverified');
   assert.equal(read([first, { ...next, observedAt: first.observedAt }]).effective, null);
   assert.equal(read([first], { scheduledTime: '2026-11-30T02:00:00Z' }).state, 'unverified');
+});
+
+test('a restored deadline or address retains the differing pre-service observation', () => {
+  const first = observe();
+  const later = '2026-11-28T12:00:00.000Z';
+  const restored = observe({}, later);
+  for (const changed of [
+    observe({delivery_window:{id:5, label:'By 7 AM', timezone:'Asia/Dubai'}}, '2026-11-28T10:00:00.000Z'),
+    observe({customer_addresses:[{id:'different-address', status:'active', current_delivery_address:true}]}, '2026-11-28T10:00:00.000Z'),
+  ]) {
+    const result = read([first, changed, restored]);
+    assert.equal(result.effective.reference, result.original.reference);
+    assert.equal(result.firstDifferentObservation.reference, changed.reference);
+    assert.equal(result.firstDifferentObservation.observedAt, changed.observedAt);
+  }
+  assert.equal(read([first, restored]).firstDifferentObservation, undefined);
+});
+
+test('the effective clock follows a conflicting same-clock read only when a later poll confirms it', () => {
+  const original = observe();
+  const revised = observe({ delivery_window: { id: 5, label: 'By 7 AM', timezone: 'Asia/Dubai' } });
+  const tie = [original, revised].sort((a, b) => a.reference.localeCompare(b.reference));
+  const confirmed = { ...tie[1], observedAt: '2026-11-28T12:00:00.000Z' };
+  assert.equal(read(tie).effective, null);
+  assert.equal(read([...tie, confirmed]).effective.observedAt, confirmed.observedAt);
 });
 
 test('normal delivery inputs cannot supply, update or rename a website observation', () => {

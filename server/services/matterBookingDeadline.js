@@ -87,11 +87,22 @@ export function bookingDeadlineEvidence(delivery) {
   if (!first) return { state: 'unverified', reason: latest.reason || 'website-deadline-unverified' };
   const bound = row => ({ addressId: row.addressId, start: null, end: row.end,
     observedAt: row.observedAt, reference: row.reference });
+  // A later reversion can make the first and most recent observations look
+  // identical. Retain the first differing dated reading for the grader.
+  const firstDifferent = observations.find(row => row.end &&
+    (row.end !== first.end || row.addressId !== first.addressId));
   const conflictingClock = observations.some(row => row.observedAt === latest.observedAt && row.reference !== latest.reference);
+  // Keep the first clock that established the current run. Repeated reads
+  // agree, but can later bracket a different reading that arrived out of order.
+  const priorDifferent = observations.findLast(row => row.reference !== latest.reference);
+  const effective = priorDifferent
+    ? observations.find(row => row.observedAt > priorDifferent.observedAt)
+    : observations[0];
   const reason = latest.reason || (conflictingClock ? 'simultaneous-website-observations-conflict'
     : latest.addressId !== id(delivery.addressId) ? 'website-destination-conflict' : null);
   return { state: 'partial', basis, serviceDate, subscriptionId: latest.subscriptionId,
     matterCustomerId: latest.matterCustomerId, addressId: id(delivery.addressId),
-    coverage: 'pre-service-observations-only', original: bound(first), effective: reason ? null : bound(latest),
+    coverage: 'pre-service-observations-only', original: bound(first), effective: reason ? null : bound(effective),
+    ...(firstDifferent && { firstDifferentObservation: bound(firstDifferent) }),
     reason: reason || 'opening-and-customer-amendment-history-unavailable' };
 }

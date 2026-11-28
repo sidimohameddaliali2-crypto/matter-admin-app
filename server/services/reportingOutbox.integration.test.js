@@ -130,3 +130,64 @@ test('a rapid second bag use republishes both source versions; amendment save in
   process.env.MATTER_REPORTING_CAPTURE_ENABLED = '0';
   assert.equal((await readReportingDeliverySnapshot(first._id)).arrivalEvidence,undefined);
 });
+
+test('dated website reads retain source order and publish only changes to the protected snapshot', { skip: !uri, timeout: 45_000 }, async t => {
+  assert.equal(uri, 'mongodb://127.0.0.1:27017/driver_reports_ci?directConnection=true');
+  const { appendWebsiteDeadline } = await import('./matterBookingCapture.js');
+  const { observeWebsiteDeadline } = await import('./matterBookingDeadline.js');
+  const { readReportingDeliverySnapshot } = await import('../routes/externalReportingApi.js');
+  await import('../models/User.js'); // The reporting snapshot populates this model.
+  await mongoose.connect(uri, { autoCreate: false, autoIndex: false, serverSelectionTimeoutMS: 5_000 });
+  t.after(() => mongoose.disconnect());
+  const previous = process.env.MATTER_REPORTING_CAPTURE_ENABLED;
+  process.env.MATTER_REPORTING_CAPTURE_ENABLED = '1';
+  t.after(() => {
+    if (previous === undefined) delete process.env.MATTER_REPORTING_CAPTURE_ENABLED;
+    else process.env.MATTER_REPORTING_CAPTURE_ENABLED = previous;
+  });
+
+  const serviceDate = '2035-04-03';
+  const order = await Delivery.create({ company: 'Matter', type: 'Delivery', status: 'assigned',
+    customerId: 'fixture-booking', customerName: 'Fixture', matterCustomerId: 'fixture-website-customer',
+    matterSubscriptionId: 'fixture-subscription', addressId: 'fixture-saved-address',
+    scheduledTime: new Date(serviceDate + 'T02:00:00.000Z') });
+  const reading = (hour, deadline) => observeWebsiteDeadline({
+    observedAt: '2035-04-02T' + hour + ':00:00.000Z', subscriptionId: order.matterSubscriptionId,
+    matterCustomerId: order.matterCustomerId, addressId: order.addressId, paid: true,
+    cycleStart: serviceDate, cycleEnd: serviceDate, days: new Map([[serviceDate, 'active']]),
+    time: deadline, windowId: deadline, pricingHash: 'fixture-pricing',
+  }, serviceDate);
+  const original = reading('08', '06:00');
+  const changed = reading('10', '07:00');
+  const restored = reading('12', '06:00');
+  const snapshot = () => readReportingDeliverySnapshot(order._id);
+  const clocks = async () => {
+    const row = await Delivery.findById(order._id).select('+matterBookingObservations').lean();
+    return row.matterBookingObservations.map(event => event.observedAt);
+  };
+  const base = await readReportingWatermark();
+  assert.equal(await appendWebsiteDeadline(order, original), true);
+  const first = await snapshot();
+  assert.equal(first.reportingVersion, base + 1);
+  assert.equal(first.arrivalEvidence.booking.effective.observedAt, original.observedAt);
+  assert.equal(await appendWebsiteDeadline(order, restored), false);
+  assert.deepEqual(await clocks(), [original.observedAt, restored.observedAt]);
+  assert.deepEqual(await snapshot(), first);
+
+  assert.equal(await appendWebsiteDeadline(order, changed), true);
+  const revised = await snapshot();
+  assert.equal(revised.reportingVersion, base + 2);
+  const booking = revised.arrivalEvidence.booking;
+  assert.deepEqual(booking.original, first.arrivalEvidence.booking.original);
+  assert.equal(booking.firstDifferentObservation.reference, changed.reference);
+  assert.equal(booking.firstDifferentObservation.observedAt, changed.observedAt);
+  assert.equal(booking.effective.reference, original.reference);
+  assert.equal(booking.effective.observedAt, restored.observedAt);
+  assert.equal(await appendWebsiteDeadline(order, changed), false);
+  assert.deepEqual(await clocks(), [original.observedAt, changed.observedAt, restored.observedAt]);
+  assert.deepEqual(await snapshot(), revised);
+  const { data } = await readReportingChanges({ after: String(base) });
+  assert.deepEqual(data.map(({ eventType, subjectId, sourceVersion }) => [eventType, subjectId, sourceVersion]), [
+    ['delivery.changed', String(order._id), base + 1], ['delivery.changed', String(order._id), base + 2],
+  ]);
+});
