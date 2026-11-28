@@ -1,8 +1,27 @@
+import { isDeepStrictEqual } from 'node:util';
 import { randomUUID } from 'node:crypto';
 import { activityActor, safeChanges, privateValue, fieldLabel } from './activityPolicy.js';
 import { traceContext } from './telemetry.js';
 import { describeActivity } from './activityLanguage.js';
 import { shouldAuditModel, isAutomaticDriverLocation, isLocationOnlyUpdate, isAutomaticTrackerVisit } from './activityScope.js';
+
+// The writer fences the update on the prior poll clock. Compare the original
+// evidence before it is redacted for display, and retain every baseline write.
+function isRepeatTrackerCheck(before, update, filter) {
+  const previous = before.trackerVisit;
+  const next = update.$set.trackerVisit;
+  if (!before._id || !previous?.status || !previous.checkedAt || !(next.checkedAt instanceof Date)
+    || !isDeepStrictEqual(filter['trackerVisit.checkedAt'], previous.checkedAt)
+    || !isDeepStrictEqual(filter._id, before._id)
+    || Object.keys(update.$set).some(key => !['trackerVisit', 'updatedAt'].includes(key))
+    || next.errorStage || next.errorCode || ['verification_error', 'tracker_error'].includes(next.status)) return false;
+
+  // Undefined object fields are omitted by the tracker write. A removed
+  // stored field, including an old error or GPS observation, is a real change.
+  const evidence = visit => Object.fromEntries(Object.entries(visit)
+    .filter(([key, value]) => key !== 'checkedAt' && value !== undefined));
+  return isDeepStrictEqual(evidence(previous), evidence(next));
+}
 
 const pendingWrites = Symbol('activity-pending-writes');
 const wrappedSession = Symbol('activity-wrapped-session');
@@ -304,6 +323,7 @@ export function createActivityPlugin({ write }) {
           'Previous values were observed before the write. Submitted values can be affected by concurrent edits and database update operators.';
         this.activityEvent = event;
         this.activityStartedDeferred = isAutomaticTrackerVisit(traceContext(), this.model.modelName, operation, proposed, this.getOptions());
+        this.activityRepeatTrackerCheck = this.activityStartedDeferred && isRepeatTrackerCheck(before, proposed, this.getFilter());
         if (!this.activityStartedDeferred) await write({
           ...event,
           eventId: randomUUID(),
@@ -331,6 +351,8 @@ export function createActivityPlugin({ write }) {
           });
           return;
         }
+        if (this.activityRepeatTrackerCheck && result?.acknowledged === true
+          && result.matchedCount === 1 && result.modifiedCount === 1) return;
         await complete(
           {
             ...this.activityEvent,

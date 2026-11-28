@@ -54,6 +54,29 @@ test('saved tracker updates retain terminal evidence and write result, without a
   assert.ok(f.events[0].changes.some(change => change.field.toLowerCase().includes('tracker')));
 });
 
+test('only a confirmed poll with identical delivery evidence suppresses its saved entry', async () => {
+  const clock = new Date('2026-11-20T02:00:00Z');
+  const success = { acknowledged: true, matchedCount: 1, modifiedCount: 1 };
+  for (const [prior, change, baseline, result, expected] of [
+    [{}, {}, false, success, []],
+    [{}, { gpsSampleCount: 1 }, false, success, ['record_saved']],
+    [{}, { status: 'outside_window' }, false, success, ['record_saved']],
+    [{errorCode: 'TIMEOUT'}, {errorCode: 'TIMEOUT'}, false, success, ['record_saved']],
+    [{}, {}, true, success, ['record_saved']],
+    [{}, {}, false, { ...success, matchedCount: 0, modifiedCount: 0 }, ['record_not_changed']],
+  ]) {
+    const f = fixture();
+    const row = { _id: 'synthetic-delivery', trackerVisit: { status: 'inside_window', checkedAt: clock, ...prior } };
+    f.query.model.findOne = () => ({ session: () => ({ lean: async () => row }) });
+    f.query.getFilter = () => ({ _id: row._id, 'trackerVisit.checkedAt': clock });
+    Object.assign(f.proposed.$set.trackerVisit, change);
+    if (baseline) f.proposed.$set.trackerVisitGpsBaseline = { evidence: prior };
+    await inTraceContext(context, () => f.pre.updateOne.call(f.query));
+    await f.post.updateOne.call(f.query, result);
+    assert.deepEqual(f.events.map(event => event.stage), expected);
+  }
+});
+
 test('a fenced-out tracker write remains visible as unchanged, not saved', async () => {
   const f = fixture();
   await inTraceContext(context, () => f.pre.updateOne.call(f.query));
